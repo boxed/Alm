@@ -1,0 +1,12 @@
+[package]
+name = "alm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "alm"
+path = "src/main.rs"
+
+[dependencies]
+alm-compiler = { path = "../compiler" }
