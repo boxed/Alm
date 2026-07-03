@@ -1,0 +1,80 @@
+port module CompareTest exposing (main)
+
+{-| Compiled by both the official Elm compiler and alm; the outputs must
+be identical. Exercises dryft production code paths that are pure.
+-}
+
+import Array
+import DecodersOfferViewer
+import Json.Decode as Decode
+import Round
+import Utils
+
+
+port ask : (() -> msg) -> Sub msg
+
+
+port answer : String -> Cmd msg
+
+
+type Msg
+    = Ask ()
+
+
+sampleJson : String
+sampleJson =
+    """{ "pk": 7, "material_chain_id": 42, "name": "Paint & primer", "amount": 12.5, "unit": "liter", "price": 349.9, "highlighted": true }"""
+
+
+decoded : String
+decoded =
+    case Decode.decodeString DecodersOfferViewer.materialDecoder sampleJson of
+        Ok material ->
+            String.join "|"
+                [ String.fromInt material.pk
+                , material.name
+                , material.unit
+                , Debug.toString material.amount
+                , Debug.toString material.price
+                , Debug.toString material.highlighted
+                , Debug.toString material.old_name
+                , material.css_classes
+                ]
+
+        Err _ ->
+            "DECODE FAILED"
+
+
+results : String
+results =
+    String.join "\n"
+        [ Utils.capitalizeFirst "hello world"
+        , String.fromInt (Utils.countChar 'a' "abracadabra")
+        , Debug.toString (Utils.parseFloat "3,14")
+        , Debug.toString (Utils.parseFloat "2.718")
+        , Debug.toString (Utils.parseFloat "1,2,3")
+        , Debug.toString (Utils.parsePositiveFloat "-5,5")
+        , Utils.maybeFloatToString (Just 12.25)
+        , Utils.stripPrefix "offer-" "offer-1234"
+        , Utils.floatFormat 1234.5678
+        , Utils.floatFormat 1000
+        , Utils.floatFormat 3.10001
+        , Debug.toString (Utils.safeModBy 0 17)
+        , Debug.toString (Utils.safeModBy 5 17)
+        , Debug.toString (Utils.wrapAroundGetIndex (Array.fromList [ "a", "b", "c" ]) -1)
+        , Round.round 2 3.14159
+        , Round.round 0 2.5
+        , Round.ceiling 1 0.111
+        , Round.floor 1 0.999
+        , decoded
+        , Debug.toString (List.map (\n -> Utils.floatFormat (toFloat n / 7)) (List.range 1 5))
+        ]
+
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Cmd.none )
+        , update = \(Ask _) model -> ( model, answer results )
+        , subscriptions = \_ -> ask Ask
+        }

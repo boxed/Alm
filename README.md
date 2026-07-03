@@ -2,70 +2,111 @@
 
 A port of the [Elm compiler](https://github.com/elm/compiler) from Haskell to Rust.
 
-alm compiles Elm source to JavaScript through the same pipeline as the
-original compiler:
+alm compiles Elm 0.19 applications to JavaScript through the same pipeline
+as the original compiler:
 
 ```
-parse → canonicalize → type check → generate JavaScript
+parse → canonicalize → type check → exhaustiveness check → generate JavaScript
 ```
+
+It compiles real production applications: an 8,357-line `Browser.element`
+app with ports, Http, Json decoders, Svg, and two dozen package
+dependencies compiles, boots, and renders. Pure code compiled by alm
+produces output identical to the official compiler's.
 
 ## Usage
 
 ```sh
-alm make examples/FizzBuzz.elm
-node -e "console.log(require('./examples/FizzBuzz.js').FizzBuzz.main)"
+alm make src/Main.elm --output=main.js
 ```
 
-The generated JavaScript exposes every top-level value of the module as
-`Elm.<ModuleName>.<name>` (CommonJS `module.exports` under node, `this.Elm`
-in a browser).
+Projects are discovered through `elm.json` (`source-directories`), and
+package dependencies compile directly from the `~/.elm` cache — pure Elm
+packages need no porting. In the browser or node:
+
+```js
+var app = Elm.Main.main.init({ node: mountPoint, flags: {...} });
+app.ports.somePort.subscribe(function (value) { ... });
+```
 
 ## What works
 
-- **The full Elm syntax for single modules**: module headers, imports,
-  custom types, type aliases, records (including extensible records and
-  updates), tuples, let/in with destructuring, case/of with nested
-  patterns, lambdas, operator sections, pipelines, whitespace-sensitive
-  layout, comments, string/char/number literals.
-- **Real Hindley-Milner type inference**, ported in spirit from
-  `Type/{Type,Unify,Solve}.hs`: unification with union-find,
-  let-polymorphism with dependency-sorted generalization (Tarjan SCC, like
-  the original's `Data.Graph` usage), rigid type variables from
-  annotations, row-polymorphic records, and Elm's `number` / `comparable`
-  / `appendable` / `compappend` constrained variables.
-- **Friendly error messages** in the Elm spirit: source excerpt, caret,
-  and both types rendered.
-- **JavaScript generation** using the same runtime conventions as Elm's
-  kernel (`F2`/`A2` currying helpers, `{ $: 'Ctor', a, b }` custom types,
-  cons lists, records as plain objects, structural equality and
-  comparison), plus a runtime with the core parts of `Basics`, `List`,
-  `String`, `Char`, `Maybe`, `Result`, `Tuple`, and `Debug`.
+- **The full Elm language**: modules, imports with aliases and exposing
+  lists (including opaque types), custom types, extensible records,
+  record-alias constructors, tuples, let/case/lambdas with nested
+  patterns, whitespace-sensitive layout, ports, all literal forms.
+- **Hindley-Milner type inference** ported in spirit from `Type/*.hs`:
+  union-find unification, let-polymorphism with SCC-based generalization,
+  rigid annotation variables scoped over nested annotations,
+  row-polymorphic records, and Elm's `number`/`comparable`/`appendable`
+  constraints. Friendly error messages with source excerpts.
+- **Exhaustiveness checking** (`Nitpick.PatternMatches`, Maranget's
+  algorithm): missing case branches are compile errors listing example
+  patterns; redundant branches are rejected.
+- **Multi-module + package builds**: dependency-ordered compilation
+  against module interfaces; pure packages (Json.Decode.Pipeline,
+  Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
+  published sources; `Elm.Kernel.*` imports resolve to runtime shims
+  (elm/parser's kernel is ported).
+- **The Elm Architecture**: virtual DOM with keyed/lazy nodes and SVG,
+  decoder-based events, `Browser.sandbox`/`element`, `Platform.worker`,
+  ports with type-driven JS value conversion, CPS task scheduler
+  (Task/Process), Http via fetch, Time, Random, Browser.Dom/Events/
+  Navigation subscriptions.
+- **Code generation** in Elm kernel style (`F2`/`A2` currying, tagged
+  objects, cons lists) with tail-call optimization: self tail calls
+  compile to loops and run in constant stack space.
+- Standard library: Basics, List, String, Char, Maybe, Result, Tuple,
+  Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
+  Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
+  Lazy), Svg(+Attributes), Browser(+Dom/Events/Navigation), Platform.
 
-## What is not ported yet
+## Benchmark
 
-- Multi-module projects and `elm.json` package resolution (the `builder/`
-  half of the original compiler).
-- The Elm Architecture: `Platform`, `Cmd`/`Sub`, `Html` — programs are
-  plain values/functions for now, so `main` is typically a `String`.
-- Exhaustiveness checking for `case` (`Nitpick.PatternMatches`) — missing
-  branches throw at runtime instead of failing at compile time.
-- Tail-call optimization, the optimizer pass (`Optimize/*`), decision
-  trees for pattern matches, ports, effect managers, GLSL shaders, and
-  the full 5,900-line syntax-error catalogue of `Reporting.Error.Syntax`.
+Compiling a production 8,357-line module and its full graph (14 modules
+including package sources), Apple Silicon, best of 3:
+
+| | time |
+|---|---|
+| elm 0.19.1, project-cold (elm-stuff wiped) | 0.82 s |
+| elm 0.19.1, incremental (one file changed) | 0.22 s |
+| **alm, full rebuild, no cache** | **0.14 s** |
+
+A full alm rebuild is faster than an incremental official rebuild.
+(The official compiler reuses per-package artifacts from `~/.elm` even
+when project-cold; alm recompiles package sources every run.)
+
+Output compared on production code (string/number formatting, Json
+decoding pipelines, Round, Debug.toString): byte-identical between the
+two compilers (`examples/dryft-compare-test.elm.txt`).
+
+## Not ported
+
+- Effect managers (`effect module`) — Http/Time/Random are native
+  runtime implementations instead; third-party effect modules won't
+  compile. `Browser.application` (navigation Keys), WebSockets, elm/bytes,
+  GLSL shaders, and the optimizer pass (`Optimize/*`, decision trees).
+- The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
+  values are untyped, like the original.
+- The 5,900-line syntax error catalogue of `Reporting.Error.Syntax` —
+  alm's parse errors are terser.
 
 ## Layout
 
 ```
 crates/compiler/src/
-  parse/         Parse/*.hs        hand-written recursive descent, layout-aware
+  parse/         Parse/*.hs        recursive descent, layout-aware
   ast/           AST/Source.hs, AST/Canonical.hs
-  canonicalize/  Canonicalize/*.hs name resolution, binop precedence, SCC sort
+  canonicalize/  Canonicalize/*.hs names, binop precedence, aliases, SCC
   typecheck/     Type/*.hs         union-find HM inference
-  generate/      Generate/*.hs     JS codegen + runtime kernel
-  builtins.rs                      core library signatures (parsed by alm itself)
+  nitpick.rs     Nitpick/PatternMatches.hs   exhaustiveness
+  generate/      Generate/*.hs     JS codegen + runtime kernel (vdom,
+                                   tasks, ports, Json, Http, ...)
+  interface.rs   Elm/Interface.hs  module interfaces
+  project.rs     builder/          elm.json, module discovery, packages
+  builtins.rs                      core library signatures (parsed by alm)
 crates/alm/                        the `alm make` CLI
 ```
 
-The Haskell sources this was ported from are ~36k lines in
-`elm/compiler`'s `compiler/src/`; a reference checkout is expected at
-`../alm-reference` if you want to compare module by module.
+A reference checkout of the Haskell sources is expected at
+`../alm-reference` for module-by-module comparison.

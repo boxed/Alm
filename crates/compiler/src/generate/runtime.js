@@ -1146,7 +1146,7 @@ var $Json$Decode$bool = _Json_decoder(function (v) {
     return typeof v === 'boolean' ? _Json_ok(v) : _Json_expecting('a BOOL', v);
 });
 var $Json$Decode$value = _Json_decoder(_Json_ok);
-var $Json$Decode$null = function (fallback) {
+var $Json$Decode$_null = function (fallback) {
     return _Json_decoder(function (v) {
         return v === null ? _Json_ok(fallback) : _Json_expecting('null', v);
     });
@@ -1306,7 +1306,7 @@ var $Json$Encode$string = function (s) { return s; };
 var $Json$Encode$int = function (n) { return n; };
 var $Json$Encode$float = function (n) { return n; };
 var $Json$Encode$bool = function (b) { return b; };
-var $Json$Encode$null = null;
+var $Json$Encode$_null = null;
 var $Json$Encode$list = F2(function (encodeItem, items) {
     return _List_toArray(items).map(function (x) { return encodeItem(x); });
 });
