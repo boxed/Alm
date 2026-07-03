@@ -130,6 +130,13 @@ pub struct Module {
     /// either a single definition or a set of mutually recursive functions.
     pub decls: Vec<DeclGroup>,
     pub unions: Vec<Union>,
+    pub ports: Vec<PortDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortDecl {
+    pub name: Name,
+    pub tipe: Type,
 }
 
 #[derive(Debug, Clone)]

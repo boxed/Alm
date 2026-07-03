@@ -10,6 +10,26 @@ function F4(fun) { return F(4, fun, function (a) { return function (b) { return 
 function F5(fun) { return F(5, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return fun(a, b, c, d, e); }; }; }; }; }); }
 function F6(fun) { return F(6, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return fun(a, b, c, d, e, f); }; }; }; }; }; }); }
 function F7(fun) { return F(7, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return function (g) { return fun(a, b, c, d, e, f, g); }; }; }; }; }; }; }); }
+// Generic builders for arities above 7 (record aliases can have dozens
+// of fields). F8..F24 and A8..A24 are emitted by the code generator.
+function _Fn(arity, fun) {
+    function curried(args) {
+        return function (x) {
+            var next = args.concat([x]);
+            return next.length === arity ? fun.apply(null, next) : curried(next);
+        };
+    }
+    var wrapper = curried([]);
+    wrapper.a = arity;
+    wrapper.f = fun;
+    return wrapper;
+}
+function _An(f, args) {
+    if (f.a === args.length) { return f.f.apply(null, args); }
+    var result = f;
+    for (var i = 0; i < args.length; i++) { result = result(args[i]); }
+    return result;
+}
 function A2(f, a, b) { return f.a === 2 ? f.f(a, b) : f(a)(b); }
 function A3(f, a, b, c) { return f.a === 3 ? f.f(a, b, c) : f(a)(b)(c); }
 function A4(f, a, b, c, d) { return f.a === 4 ? f.f(a, b, c, d) : f(a)(b)(c)(d); }
@@ -145,6 +165,7 @@ var $Basics$or = F2(function (a, b) { return a || b; });
 var $Basics$xor = F2(function (a, b) { return a !== b; });
 var $Basics$append = F2(_Utils_ap);
 var $Basics$identity = function (x) { return x; };
+var $Basics$never = function (_n) { throw new Error('Basics.never was called (this is impossible in well-typed code)'); };
 var $Basics$always = F2(function (x, _y) { return x; });
 var $Basics$apL = F2(function (f, x) { return f(x); });
 var $Basics$apR = F2(function (x, f) { return f(x); });
@@ -379,6 +400,8 @@ var $String$fromList = function (cs) { return _List_toArray(cs).join(''); };
 var $String$toUpper = function (s) { return s.toUpperCase(); };
 var $String$toLower = function (s) { return s.toLowerCase(); };
 var $String$trim = function (s) { return s.trim(); };
+var $String$trimLeft = function (s) { return s.replace(/^\s+/, ''); };
+var $String$trimRight = function (s) { return s.replace(/\s+$/, ''); };
 var $String$padLeft = F3(function (n, c, s) {
     return c.repeat(Math.max(0, n - s.length)) + s;
 });
@@ -786,10 +809,51 @@ function _VDom_node(tag) {
         return { $: 'VNode', tag: tag, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
     });
 }
+function _VDom_nodeNS(tag) {
+    return F2(function (attrs, kids) {
+        return {
+            $: 'VNode', tag: tag, ns: 'http://www.w3.org/2000/svg',
+            attrs: _List_toArray(attrs), kids: _List_toArray(kids)
+        };
+    });
+}
 
 var $Html$text = _VDom_text;
 var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
+
+var $Html$Keyed$node = function (tag) {
+    return F2(function (attrs, keyedKids) {
+        return {
+            $: 'VKeyed', tag: tag, attrs: _List_toArray(attrs),
+            kids: _List_toArray(keyedKids) // (key, node) tuples
+        };
+    });
+};
+var $Html$Keyed$ul = $Html$Keyed$node('ul');
+var $Html$Keyed$ol = $Html$Keyed$node('ol');
+
+var $Html$Lazy$lazy = F2(function (f, a) { return { $: 'VLazy', f: f, args: [a] }; });
+var $Html$Lazy$lazy2 = F3(function (f, a, b) { return { $: 'VLazy', f: f, args: [a, b] }; });
+var $Html$Lazy$lazy3 = F4(function (f, a, b, c) { return { $: 'VLazy', f: f, args: [a, b, c] }; });
+var $Html$Lazy$lazy4 = F5(function (f, a, b, c, d) { return { $: 'VLazy', f: f, args: [a, b, c, d] }; });
+
+function _VDom_forceLazy(vnode) {
+    if (!vnode.forced) {
+        var result = vnode.f;
+        for (var i = 0; i < vnode.args.length; i++) { result = result(vnode.args[i]); }
+        vnode.forced = result;
+    }
+    return vnode.forced;
+}
+
+function _VDom_sameLazy(a, b) {
+    if (a.f !== b.f || a.args.length !== b.args.length) { return false; }
+    for (var i = 0; i < a.args.length; i++) {
+        if (a.args[i] !== b.args[i]) { return false; }
+    }
+    return true;
+}
 
 // Attributes are tagged with how they apply to a DOM node.
 var $Html$Attributes$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
@@ -800,24 +864,63 @@ var $Html$Attributes$map = F2(function (f, attr) {
 function _VDom_prop(key) {
     return function (val) { return { $: 'AProp', key: key, val: val }; };
 }
-function _VDom_on(name, toMsg, opts) {
-    return { $: 'AEvent', name: name, toMsg: toMsg, opts: opts || {} };
+// Events carry a Json decoder run against the DOM event, like real Elm.
+// The decoder yields the message; `stop`/`prevent` control propagation.
+function _VDom_on(name, decoder, opts) {
+    return { $: 'AEvent', name: name, decoder: decoder, opts: opts || {} };
 }
 
-var $Html$Events$onClick = function (msg) { return _VDom_on('click', function (_e) { return msg; }); };
-var $Html$Events$onDoubleClick = function (msg) { return _VDom_on('dblclick', function (_e) { return msg; }); };
-var $Html$Events$onMouseDown = function (msg) { return _VDom_on('mousedown', function (_e) { return msg; }); };
-var $Html$Events$onMouseUp = function (msg) { return _VDom_on('mouseup', function (_e) { return msg; }); };
-var $Html$Events$onMouseEnter = function (msg) { return _VDom_on('mouseenter', function (_e) { return msg; }); };
-var $Html$Events$onMouseLeave = function (msg) { return _VDom_on('mouseleave', function (_e) { return msg; }); };
+function _Json_succeedDecoder(msg) {
+    return { $: 'Decoder', run: function (_v) { return { ok: true, value: msg }; } };
+}
+
+var $Html$Events$on = F2(function (name, decoder) { return _VDom_on(name, decoder); });
+var $Html$Events$stopPropagationOn = F2(function (name, decoder) {
+    return _VDom_on(name, decoder, { pair: true, stopField: true });
+});
+var $Html$Events$preventDefaultOn = F2(function (name, decoder) {
+    return _VDom_on(name, decoder, { pair: true, preventField: true });
+});
+var $Html$Events$onClick = function (msg) { return _VDom_on('click', _Json_succeedDecoder(msg)); };
+var $Html$Events$onDoubleClick = function (msg) { return _VDom_on('dblclick', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseDown = function (msg) { return _VDom_on('mousedown', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseUp = function (msg) { return _VDom_on('mouseup', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseEnter = function (msg) { return _VDom_on('mouseenter', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseLeave = function (msg) { return _VDom_on('mouseleave', _Json_succeedDecoder(msg)); };
+var $Html$Events$custom = F2(function (name, decoder) {
+    return _VDom_on(name, decoder, { custom: true });
+});
+var $Html$Events$targetValue = _Json_decoder(function (e) {
+    return e && e.target && typeof e.target.value === 'string'
+        ? _Json_ok(e.target.value)
+        : _Json_expecting('an event with target.value', e);
+});
+var $Html$Events$targetChecked = _Json_decoder(function (e) {
+    return e && e.target && typeof e.target.checked === 'boolean'
+        ? _Json_ok(e.target.checked)
+        : _Json_expecting('an event with target.checked', e);
+});
+var $Html$Events$keyCode = _Json_decoder(function (e) {
+    return e && typeof e.keyCode === 'number'
+        ? _Json_ok(e.keyCode)
+        : _Json_expecting('an event with keyCode', e);
+});
+var $Html$Events$onBlur = function (msg) { return _VDom_on('blur', _Json_succeedDecoder(msg)); };
+var $Html$Events$onFocus = function (msg) { return _VDom_on('focus', _Json_succeedDecoder(msg)); };
 var $Html$Events$onInput = function (toMsg) {
-    return _VDom_on('input', function (e) { return toMsg(e.target.value); });
+    return _VDom_on('input', {
+        $: 'Decoder',
+        run: function (e) { return { ok: true, value: toMsg(e.target.value) }; }
+    });
 };
 var $Html$Events$onCheck = function (toMsg) {
-    return _VDom_on('change', function (e) { return toMsg(e.target.checked); });
+    return _VDom_on('change', {
+        $: 'Decoder',
+        run: function (e) { return { ok: true, value: toMsg(e.target.checked) }; }
+    });
 };
 var $Html$Events$onSubmit = function (msg) {
-    return _VDom_on('submit', function (e) { return msg; }, { preventDefault: true });
+    return _VDom_on('submit', _Json_succeedDecoder(msg), { preventDefault: true });
 };
 
 // RENDER — build a real DOM node from a virtual node.
@@ -830,14 +933,19 @@ function _VDom_render(vnode, dispatch, doc) {
             var f = vnode.f;
             return _VDom_render(vnode.node, function (msg) { dispatch(f(msg)); }, doc);
         }
+        case 'VLazy':
+            return _VDom_render(_VDom_forceLazy(vnode), dispatch, doc);
         default: {
-            var dom = doc.createElement(vnode.tag);
+            var dom = vnode.ns && doc.createElementNS
+                ? doc.createElementNS(vnode.ns, vnode.tag)
+                : doc.createElement(vnode.tag);
             dom._almListeners = {};
             for (var i = 0; i < vnode.attrs.length; i++) {
                 _VDom_applyAttr(dom, vnode.attrs[i], dispatch);
             }
             for (var k = 0; k < vnode.kids.length; k++) {
-                dom.appendChild(_VDom_render(vnode.kids[k], dispatch, doc));
+                var kid = vnode.$ === 'VKeyed' ? vnode.kids[k].b : vnode.kids[k];
+                dom.appendChild(_VDom_render(kid, dispatch, doc));
             }
             return dom;
         }
@@ -860,15 +968,28 @@ function _VDom_applyAttr(dom, attr, dispatch) {
             if (!record) {
                 record = dom._almListeners[attr.name] = {
                     handler: function (e) {
-                        if (record.opts && record.opts.preventDefault && e.preventDefault) {
-                            e.preventDefault();
+                        var opts = record.opts || {};
+                        if (opts.preventDefault && e.preventDefault) { e.preventDefault(); }
+                        var result = record.decoder.run(e);
+                        if (!result.ok) { return; }
+                        var msg = result.value;
+                        if (opts.custom) {
+                            if (msg.stopPropagation && e.stopPropagation) { e.stopPropagation(); }
+                            if (msg.preventDefault && e.preventDefault) { e.preventDefault(); }
+                            msg = msg.message;
+                        } else if (opts.pair) {
+                            // Decoder produced ( msg, Bool ).
+                            var doIt = msg.b;
+                            msg = msg.a;
+                            if (doIt && opts.stopField && e.stopPropagation) { e.stopPropagation(); }
+                            if (doIt && opts.preventField && e.preventDefault) { e.preventDefault(); }
                         }
-                        record.dispatch(record.toMsg(e));
+                        record.dispatch(msg);
                     }
                 };
                 dom.addEventListener(attr.name, record.handler);
             }
-            record.toMsg = attr.toMsg;
+            record.decoder = attr.decoder;
             record.opts = attr.opts;
             record.dispatch = dispatch;
             return;
@@ -907,6 +1028,16 @@ function _VDom_unapplyAttr(dom, attr) {
 function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     if (oldV === newV) { return dom; }
 
+    if (oldV.$ === 'VLazy' && newV.$ === 'VLazy' && _VDom_sameLazy(oldV, newV)) {
+        newV.forced = oldV.forced;
+        return dom;
+    }
+    if (oldV.$ === 'VLazy' || newV.$ === 'VLazy') {
+        var oldForced = oldV.$ === 'VLazy' ? _VDom_forceLazy(oldV) : oldV;
+        var newForced = newV.$ === 'VLazy' ? _VDom_forceLazy(newV) : newV;
+        return _VDom_patch(dom, oldForced, newForced, dispatch, doc);
+    }
+
     if (oldV.$ === 'VMap' && newV.$ === 'VMap') {
         var f = newV.f;
         return _VDom_patch(dom, oldV.node, newV.node, function (msg) { dispatch(f(msg)); }, doc);
@@ -917,7 +1048,7 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
         return dom;
     }
 
-    if (oldV.$ !== newV.$ || oldV.tag !== newV.tag) {
+    if (oldV.$ !== newV.$ || oldV.tag !== newV.tag || oldV.ns !== newV.ns) {
         var replacement = _VDom_render(newV, dispatch, doc);
         dom.parentNode.replaceChild(replacement, dom);
         return replacement;
@@ -938,6 +1069,10 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
         if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
     }
 
+    if (oldV.$ === 'VKeyed') {
+        return _VDom_patchKeyed(dom, oldV, newV, dispatch, doc);
+    }
+
     // ...then children by index.
     var oldKids = oldV.kids, newKids = newV.kids;
     var shared = Math.min(oldKids.length, newKids.length);
@@ -953,15 +1088,795 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     return dom;
 }
 
-// COMMANDS AND SUBSCRIPTIONS — Cmd/Sub values exist and compose, but no
-// effect managers are ported yet, so executing them is a no-op.
+function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
+    // Reuse DOM nodes for matching keys; rebuild the child list in order.
+    var oldByKey = {};
+    for (var i = 0; i < oldV.kids.length; i++) {
+        oldByKey[oldV.kids[i].a] = { vnode: oldV.kids[i].b, dom: dom.childNodes[i] };
+    }
+    var newDoms = [];
+    var used = {};
+    for (var j = 0; j < newV.kids.length; j++) {
+        var key = newV.kids[j].a;
+        var newKid = newV.kids[j].b;
+        var old = !used[key] && oldByKey[key];
+        if (old) {
+            used[key] = true;
+            newDoms.push(_VDom_patch(old.dom, old.vnode, newKid, dispatch, doc));
+        } else {
+            newDoms.push(_VDom_render(newKid, dispatch, doc));
+        }
+    }
+    while (dom.childNodes.length > 0) {
+        dom.removeChild(dom.childNodes[dom.childNodes.length - 1]);
+    }
+    for (var n = 0; n < newDoms.length; n++) {
+        dom.appendChild(newDoms[n]);
+    }
+    return dom;
+}
+
+// JSON — Elm.Kernel.Json. Decoders are objects with a `run` function from
+// a JS value to { ok: true, value } or { ok: false, error }.
+
+function _Json_ok(value) { return { ok: true, value: value }; }
+function _Json_err(error) { return { ok: false, error: error }; }
+function _Json_failure(msg, value) {
+    return _Json_err({ $: 'Failure', a: msg, b: value });
+}
+function _Json_decoder(run) { return { $: 'Decoder', run: run }; }
+function _Json_expecting(what, value) {
+    return _Json_failure('Expecting ' + what, value);
+}
+function _Json_runDecoder(decoder, value) {
+    var r = decoder.run(value);
+    return r.ok ? $Result$Ok(r.value) : $Result$Err(r.error);
+}
+
+var $Json$Decode$string = _Json_decoder(function (v) {
+    return typeof v === 'string' ? _Json_ok(v) : _Json_expecting('a STRING', v);
+});
+var $Json$Decode$int = _Json_decoder(function (v) {
+    return typeof v === 'number' && (v | 0) === v ? _Json_ok(v) : _Json_expecting('an INT', v);
+});
+var $Json$Decode$float = _Json_decoder(function (v) {
+    return typeof v === 'number' ? _Json_ok(v) : _Json_expecting('a FLOAT', v);
+});
+var $Json$Decode$bool = _Json_decoder(function (v) {
+    return typeof v === 'boolean' ? _Json_ok(v) : _Json_expecting('a BOOL', v);
+});
+var $Json$Decode$value = _Json_decoder(_Json_ok);
+var $Json$Decode$null = function (fallback) {
+    return _Json_decoder(function (v) {
+        return v === null ? _Json_ok(fallback) : _Json_expecting('null', v);
+    });
+};
+var $Json$Decode$succeed = function (x) {
+    return _Json_decoder(function (_v) { return _Json_ok(x); });
+};
+var $Json$Decode$fail = function (msg) {
+    return _Json_decoder(function (v) { return _Json_failure(msg, v); });
+};
+var $Json$Decode$nullable = function (decoder) {
+    return _Json_decoder(function (v) {
+        if (v === null || v === undefined) { return _Json_ok($Maybe$Nothing); }
+        var r = decoder.run(v);
+        return r.ok ? _Json_ok($Maybe$Just(r.value)) : r;
+    });
+};
+var $Json$Decode$maybe = function (decoder) {
+    return _Json_decoder(function (v) {
+        var r = decoder.run(v);
+        return _Json_ok(r.ok ? $Maybe$Just(r.value) : $Maybe$Nothing);
+    });
+};
+var $Json$Decode$list = function (decoder) {
+    return _Json_decoder(function (v) {
+        if (!Array.isArray(v)) { return _Json_expecting('a LIST', v); }
+        var out = [];
+        for (var i = 0; i < v.length; i++) {
+            var r = decoder.run(v[i]);
+            if (!r.ok) { return _Json_err({ $: 'Index', a: i, b: r.error }); }
+            out.push(r.value);
+        }
+        return _Json_ok(_List_fromArray(out));
+    });
+};
+var $Json$Decode$array = function (decoder) {
+    return _Json_decoder(function (v) {
+        var r = $Json$Decode$list(decoder).run(v);
+        return r.ok ? _Json_ok({ $: 'Array', a: _List_toArray(r.value) }) : r;
+    });
+};
+var $Json$Decode$keyValuePairs = function (decoder) {
+    return _Json_decoder(function (v) {
+        if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+            return _Json_expecting('an OBJECT', v);
+        }
+        var out = [];
+        for (var key in v) {
+            var r = decoder.run(v[key]);
+            if (!r.ok) { return _Json_err({ $: 'Field', a: key, b: r.error }); }
+            out.push({ $: '#2', a: key, b: r.value });
+        }
+        return _Json_ok(_List_fromArray(out));
+    });
+};
+var $Json$Decode$dict = function (decoder) {
+    return _Json_decoder(function (v) {
+        var r = $Json$Decode$keyValuePairs(decoder).run(v);
+        return r.ok ? _Json_ok($Dict$fromList(r.value)) : r;
+    });
+};
+var $Json$Decode$field = F2(function (name, decoder) {
+    return _Json_decoder(function (v) {
+        if (v === null || typeof v !== 'object' || Array.isArray(v) || !(name in v)) {
+            return _Json_expecting('an OBJECT with a field named `' + name + '`', v);
+        }
+        var r = decoder.run(v[name]);
+        return r.ok ? r : _Json_err({ $: 'Field', a: name, b: r.error });
+    });
+});
+var $Json$Decode$at = F2(function (path, decoder) {
+    var names = _List_toArray(path);
+    var result = decoder;
+    for (var i = names.length; i--;) { result = A2($Json$Decode$field, names[i], result); }
+    return result;
+});
+var $Json$Decode$index = F2(function (i, decoder) {
+    return _Json_decoder(function (v) {
+        if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
+        if (i >= v.length) {
+            return _Json_expecting('a LONGER array — need index ' + i, v);
+        }
+        var r = decoder.run(v[i]);
+        return r.ok ? r : _Json_err({ $: 'Index', a: i, b: r.error });
+    });
+});
+var $Json$Decode$oneOf = function (decoders) {
+    var arr = _List_toArray(decoders);
+    return _Json_decoder(function (v) {
+        var errors = [];
+        for (var i = 0; i < arr.length; i++) {
+            var r = arr[i].run(v);
+            if (r.ok) { return r; }
+            errors.push(r.error);
+        }
+        return _Json_err({ $: 'OneOf', a: _List_fromArray(errors) });
+    });
+};
+var $Json$Decode$lazy = function (thunk) {
+    return _Json_decoder(function (v) { return thunk(_Utils_Tuple0).run(v); });
+};
+var $Json$Decode$map = F2(function (f, d) {
+    return _Json_decoder(function (v) {
+        var r = d.run(v);
+        return r.ok ? _Json_ok(f(r.value)) : r;
+    });
+});
+function _Json_mapMany(f, decoders) {
+    return _Json_decoder(function (v) {
+        var result = f;
+        for (var i = 0; i < decoders.length; i++) {
+            var r = decoders[i].run(v);
+            if (!r.ok) { return r; }
+            result = result(r.value);
+        }
+        return _Json_ok(result);
+    });
+}
+var $Json$Decode$map2 = F3(function (f, a, b) { return _Json_mapMany(f, [a, b]); });
+var $Json$Decode$map3 = F4(function (f, a, b, c) { return _Json_mapMany(f, [a, b, c]); });
+var $Json$Decode$map4 = F5(function (f, a, b, c, d) { return _Json_mapMany(f, [a, b, c, d]); });
+var $Json$Decode$map5 = F6(function (f, a, b, c, d, e) { return _Json_mapMany(f, [a, b, c, d, e]); });
+var $Json$Decode$map6 = F7(function (f, a, b, c, d, e, g) { return _Json_mapMany(f, [a, b, c, d, e, g]); });
+var $Json$Decode$map7 = function (f) { return function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (g) { return function (h) { return _Json_mapMany(f, [a, b, c, d, e, g, h]); }; }; }; }; }; }; }; };
+var $Json$Decode$map8 = function (f) { return function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (g) { return function (h) { return function (i) { return _Json_mapMany(f, [a, b, c, d, e, g, h, i]); }; }; }; }; }; }; }; }; };
+var $Json$Decode$andThen = F2(function (f, d) {
+    return _Json_decoder(function (v) {
+        var r = d.run(v);
+        return r.ok ? f(r.value).run(v) : r;
+    });
+});
+var $Json$Decode$decodeValue = F2(_Json_runDecoder);
+var $Json$Decode$decodeString = F2(function (decoder, str) {
+    try {
+        var v = JSON.parse(str);
+    } catch (e) {
+        return $Result$Err({ $: 'Failure', a: 'This is not valid JSON! ' + e.message, b: str });
+    }
+    return _Json_runDecoder(decoder, v);
+});
+var $Json$Decode$errorToString = function (error) {
+    switch (error.$) {
+        case 'Field':
+            return 'Problem with the value at .' + error.a + ':\n' + $Json$Decode$errorToString(error.b);
+        case 'Index':
+            return 'Problem with the value at [' + error.a + ']:\n' + $Json$Decode$errorToString(error.b);
+        case 'OneOf': {
+            var errors = _List_toArray(error.a);
+            return 'All possibilities failed:\n' + errors.map($Json$Decode$errorToString).join('\n');
+        }
+        default:
+            return error.a + '\n\n' + JSON.stringify(error.b, null, 4);
+    }
+};
+
+var $Json$Encode$string = function (s) { return s; };
+var $Json$Encode$int = function (n) { return n; };
+var $Json$Encode$float = function (n) { return n; };
+var $Json$Encode$bool = function (b) { return b; };
+var $Json$Encode$null = null;
+var $Json$Encode$list = F2(function (encodeItem, items) {
+    return _List_toArray(items).map(function (x) { return encodeItem(x); });
+});
+var $Json$Encode$array = F2(function (encodeItem, arr) {
+    return arr.a.map(function (x) { return encodeItem(x); });
+});
+var $Json$Encode$object = function (pairs) {
+    var out = {};
+    for (var xs = pairs; xs.$ === '::'; xs = xs.b) { out[xs.a.a] = xs.a.b; }
+    return out;
+};
+var $Json$Encode$dict = F3(function (toKey, toValue, dict) {
+    var out = {};
+    for (var i = 0; i < dict.keys.length; i++) {
+        out[toKey(dict.keys[i])] = toValue(dict.vals[i]);
+    }
+    return out;
+});
+var $Json$Encode$encode = F2(function (indent, value) {
+    return JSON.stringify(value === undefined ? null : value, null, indent) || 'null';
+});
+
+// TASKS — CPS-style: { fork: function (onSuccess, onFailure) }.
+
+function _Task(fork) { return { $: 'Task', fork: fork }; }
+var $Task$succeed = function (value) {
+    return _Task(function (ok, _err) { ok(value); });
+};
+var $Task$fail = function (error) {
+    return _Task(function (_ok, err) { err(error); });
+};
+var $Task$andThen = F2(function (f, task) {
+    return _Task(function (ok, err) {
+        task.fork(function (a) { f(a).fork(ok, err); }, err);
+    });
+});
+var $Task$onError = F2(function (f, task) {
+    return _Task(function (ok, err) {
+        task.fork(ok, function (x) { f(x).fork(ok, err); });
+    });
+});
+var $Task$map = F2(function (f, task) {
+    return _Task(function (ok, err) {
+        task.fork(function (a) { ok(f(a)); }, err);
+    });
+});
+var $Task$map2 = F3(function (f, ta, tb) {
+    return A2($Task$andThen, function (a) {
+        return A2($Task$map, function (b) { return A2(f, a, b); }, tb);
+    }, ta);
+});
+var $Task$mapError = F2(function (f, task) {
+    return _Task(function (ok, err) {
+        task.fork(ok, function (x) { err(f(x)); });
+    });
+});
+var $Task$sequence = function (tasks) {
+    var arr = _List_toArray(tasks);
+    return _Task(function (ok, err) {
+        var results = [];
+        function step(i) {
+            if (i >= arr.length) { return ok(_List_fromArray(results)); }
+            arr[i].fork(function (v) { results.push(v); step(i + 1); }, err);
+        }
+        step(0);
+    });
+};
+var $Task$perform = F2(function (toMsg, task) {
+    return { $: 'CmdTask', task: A2($Task$map, toMsg, task) };
+});
+var $Task$attempt = F2(function (toMsg, task) {
+    return {
+        $: 'CmdTask',
+        task: _Task(function (ok, _err) {
+            task.fork(
+                function (v) { ok(toMsg($Result$Ok(v))); },
+                function (x) { ok(toMsg($Result$Err(x))); }
+            );
+        })
+    };
+});
+
+var $Process$sleep = function (ms) {
+    return _Task(function (ok, _err) {
+        setTimeout(function () { ok(_Utils_Tuple0); }, ms);
+    });
+};
+
+// TIME
+
+function _Time_posix(ms) { return { $: 'Posix', ms: ms }; }
+var $Time$millisToPosix = function (ms) { return _Time_posix(ms); };
+var $Time$posixToMillis = function (posix) { return posix.ms; };
+var $Time$utc = { $: 'Zone', offset: 0, eras: [] };
+var $Time$customZone = F2(function (offset, eras) {
+    return { $: 'Zone', offset: offset, eras: _List_toArray(eras) };
+});
+var $Time$here = _Task(function (ok, _err) {
+    ok({ $: 'Zone', offset: -new Date().getTimezoneOffset(), eras: [] });
+});
+var $Time$now = _Task(function (ok, _err) { ok(_Time_posix(Date.now())); });
+var $Time$every = F2(function (interval, toMsg) {
+    return { $: 'SubTime', interval: interval, toMsg: toMsg };
+});
+function _Time_toAdjusted(zone, posix) {
+    var minutes = posix.ms / 60000;
+    var offset = zone.offset;
+    for (var i = 0; i < zone.eras.length; i++) {
+        if (zone.eras[i].start < minutes) { offset = zone.eras[i].offset; break; }
+    }
+    return new Date(posix.ms + offset * 60000);
+}
+var $Time$toYear = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCFullYear(); });
+var _Time_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+var $Time$toMonth = F2(function (zone, posix) {
+    return { $: _Time_months[_Time_toAdjusted(zone, posix).getUTCMonth()] };
+});
+var $Time$toDay = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCDate(); });
+var $Time$toHour = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCHours(); });
+var $Time$toMinute = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMinutes(); });
+var $Time$toSecond = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCSeconds(); });
+var $Time$toMillis = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMilliseconds(); });
+var _Time_weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var $Time$toWeekday = F2(function (zone, posix) {
+    return { $: _Time_weekdays[_Time_toAdjusted(zone, posix).getUTCDay()] };
+});
+
+// HTTP — fetch-based.
+
+var $Http$header = F2(function (name, value) { return { name: name, value: value }; });
+var $Http$emptyBody = { contentType: null, content: null };
+var $Http$stringBody = F2(function (contentType, content) {
+    return { contentType: contentType, content: content };
+});
+var $Http$fileBody = function (file) {
+    return { contentType: file.type || 'application/octet-stream', content: file };
+};
+var $Http$jsonBody = function (value) {
+    return { contentType: 'application/json', content: JSON.stringify(value) };
+};
+var $Http$stringPart = F2(function (name, value) { return { $: 'StringPart', name: name, value: value }; });
+var $Http$filePart = F2(function (name, file) { return { $: 'FilePart', name: name, file: file }; });
+var $Http$multipartBody = function (parts) {
+    return { contentType: 'multipart', parts: _List_toArray(parts) };
+};
+var $Http$expectString = function (toMsg) {
+    return { toMsg: toMsg, handle: function (response) {
+        return _Http_defaultHandle(response, function (body) { return $Result$Ok(body); });
+    } };
+};
+var $Http$expectWhatever = function (toMsg) {
+    return { toMsg: toMsg, handle: function (response) {
+        return _Http_defaultHandle(response, function (_body) { return $Result$Ok(_Utils_Tuple0); });
+    } };
+};
+var $Http$expectJson = F2(function (toMsg, decoder) {
+    return { toMsg: toMsg, handle: function (response) {
+        return _Http_defaultHandle(response, function (body) {
+            var r = A2($Json$Decode$decodeString, decoder, body);
+            return r.$ === 'Ok'
+                ? r
+                : $Result$Err({ $: 'BadBody', a: $Json$Decode$errorToString(r.a) });
+        });
+    } };
+});
+function _Http_defaultHandle(response, onGood) {
+    switch (response.$) {
+        case 'BadUrl_': return $Result$Err({ $: 'BadUrl', a: response.a });
+        case 'Timeout_': return $Result$Err({ $: 'Timeout' });
+        case 'NetworkError_': return $Result$Err({ $: 'NetworkError' });
+        case 'BadStatus_': return $Result$Err({ $: 'BadStatus', a: response.a.statusCode });
+        default: return onGood(response.b);
+    }
+}
+function _Http_makeTask(config, handle) {
+    return _Task(function (ok, _err) {
+        var headers = {};
+        for (var i = 0; i < config.headers.length; i++) {
+            headers[config.headers[i].name] = config.headers[i].value;
+        }
+        var body = null;
+        if (config.body.contentType === 'multipart') {
+            var form = new FormData();
+            config.body.parts.forEach(function (part) {
+                if (part.$ === 'StringPart') { form.append(part.name, part.value); }
+                else { form.append(part.name, part.file); }
+            });
+            body = form;
+        } else if (config.body.content !== null) {
+            body = config.body.content;
+            if (config.body.contentType) { headers['Content-Type'] = config.body.contentType; }
+        }
+        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = null;
+        if (config.timeout && config.timeout.$ === 'Just' && controller) {
+            timer = setTimeout(function () { controller.abort(); }, config.timeout.a);
+        }
+        fetch(config.url, {
+            method: config.method,
+            headers: headers,
+            body: config.method === 'GET' || config.method === 'HEAD' ? undefined : body,
+            signal: controller ? controller.signal : undefined
+        }).then(function (response) {
+            return response.text().then(function (text) {
+                if (timer) { clearTimeout(timer); }
+                var metadata = {
+                    url: response.url,
+                    statusCode: response.status,
+                    statusText: response.statusText,
+                    headers: $Dict$empty
+                };
+                ok(response.ok
+                    ? { $: 'GoodStatus_', a: metadata, b: text }
+                    : { $: 'BadStatus_', a: metadata, b: text });
+            });
+        }).catch(function (e) {
+            if (timer) { clearTimeout(timer); }
+            ok(e.name === 'AbortError' ? { $: 'Timeout_' } : { $: 'NetworkError_' });
+        });
+    });
+}
+var $Http$request = function (config) {
+    return { $: 'CmdHttp', config: config };
+};
+var $Http$get = function (config) {
+    return $Http$request({
+        method: 'GET', headers: [], url: config.url, body: $Http$emptyBody,
+        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
+    });
+};
+var $Http$post = function (config) {
+    return $Http$request({
+        method: 'POST', headers: [], url: config.url, body: config.body,
+        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
+    });
+};
+var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
+var $Http$task = function (config) {
+    var cfg = {
+        method: config.method,
+        headers: _List_toArray(config.headers),
+        url: config.url,
+        body: config.body,
+        timeout: config.timeout
+    };
+    return A2($Task$andThen, function (response) {
+        var r = config.resolver.toResult(response);
+        return r.$ === 'Ok' ? $Task$succeed(r.a) : $Task$fail(r.a);
+    }, _Http_makeTask(cfg, null));
+};
+
+// FILE
+
+var $File$decoder = _Json_decoder(function (v) {
+    return v && typeof v === 'object' ? _Json_ok(v) : _Json_expecting('a FILE', v);
+});
+var $File$name = function (file) { return file.name; };
+var $File$size = function (file) { return file.size; };
+var $File$mime = function (file) { return file.type; };
+
+// URL
+
+var $Url$percentEncode = function (s) { return encodeURIComponent(s); };
+var $Url$percentDecode = function (s) {
+    try { return $Maybe$Just(decodeURIComponent(s)); }
+    catch (e) { return $Maybe$Nothing; }
+};
+var $Url$fromString = function (str) {
+    var match = /^(https?):\/\/([^/:?#]*)(?::(\d+))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(str);
+    if (!match) { return $Maybe$Nothing; }
+    return $Maybe$Just({
+        protocol: match[1] === 'https' ? { $: 'Https' } : { $: 'Http' },
+        host: match[2],
+        port_: match[3] ? $Maybe$Just(parseInt(match[3], 10)) : $Maybe$Nothing,
+        path: match[4] || '/',
+        query: match[5] !== undefined ? $Maybe$Just(match[5]) : $Maybe$Nothing,
+        fragment: match[6] !== undefined ? $Maybe$Just(match[6]) : $Maybe$Nothing
+    });
+};
+var $Url$toString = function (url) {
+    var s = (url.protocol.$ === 'Https' ? 'https' : 'http') + '://' + url.host;
+    if (url.port_.$ === 'Just') { s += ':' + url.port_.a; }
+    s += url.path;
+    if (url.query.$ === 'Just') { s += '?' + url.query.a; }
+    if (url.fragment.$ === 'Just') { s += '#' + url.fragment.a; }
+    return s;
+};
+
+// BROWSER.DOM
+
+function _Dom_byId(id, andThen) {
+    return _Task(function (ok, err) {
+        var node = typeof document !== 'undefined' && document.getElementById
+            ? document.getElementById(id)
+            : null;
+        if (!node) { return err({ $: 'NotFound', a: id }); }
+        ok(andThen(node));
+    });
+}
+var $Browser$Dom$focus = function (id) {
+    return _Dom_byId(id, function (node) {
+        if (node.focus) { node.focus(); }
+        return _Utils_Tuple0;
+    });
+};
+var $Browser$Dom$blur = function (id) {
+    return _Dom_byId(id, function (node) {
+        if (node.blur) { node.blur(); }
+        return _Utils_Tuple0;
+    });
+};
+var $Browser$Dom$getViewport = _Task(function (ok, _err) {
+    var w = typeof window !== 'undefined' ? window : { pageXOffset: 0, pageYOffset: 0, innerWidth: 0, innerHeight: 0 };
+    ok({
+        scene: { width: w.innerWidth || 0, height: w.innerHeight || 0 },
+        viewport: { x: w.pageXOffset || 0, y: w.pageYOffset || 0, width: w.innerWidth || 0, height: w.innerHeight || 0 }
+    });
+});
+var $Browser$Dom$setViewport = F2(function (x, y) {
+    return _Task(function (ok, _err) {
+        if (typeof window !== 'undefined' && window.scroll) { window.scroll(x, y); }
+        ok(_Utils_Tuple0);
+    });
+});
+var $Browser$Dom$getElement = function (id) {
+    return _Dom_byId(id, function (node) {
+        var rect = node.getBoundingClientRect ? node.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+        var x = typeof window !== 'undefined' ? window.pageXOffset : 0;
+        var y = typeof window !== 'undefined' ? window.pageYOffset : 0;
+        return {
+            scene: { width: 0, height: 0 },
+            viewport: { x: x, y: y, width: 0, height: 0 },
+            element: { x: x + rect.left, y: y + rect.top, width: rect.width, height: rect.height }
+        };
+    });
+};
+
+// BROWSER.EVENTS
+
+function _Browser_on(name, decoder) {
+    return { $: 'SubDom', name: name, decoder: decoder };
+}
+var $Browser$Events$onKeyDown = function (d) { return _Browser_on('keydown', d); };
+var $Browser$Events$onKeyUp = function (d) { return _Browser_on('keyup', d); };
+var $Browser$Events$onKeyPress = function (d) { return _Browser_on('keypress', d); };
+var $Browser$Events$onClick = function (d) { return _Browser_on('click', d); };
+var $Browser$Events$onMouseMove = function (d) { return _Browser_on('mousemove', d); };
+var $Browser$Events$onMouseDown = function (d) { return _Browser_on('mousedown', d); };
+var $Browser$Events$onMouseUp = function (d) { return _Browser_on('mouseup', d); };
+var $Browser$Events$onResize = function (toMsg) {
+    return _Browser_on('resize', _Json_decoder(function (_e) {
+        var w = typeof window !== 'undefined' ? window : { innerWidth: 0, innerHeight: 0 };
+        return _Json_ok(A2(toMsg, w.innerWidth, w.innerHeight));
+    }));
+};
+var $Browser$Events$onAnimationFrameDelta = function (toMsg) {
+    return { $: 'SubAnimation', toMsg: toMsg, delta: true };
+};
+var $Browser$Events$onAnimationFrame = function (toMsg) {
+    return { $: 'SubAnimation', toMsg: toMsg, delta: false };
+};
+
+// BROWSER.NAVIGATION
+
+var $Browser$Navigation$load = function (url) { return { $: 'CmdLoad', url: url }; };
+var $Browser$Navigation$reload = { $: 'CmdReload' };
+
+// RANDOM — generators as seed -> [value, seed] functions.
+
+function _Random_next(seed) {
+    // mulberry32
+    var t = (seed + 0x6D2B79F5) | 0;
+    var r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return { state: t, value: ((r ^ (r >>> 14)) >>> 0) / 4294967296 };
+}
+function _Random_gen(fn) { return { $: 'Generator', gen: fn }; }
+var $Random$minInt = -2147483648;
+var $Random$maxInt = 2147483647;
+var $Random$initialSeed = function (n) { return { $: 'Seed', state: n | 0 }; };
+var $Random$int = F2(function (lo, hi) {
+    return _Random_gen(function (seed) {
+        var next = _Random_next(seed.state);
+        var value = lo + Math.floor(next.value * (hi - lo + 1));
+        return [value, { $: 'Seed', state: next.state }];
+    });
+});
+var $Random$float = F2(function (lo, hi) {
+    return _Random_gen(function (seed) {
+        var next = _Random_next(seed.state);
+        return [lo + next.value * (hi - lo), { $: 'Seed', state: next.state }];
+    });
+});
+var $Random$constant = function (x) {
+    return _Random_gen(function (seed) { return [x, seed]; });
+};
+var $Random$map = F2(function (f, g) {
+    return _Random_gen(function (seed) {
+        var r = g.gen(seed);
+        return [f(r[0]), r[1]];
+    });
+});
+var $Random$map2 = F3(function (f, ga, gb) {
+    return _Random_gen(function (seed) {
+        var ra = ga.gen(seed);
+        var rb = gb.gen(ra[1]);
+        return [A2(f, ra[0], rb[0]), rb[1]];
+    });
+});
+var $Random$andThen = F2(function (f, g) {
+    return _Random_gen(function (seed) {
+        var r = g.gen(seed);
+        return f(r[0]).gen(r[1]);
+    });
+});
+var $Random$list = F2(function (n, g) {
+    return _Random_gen(function (seed) {
+        var out = [];
+        for (var i = 0; i < n; i++) {
+            var r = g.gen(seed);
+            out.push(r[0]);
+            seed = r[1];
+        }
+        return [_List_fromArray(out), seed];
+    });
+});
+var $Random$step = F2(function (g, seed) {
+    var r = g.gen(seed);
+    return { $: '#2', a: r[0], b: r[1] };
+});
+var $Random$generate = F2(function (toMsg, g) {
+    return {
+        $: 'CmdTask',
+        task: _Task(function (ok, _err) {
+            var seed = { $: 'Seed', state: (Math.random() * 0xFFFFFFFF) | 0 };
+            ok(toMsg(g.gen(seed)[0]));
+        })
+    };
+});
+
+// UUID
+
+var $UUID$generator = _Random_gen(function (seed) {
+    var hex = '';
+    var s = seed;
+    for (var i = 0; i < 32; i++) {
+        var next = _Random_next(s.state !== undefined ? s.state : s);
+        s = { state: next.state };
+        hex += ((next.value * 16) | 0).toString(16);
+    }
+    var uuid = hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-4' + hex.slice(13, 16) +
+        '-' + ((parseInt(hex[16], 16) & 3 | 8)).toString(16) + hex.slice(17, 20) + '-' + hex.slice(20, 32);
+    return [{ $: 'UUID', s: uuid }, { $: 'Seed', state: s.state }];
+});
+var $UUID$toString = function (uuid) { return uuid.s; };
+var $UUID$toRepresentation = F2(function (representation, uuid) {
+    switch (representation.$) {
+        case 'Compact': return uuid.s.replace(/-/g, '');
+        case 'Guid': return '{' + uuid.s + '}';
+        case 'Urn': return 'urn:uuid:' + uuid.s;
+        default: return uuid.s;
+    }
+});
+var $UUID$fromString = function (s) {
+    var normalized = s.trim().toLowerCase();
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)
+        ? $Result$Ok({ $: 'UUID', s: normalized })
+        : $Result$Err({ $: 'WrongFormat' });
+};
+var $UUID$jsonDecoder = _Json_decoder(function (v) {
+    if (typeof v !== 'string') { return _Json_expecting('a UUID string', v); }
+    var r = $UUID$fromString(v);
+    return r.$ === 'Ok' ? _Json_ok(r.a) : _Json_failure('Invalid UUID', v);
+});
+var $UUID$toValue = function (uuid) { return uuid.s; };
+
+// ELM.KERNEL.PARSER — the primitives behind elm/parser, ported from
+// its kernel JavaScript so the package compiles from source.
+
+var $Elm$Kernel$Parser$isSubString = F5(function (smallString, offset, row, col, bigString) {
+    var smallLength = smallString.length;
+    var isGood = offset + smallLength <= bigString.length;
+    for (var i = 0; isGood && i < smallLength;) {
+        var code = bigString.charCodeAt(offset);
+        isGood = smallString[i++] === bigString[offset++]
+            && (code === 0x000A
+                ? (row++, col = 1, true)
+                : (col++, (code & 0xF800) === 0xD800 ? smallString[i++] === bigString[offset++] : true));
+    }
+    return { $: '#3', a: isGood ? offset : -1, b: row, c: col };
+});
+var $Elm$Kernel$Parser$isSubChar = F3(function (predicate, offset, string) {
+    return string.length <= offset
+        ? -1
+        : (string.charCodeAt(offset) & 0xF800) === 0xD800
+            ? (predicate(string.substr(offset, 2)) ? offset + 2 : -1)
+            : (predicate(string[offset])
+                ? (string[offset] === '\n' ? -2 : offset + 1)
+                : -1);
+});
+var $Elm$Kernel$Parser$isAsciiCode = F3(function (code, offset, string) {
+    return string.charCodeAt(offset) === code;
+});
+var $Elm$Kernel$Parser$chompBase10 = F2(function (offset, string) {
+    for (; offset < string.length; offset++) {
+        var code = string.charCodeAt(offset);
+        if (code < 0x30 || 0x39 < code) { return offset; }
+    }
+    return offset;
+});
+var $Elm$Kernel$Parser$consumeBase = F3(function (base, offset, string) {
+    for (var total = 0; offset < string.length; offset++) {
+        var digit = string.charCodeAt(offset) - 0x30;
+        if (digit < 0 || base <= digit) { break; }
+        total = base * total + digit;
+    }
+    return { $: '#2', a: offset, b: total };
+});
+var $Elm$Kernel$Parser$consumeBase16 = F2(function (offset, string) {
+    for (var total = 0; offset < string.length; offset++) {
+        var code = string.charCodeAt(offset);
+        if (0x30 <= code && code <= 0x39) {
+            total = 16 * total + code - 0x30;
+        } else if (0x41 <= code && code <= 0x46) {
+            total = 16 * total + code - 55;
+        } else if (0x61 <= code && code <= 0x66) {
+            total = 16 * total + code - 87;
+        } else {
+            break;
+        }
+    }
+    return { $: '#2', a: offset, b: total };
+});
+var $Elm$Kernel$Parser$findSubString = F5(function (smallString, offset, row, col, bigString) {
+    var newOffset = bigString.indexOf(smallString, offset);
+    var target = newOffset < 0 ? bigString.length : newOffset + smallString.length;
+    while (offset < target) {
+        var code = bigString.charCodeAt(offset++);
+        code === 0x000A
+            ? (col = 1, row++)
+            : (col++, (code & 0xF800) === 0xD800 && offset++);
+    }
+    return { $: '#3', a: newOffset, b: row, c: col };
+});
+
+// COMMANDS AND SUBSCRIPTIONS
 
 var $Platform$Cmd$none = { $: 'CmdNone' };
-var $Platform$Cmd$batch = function (_cmds) { return $Platform$Cmd$none; };
-var $Platform$Cmd$map = F2(function (_f, _cmd) { return $Platform$Cmd$none; });
+var $Platform$Cmd$batch = function (cmds) { return { $: 'CmdBatch', cmds: _List_toArray(cmds) }; };
+var $Platform$Cmd$map = F2(function (f, cmd) { return { $: 'CmdMap', f: f, cmd: cmd }; });
 var $Platform$Sub$none = { $: 'SubNone' };
-var $Platform$Sub$batch = function (_subs) { return $Platform$Sub$none; };
-var $Platform$Sub$map = F2(function (_f, _sub) { return $Platform$Sub$none; });
+var $Platform$Sub$batch = function (subs) { return { $: 'SubBatch', subs: _List_toArray(subs) }; };
+var $Platform$Sub$map = F2(function (f, sub) { return { $: 'SubMap', f: f, sub: sub }; });
+
+// PORTS
+
+var _Platform_portDefs = {};
+function _Port_id(v) { return v; }
+function _Platform_outgoingPort(name, converter) {
+    _Platform_portDefs[name] = { direction: 'outgoing', subscribers: [] };
+    return function (payload) {
+        return { $: 'CmdPort', name: name, value: converter(payload) };
+    };
+}
+function _Platform_incomingPort(name, converter) {
+    _Platform_portDefs[name] = { direction: 'incoming', converter: converter };
+    return function (toMsg) {
+        return { $: 'SubPort', name: name, toMsg: toMsg, converter: converter };
+    };
+}
 
 // PROGRAMS
 
@@ -975,8 +1890,6 @@ var $Platform$worker = function (impl) {
     return { $: 'Program', kind: 'worker', impl: impl };
 };
 
-/// Exported values that are Programs become `{ init: ... }` objects, like
-/// the real Elm runtime; everything else is exported as-is.
 function _Platform_wrap(value) {
     if (!value || value.$ !== 'Program') { return value; }
     return {
@@ -990,29 +1903,172 @@ function _Platform_initialize(program, opts) {
     var impl = program.impl;
     var doc = (opts.node && opts.node.ownerDocument) ||
         (typeof document !== 'undefined' ? document : null);
+    var isSandbox = program.kind === 'sandbox';
 
     var model;
-    if (program.kind === 'sandbox') {
+    var initialCmd = null;
+    if (isSandbox) {
         model = impl.init;
     } else {
         var pair = impl.init(opts.flags);
-        model = pair.a; // (model, Cmd msg) — commands are no-ops for now
+        model = pair.a;
+        initialCmd = pair.b;
     }
 
     var view = impl.view;
     var vnode = null;
     var root = null;
 
+    // Live subscription state.
+    var activePortSubs = {};   // port name -> [handler]
+    var activeDomSubs = [];    // { name, handler } attached to document
+    var activeTimers = [];     // { interval, id }
+    var animationFrame = null;
+
     function dispatch(msg) {
-        if (program.kind === 'sandbox') {
+        if (isSandbox) {
             model = A2(impl.update, msg, model);
         } else {
-            model = A2(impl.update, msg, model).a;
+            var next = A2(impl.update, msg, model);
+            model = next.a;
+            runCmd(next.b, function (m) { return m; });
         }
         if (view) {
             var newVnode = view(model);
             root = _VDom_patch(root, vnode, newVnode, dispatch, doc);
             vnode = newVnode;
+        }
+        updateSubs();
+    }
+
+    function runCmd(cmd, tagger) {
+        if (!cmd) { return; }
+        switch (cmd.$) {
+            case 'CmdNone': return;
+            case 'CmdBatch': cmd.cmds.forEach(function (c) { runCmd(c, tagger); }); return;
+            case 'CmdMap': {
+                var f = cmd.f;
+                runCmd(cmd.cmd, function (m) { return tagger(f(m)); });
+                return;
+            }
+            case 'CmdPort': {
+                var def = _Platform_portDefs[cmd.name];
+                if (def) {
+                    def.subscribers.slice().forEach(function (fn) { fn(cmd.value); });
+                }
+                return;
+            }
+            case 'CmdTask':
+                cmd.task.fork(
+                    function (msg) { dispatch(tagger(msg)); },
+                    function (x) {
+                        throw new Error('Task failed without an error handler: ' + _Debug_toString(x));
+                    }
+                );
+                return;
+            case 'CmdHttp': {
+                var cfg = {
+                    method: cmd.config.method,
+                    headers: _List_toArray(cmd.config.headers),
+                    url: cmd.config.url,
+                    body: cmd.config.body,
+                    timeout: cmd.config.timeout
+                };
+                _Http_makeTask(cfg, null).fork(function (response) {
+                    var result = cmd.config.expect.handle(response);
+                    dispatch(tagger(cmd.config.expect.toMsg(result)));
+                }, function () {});
+                return;
+            }
+            case 'CmdLoad':
+                if (typeof window !== 'undefined') { window.location.href = cmd.url; }
+                return;
+            case 'CmdReload':
+                if (typeof window !== 'undefined') { window.location.reload(); }
+                return;
+        }
+    }
+
+    function collectSubs(sub, tagger, acc) {
+        if (!sub) { return; }
+        switch (sub.$) {
+            case 'SubNone': return;
+            case 'SubBatch': sub.subs.forEach(function (s) { collectSubs(s, tagger, acc); }); return;
+            case 'SubMap': {
+                var f = sub.f;
+                collectSubs(sub.sub, function (m) { return tagger(f(m)); }, acc);
+                return;
+            }
+            case 'SubPort': {
+                (acc.ports[sub.name] = acc.ports[sub.name] || []).push(function (jsValue) {
+                    dispatch(tagger(sub.toMsg(sub.converter(jsValue))));
+                });
+                return;
+            }
+            case 'SubDom':
+                acc.dom.push({ name: sub.name, decoder: sub.decoder, tagger: tagger });
+                return;
+            case 'SubTime':
+                acc.timers.push({ interval: sub.interval, toMsg: sub.toMsg, tagger: tagger });
+                return;
+            case 'SubAnimation':
+                acc.animation.push({ toMsg: sub.toMsg, delta: sub.delta, tagger: tagger });
+                return;
+        }
+    }
+
+    function updateSubs() {
+        var acc = { ports: {}, dom: [], timers: [], animation: [] };
+        if (!isSandbox && impl.subscriptions) {
+            collectSubs(impl.subscriptions(model), function (m) { return m; }, acc);
+        }
+        activePortSubs = acc.ports;
+
+        // Document-level DOM listeners: drop and re-add (simple and correct).
+        if (doc && doc.addEventListener) {
+            activeDomSubs.forEach(function (record) {
+                doc.removeEventListener(record.name, record.handler);
+            });
+            activeDomSubs = acc.dom.map(function (spec) {
+                var handler = function (e) {
+                    var r = spec.decoder.run(e);
+                    if (r.ok) { dispatch(spec.tagger(r.value)); }
+                };
+                doc.addEventListener(spec.name, handler);
+                return { name: spec.name, handler: handler };
+            });
+        }
+
+        // Timers.
+        activeTimers.forEach(function (t) { clearInterval(t.id); });
+        activeTimers = acc.timers.map(function (spec) {
+            return {
+                id: setInterval(function () {
+                    dispatch(spec.tagger(spec.toMsg(_Time_posix(Date.now()))));
+                }, spec.interval)
+            };
+        });
+
+        // Animation frames.
+        if (animationFrame) {
+            (typeof cancelAnimationFrame !== 'undefined' ? cancelAnimationFrame : clearTimeout)(animationFrame.id);
+            animationFrame = null;
+        }
+        if (acc.animation.length > 0) {
+            var raf = typeof requestAnimationFrame !== 'undefined'
+                ? requestAnimationFrame
+                : function (fn) { return setTimeout(function () { fn(Date.now()); }, 16); };
+            var last = Date.now();
+            var loop = function () {
+                var now = Date.now();
+                var delta = now - last;
+                last = now;
+                acc.animation.forEach(function (spec) {
+                    dispatch(spec.tagger(spec.toMsg(spec.delta ? delta : _Time_posix(now))));
+                });
+                if (animationFrame) { animationFrame.id = raf(loop); }
+            };
+            animationFrame = { id: raf(loop) };
         }
     }
 
@@ -1029,5 +2085,29 @@ function _Platform_initialize(program, opts) {
         }
     }
 
-    return { ports: {} };
+    updateSubs();
+    if (initialCmd) { runCmd(initialCmd, function (m) { return m; }); }
+
+    // The app.ports API.
+    var ports = {};
+    Object.keys(_Platform_portDefs).forEach(function (name) {
+        var def = _Platform_portDefs[name];
+        if (def.direction === 'outgoing') {
+            ports[name] = {
+                subscribe: function (fn) { def.subscribers.push(fn); },
+                unsubscribe: function (fn) {
+                    var i = def.subscribers.indexOf(fn);
+                    if (i > -1) { def.subscribers.splice(i, 1); }
+                }
+            };
+        } else {
+            ports[name] = {
+                send: function (value) {
+                    (activePortSubs[name] || []).slice().forEach(function (fn) { fn(value); });
+                }
+            };
+        }
+    });
+
+    return { ports: ports };
 }

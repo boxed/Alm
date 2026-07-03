@@ -26,6 +26,24 @@ pub fn generate_project(modules: &[can::Module]) -> String {
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
     gen.out.push_str(RUNTIME);
+    gen.out.push_str("\n// HIGHER-ARITY CURRY HELPERS\n");
+    for n in 8..=64 {
+        let params: Vec<String> = (0..n).map(|i| format!("v{}", i)).collect();
+        writeln!(
+            gen.out,
+            "var F{} = function (fun) {{ return _Fn({}, fun); }};",
+            n, n
+        )
+        .unwrap();
+        writeln!(
+            gen.out,
+            "var A{} = function (f, {}) {{ return _An(f, [{}]); }};",
+            n,
+            params.join(", "),
+            params.join(", ")
+        )
+        .unwrap();
+    }
     gen.out.push_str("\n// HTML HELPERS (generated from the builtin tables)\n");
     for tag in crate::builtins::HTML_TAGS {
         let dom_tag = tag.trim_end_matches('_');
@@ -64,6 +82,44 @@ pub fn generate_project(modules: &[can::Module]) -> String {
         )
         .unwrap();
     }
+    for attr in crate::builtins::HTML_INT_ATTRS {
+        writeln!(
+            gen.out,
+            "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
+            sanitize(attr),
+            attr
+        )
+        .unwrap();
+    }
+    writeln!(
+        gen.out,
+        "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ if (xs.a.b) {{ names.push(xs.a.a); }} }} return {{ $: 'AAttr', key: 'class', val: names.join(' ') }}; }};"
+    )
+    .unwrap();
+    writeln!(
+        gen.out,
+        "var $Html$Attributes$property = F2(function (key, value) {{ return {{ $: 'AProp', key: key, val: value }}; }});"
+    )
+    .unwrap();
+    for tag in crate::builtins::SVG_TAGS {
+        let dom_tag = tag.trim_end_matches('_');
+        writeln!(
+            gen.out,
+            "var $Svg${} = _VDom_nodeNS('{}');",
+            sanitize(tag),
+            dom_tag
+        )
+        .unwrap();
+    }
+    for (attr, dom_name) in crate::builtins::SVG_ATTRS {
+        writeln!(
+            gen.out,
+            "var $Svg$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
+            sanitize(attr),
+            dom_name
+        )
+        .unwrap();
+    }
 
     let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
     for module in modules {
@@ -74,6 +130,9 @@ pub fn generate_project(modules: &[can::Module]) -> String {
 
         for union in &module.unions {
             gen.union(union);
+        }
+        for port in &module.ports {
+            gen.port_decl(port);
         }
 
         let mut exports = Vec::new();
@@ -193,6 +252,52 @@ impl Generator {
             }
         }
         self.out.push('\n');
+    }
+
+    // PORTS
+
+    fn port_decl(&mut self, port: &can::PortDecl) {
+        let var = self.global(&port.name);
+        match &port.tipe {
+            // Outgoing: `name : payload -> Cmd msg`
+            can::Type::Lambda(payload, result)
+                if matches!(&**result, can::Type::Type(_, n, _) if n.as_str() == "Cmd") =>
+            {
+                writeln!(
+                    self.out,
+                    "var {} = _Platform_outgoingPort('{}', {});",
+                    var,
+                    port.name,
+                    to_js_converter(payload)
+                )
+                .unwrap();
+            }
+            // Incoming: `name : (payload -> msg) -> Sub msg`
+            can::Type::Lambda(handler, result)
+                if matches!(&**result, can::Type::Type(_, n, _) if n.as_str() == "Sub") =>
+            {
+                let payload = match &**handler {
+                    can::Type::Lambda(payload, _) => from_js_converter(payload),
+                    _ => "function (v) { return v; }".to_string(),
+                };
+                writeln!(
+                    self.out,
+                    "var {} = _Platform_incomingPort('{}', {});",
+                    var, port.name, payload
+                )
+                .unwrap();
+            }
+            _ => {
+                // The type checker enforces port shapes are one of the two
+                // above; anything else would be an alm bug.
+                writeln!(
+                    self.out,
+                    "var {} = function () {{ throw new Error('bad port {}'); }};",
+                    var, port.name
+                )
+                .unwrap();
+            }
+        }
     }
 
     // DEFINITIONS
@@ -668,6 +773,94 @@ fn pattern_tests(
             pattern_tests(head, &format!("{}.a", path), tests, bindings);
             pattern_tests(tail, &format!("{}.b", path), tests, bindings);
         }
+    }
+}
+
+// PORT CONVERTERS — JS expressions converting between Elm values and the
+// plain JS values that flow through ports, driven by the port's type.
+
+fn to_js_converter(tipe: &can::Type) -> String {
+    use can::Type::*;
+    match tipe {
+        Type(_, name, args) => match name.as_str() {
+            "Int" | "Float" | "Bool" | "String" | "Char" | "Value" => "_Port_id".to_string(),
+            "List" => format!(
+                "function (l) {{ return _List_toArray(l).map({}); }}",
+                to_js_converter(&args[0])
+            ),
+            "Array" => format!(
+                "function (a) {{ return a.a.map({}); }}",
+                to_js_converter(&args[0])
+            ),
+            "Maybe" => format!(
+                "function (m) {{ return m.$ === 'Just' ? ({})(m.a) : null; }}",
+                to_js_converter(&args[0])
+            ),
+            _ => "_Port_id".to_string(),
+        },
+        Unit => "function (_v) { return null; }".to_string(),
+        Record(fields, _) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(name, t)| format!("{}: ({})(r.{})", name, to_js_converter(t), name))
+                .collect();
+            format!("function (r) {{ return {{ {} }}; }}", parts.join(", "))
+        }
+        Tuple(a, b, c) => {
+            let mut parts = vec![
+                format!("({})(t.a)", to_js_converter(a)),
+                format!("({})(t.b)", to_js_converter(b)),
+            ];
+            if let Some(c) = c {
+                parts.push(format!("({})(t.c)", to_js_converter(c)));
+            }
+            format!("function (t) {{ return [{}]; }}", parts.join(", "))
+        }
+        _ => "_Port_id".to_string(),
+    }
+}
+
+fn from_js_converter(tipe: &can::Type) -> String {
+    use can::Type::*;
+    match tipe {
+        Type(_, name, args) => match name.as_str() {
+            "Int" | "Float" | "Bool" | "String" | "Char" | "Value" => "_Port_id".to_string(),
+            "List" => format!(
+                "function (a) {{ return _List_fromArray(a.map({})); }}",
+                from_js_converter(&args[0])
+            ),
+            "Array" => format!(
+                "function (a) {{ return {{ $: 'Array', a: a.map({}) }}; }}",
+                from_js_converter(&args[0])
+            ),
+            "Maybe" => format!(
+                "function (v) {{ return v === null || v === undefined ? $Maybe$Nothing : $Maybe$Just(({})(v)); }}",
+                from_js_converter(&args[0])
+            ),
+            _ => "_Port_id".to_string(),
+        },
+        Unit => "function (_v) { return _Utils_Tuple0; }".to_string(),
+        Record(fields, _) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(name, t)| format!("{}: ({})(r.{})", name, from_js_converter(t), name))
+                .collect();
+            format!("function (r) {{ return {{ {} }}; }}", parts.join(", "))
+        }
+        Tuple(a, b, c) => match c {
+            None => format!(
+                "function (t) {{ return {{ $: '#2', a: ({})(t[0]), b: ({})(t[1]) }}; }}",
+                from_js_converter(a),
+                from_js_converter(b)
+            ),
+            Some(c) => format!(
+                "function (t) {{ return {{ $: '#3', a: ({})(t[0]), b: ({})(t[1]), c: ({})(t[2]) }}; }}",
+                from_js_converter(a),
+                from_js_converter(b),
+                from_js_converter(c)
+            ),
+        },
+        _ => "_Port_id".to_string(),
     }
 }
 

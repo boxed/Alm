@@ -57,6 +57,9 @@ pub struct Checker<'a> {
     scopes: Vec<HashMap<Name, Binding>>,
     unions: HashMap<(Name, Name), UnionInfo>,
     interfaces: &'a Interfaces,
+    /// Rigid type variables introduced by enclosing annotations; inner
+    /// annotations reuse them so `a` means the same thing throughout.
+    rigid_scope: Vec<HashMap<Name, Variable>>,
     errors: Vec<Error>,
 }
 
@@ -126,8 +129,16 @@ pub fn check_module(
         scopes: Vec::new(),
         unions,
         interfaces,
+        rigid_scope: Vec::new(),
         errors: Vec::new(),
     };
+
+    for port in &module.ports {
+        checker.globals.insert(
+            port.name.clone(),
+            Binding::Scheme(Scheme::closed(port.tipe.clone())),
+        );
+    }
 
     for group in &module.decls {
         checker.check_decl_group(group);
@@ -185,6 +196,9 @@ impl Checker<'_> {
             if let Binding::Mono(var) = binding {
                 mono_vars.push(*var);
             }
+        }
+        for scope in &self.rigid_scope {
+            mono_vars.extend(scope.values().copied());
         }
         let mut free = HashSet::new();
         for var in mono_vars {
@@ -311,6 +325,16 @@ impl Checker<'_> {
     /// against the annotation when there is one.
     fn infer_def_type(&mut self, def: &can::Def) -> Infer<Variable> {
         self.scopes.push(HashMap::new());
+
+        // Instantiate the annotation first so its rigid variables are in
+        // scope for annotations on inner `let` definitions.
+        let expected = def.annotation.as_ref().map(|annotation| {
+            let mut substitutions = self.flatten_rigid_scope();
+            let expected = self.type_to_variable(annotation, &mut substitutions, true);
+            self.rigid_scope.push(substitutions);
+            expected
+        });
+
         let result = (|| {
             let mut arg_vars = Vec::new();
             for arg in &def.args {
@@ -321,8 +345,7 @@ impl Checker<'_> {
             for arg in arg_vars.into_iter().rev() {
                 def_type = self.pool.fresh(Content::Structure(FlatType::Fun(arg, def_type)));
             }
-            if let Some(annotation) = &def.annotation {
-                let expected = self.instantiate_rigid(annotation);
+            if let Some(expected) = expected {
                 self.unify(expected, def_type, def.name.region, || {
                     format!(
                         "Something is off with the body of the `{}` definition",
@@ -332,8 +355,22 @@ impl Checker<'_> {
             }
             Ok(def_type)
         })();
+
+        if def.annotation.is_some() {
+            self.rigid_scope.pop();
+        }
         self.scopes.pop();
         result
+    }
+
+    fn flatten_rigid_scope(&self) -> HashMap<Name, Variable> {
+        let mut merged = HashMap::new();
+        for scope in &self.rigid_scope {
+            for (name, var) in scope {
+                merged.insert(name.clone(), *var);
+            }
+        }
+        merged
     }
 
     // INSTANTIATION
@@ -682,6 +719,10 @@ impl Checker<'_> {
                 })
             }
             VarForeign(module, name) => {
+                // Kernel values are trusted: they get a fresh flexible type.
+                if module.as_str().starts_with("Elm.Kernel.") {
+                    return Ok(self.pool.fresh_var());
+                }
                 let tipe = match builtins::lookup_value(module.as_str(), name.as_str()) {
                     Some(value) => builtins::parse_signature(value.signature),
                     None => self

@@ -2,7 +2,8 @@
 
 use super::{expr, type_, PResult, ParseError, Parser};
 use crate::ast::source::{
-    Alias, Associativity, Def, Exposed, Exposing, Import, Infix, Module, Privacy, Union, Value,
+    Alias, Associativity, Def, Exposed, Exposing, Import, Infix, Module, Port, Privacy, Union,
+    Value,
 };
 use crate::data::Name;
 use crate::reporting::{Located, Region};
@@ -19,8 +20,10 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
 fn chomp_module(p: &mut Parser) -> PResult<Module> {
     p.chomp_space()?;
 
-    // HEADER — `module Name exposing (..)`
+    // HEADER — `module Name exposing (..)` or `port module ...`
+    let mut is_port_module = false;
     let (name, exports) = if p.src_from_here().starts_with(b"port module") {
+        is_port_module = true;
         p.keyword("port")?;
         p.chomp_and_check_indent("I was expecting `module` after `port`")?;
         chomp_header(p)?
@@ -47,6 +50,7 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
     let mut unions: Vec<Located<Union>> = Vec::new();
     let mut aliases: Vec<Located<Alias>> = Vec::new();
     let mut binops: Vec<Located<Infix>> = Vec::new();
+    let mut ports: Vec<Port> = Vec::new();
 
     while !p.is_at_end() {
         p.check_fresh_line(
@@ -72,8 +76,22 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
             let infix = chomp_infix(p)?;
             let end = p.position();
             binops.push(Located::at(start, end, infix));
-        } else if p.src_from_here().starts_with(b"port") {
-            return Err(p.error("Ports are not supported yet in alm."));
+        } else if p.src_from_here().starts_with(b"port")
+            && !p.peek_at(4).is_some_and(super::is_inner_char)
+        {
+            if !is_port_module {
+                return Err(p.error(
+                    "This module declares a port, so the header must say `port module`.",
+                ));
+            }
+            p.keyword("port")?;
+            p.chomp_and_check_indent("I was expecting a port name after `port`")?;
+            let name = p.located(|p| p.lower_name("a port name"))?;
+            p.chomp_and_check_indent("I was expecting a `:` after this port name")?;
+            p.eat_byte(b':', "a `:` after this port name")?;
+            p.chomp_and_check_indent("I was expecting the port's type after `:`")?;
+            let tipe = type_::expression(p)?;
+            ports.push(Port { name, tipe });
         } else {
             let def = expr::definition(p)?;
             let region = def.region;
@@ -108,6 +126,7 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
         unions,
         aliases,
         binops,
+        ports,
     })
 }
 

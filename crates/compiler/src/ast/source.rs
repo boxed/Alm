@@ -97,6 +97,13 @@ pub struct Module {
     pub unions: Vec<Located<Union>>,
     pub aliases: Vec<Located<Alias>>,
     pub binops: Vec<Located<Infix>>,
+    pub ports: Vec<Port>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Port {
+    pub name: Located<Name>,
+    pub tipe: Type,
 }
 
 impl Module {

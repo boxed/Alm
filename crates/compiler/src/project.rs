@@ -135,7 +135,9 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
 }
 
 /// Walk up from the entry file looking for elm.json; fall back to treating
-/// the entry file's directory as the only source directory.
+/// the entry file's directory as the only source directory. Package
+/// dependencies listed in elm.json are added from the ELM_HOME cache so
+/// pure Elm packages compile from their real sources.
 fn find_source_directories(entry: &Path) -> Vec<PathBuf> {
     let entry_dir = entry
         .parent()
@@ -145,19 +147,70 @@ fn find_source_directories(entry: &Path) -> Vec<PathBuf> {
     loop {
         let elm_json = dir.join("elm.json");
         if elm_json.is_file() {
+            let mut dirs = Vec::new();
             if let Ok(contents) = std::fs::read_to_string(&elm_json) {
-                let dirs = parse_source_directories(&contents);
-                if !dirs.is_empty() {
-                    return dirs.iter().map(|d| dir.join(d)).collect();
+                let sources = parse_source_directories(&contents);
+                if sources.is_empty() {
+                    dirs.push(dir.join("src"));
+                } else {
+                    dirs.extend(sources.iter().map(|d| dir.join(d)));
                 }
+                dirs.extend(package_directories(&contents));
+            } else {
+                dirs.push(dir.join("src"));
             }
-            return vec![dir.join("src")];
+            return dirs;
         }
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
             None => return vec![entry_dir],
         }
     }
+}
+
+/// Source directories of every package mentioned in elm.json, from the
+/// ELM_HOME cache (~/.elm/0.19.1/packages/<author>/<name>/<version>/src).
+fn package_directories(elm_json: &str) -> Vec<PathBuf> {
+    let home = std::env::var("ELM_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let user = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(user).join(".elm")
+        });
+    let packages = home.join("0.19.1").join("packages");
+
+    let mut dirs = Vec::new();
+    // Scan for `"author/name": "1.2.3"` pairs anywhere in elm.json.
+    let bytes = elm_json.as_bytes();
+    let mut i = 0;
+    while let Some(quote) = elm_json[i..].find('"') {
+        let start = i + quote + 1;
+        let Some(end_rel) = elm_json[start..].find('"') else { break };
+        let key = &elm_json[start..start + end_rel];
+        i = start + end_rel + 1;
+        if !key.contains('/') {
+            continue;
+        }
+        // Value: skip whitespace and colon, expect a quoted version.
+        let mut j = i;
+        while j < bytes.len() && (bytes[j] == b':' || bytes[j].is_ascii_whitespace()) {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != b'"' {
+            continue;
+        }
+        let vstart = j + 1;
+        let Some(vend_rel) = elm_json[vstart..].find('"') else { break };
+        let version = &elm_json[vstart..vstart + vend_rel];
+        if version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            let (author, name) = key.split_once('/').unwrap();
+            let src = packages.join(author).join(name).join(version).join("src");
+            if src.is_dir() {
+                dirs.push(src);
+            }
+        }
+    }
+    dirs
 }
 
 /// Extract `"source-directories": [ ... ]` from elm.json without a JSON
@@ -183,7 +236,10 @@ fn user_imports(module: &src::Module) -> Vec<Name> {
     module
         .imports
         .iter()
-        .filter(|i| !builtins::is_builtin_module(i.name.value.as_str()))
+        .filter(|i| {
+            let name = i.name.value.as_str();
+            !builtins::is_builtin_module(name) && !name.starts_with("Elm.Kernel.")
+        })
         .map(|i| i.name.value.clone())
         .collect()
 }

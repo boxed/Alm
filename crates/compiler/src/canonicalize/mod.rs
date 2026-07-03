@@ -142,6 +142,11 @@ pub fn canonicalize_module(
     import_names.insert(Name::from("Sub"), Name::from("Platform.Sub"));
     for import in &module.imports {
         let import_name = &import.name.value;
+        // Kernel modules are trusted JavaScript: importable, values untyped.
+        if import_name.as_str().starts_with("Elm.Kernel.") {
+            import_names.insert(import_name.clone(), import_name.clone());
+            continue;
+        }
         let is_builtin = builtins::is_builtin_module(import_name.as_str());
         let user_interface = interfaces.get(import_name);
         if !is_builtin && user_interface.is_none() {
@@ -287,6 +292,17 @@ pub fn canonicalize_module(
             ));
         }
     }
+    for port in &module.ports {
+        if !top_level.insert(port.name.value.clone()) {
+            errors.push(Error::new(
+                format!(
+                    "This module has multiple definitions named `{}`.",
+                    port.name.value
+                ),
+                port.name.region,
+            ));
+        }
+    }
 
     let mut env = Env {
         module_name: module_name.clone(),
@@ -319,6 +335,18 @@ pub fn canonicalize_module(
         }
     }
 
+    // Canonicalize port declarations.
+    let mut ports = Vec::new();
+    for port in &module.ports {
+        match canonicalize_type(&env, &port.tipe) {
+            Ok(tipe) => ports.push(can::PortDecl {
+                name: port.name.value.clone(),
+                tipe,
+            }),
+            Err(e) => errors.push(e),
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -333,6 +361,7 @@ pub fn canonicalize_module(
         name: module_name,
         decls,
         unions,
+        ports,
     };
     let interface = build_interface(&env, module, &canonical).map_err(|e| vec![e])?;
     Ok((canonical, interface))
@@ -724,9 +753,27 @@ fn resolve_foreign_type(
     name: &Name,
     args: Vec<can::Type>,
 ) -> CResult<can::Type> {
-    // Builtin opaque types exposed through an import, e.g.
-    // `import Html exposing (Html)`.
-    if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
+    // Builtin aliases like Http.Metadata or Url.Url.
+    if let Some((vars, body)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
+        if vars.len() != args.len() {
+            return Err(Error::new(
+                format!(
+                    "The `{}` type alias needs {} argument{}, but I see {}.",
+                    name,
+                    vars.len(),
+                    if vars.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                region,
+            ));
+        }
+        let expanded = builtins::parse_signature(body);
+        let map: HashMap<Name, can::Type> =
+            vars.iter().map(|v| Name::from(*v)).zip(args).collect();
+        return Ok(subst_can_type(&expanded, &map));
+    }
+    // Builtin types addressed by module, e.g. `Http.Error` or `Html.Html`.
+    if builtins::is_builtin_type(module.as_str(), name.as_str()) {
         return Ok(can::Type::Type(module.clone(), name.clone(), args));
     }
     let interface = env.interfaces.get(module).ok_or_else(|| {
@@ -774,7 +821,7 @@ fn resolve_foreign_type(
 
 /// Substitute type variables in an already-canonical type (used to expand
 /// aliases exported by other modules).
-fn subst_can_type(tipe: &can::Type, map: &HashMap<Name, can::Type>) -> can::Type {
+pub(crate) fn subst_can_type(tipe: &can::Type, map: &HashMap<Name, can::Type>) -> can::Type {
     match tipe {
         can::Type::Var(name) => map.get(name).cloned().unwrap_or_else(|| tipe.clone()),
         can::Type::Lambda(arg, result) => can::Type::Lambda(
@@ -1046,13 +1093,19 @@ fn canonicalize_expr(env: &mut Env, expr: &src::Expr) -> CResult<can::Expr> {
         src::Expr_::Float(f) => can::Expr_::Float(*f),
         src::Expr_::Var(var_type, name) => match var_type {
             src::VarType::LowVar => find_var(env, region, name)?,
-            src::VarType::CapVar => ctor_to_expr(find_ctor(env, region, None, name)?),
+            src::VarType::CapVar => match find_ctor(env, region, None, name) {
+                Ok(info) => ctor_to_expr(info),
+                Err(err) => record_alias_ctor(env, region, None, name).ok_or(err)?,
+            },
         },
         src::Expr_::VarQual(var_type, qualifier, name) => match var_type {
             src::VarType::LowVar => find_qualified_var(env, region, qualifier, name)?,
-            src::VarType::CapVar => {
-                ctor_to_expr(find_ctor(env, region, Some(qualifier), name)?)
-            }
+            src::VarType::CapVar => match find_ctor(env, region, Some(qualifier), name) {
+                Ok(info) => ctor_to_expr(info),
+                Err(err) => {
+                    record_alias_ctor(env, region, Some(qualifier), name).ok_or(err)?
+                }
+            },
         },
         src::Expr_::List(items) => can::Expr_::List(
             items
@@ -1173,6 +1226,87 @@ fn ctor_to_expr(info: CtorInfo) -> can::Expr_ {
     can::Expr_::VarCtor(info.home, info.union, info.ctor)
 }
 
+/// A record type alias used as a constructor function: `Person "Ann" 40`.
+/// Desugars to a lambda that builds the record, with arguments in field
+/// declaration order.
+fn record_alias_ctor(
+    env: &Env,
+    region: Region,
+    qualifier: Option<&Name>,
+    name: &Name,
+) -> Option<can::Expr_> {
+    let field_names: Vec<Name> = match qualifier {
+        None => {
+            if let Some((_, body)) = env.aliases.get(name) {
+                record_field_names_src(body)?
+            } else if let Some(module) = env.exposed_types.get(name) {
+                record_alias_fields_foreign(env, module, name)?
+            } else {
+                return None;
+            }
+        }
+        Some(qualifier) => {
+            let module = env.resolve_module(qualifier)?;
+            if module == env.module_name {
+                record_field_names_src(&env.aliases.get(name)?.1)?
+            } else {
+                record_alias_fields_foreign(env, &module, name)?
+            }
+        }
+    };
+
+    if field_names.is_empty() {
+        return Some(can::Expr_::Record(vec![]));
+    }
+    let args: Vec<can::Pattern> = field_names
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            Located::new(region, can::Pattern_::Var(Name::from(format!("_r{}", i))))
+        })
+        .collect();
+    let fields: Vec<(Located<Name>, can::Expr)> = field_names
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            (
+                Located::new(region, field.clone()),
+                Located::new(
+                    region,
+                    can::Expr_::VarLocal(Name::from(format!("_r{}", i))),
+                ),
+            )
+        })
+        .collect();
+    Some(can::Expr_::Lambda(
+        args,
+        Box::new(Located::new(region, can::Expr_::Record(fields))),
+    ))
+}
+
+fn record_field_names_src(tipe: &src::Type) -> Option<Vec<Name>> {
+    match &tipe.value {
+        src::Type_::Record(fields, None) => {
+            Some(fields.iter().map(|(n, _)| n.value.clone()).collect())
+        }
+        _ => None,
+    }
+}
+
+fn record_alias_fields_foreign(env: &Env, module: &Name, name: &Name) -> Option<Vec<Name>> {
+    if let Some(interface) = env.interfaces.get(module) {
+        if let Some((_, can::Type::Record(fields, None))) = interface.aliases.get(name) {
+            return Some(fields.iter().map(|(n, _)| n.clone()).collect());
+        }
+    }
+    if let Some((_, body)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
+        if let can::Type::Record(fields, None) = builtins::parse_signature(body) {
+            return Some(fields.iter().map(|(n, _)| n.clone()).collect());
+        }
+    }
+    None
+}
+
 fn find_var(env: &Env, region: Region, name: &Name) -> CResult<can::Expr_> {
     if env.is_local(name) {
         return Ok(can::Expr_::VarLocal(name.clone()));
@@ -1203,6 +1337,9 @@ fn find_qualified_var(
     })?;
     if module == env.module_name && env.top_level.contains(name) {
         return Ok(can::Expr_::VarTopLevel(name.clone()));
+    }
+    if module.as_str().starts_with("Elm.Kernel.") {
+        return Ok(can::Expr_::VarForeign(module, name.clone()));
     }
     if builtins::lookup_value(module.as_str(), name.as_str()).is_some() {
         return Ok(can::Expr_::VarForeign(module, name.clone()));

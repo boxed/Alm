@@ -77,6 +77,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Basics", "append", "appendable -> appendable -> appendable"),
             // Basics — function helpers
             V("Basics", "identity", "a -> a"),
+            V("Basics", "never", "Never -> a"),
             V("Basics", "always", "a -> b -> a"),
             V("Basics", "apL", "(a -> b) -> a -> b"),
             V("Basics", "apR", "a -> (a -> b) -> b"),
@@ -146,6 +147,8 @@ pub fn values() -> &'static [BuiltinValue] {
             V("String", "toUpper", "String -> String"),
             V("String", "toLower", "String -> String"),
             V("String", "trim", "String -> String"),
+            V("String", "trimLeft", "String -> String"),
+            V("String", "trimRight", "String -> String"),
             V("String", "padLeft", "Int -> Char -> String -> String"),
             V("String", "padRight", "Int -> Char -> String -> String"),
             V("String", "filter", "(Char -> Bool) -> String -> String"),
@@ -333,9 +336,253 @@ pub fn values() -> &'static [BuiltinValue] {
         for attr in HTML_BOOL_ATTRS {
             table.push(V("Html.Attributes", attr, "Bool -> Attribute msg"));
         }
+        for attr in HTML_INT_ATTRS {
+            table.push(V("Html.Attributes", attr, "Int -> Attribute msg"));
+        }
+        for tag in SVG_TAGS {
+            table.push(V(
+                "Svg",
+                tag,
+                "List (Attribute msg) -> List (Html msg) -> Html msg",
+            ));
+        }
+        for (attr, _) in SVG_ATTRS {
+            table.push(V("Svg.Attributes", attr, "String -> Attribute msg"));
+        }
+        table.extend([
+            // Html — extras
+            V("Html.Attributes", "classList", "List ( String, Bool ) -> Attribute msg"),
+            V("Html.Attributes", "property", "String -> Value -> Attribute msg"),
+            V("Html.Events", "on", "String -> Decoder msg -> Attribute msg"),
+            V("Html.Events", "stopPropagationOn", "String -> Decoder ( msg, Bool ) -> Attribute msg"),
+            V("Html.Events", "preventDefaultOn", "String -> Decoder ( msg, Bool ) -> Attribute msg"),
+            V("Html.Events", "targetValue", "Decoder String"),
+            V("Html.Events", "targetChecked", "Decoder Bool"),
+            V("Html.Events", "keyCode", "Decoder Int"),
+            V("Html.Events", "onBlur", "msg -> Attribute msg"),
+            V("Html.Events", "custom", "String -> Decoder { message : msg, stopPropagation : Bool, preventDefault : Bool } -> Attribute msg"),
+            V("Html.Events", "onFocus", "msg -> Attribute msg"),
+            V("Html.Lazy", "lazy", "(a -> Html msg) -> a -> Html msg"),
+            V("Html.Lazy", "lazy2", "(a -> b -> Html msg) -> a -> b -> Html msg"),
+            V("Html.Lazy", "lazy3", "(a -> b -> c -> Html msg) -> a -> b -> c -> Html msg"),
+            V("Html.Lazy", "lazy4", "(a -> b -> c -> d -> Html msg) -> a -> b -> c -> d -> Html msg"),
+            V("Html.Keyed", "node", "String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
+            V("Html.Keyed", "ul", "List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
+            V("Html.Keyed", "ol", "List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
+            // Json.Decode
+            V("Json.Decode", "decodeString", "Decoder a -> String -> Result Json.Decode.Error a"),
+            V("Json.Decode", "decodeValue", "Decoder a -> Value -> Result Json.Decode.Error a"),
+            V("Json.Decode", "errorToString", "Json.Decode.Error -> String"),
+            V("Json.Decode", "string", "Decoder String"),
+            V("Json.Decode", "int", "Decoder Int"),
+            V("Json.Decode", "float", "Decoder Float"),
+            V("Json.Decode", "bool", "Decoder Bool"),
+            V("Json.Decode", "value", "Decoder Value"),
+            V("Json.Decode", "null", "a -> Decoder a"),
+            V("Json.Decode", "nullable", "Decoder a -> Decoder (Maybe a)"),
+            V("Json.Decode", "list", "Decoder a -> Decoder (List a)"),
+            V("Json.Decode", "array", "Decoder a -> Decoder (Array a)"),
+            V("Json.Decode", "dict", "Decoder a -> Decoder (Dict String a)"),
+            V("Json.Decode", "keyValuePairs", "Decoder a -> Decoder (List ( String, a ))"),
+            V("Json.Decode", "field", "String -> Decoder a -> Decoder a"),
+            V("Json.Decode", "at", "List String -> Decoder a -> Decoder a"),
+            V("Json.Decode", "index", "Int -> Decoder a -> Decoder a"),
+            V("Json.Decode", "maybe", "Decoder a -> Decoder (Maybe a)"),
+            V("Json.Decode", "oneOf", "List (Decoder a) -> Decoder a"),
+            V("Json.Decode", "lazy", "(() -> Decoder a) -> Decoder a"),
+            V("Json.Decode", "map", "(a -> value) -> Decoder a -> Decoder value"),
+            V("Json.Decode", "map2", "(a -> b -> value) -> Decoder a -> Decoder b -> Decoder value"),
+            V("Json.Decode", "map3", "(a -> b -> c -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder value"),
+            V("Json.Decode", "map4", "(a -> b -> c -> d -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder d -> Decoder value"),
+            V("Json.Decode", "map5", "(a -> b -> c -> d -> e -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder d -> Decoder e -> Decoder value"),
+            V("Json.Decode", "map6", "(a -> b -> c -> d -> e -> f -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder d -> Decoder e -> Decoder f -> Decoder value"),
+            V("Json.Decode", "map7", "(a -> b -> c -> d -> e -> f -> g -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder d -> Decoder e -> Decoder f -> Decoder g -> Decoder value"),
+            V("Json.Decode", "map8", "(a -> b -> c -> d -> e -> f -> g -> h -> value) -> Decoder a -> Decoder b -> Decoder c -> Decoder d -> Decoder e -> Decoder f -> Decoder g -> Decoder h -> Decoder value"),
+            V("Json.Decode", "andThen", "(a -> Decoder b) -> Decoder a -> Decoder b"),
+            V("Json.Decode", "succeed", "a -> Decoder a"),
+            V("Json.Decode", "fail", "String -> Decoder a"),
+            // Json.Encode
+            V("Json.Encode", "encode", "Int -> Value -> String"),
+            V("Json.Encode", "string", "String -> Value"),
+            V("Json.Encode", "int", "Int -> Value"),
+            V("Json.Encode", "float", "Float -> Value"),
+            V("Json.Encode", "bool", "Bool -> Value"),
+            V("Json.Encode", "null", "Value"),
+            V("Json.Encode", "list", "(a -> Value) -> List a -> Value"),
+            V("Json.Encode", "array", "(a -> Value) -> Array a -> Value"),
+            V("Json.Encode", "object", "List ( String, Value ) -> Value"),
+            V("Json.Encode", "dict", "(k -> String) -> (v -> Value) -> Dict k v -> Value"),
+            // Task
+            V("Task", "perform", "(a -> msg) -> Task Never a -> Cmd msg"),
+            V("Task", "attempt", "(Result x a -> msg) -> Task x a -> Cmd msg"),
+            V("Task", "succeed", "a -> Task x a"),
+            V("Task", "fail", "x -> Task x a"),
+            V("Task", "map", "(a -> b) -> Task x a -> Task x b"),
+            V("Task", "map2", "(a -> b -> result) -> Task x a -> Task x b -> Task x result"),
+            V("Task", "andThen", "(a -> Task x b) -> Task x a -> Task x b"),
+            V("Task", "onError", "(x -> Task y a) -> Task x a -> Task y a"),
+            V("Task", "mapError", "(x -> y) -> Task x a -> Task y a"),
+            V("Task", "sequence", "List (Task x a) -> Task x (List a)"),
+            // Process
+            V("Process", "sleep", "Float -> Task x ()"),
+            // Time
+            V("Time", "now", "Task x Time.Posix"),
+            V("Time", "posixToMillis", "Time.Posix -> Int"),
+            V("Time", "millisToPosix", "Int -> Time.Posix"),
+            V("Time", "utc", "Time.Zone"),
+            V("Time", "here", "Task x Time.Zone"),
+            V("Time", "customZone", "Int -> List { start : Int, offset : Int } -> Time.Zone"),
+            V("Time", "every", "Float -> (Time.Posix -> msg) -> Sub msg"),
+            V("Time", "toYear", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toMonth", "Time.Zone -> Time.Posix -> Time.Month"),
+            V("Time", "toDay", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toHour", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toMinute", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toSecond", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toMillis", "Time.Zone -> Time.Posix -> Int"),
+            V("Time", "toWeekday", "Time.Zone -> Time.Posix -> Time.Weekday"),
+            // Http
+            V("Http", "get", "{ url : String, expect : Http.Expect msg } -> Cmd msg"),
+            V("Http", "post", "{ url : String, body : Http.Body, expect : Http.Expect msg } -> Cmd msg"),
+            V("Http", "request", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, expect : Http.Expect msg, timeout : Maybe Float, tracker : Maybe String } -> Cmd msg"),
+            V("Http", "header", "String -> String -> Http.Header"),
+            V("Http", "emptyBody", "Http.Body"),
+            V("Http", "jsonBody", "Value -> Http.Body"),
+            V("Http", "stringBody", "String -> String -> Http.Body"),
+            V("Http", "fileBody", "File -> Http.Body"),
+            V("Http", "multipartBody", "List Http.Part -> Http.Body"),
+            V("Http", "stringPart", "String -> String -> Http.Part"),
+            V("Http", "filePart", "String -> File -> Http.Part"),
+            V("Http", "expectJson", "(Result Http.Error a -> msg) -> Decoder a -> Http.Expect msg"),
+            V("Http", "expectString", "(Result Http.Error String -> msg) -> Http.Expect msg"),
+            V("Http", "expectWhatever", "(Result Http.Error () -> msg) -> Http.Expect msg"),
+            V("Http", "task", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, resolver : Http.Resolver x a, timeout : Maybe Float } -> Task x a"),
+            V("Http", "stringResolver", "(Http.Response String -> Result x a) -> Http.Resolver x a"),
+            // File
+            V("File", "decoder", "Decoder File"),
+            V("File", "name", "File -> String"),
+            V("File", "size", "File -> Int"),
+            V("File", "mime", "File -> String"),
+            // Url
+            V("Url", "fromString", "String -> Maybe Url.Url"),
+            V("Url", "toString", "Url.Url -> String"),
+            V("Url", "percentEncode", "String -> String"),
+            V("Url", "percentDecode", "String -> Maybe String"),
+            // Browser.Dom
+            V("Browser.Dom", "focus", "String -> Task Browser.Dom.Error ()"),
+            V("Browser.Dom", "blur", "String -> Task Browser.Dom.Error ()"),
+            V("Browser.Dom", "getViewport", "Task x Browser.Dom.Viewport"),
+            V("Browser.Dom", "setViewport", "Float -> Float -> Task x ()"),
+            V("Browser.Dom", "getElement", "String -> Task Browser.Dom.Error Browser.Dom.Element"),
+            // Browser.Events
+            V("Browser.Events", "onKeyDown", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onKeyUp", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onKeyPress", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onClick", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onMouseMove", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onMouseDown", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onMouseUp", "Decoder msg -> Sub msg"),
+            V("Browser.Events", "onResize", "(Int -> Int -> msg) -> Sub msg"),
+            V("Browser.Events", "onAnimationFrameDelta", "(Float -> msg) -> Sub msg"),
+            V("Browser.Events", "onAnimationFrame", "(Time.Posix -> msg) -> Sub msg"),
+            // Browser.Navigation
+            V("Browser.Navigation", "load", "String -> Cmd msg"),
+            V("Browser.Navigation", "reload", "Cmd msg"),
+            // Random (the effect-module parts reimplemented natively)
+            V("Random", "int", "Int -> Int -> Random.Generator Int"),
+            V("Random", "float", "Float -> Float -> Random.Generator Float"),
+            V("Random", "constant", "a -> Random.Generator a"),
+            V("Random", "map", "(a -> b) -> Random.Generator a -> Random.Generator b"),
+            V("Random", "map2", "(a -> b -> c) -> Random.Generator a -> Random.Generator b -> Random.Generator c"),
+            V("Random", "andThen", "(a -> Random.Generator b) -> Random.Generator a -> Random.Generator b"),
+            V("Random", "list", "Int -> Random.Generator a -> Random.Generator (List a)"),
+            V("Random", "step", "Random.Generator a -> Random.Seed -> ( a, Random.Seed )"),
+            V("Random", "initialSeed", "Int -> Random.Seed"),
+            V("Random", "generate", "(a -> msg) -> Random.Generator a -> Cmd msg"),
+            V("Random", "minInt", "Int"),
+            V("Random", "maxInt", "Int"),
+            // UUID (TSFoster/elm-uuid surface used in practice)
+            V("UUID", "generator", "Random.Generator UUID.UUID"),
+            V("UUID", "toString", "UUID.UUID -> String"),
+            V("UUID", "toRepresentation", "UUID.Representation -> UUID.UUID -> String"),
+            V("UUID", "fromString", "String -> Result UUID.Error UUID.UUID"),
+            V("UUID", "jsonDecoder", "Decoder UUID.UUID"),
+            V("UUID", "toValue", "UUID.UUID -> Value"),
+        ]);
         table
     })
 }
+
+/// Int-valued HTML attribute helpers in Html.Attributes.
+pub const HTML_INT_ATTRS: &[&str] = &[
+    "rows", "cols", "colspan", "rowspan", "tabindex", "size", "maxlength", "minlength",
+    "height", "width",
+];
+
+/// SVG element helpers.
+pub const SVG_TAGS: &[&str] = &[
+    "svg", "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "defs",
+    "text_", "tspan", "use", "mask", "clipPath", "linearGradient", "radialGradient", "stop",
+    "pattern", "marker", "symbol", "title", "desc", "foreignObject", "animate",
+];
+
+/// SVG attribute helpers: (Elm name, DOM attribute name).
+pub const SVG_ATTRS: &[(&str, &str)] = &[
+    ("viewBox", "viewBox"),
+    ("width", "width"),
+    ("height", "height"),
+    ("x", "x"),
+    ("y", "y"),
+    ("x1", "x1"),
+    ("y1", "y1"),
+    ("x2", "x2"),
+    ("y2", "y2"),
+    ("cx", "cx"),
+    ("cy", "cy"),
+    ("r", "r"),
+    ("rx", "rx"),
+    ("ry", "ry"),
+    ("d", "d"),
+    ("points", "points"),
+    ("fill", "fill"),
+    ("fillRule", "fill-rule"),
+    ("fillOpacity", "fill-opacity"),
+    ("stroke", "stroke"),
+    ("strokeWidth", "stroke-width"),
+    ("strokeLinecap", "stroke-linecap"),
+    ("strokeLinejoin", "stroke-linejoin"),
+    ("strokeDasharray", "stroke-dasharray"),
+    ("strokeDashoffset", "stroke-dashoffset"),
+    ("strokeOpacity", "stroke-opacity"),
+    ("strokeMiterlimit", "stroke-miterlimit"),
+    ("opacity", "opacity"),
+    ("transform", "transform"),
+    ("class", "class"),
+    ("id", "id"),
+    ("style", "style"),
+    ("dx", "dx"),
+    ("dy", "dy"),
+    ("fontSize", "font-size"),
+    ("fontFamily", "font-family"),
+    ("textAnchor", "text-anchor"),
+    ("dominantBaseline", "dominant-baseline"),
+    ("gradientUnits", "gradientUnits"),
+    ("gradientTransform", "gradientTransform"),
+    ("offset", "offset"),
+    ("stopColor", "stop-color"),
+    ("stopOpacity", "stop-opacity"),
+    ("clipRule", "clip-rule"),
+    ("clipPathUnits", "clipPathUnits"),
+    ("preserveAspectRatio", "preserveAspectRatio"),
+    ("xlinkHref", "xlink:href"),
+    ("pointerEvents", "pointer-events"),
+    ("visibility", "visibility"),
+    ("version", "version"),
+    ("attributeName", "attributeName"),
+    ("values", "values"),
+    ("dur", "dur"),
+    ("repeatCount", "repeatCount"),
+];
 
 /// The standard HTML element helpers, all `List (Attribute msg) ->
 /// List (Html msg) -> Html msg`. Generated from a name list to keep the
@@ -414,7 +661,92 @@ pub const UNIONS: &[BuiltinUnion] = &[
     BuiltinUnion { module: "Basics", name: "Order", vars: &[], ctors: &[("LT", &[]), ("EQ", &[]), ("GT", &[])] },
     BuiltinUnion { module: "Maybe", name: "Maybe", vars: &["a"], ctors: &[("Just", &["a"]), ("Nothing", &[])] },
     BuiltinUnion { module: "Result", name: "Result", vars: &["error", "value"], ctors: &[("Ok", &["value"]), ("Err", &["error"])] },
+    BuiltinUnion { module: "Http", name: "Error", vars: &[], ctors: &[
+        ("BadUrl", &["String"]),
+        ("Timeout", &[]),
+        ("NetworkError", &[]),
+        ("BadStatus", &["Int"]),
+        ("BadBody", &["String"]),
+    ] },
+    BuiltinUnion { module: "Http", name: "Response", vars: &["body"], ctors: &[
+        ("BadUrl_", &["String"]),
+        ("Timeout_", &[]),
+        ("NetworkError_", &[]),
+        ("BadStatus_", &["Http.Metadata", "body"]),
+        ("GoodStatus_", &["Http.Metadata", "body"]),
+    ] },
+    BuiltinUnion { module: "Time", name: "Month", vars: &[], ctors: &[
+        ("Jan", &[]), ("Feb", &[]), ("Mar", &[]), ("Apr", &[]), ("May", &[]), ("Jun", &[]),
+        ("Jul", &[]), ("Aug", &[]), ("Sep", &[]), ("Oct", &[]), ("Nov", &[]), ("Dec", &[]),
+    ] },
+    BuiltinUnion { module: "Time", name: "Weekday", vars: &[], ctors: &[
+        ("Mon", &[]), ("Tue", &[]), ("Wed", &[]), ("Thu", &[]), ("Fri", &[]), ("Sat", &[]), ("Sun", &[]),
+    ] },
+    BuiltinUnion { module: "Browser.Dom", name: "Error", vars: &[], ctors: &[("NotFound", &["String"])] },
+    BuiltinUnion { module: "Url", name: "Protocol", vars: &[], ctors: &[("Http", &[]), ("Https", &[])] },
+    BuiltinUnion { module: "UUID", name: "Representation", vars: &[], ctors: &[
+        ("Canonical", &[]), ("Compact", &[]), ("Guid", &[]), ("Urn", &[]),
+    ] },
+    BuiltinUnion { module: "Json.Decode", name: "Error", vars: &[], ctors: &[
+        ("Field", &["String", "Json.Decode.Error"]),
+        ("Index", &["Int", "Json.Decode.Error"]),
+        ("OneOf", &["List Json.Decode.Error"]),
+        ("Failure", &["String", "Value"]),
+    ] },
 ];
+
+/// Built-in type aliases: (module, name, vars, body signature).
+pub const ALIASES: &[(&str, &str, &[&str], &str)] = &[
+    ("Json.Decode", "Value", &[], "Value"),
+    ("Http", "Metadata", &[], "{ url : String, statusCode : Int, statusText : String, headers : Dict String String }"),
+    ("Browser.Dom", "Viewport", &[], "{ scene : { width : Float, height : Float }, viewport : { x : Float, y : Float, width : Float, height : Float } }"),
+    ("Browser.Dom", "Element", &[], "{ scene : { width : Float, height : Float }, viewport : { x : Float, y : Float, width : Float, height : Float }, element : { x : Float, y : Float, width : Float, height : Float } }"),
+    ("Url", "Url", &[], "{ protocol : Protocol, host : String, port_ : Maybe Int, path : String, query : Maybe String, fragment : Maybe String }"),
+    ("Svg", "Svg", &["msg"], "Html msg"),
+    ("Svg", "Attribute", &["msg"], "Attribute msg"),
+];
+
+pub fn lookup_alias(module: &str, name: &str) -> Option<(&'static [&'static str], &'static str)> {
+    ALIASES
+        .iter()
+        .find(|(m, n, _, _)| *m == module && *n == name)
+        .map(|(_, _, vars, body)| (*vars, *body))
+}
+
+/// Types that live in builtin modules, addressed by (module, name). Used
+/// for qualified type resolution where bare names would be ambiguous
+/// (e.g. Http.Error vs Json.Decode.Error).
+pub fn is_builtin_type(module: &str, name: &str) -> bool {
+    if lookup_type_home(name) == Some(module) {
+        return true;
+    }
+    UNIONS
+        .iter()
+        .any(|u| u.module == module && u.name == name)
+        || matches!(
+            (module, name),
+            ("Http", "Expect")
+                | ("Http", "Body")
+                | ("Http", "Header")
+                | ("Http", "Part")
+                | ("Http", "Resolver")
+                | ("Time", "Posix")
+                | ("Time", "Zone")
+                | ("Task", "Task")
+                | ("Json.Decode", "Decoder")
+                | ("Json.Encode", "Value")
+                | ("File", "File")
+                | ("Html", "Html")
+                | ("Html", "Attribute")
+                | ("Platform", "Program")
+                | ("Platform.Cmd", "Cmd")
+                | ("Platform.Sub", "Sub")
+                | ("Random", "Generator")
+                | ("Random", "Seed")
+                | ("UUID", "UUID")
+                | ("UUID", "Error")
+        )
+}
 
 /// Where each built-in type constructor lives.
 pub fn lookup_type_home(name: &str) -> Option<&'static str> {
@@ -432,6 +764,12 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "Program" => Some("Platform"),
         "Cmd" => Some("Platform.Cmd"),
         "Sub" => Some("Platform.Sub"),
+        "Value" => Some("Json.Encode"),
+        "Decoder" => Some("Json.Decode"),
+        "Posix" | "Zone" | "Month" | "Weekday" => Some("Time"),
+        "Task" => Some("Task"),
+        "File" => Some("File"),
+        "Protocol" => Some("Url"),
         _ => None,
     }
 }
@@ -440,8 +778,10 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
 /// core data structure modules).
 pub const MODULES: &[&str] = &[
     "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug", "Dict", "Set",
-    "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Browser", "Platform",
-    "Platform.Cmd", "Platform.Sub",
+    "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
+    "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
+    "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process", "Time",
+    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {
@@ -521,15 +861,25 @@ fn canonicalize_signature_type(tipe: &source::Type) -> Type {
         ),
         source::Type_::Var(name) => Type::Var(name.clone()),
         source::Type_::Type(_, name, args) => {
-            let home = lookup_type_home(name.as_str())
-                .unwrap_or_else(|| panic!("unknown type {} in builtin signature", name));
-            Type::Type(
-                Name::from(home),
-                name.clone(),
-                args.iter().map(canonicalize_signature_type).collect(),
-            )
+            let args: Vec<Type> = args.iter().map(canonicalize_signature_type).collect();
+            if let Some(home) = lookup_type_home(name.as_str()) {
+                return Type::Type(Name::from(home), name.clone(), args);
+            }
+            // Unambiguous builtin alias referenced without qualification.
+            if let Some((_, _, vars, body)) =
+                ALIASES.iter().find(|(_, n, _, _)| *n == name.as_str())
+            {
+                return expand_signature_alias(vars, body, args);
+            }
+            panic!("unknown type {} in builtin signature", name)
         }
-        source::Type_::TypeQual(..) => panic!("qualified types not allowed in builtin signatures"),
+        source::Type_::TypeQual(_, qualifier, name, args) => {
+            let args: Vec<Type> = args.iter().map(canonicalize_signature_type).collect();
+            if let Some((vars, body)) = lookup_alias(qualifier.as_str(), name.as_str()) {
+                return expand_signature_alias(vars, body, args);
+            }
+            Type::Type(qualifier.clone(), name.clone(), args)
+        }
         source::Type_::Record(fields, ext) => Type::Record(
             fields
                 .iter()
@@ -544,6 +894,16 @@ fn canonicalize_signature_type(tipe: &source::Type) -> Type {
             rest.first().map(|t| Box::new(canonicalize_signature_type(t))),
         ),
     }
+}
+
+fn expand_signature_alias(vars: &[&str], body: &str, args: Vec<Type>) -> Type {
+    let expanded = parse_signature(body);
+    let map: std::collections::HashMap<Name, Type> = vars
+        .iter()
+        .map(|v| Name::from(*v))
+        .zip(args)
+        .collect();
+    crate::canonicalize::subst_can_type(&expanded, &map)
 }
 
 /// The arity of a builtin value, derived from its signature.
