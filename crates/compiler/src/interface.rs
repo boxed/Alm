@@ -3,7 +3,18 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::canonical as can;
+use crate::ast::source::Associativity;
 use crate::data::Name;
+
+/// A custom operator exported by a module (e.g. elm/parser's `|=`).
+#[derive(Debug, Clone)]
+pub struct BinopDef {
+    pub associativity: Associativity,
+    pub precedence: u8,
+    pub function: Name,
+    /// The underlying function's type, filled in after type checking.
+    pub tipe: Option<can::Type>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Interface {
@@ -18,6 +29,8 @@ pub struct Interface {
     pub open_unions: HashSet<Name>,
     /// Exported type aliases: name -> (vars, canonical body).
     pub aliases: HashMap<Name, (Vec<Name>, can::Type)>,
+    /// Exported custom operators.
+    pub binops: HashMap<Name, BinopDef>,
 }
 
 pub type Interfaces = HashMap<Name, Interface>;

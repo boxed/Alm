@@ -324,3 +324,10 @@ fn binop_then_lambda() {
         other => panic!("expected binops, got {:?}", other),
     }
 }
+
+#[test]
+fn surrogate_pair_escapes() {
+    let m = parse_ok("module M exposing (..)\n\nx = \"\\u{D835}\\u{DD04}\"\ny = \"\\u{1F4A9}\"\n");
+    assert_eq!(m.values[0].value.body.value, Expr_::Str("𝔄".into()));
+    assert_eq!(m.values[1].value.body.value, Expr_::Str("💩".into()));
+}

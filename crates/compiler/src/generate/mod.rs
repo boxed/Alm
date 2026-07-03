@@ -44,6 +44,42 @@ pub fn generate_project(modules: &[can::Module]) -> String {
         )
         .unwrap();
     }
+    gen.out.push_str("\n// BUILTIN UNION CONSTRUCTORS\n");
+    for union in crate::builtins::UNIONS {
+        // Bool/Order/Maybe/Result constructors are hand-written in the
+        // runtime kernel.
+        if matches!(union.module, "Basics" | "Maybe" | "Result") {
+            continue;
+        }
+        let module_var = mangle_module(&Name::from(union.module));
+        for (ctor_name, args) in union.ctors {
+            let var = format!("{}${}", module_var, sanitize(ctor_name));
+            match args.len() {
+                0 => writeln!(gen.out, "var {} = {{ $: '{}' }};", var, ctor_name).unwrap(),
+                1 => writeln!(
+                    gen.out,
+                    "var {} = function (a) {{ return {{ $: '{}', a: a }}; }};",
+                    var, ctor_name
+                )
+                .unwrap(),
+                n => {
+                    let params: Vec<String> = (0..n).map(field_name).collect();
+                    let fields: Vec<String> =
+                        params.iter().map(|p| format!("{}: {}", p, p)).collect();
+                    writeln!(
+                        gen.out,
+                        "var {} = F{}(function ({}) {{ return {{ $: '{}', {} }}; }});",
+                        var,
+                        n,
+                        params.join(", "),
+                        ctor_name,
+                        fields.join(", ")
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
     gen.out.push_str("\n// HTML HELPERS (generated from the builtin tables)\n");
     for tag in crate::builtins::HTML_TAGS {
         let dom_tag = tag.trim_end_matches('_');

@@ -11,7 +11,7 @@ use crate::ast::source as src;
 use crate::ast::source::Associativity;
 use crate::builtins;
 use crate::data::Name;
-use crate::interface::{Interface, Interfaces};
+use crate::interface::{BinopDef, Interface, Interfaces};
 use crate::reporting::{Located, Region};
 
 #[derive(Debug, Clone)]
@@ -46,14 +46,26 @@ struct Env<'a> {
     local_types: HashSet<Name>,
     aliases: HashMap<Name, (Vec<Name>, src::Type)>,
     /// Modules reachable under which names (identity plus `as` aliases).
-    import_names: HashMap<Name, Name>,
+    /// One alias may point at several modules (`import A as X` twice).
+    import_names: HashMap<Name, Vec<Name>>,
     /// Values exposed unqualified through `exposing` clauses on imports.
     exposed_values: HashMap<Name, Name>,
     /// Types exposed unqualified through `exposing` clauses on imports.
     exposed_types: HashMap<Name, Name>,
     /// Interfaces of already-compiled user modules.
     interfaces: &'a Interfaces,
+    /// All operators usable in this module: builtins, imported customs,
+    /// and locally defined ones.
+    binops: HashMap<Name, BinopEntry>,
     scopes: Vec<HashSet<Name>>,
+}
+
+#[derive(Clone)]
+struct BinopEntry {
+    home: Name,
+    function: Name,
+    precedence: u8,
+    associativity: Associativity,
 }
 
 impl Env<'_> {
@@ -61,8 +73,8 @@ impl Env<'_> {
         self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
-    fn resolve_module(&self, name: &Name) -> Option<Name> {
-        self.import_names.get(name).cloned()
+    fn resolve_modules(&self, name: &Name) -> Vec<Name> {
+        self.import_names.get(name).cloned().unwrap_or_default()
     }
 }
 
@@ -129,22 +141,67 @@ pub fn canonicalize_module(
         }
     }
 
+    // Operator table: builtins first, then imported and local operators.
+    let mut binops: HashMap<Name, BinopEntry> = HashMap::new();
+    for infix in builtins::INFIXES {
+        binops.insert(
+            Name::from(infix.op),
+            BinopEntry {
+                home: Name::from(infix.module),
+                function: Name::from(infix.function),
+                precedence: infix.precedence,
+                associativity: infix.associativity,
+            },
+        );
+    }
+    for infix in &module.binops {
+        if !module
+            .values
+            .iter()
+            .any(|v| v.value.name.value == infix.value.function)
+        {
+            errors.push(Error::new(
+                format!(
+                    "The `{}` operator points at `{}`, but that function is not defined in this module.",
+                    infix.value.op, infix.value.function
+                ),
+                infix.region,
+            ));
+            continue;
+        }
+        binops.insert(
+            infix.value.op.clone(),
+            BinopEntry {
+                home: module_name.clone(),
+                function: infix.value.function.clone(),
+                precedence: infix.value.precedence,
+                associativity: infix.value.associativity,
+            },
+        );
+    }
+
     // Imports: identity names for builtin modules plus user aliases.
-    let mut import_names: HashMap<Name, Name> = HashMap::new();
+    let mut import_names: HashMap<Name, Vec<Name>> = HashMap::new();
+    let mut add_import_name = |map: &mut HashMap<Name, Vec<Name>>, alias: Name, target: Name| {
+        let entry = map.entry(alias).or_default();
+        if !entry.contains(&target) {
+            entry.push(target);
+        }
+    };
     let mut exposed_values: HashMap<Name, Name> = HashMap::new();
     let mut exposed_types: HashMap<Name, Name> = HashMap::new();
     for module_name in builtins::MODULES {
-        import_names.insert(Name::from(*module_name), Name::from(*module_name));
+        add_import_name(&mut import_names, Name::from(*module_name), Name::from(*module_name));
     }
     // Elm's default imports include `import Platform.Cmd as Cmd` and
     // `import Platform.Sub as Sub`.
-    import_names.insert(Name::from("Cmd"), Name::from("Platform.Cmd"));
-    import_names.insert(Name::from("Sub"), Name::from("Platform.Sub"));
+    add_import_name(&mut import_names, Name::from("Cmd"), Name::from("Platform.Cmd"));
+    add_import_name(&mut import_names, Name::from("Sub"), Name::from("Platform.Sub"));
     for import in &module.imports {
         let import_name = &import.name.value;
         // Kernel modules are trusted JavaScript: importable, values untyped.
         if import_name.as_str().starts_with("Elm.Kernel.") {
-            import_names.insert(import_name.clone(), import_name.clone());
+            add_import_name(&mut import_names, import_name.clone(), import_name.clone());
             continue;
         }
         let is_builtin = builtins::is_builtin_module(import_name.as_str());
@@ -156,9 +213,9 @@ pub fn canonicalize_module(
             ));
             continue;
         }
-        import_names.insert(import_name.clone(), import_name.clone());
+        add_import_name(&mut import_names, import_name.clone(), import_name.clone());
         if let Some(alias) = &import.alias {
-            import_names.insert(alias.clone(), import_name.clone());
+            add_import_name(&mut import_names, alias.clone(), import_name.clone());
         }
         match &import.exposing {
             src::Exposing::Open => {
@@ -177,6 +234,17 @@ pub fn canonicalize_module(
                             &mut ctors,
                             import_name,
                             &interface.unions[union_name],
+                        );
+                    }
+                    for (op, def) in &interface.binops {
+                        binops.insert(
+                            op.clone(),
+                            BinopEntry {
+                                home: import_name.clone(),
+                                function: def.function.clone(),
+                                precedence: def.precedence,
+                                associativity: def.associativity,
+                            },
                         );
                     }
                 } else {
@@ -271,8 +339,34 @@ pub fn canonicalize_module(
                                 }
                             }
                         }
-                        // Operators are globally available in alm.
-                        src::Exposed::Operator(..) => {}
+                        // Builtin operators are globally available; custom
+                        // ones come from the module's interface.
+                        src::Exposed::Operator(region, op) => {
+                            if let Some(interface) = user_interface {
+                                match interface.binops.get(op) {
+                                    Some(def) => {
+                                        binops.insert(
+                                            op.clone(),
+                                            BinopEntry {
+                                                home: import_name.clone(),
+                                                function: def.function.clone(),
+                                                precedence: def.precedence,
+                                                associativity: def.associativity,
+                                            },
+                                        );
+                                    }
+                                    None => {
+                                        errors.push(Error::new(
+                                            format!(
+                                                "The `{}` module does not expose a `{}` operator.",
+                                                import_name, op
+                                            ),
+                                            *region,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -314,6 +408,7 @@ pub fn canonicalize_module(
         exposed_values,
         exposed_types,
         interfaces,
+        binops,
         scopes: vec![],
     };
 
@@ -405,6 +500,17 @@ fn build_interface(
             for name in alias_names {
                 expose_alias(&mut interface, &name);
             }
+            for infix in &module.binops {
+                interface.binops.insert(
+                    infix.value.op.clone(),
+                    BinopDef {
+                        associativity: infix.value.associativity,
+                        precedence: infix.value.precedence,
+                        function: infix.value.function.clone(),
+                        tipe: None,
+                    },
+                );
+            }
         }
         src::Exposing::Explicit(items) => {
             for item in items {
@@ -450,11 +556,29 @@ fn build_interface(
                             ));
                         }
                     }
-                    src::Exposed::Operator(region, _) => {
-                        return Err(Error::new(
-                            "Custom operators are not supported.",
-                            *region,
-                        ));
+                    src::Exposed::Operator(region, op) => {
+                        match module.binops.iter().find(|i| i.value.op == *op) {
+                            Some(infix) => {
+                                interface.binops.insert(
+                                    op.clone(),
+                                    BinopDef {
+                                        associativity: infix.value.associativity,
+                                        precedence: infix.value.precedence,
+                                        function: infix.value.function.clone(),
+                                        tipe: None,
+                                    },
+                                );
+                            }
+                            None => {
+                                return Err(Error::new(
+                                    format!(
+                                        "You are trying to expose the `{}` operator, but it is not defined in this module.",
+                                        op
+                                    ),
+                                    *region,
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -489,19 +613,50 @@ fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Error> {
     let names: Vec<Name> = defs.iter().map(|d| d.name.value.clone()).collect();
     let name_set: HashSet<Name> = names.iter().cloned().collect();
 
+    let to_deps = |refs: &HashSet<Name>| -> Vec<usize> {
+        names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| refs.contains(*n) && name_set.contains(*n))
+            .map(|(i, _)| i)
+            .collect()
+    };
     let dependencies: Vec<Vec<usize>> = defs
         .iter()
         .map(|def| {
             let mut refs = HashSet::new();
             collect_refs(&def.body, &mut refs);
-            names
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| refs.contains(*n) && name_set.contains(*n))
-                .map(|(i, _)| i)
-                .collect()
+            to_deps(&refs)
         })
         .collect();
+    // References evaluated immediately (not delayed inside a lambda);
+    // only these make a value cycle illegal.
+    let direct_dependencies: Vec<Vec<usize>> = defs
+        .iter()
+        .map(|def| {
+            if !def.args.is_empty() {
+                return vec![];
+            }
+            let mut refs = HashSet::new();
+            collect_direct_refs(&def.body, &mut refs);
+            to_deps(&refs)
+        })
+        .collect();
+
+    // A value is illegal only if it sits on a cycle of IMMEDIATE
+    // references; recursion delayed behind lambdas is fine.
+    let directly_cyclic = cyclic_nodes(defs.len(), &direct_dependencies);
+    for (i, def) in defs.iter().enumerate() {
+        if directly_cyclic[i] {
+            return Err(Error::new(
+                format!(
+                    "The value `{}` is defined in terms of itself, and it is not a function, so it would run forever.",
+                    def.name.value
+                ),
+                def.name.region,
+            ));
+        }
+    }
 
     let groups = graph::strongly_connected_components(defs.len(), &dependencies);
 
@@ -513,15 +668,6 @@ fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Error> {
             let is_self_recursive = dependencies[i].contains(&i);
             let def = defs[i].take().unwrap();
             if is_self_recursive {
-                if !def_is_function(&def) {
-                    return Err(Error::new(
-                        format!(
-                            "The value `{}` is defined in terms of itself, and it is not a function, so it would run forever.",
-                            def.name.value
-                        ),
-                        def.name.region,
-                    ));
-                }
                 result.push(can::DeclGroup::Recursive(vec![def]));
             } else {
                 result.push(can::DeclGroup::Value(def));
@@ -529,19 +675,101 @@ fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Error> {
         } else {
             let group_defs: Vec<can::Def> =
                 group.iter().map(|&i| defs[i].take().unwrap()).collect();
-            if let Some(bad) = group_defs.iter().find(|d| !def_is_function(d)) {
-                return Err(Error::new(
-                    format!(
-                        "The value `{}` is part of a definition cycle, and it is not a function, so it cannot be evaluated.",
-                        bad.name.value
-                    ),
-                    bad.name.region,
-                ));
-            }
             result.push(can::DeclGroup::Recursive(group_defs));
         }
     }
     Ok(result)
+}
+
+/// Which nodes sit on a cycle (including self-loops) in the given graph?
+fn cyclic_nodes(count: usize, edges: &[Vec<usize>]) -> Vec<bool> {
+    let components = graph::strongly_connected_components(count, edges);
+    let mut cyclic = vec![false; count];
+    for component in components {
+        if component.len() > 1 {
+            for i in component {
+                cyclic[i] = true;
+            }
+        } else {
+            let i = component[0];
+            if edges[i].contains(&i) {
+                cyclic[i] = true;
+            }
+        }
+    }
+    cyclic
+}
+
+/// Like `collect_refs`, but stops at lambdas and function definitions:
+/// those references only run when called, so they cannot make evaluation
+/// of a value diverge.
+fn collect_direct_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
+    use can::Expr_::*;
+    match &expr.value {
+        Lambda(..) => {}
+        Let(decls, body) => {
+            for decl in decls {
+                match decl {
+                    can::LetDecl::Def(def) => {
+                        if def.args.is_empty() {
+                            collect_direct_refs(&def.body, refs);
+                        }
+                    }
+                    can::LetDecl::Recursive(inner) => {
+                        for def in inner {
+                            if def.args.is_empty() {
+                                collect_direct_refs(&def.body, refs);
+                            }
+                        }
+                    }
+                    can::LetDecl::Destruct(_, e) => collect_direct_refs(e, refs),
+                }
+            }
+            collect_direct_refs(body, refs);
+        }
+        VarLocal(name) | VarTopLevel(name) => {
+            refs.insert(name.clone());
+        }
+        Binop(_, _, function, left, right) => {
+            refs.insert(function.clone());
+            collect_direct_refs(left, refs);
+            collect_direct_refs(right, refs);
+        }
+        VarForeign(..) | VarCtor(..) | Chr(_) | Str(_) | Int(_) | Float(_) | Accessor(_)
+        | Unit => {}
+        List(items) => items.iter().for_each(|e| collect_direct_refs(e, refs)),
+        Negate(e) => collect_direct_refs(e, refs),
+        Call(f, args) => {
+            collect_direct_refs(f, refs);
+            args.iter().for_each(|e| collect_direct_refs(e, refs));
+        }
+        If(branches, otherwise) => {
+            for (c, b) in branches {
+                collect_direct_refs(c, refs);
+                collect_direct_refs(b, refs);
+            }
+            collect_direct_refs(otherwise, refs);
+        }
+        Case(scrutinee, branches) => {
+            collect_direct_refs(scrutinee, refs);
+            for (_, b) in branches {
+                collect_direct_refs(b, refs);
+            }
+        }
+        Access(e, _) => collect_direct_refs(e, refs),
+        Update(e, fields) => {
+            collect_direct_refs(e, refs);
+            fields.iter().for_each(|(_, e)| collect_direct_refs(e, refs));
+        }
+        Record(fields) => fields
+            .iter()
+            .for_each(|(_, e)| collect_direct_refs(e, refs)),
+        Tuple(a, b, rest) => {
+            collect_direct_refs(a, refs);
+            collect_direct_refs(b, refs);
+            rest.iter().for_each(|e| collect_direct_refs(e, refs));
+        }
+    }
 }
 
 /// Collect names of local/top-level variables referenced in an expression.
@@ -555,7 +783,9 @@ fn collect_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
         | Unit => {}
         List(items) => items.iter().for_each(|e| collect_refs(e, refs)),
         Negate(e) => collect_refs(e, refs),
-        Binop(_, _, _, left, right) => {
+        Binop(_, _, function, left, right) => {
+            // A locally-defined operator's function is a real dependency.
+            refs.insert(function.clone());
             collect_refs(left, refs);
             collect_refs(right, refs);
         }
@@ -728,19 +958,33 @@ fn resolve_type(
             ))
         }
         Some(qualifier) => {
-            let module = env.resolve_module(qualifier).ok_or_else(|| {
-                Error::new(
+            let candidates = env.resolve_modules(qualifier);
+            if candidates.is_empty() {
+                return Err(Error::new(
                     format!("I cannot find a module named `{}`.", qualifier),
                     region,
-                )
-            })?;
-            if module == env.module_name {
-                return resolve_type(env, region, None, name, args, depth);
+                ));
             }
-            if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
-                return Ok(can::Type::Type(module, name.clone(), args));
+            let mut last_err = None;
+            for module in &candidates {
+                if *module == env.module_name {
+                    match resolve_type(env, region, None, name, args.clone(), depth) {
+                        Ok(t) => return Ok(t),
+                        Err(e) => {
+                            last_err = Some(e);
+                            continue;
+                        }
+                    }
+                }
+                if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
+                    return Ok(can::Type::Type(module.clone(), name.clone(), args));
+                }
+                match resolve_foreign_type(env, region, module, name, args.clone()) {
+                    Ok(t) => return Ok(t),
+                    Err(e) => last_err = Some(e),
+                }
             }
-            resolve_foreign_type(env, region, &module, name, args)
+            Err(last_err.unwrap())
         }
     }
 }
@@ -1032,36 +1276,47 @@ fn find_ctor(
             ))
         }
         Some(qualifier) => {
-            let module = env.resolve_module(qualifier).ok_or_else(|| {
-                Error::new(format!("I cannot find a module named `{}`.", qualifier), region)
-            })?;
-            if module == env.module_name {
-                if let Some(info) = env.ctors.get(name) {
-                    return Ok(info.clone());
+            let candidates = env.resolve_modules(qualifier);
+            if candidates.is_empty() {
+                return Err(Error::new(
+                    format!("I cannot find a module named `{}`.", qualifier),
+                    region,
+                ));
+            }
+            for module in &candidates {
+                if *module == env.module_name {
+                    if let Some(info) = env.ctors.get(name) {
+                        return Ok(info.clone());
+                    }
                 }
-            }
-            if let Some((union, index)) = builtins::lookup_ctor(module.as_str(), name.as_str()) {
-                return Ok(builtin_ctor_info(union, index));
-            }
-            if let Some(interface) = env.interfaces.get(&module) {
-                for union_name in &interface.open_unions {
-                    let union = &interface.unions[union_name];
-                    if let Some(ctor) = union.ctors.iter().find(|c| c.name == *name) {
-                        return Ok(CtorInfo {
-                            home: module.clone(),
-                            union: union.name.clone(),
-                            ctor: can::Ctor {
-                                name: ctor.name.clone(),
-                                index: ctor.index,
-                                arity: ctor.args.len() as u32,
-                                num_ctors: union.ctors.len() as u32,
-                            },
-                        });
+                if let Some((union, index)) =
+                    builtins::lookup_ctor(module.as_str(), name.as_str())
+                {
+                    return Ok(builtin_ctor_info(union, index));
+                }
+                if let Some(interface) = env.interfaces.get(module) {
+                    for union_name in &interface.open_unions {
+                        let union = &interface.unions[union_name];
+                        if let Some(ctor) = union.ctors.iter().find(|c| c.name == *name) {
+                            return Ok(CtorInfo {
+                                home: module.clone(),
+                                union: union.name.clone(),
+                                ctor: can::Ctor {
+                                    name: ctor.name.clone(),
+                                    index: ctor.index,
+                                    arity: ctor.args.len() as u32,
+                                    num_ctors: union.ctors.len() as u32,
+                                },
+                            });
+                        }
                     }
                 }
             }
             Err(Error::new(
-                format!("The `{}` module does not have a `{}` constructor.", module, name),
+                format!(
+                    "The `{}` module does not have a `{}` constructor.",
+                    candidates[0], name
+                ),
                 region,
             ))
         }
@@ -1114,10 +1369,14 @@ fn canonicalize_expr(env: &mut Env, expr: &src::Expr) -> CResult<can::Expr> {
                 .collect::<CResult<Vec<_>>>()?,
         ),
         src::Expr_::Op(op) => {
-            let infix = builtins::lookup_infix(op.as_str()).ok_or_else(|| {
+            let entry = env.binops.get(op).ok_or_else(|| {
                 Error::new(format!("I do not recognize the `{}` operator.", op), region)
             })?;
-            can::Expr_::VarForeign(Name::from(infix.module), Name::from(infix.function))
+            if entry.home == env.module_name {
+                can::Expr_::VarTopLevel(entry.function.clone())
+            } else {
+                can::Expr_::VarForeign(entry.home.clone(), entry.function.clone())
+            }
         }
         src::Expr_::Negate(inner) => {
             can::Expr_::Negate(Box::new(canonicalize_expr(env, inner)?))
@@ -1128,7 +1387,7 @@ fn canonicalize_expr(env: &mut Env, expr: &src::Expr) -> CResult<can::Expr> {
                 .map(|(e, op)| Ok((canonicalize_expr(env, e)?, op.clone())))
                 .collect::<CResult<Vec<_>>>()?;
             let last = canonicalize_expr(env, last)?;
-            return resolve_binops(exprs_and_ops, last, region);
+            return resolve_binops(env, exprs_and_ops, last, region);
         }
         src::Expr_::Lambda(args, body) => {
             let mut bound = Vec::new();
@@ -1246,12 +1505,14 @@ fn record_alias_ctor(
             }
         }
         Some(qualifier) => {
-            let module = env.resolve_module(qualifier)?;
-            if module == env.module_name {
-                record_field_names_src(&env.aliases.get(name)?.1)?
-            } else {
-                record_alias_fields_foreign(env, &module, name)?
-            }
+            let candidates = env.resolve_modules(qualifier);
+            candidates.iter().find_map(|module| {
+                if *module == env.module_name {
+                    record_field_names_src(&env.aliases.get(name)?.1)
+                } else {
+                    record_alias_fields_foreign(env, module, name)
+                }
+            })?
         }
     };
 
@@ -1332,25 +1593,34 @@ fn find_qualified_var(
     qualifier: &Name,
     name: &Name,
 ) -> CResult<can::Expr_> {
-    let module = env.resolve_module(qualifier).ok_or_else(|| {
-        Error::new(format!("I cannot find a module named `{}`.", qualifier), region)
-    })?;
-    if module == env.module_name && env.top_level.contains(name) {
-        return Ok(can::Expr_::VarTopLevel(name.clone()));
+    let candidates = env.resolve_modules(qualifier);
+    if candidates.is_empty() {
+        return Err(Error::new(
+            format!("I cannot find a module named `{}`.", qualifier),
+            region,
+        ));
     }
-    if module.as_str().starts_with("Elm.Kernel.") {
-        return Ok(can::Expr_::VarForeign(module, name.clone()));
-    }
-    if builtins::lookup_value(module.as_str(), name.as_str()).is_some() {
-        return Ok(can::Expr_::VarForeign(module, name.clone()));
-    }
-    if let Some(interface) = env.interfaces.get(&module) {
-        if interface.value_names.contains(name) {
-            return Ok(can::Expr_::VarForeign(module, name.clone()));
+    for module in &candidates {
+        if *module == env.module_name && env.top_level.contains(name) {
+            return Ok(can::Expr_::VarTopLevel(name.clone()));
+        }
+        if module.as_str().starts_with("Elm.Kernel.") {
+            return Ok(can::Expr_::VarForeign(module.clone(), name.clone()));
+        }
+        if builtins::lookup_value(module.as_str(), name.as_str()).is_some() {
+            return Ok(can::Expr_::VarForeign(module.clone(), name.clone()));
+        }
+        if let Some(interface) = env.interfaces.get(module) {
+            if interface.value_names.contains(name) {
+                return Ok(can::Expr_::VarForeign(module.clone(), name.clone()));
+            }
         }
     }
     Err(Error::new(
-        format!("The `{}` module does not expose a value named `{}`.", module, name),
+        format!(
+            "The `{}` module does not expose a value named `{}`.",
+            candidates[0], name
+        ),
         region,
     ))
 }
@@ -1476,6 +1746,63 @@ fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDecl>> {
         })
         .collect();
 
+    // Immediate (non-delayed) references decide whether a cycle is legal.
+    let direct_dependencies: Vec<Vec<usize>> = decls
+        .iter()
+        .map(|decl| {
+            let mut refs = HashSet::new();
+            match decl {
+                can::LetDecl::Def(def) => {
+                    if def.args.is_empty() {
+                        collect_direct_refs(&def.body, &mut refs);
+                    }
+                }
+                can::LetDecl::Recursive(defs) => {
+                    for def in defs {
+                        if def.args.is_empty() {
+                            collect_direct_refs(&def.body, &mut refs);
+                        }
+                    }
+                }
+                can::LetDecl::Destruct(_, e) => collect_direct_refs(e, &mut refs),
+            }
+            let mut deps: Vec<usize> = refs
+                .iter()
+                .filter_map(|name| name_to_decl.get(name).copied())
+                .collect();
+            deps.sort_unstable();
+            deps.dedup();
+            deps
+        })
+        .collect();
+
+    let directly_cyclic = cyclic_nodes(decls.len(), &direct_dependencies);
+    for (i, decl) in decls.iter().enumerate() {
+        if directly_cyclic[i] {
+            let (message, region) = match decl {
+                can::LetDecl::Def(def) => (
+                    format!(
+                        "The value `{}` is defined in terms of itself, and it is not a function.",
+                        def.name.value
+                    ),
+                    def.name.region,
+                ),
+                can::LetDecl::Recursive(defs) => (
+                    format!(
+                        "The value `{}` is part of a definition cycle.",
+                        defs[0].name.value
+                    ),
+                    defs[0].name.region,
+                ),
+                can::LetDecl::Destruct(pattern, _) => (
+                    "This destructuring is part of a definition cycle.".to_string(),
+                    pattern.region,
+                ),
+            };
+            return Err(Error::new(message, region));
+        }
+    }
+
     let groups = graph::strongly_connected_components(decls.len(), &dependencies);
     let mut decls: Vec<Option<can::LetDecl>> = decls.into_iter().map(Some).collect();
     let mut result = Vec::new();
@@ -1486,15 +1813,6 @@ fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDecl>> {
             if dependencies[i].contains(&i) {
                 match decl {
                     can::LetDecl::Def(def) => {
-                        if !def_is_function(&def) {
-                            return Err(Error::new(
-                                format!(
-                                    "The value `{}` is defined in terms of itself, and it is not a function.",
-                                    def.name.value
-                                ),
-                                def.name.region,
-                            ));
-                        }
                         result.push(can::LetDecl::Recursive(vec![def]));
                     }
                     can::LetDecl::Destruct(pattern, _) => {
@@ -1512,25 +1830,14 @@ fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDecl>> {
             let mut group_defs = Vec::new();
             for &i in &group {
                 match decls[i].take().unwrap() {
-                    can::LetDecl::Def(def) => {
-                        if !def_is_function(&def) {
-                            return Err(Error::new(
-                                format!(
-                                    "The value `{}` is part of a definition cycle, and it is not a function.",
-                                    def.name.value
-                                ),
-                                def.name.region,
-                            ));
-                        }
-                        group_defs.push(def);
-                    }
+                    can::LetDecl::Def(def) => group_defs.push(def),
+                    can::LetDecl::Recursive(defs) => group_defs.extend(defs),
                     can::LetDecl::Destruct(pattern, _) => {
                         return Err(Error::new(
                             "This destructuring is part of a definition cycle.",
                             pattern.region,
                         ));
                     }
-                    can::LetDecl::Recursive(_) => unreachable!(),
                 }
             }
             result.push(can::LetDecl::Recursive(group_defs));
@@ -1582,6 +1889,7 @@ struct OpInfo {
 }
 
 fn resolve_binops(
+    env: &Env,
     pairs: Vec<(can::Expr, Located<Name>)>,
     last: can::Expr,
     region: Region,
@@ -1589,7 +1897,7 @@ fn resolve_binops(
     let mut exprs = Vec::new();
     let mut ops = Vec::new();
     for (expr, op) in pairs {
-        let infix = builtins::lookup_infix(op.value.as_str()).ok_or_else(|| {
+        let entry = env.binops.get(&op.value).ok_or_else(|| {
             Error::new(
                 format!("I do not recognize the `{}` operator.", op.value),
                 op.region,
@@ -1598,10 +1906,10 @@ fn resolve_binops(
         exprs.push(expr);
         ops.push(OpInfo {
             op: op.value.clone(),
-            home: Name::from(infix.module),
-            function: Name::from(infix.function),
-            precedence: infix.precedence,
-            associativity: infix.associativity,
+            home: entry.home.clone(),
+            function: entry.function.clone(),
+            precedence: entry.precedence,
+            associativity: entry.associativity,
             region: op.region,
         });
     }

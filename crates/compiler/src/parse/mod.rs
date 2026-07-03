@@ -554,15 +554,28 @@ impl<'a> Parser<'a> {
                 Ok('\\')
             }
             Some(b'u') if self.peek_at(1) == Some(b'{') => {
-                self.bump(2);
-                let start = self.pos;
-                while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
-                    self.bump(1);
+                let code = self.unicode_escape_code()?;
+                // Elm sources may write astral-plane characters as UTF-16
+                // surrogate pairs: `\u{D835}\u{DD04}`.
+                if (0xD800..=0xDBFF).contains(&code) {
+                    if self.peek() == Some(b'\\')
+                        && self.peek_at(1) == Some(b'u')
+                        && self.peek_at(2) == Some(b'{')
+                    {
+                        self.bump(1); // the backslash
+                        let low = self.unicode_escape_code()?;
+                        if (0xDC00..=0xDFFF).contains(&low) {
+                            let combined =
+                                0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            return char::from_u32(combined).ok_or_else(|| {
+                                self.error("This surrogate pair is not a valid code point")
+                            });
+                        }
+                    }
+                    return Err(self.error(
+                        "This is half of a surrogate pair; it must be followed by the low half",
+                    ));
                 }
-                let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
-                let code = u32::from_str_radix(text, 16)
-                    .map_err(|_| self.error("Expecting hex digits in a `\\u{...}` escape"))?;
-                self.eat_byte(b'}', "a closing `}` for this unicode escape")?;
                 char::from_u32(code)
                     .ok_or_else(|| self.error("This is not a valid unicode code point"))
             }
@@ -570,6 +583,22 @@ impl<'a> Parser<'a> {
                 "This is not a valid escape. Valid escapes are \\n, \\r, \\t, \\\", \\', \\\\, and \\u{003D}.",
             )),
         }
+    }
+
+    /// Parse `u{1F4A9}` (the parser is positioned at the `u`), returning
+    /// the raw code point without validating it.
+    fn unicode_escape_code(&mut self) -> PResult<u32> {
+        debug_assert_eq!(self.peek(), Some(b'u'));
+        self.bump(2); // `u{`
+        let start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
+            self.bump(1);
+        }
+        let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
+        let code = u32::from_str_radix(text, 16)
+            .map_err(|_| self.error("Expecting hex digits in a `\\u{...}` escape"))?;
+        self.eat_byte(b'}', "a closing `}` for this unicode escape")?;
+        Ok(code)
     }
 
     // LOCATED HELPERS

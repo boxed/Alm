@@ -232,3 +232,50 @@ fn inferred_exports_work_without_annotations() {
     ]);
     assert_eq!(result.unwrap(), "(1,\"a\")");
 }
+
+#[test]
+fn custom_operators() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Ops exposing (Wrap(..), unwrap, (|+|))\n\nmain = String.fromInt (unwrap (Wrap 20 |+| Wrap 22))\n",
+        ),
+        (
+            "Ops.elm",
+            "module Ops exposing (Wrap(..), unwrap, (|+|))\n\ninfix left 6 (|+|) = plus\n\n\ntype Wrap\n    = Wrap Int\n\n\nplus : Wrap -> Wrap -> Wrap\nplus (Wrap a) (Wrap b) =\n    Wrap (a + b)\n\n\nunwrap : Wrap -> Int\nunwrap (Wrap n) =\n    n\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "42");
+}
+
+#[test]
+fn value_recursion_through_lambdas_is_legal() {
+    // Like recursive Json decoders: the self-reference is delayed.
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\nimport Json.Decode as Decode\n\ntype Tree\n    = Node Int (List Tree)\n\ntreeDecoder : Decode.Decoder Tree\ntreeDecoder =\n    Decode.map2 Node\n        (Decode.field \"v\" Decode.int)\n        (Decode.field \"kids\" (Decode.list (Decode.lazy (\\_ -> treeDecoder))))\n\nsumTree : Tree -> Int\nsumTree (Node n kids) =\n    n + List.sum (List.map sumTree kids)\n\nmain =\n    case Decode.decodeString treeDecoder \"{\\\"v\\\":1,\\\"kids\\\":[{\\\"v\\\":2,\\\"kids\\\":[]},{\\\"v\\\":3,\\\"kids\\\":[]}]}\" of\n        Ok tree ->\n            String.fromInt (sumTree tree)\n\n        Err _ ->\n            \"failed\"\n",
+    )]);
+    assert_eq!(result.unwrap(), "6");
+}
+
+#[test]
+fn direct_value_cycles_are_still_rejected() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\nx = y + 1\n\ny = x + 1\n\nmain = String.fromInt x\n",
+    )]);
+    assert!(result.is_err(), "direct value cycle must be an error");
+}
+
+#[test]
+fn one_alias_may_cover_several_modules() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Money as M\nimport Prices as M\n\nmain = M.currency ++ String.fromInt M.price\n",
+        ),
+        ("Money.elm", "module Money exposing (currency)\n\ncurrency = \"SEK\"\n"),
+        ("Prices.elm", "module Prices exposing (price)\n\nprice = 99\n"),
+    ]);
+    assert_eq!(result.unwrap(), "SEK99");
+}

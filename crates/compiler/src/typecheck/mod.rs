@@ -57,6 +57,7 @@ pub struct Checker<'a> {
     scopes: Vec<HashMap<Name, Binding>>,
     unions: HashMap<(Name, Name), UnionInfo>,
     interfaces: &'a Interfaces,
+    module_name: Name,
     /// Rigid type variables introduced by enclosing annotations; inner
     /// annotations reuse them so `a` means the same thing throughout.
     rigid_scope: Vec<HashMap<Name, Variable>>,
@@ -129,6 +130,7 @@ pub fn check_module(
         scopes: Vec::new(),
         unions,
         interfaces,
+        module_name: module.name.clone(),
         rigid_scope: Vec::new(),
         errors: Vec::new(),
     };
@@ -690,6 +692,43 @@ impl Checker<'_> {
         Ok((result, arg_vars))
     }
 
+    /// The type of the function behind a binary operator: a builtin, the
+    /// current module's own operator, or one from an imported interface.
+    fn binop_function_type(
+        &mut self,
+        op: &Name,
+        home: &Name,
+        function: &Name,
+        region: Region,
+    ) -> Infer<Variable> {
+        if let Some(value) = builtins::lookup_value(home.as_str(), function.as_str()) {
+            let tipe = builtins::parse_signature(value.signature);
+            return Ok(self.instantiate(&Scheme::closed(tipe)));
+        }
+        if home == &self.module_name {
+            if let Some(binding) = self.globals.get(function).cloned() {
+                return Ok(match binding {
+                    Binding::Mono(var) => var,
+                    Binding::Scheme(scheme) => self.instantiate(&scheme),
+                });
+            }
+        }
+        if let Some(interface) = self.interfaces.get(home) {
+            if let Some(tipe) = interface
+                .binops
+                .get(op)
+                .and_then(|def| def.tipe.clone())
+                .or_else(|| interface.values.get(function).cloned())
+            {
+                return Ok(self.instantiate(&Scheme::closed(tipe)));
+            }
+        }
+        Err(Error {
+            message: format!("I cannot find the function behind the `{}` operator.", op),
+            region,
+        })
+    }
+
     fn app(&mut self, home: &str, name: &str, args: Vec<Variable>) -> Variable {
         self.pool.fresh(Content::Structure(FlatType::App(
             Name::from(home),
@@ -728,8 +767,18 @@ impl Checker<'_> {
                     None => self
                         .interfaces
                         .get(module)
-                        .and_then(|interface| interface.values.get(name))
-                        .cloned()
+                        .and_then(|interface| {
+                            interface.values.get(name).cloned().or_else(|| {
+                                // The function behind an exposed operator
+                                // (e.g. Parser.Advanced.keeper) need not be
+                                // exposed itself.
+                                interface
+                                    .binops
+                                    .values()
+                                    .find(|def| def.function == *name)
+                                    .and_then(|def| def.tipe.clone())
+                            })
+                        })
                         .ok_or_else(|| Error {
                             message: format!("I cannot find `{}.{}`.", module, name),
                             region,
@@ -765,10 +814,7 @@ impl Checker<'_> {
                 Ok(number)
             }
             Binop(op, home, function, left, right) => {
-                let value = builtins::lookup_value(home.as_str(), function.as_str())
-                    .unwrap_or_else(|| panic!("unknown binop function {}.{}", home, function));
-                let tipe = builtins::parse_signature(value.signature);
-                let func_var = self.instantiate(&Scheme::closed(tipe));
+                let func_var = self.binop_function_type(op, home, function, region)?;
                 let left_var = self.infer_expr(left)?;
                 let right_var = self.infer_expr(right)?;
                 let result = self.pool.fresh_var();

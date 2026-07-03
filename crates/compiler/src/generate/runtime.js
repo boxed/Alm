@@ -819,6 +819,12 @@ function _VDom_nodeNS(tag) {
 }
 
 var $Html$text = _VDom_text;
+var $VirtualDom$text = _VDom_text;
+var $VirtualDom$node = function (tag) { return _VDom_node(tag); };
+var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
+var $VirtualDom$property = F2(function (key, val) { return { $: 'AProp', key: key, val: val }; });
+var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
+var $VirtualDom$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 
@@ -1313,6 +1319,9 @@ var $Json$Encode$list = F2(function (encodeItem, items) {
 var $Json$Encode$array = F2(function (encodeItem, arr) {
     return arr.a.map(function (x) { return encodeItem(x); });
 });
+var $Json$Encode$set = F2(function (encodeItem, set) {
+    return $Dict$keys(set.d) === undefined ? [] : _List_toArray($Dict$keys(set.d)).map(function (x) { return encodeItem(x); });
+});
 var $Json$Encode$object = function (pairs) {
     var out = {};
     for (var xs = pairs; xs.$ === '::'; xs = xs.b) { out[xs.a.a] = xs.a.b; }
@@ -1408,6 +1417,13 @@ var $Time$here = _Task(function (ok, _err) {
     ok({ $: 'Zone', offset: -new Date().getTimezoneOffset(), eras: [] });
 });
 var $Time$now = _Task(function (ok, _err) { ok(_Time_posix(Date.now())); });
+var $Time$getZoneName = _Task(function (ok, _err) {
+    try {
+        ok({ $: 'Name', a: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    } catch (e) {
+        ok({ $: 'Offset', a: -new Date().getTimezoneOffset() });
+    }
+});
 var $Time$every = F2(function (interval, toMsg) {
     return { $: 'SubTime', interval: interval, toMsg: toMsg };
 });
@@ -1544,6 +1560,14 @@ var $Http$post = function (config) {
     });
 };
 var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
+var $Http$track = F2(function (_tracker, _toMsg) { return { $: 'SubNone' }; });
+var $Http$cancel = function (_tracker) { return { $: 'CmdNone' }; };
+var $Http$fractionSent = function (p) {
+    return p.size > 0 ? p.sent / p.size : 1;
+};
+var $Http$fractionReceived = function (p) {
+    return p.size.$ === 'Just' && p.size.a > 0 ? p.received / p.size.a : 0;
+};
 var $Http$task = function (config) {
     var cfg = {
         method: config.method,

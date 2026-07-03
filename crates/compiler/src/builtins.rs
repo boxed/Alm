@@ -411,6 +411,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Json.Encode", "list", "(a -> Value) -> List a -> Value"),
             V("Json.Encode", "array", "(a -> Value) -> Array a -> Value"),
             V("Json.Encode", "object", "List ( String, Value ) -> Value"),
+            V("Json.Encode", "set", "(a -> Value) -> Set a -> Value"),
             V("Json.Encode", "dict", "(k -> String) -> (v -> Value) -> Dict k v -> Value"),
             // Task
             V("Task", "perform", "(a -> msg) -> Task Never a -> Cmd msg"),
@@ -441,6 +442,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Time", "toSecond", "Time.Zone -> Time.Posix -> Int"),
             V("Time", "toMillis", "Time.Zone -> Time.Posix -> Int"),
             V("Time", "toWeekday", "Time.Zone -> Time.Posix -> Time.Weekday"),
+            V("Time", "getZoneName", "Task x Time.ZoneName"),
             // Http
             V("Http", "get", "{ url : String, expect : Http.Expect msg } -> Cmd msg"),
             V("Http", "post", "{ url : String, body : Http.Body, expect : Http.Expect msg } -> Cmd msg"),
@@ -458,6 +460,10 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Http", "expectWhatever", "(Result Http.Error () -> msg) -> Http.Expect msg"),
             V("Http", "task", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, resolver : Http.Resolver x a, timeout : Maybe Float } -> Task x a"),
             V("Http", "stringResolver", "(Http.Response String -> Result x a) -> Http.Resolver x a"),
+            V("Http", "track", "String -> (Http.Progress -> msg) -> Sub msg"),
+            V("Http", "fractionSent", "{ sent : Int, size : Int } -> Float"),
+            V("Http", "fractionReceived", "{ received : Int, size : Maybe Int } -> Float"),
+            V("Http", "cancel", "String -> Cmd msg"),
             // File
             V("File", "decoder", "Decoder File"),
             V("File", "name", "File -> String"),
@@ -508,6 +514,13 @@ pub fn values() -> &'static [BuiltinValue] {
             V("UUID", "fromString", "String -> Result UUID.Error UUID.UUID"),
             V("UUID", "jsonDecoder", "Decoder UUID.UUID"),
             V("UUID", "toValue", "UUID.UUID -> Value"),
+            // VirtualDom (the parts packages use directly)
+            V("VirtualDom", "text", "String -> Html msg"),
+            V("VirtualDom", "node", "String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
+            V("VirtualDom", "attribute", "String -> String -> Attribute msg"),
+            V("VirtualDom", "property", "String -> Value -> Attribute msg"),
+            V("VirtualDom", "style", "String -> String -> Attribute msg"),
+            V("VirtualDom", "map", "(a -> msg) -> Html a -> Html msg"),
         ]);
         table
     })
@@ -582,6 +595,14 @@ pub const SVG_ATTRS: &[(&str, &str)] = &[
     ("values", "values"),
     ("dur", "dur"),
     ("repeatCount", "repeatCount"),
+    ("xmlSpace", "xml:space"),
+    ("xmlLang", "xml:lang"),
+    ("baseProfile", "baseProfile"),
+    ("markerEnd", "marker-end"),
+    ("markerStart", "marker-start"),
+    ("maskUnits", "maskUnits"),
+    ("patternUnits", "patternUnits"),
+    ("vectorEffect", "vector-effect"),
 ];
 
 /// The standard HTML element helpers, all `List (Attribute msg) ->
@@ -593,19 +614,20 @@ pub const HTML_TAGS: &[&str] = &[
     "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th", "form", "fieldset",
     "legend", "label", "input", "textarea", "button", "select", "option", "section", "header",
     "footer", "nav", "article", "aside", "main_", "figure", "figcaption", "blockquote",
-    "iframe", "canvas", "audio", "video", "source", "small", "cite",
+    "iframe", "canvas", "audio", "video", "source", "small", "cite", "details", "summary",
+    "abbr", "address", "mark", "meter", "progress", "output", "datalist", "optgroup",
 ];
 
 /// String-valued HTML attribute helpers in Html.Attributes.
 pub const HTML_STRING_ATTRS: &[&str] = &[
-    "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_",
+    "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_", "draggable",
     "for", "action", "method", "target", "rel", "wrap", "accept", "autocomplete", "list",
     "max", "min", "step", "pattern", "lang", "dir",
 ];
 
 /// Bool-valued HTML attribute helpers in Html.Attributes.
 pub const HTML_BOOL_ATTRS: &[&str] = &[
-    "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus",
+    "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus", "contenteditable",
     "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck",
 ];
 
@@ -668,6 +690,10 @@ pub const UNIONS: &[BuiltinUnion] = &[
         ("BadStatus", &["Int"]),
         ("BadBody", &["String"]),
     ] },
+    BuiltinUnion { module: "Http", name: "Progress", vars: &[], ctors: &[
+        ("Sending", &["{ sent : Int, size : Int }"]),
+        ("Receiving", &["{ received : Int, size : Maybe Int }"]),
+    ] },
     BuiltinUnion { module: "Http", name: "Response", vars: &["body"], ctors: &[
         ("BadUrl_", &["String"]),
         ("Timeout_", &[]),
@@ -678,6 +704,9 @@ pub const UNIONS: &[BuiltinUnion] = &[
     BuiltinUnion { module: "Time", name: "Month", vars: &[], ctors: &[
         ("Jan", &[]), ("Feb", &[]), ("Mar", &[]), ("Apr", &[]), ("May", &[]), ("Jun", &[]),
         ("Jul", &[]), ("Aug", &[]), ("Sep", &[]), ("Oct", &[]), ("Nov", &[]), ("Dec", &[]),
+    ] },
+    BuiltinUnion { module: "Time", name: "ZoneName", vars: &[], ctors: &[
+        ("Name", &["String"]), ("Offset", &["Int"]),
     ] },
     BuiltinUnion { module: "Time", name: "Weekday", vars: &[], ctors: &[
         ("Mon", &[]), ("Tue", &[]), ("Wed", &[]), ("Thu", &[]), ("Fri", &[]), ("Sat", &[]), ("Sun", &[]),
@@ -704,6 +733,8 @@ pub const ALIASES: &[(&str, &str, &[&str], &str)] = &[
     ("Url", "Url", &[], "{ protocol : Protocol, host : String, port_ : Maybe Int, path : String, query : Maybe String, fragment : Maybe String }"),
     ("Svg", "Svg", &["msg"], "Html msg"),
     ("Svg", "Attribute", &["msg"], "Attribute msg"),
+    ("VirtualDom", "Node", &["msg"], "Html msg"),
+    ("VirtualDom", "Attribute", &["msg"], "Attribute msg"),
 ];
 
 pub fn lookup_alias(module: &str, name: &str) -> Option<(&'static [&'static str], &'static str)> {
@@ -732,6 +763,7 @@ pub fn is_builtin_type(module: &str, name: &str) -> bool {
                 | ("Http", "Resolver")
                 | ("Time", "Posix")
                 | ("Time", "Zone")
+                | ("Time", "ZoneName")
                 | ("Task", "Task")
                 | ("Json.Decode", "Decoder")
                 | ("Json.Encode", "Value")
@@ -781,7 +813,7 @@ pub const MODULES: &[&str] = &[
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
     "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process", "Time",
-    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID",
+    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID", "VirtualDom",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

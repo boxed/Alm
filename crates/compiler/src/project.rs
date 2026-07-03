@@ -127,6 +127,9 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
                 interface.values.insert(name, tipe.clone());
             }
         }
+        for def in interface.binops.values_mut() {
+            def.tipe = types.get(&def.function).cloned();
+        }
         interfaces.insert(name.clone(), interface);
         canonical_modules.push(canonical);
     }

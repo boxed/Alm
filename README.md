@@ -9,10 +9,11 @@ as the original compiler:
 parse → canonicalize → type check → exhaustiveness check → generate JavaScript
 ```
 
-It compiles real production applications: an 8,357-line `Browser.element`
-app with ports, Http, Json decoders, Svg, and two dozen package
-dependencies compiles, boots, and renders. Pure code compiled by alm
-produces output identical to the official compiler's.
+It compiles real production applications: all 19 entry points of a
+~40k-line production codebase (ports, Http, Json decoders, Svg, custom
+operators, elm/parser, two dozen package dependencies) compile, boot,
+and render. Pure code compiled by alm produces output byte-identical to
+the official compiler's.
 
 ## Usage
 
@@ -32,9 +33,12 @@ app.ports.somePort.subscribe(function (value) { ... });
 ## What works
 
 - **The full Elm language**: modules, imports with aliases and exposing
-  lists (including opaque types), custom types, extensible records,
-  record-alias constructors, tuples, let/case/lambdas with nested
-  patterns, whitespace-sensitive layout, ports, all literal forms.
+  lists (including opaque types and one alias covering several modules),
+  custom types, extensible records, record-alias constructors, custom
+  operators (`infix left 5 (|=) = keeper`), value recursion through
+  lambdas (recursive Json decoders), tuples, let/case/lambdas with
+  nested patterns, whitespace-sensitive layout, ports, all literal
+  forms including surrogate-pair escapes.
 - **Hindley-Milner type inference** ported in spirit from `Type/*.hs`:
   union-find unification, let-polymorphism with SCC-based generalization,
   rigid annotation variables scoped over nested annotations,
@@ -63,14 +67,21 @@ app.ports.somePort.subscribe(function (value) { ... });
 
 ## Benchmark
 
-Compiling a production 8,357-line module and its full graph (14 modules
-including package sources), Apple Silicon, best of 3:
+Apple Silicon, production codebase. One 8,357-line entry point and its
+full module graph:
 
 | | time |
 |---|---|
 | elm 0.19.1, project-cold (elm-stuff wiped) | 0.82 s |
 | elm 0.19.1, incremental (one file changed) | 0.22 s |
 | **alm, full rebuild, no cache** | **0.14 s** |
+
+All 19 entry points of the same codebase:
+
+| | time |
+|---|---|
+| elm 0.19.1, warm caches, sources touched | 2.9 s |
+| **alm, full rebuild every time, no cache** | **0.79 s** |
 
 A full alm rebuild is faster than an incremental official rebuild.
 (The official compiler reuses per-package artifacts from `~/.elm` even
