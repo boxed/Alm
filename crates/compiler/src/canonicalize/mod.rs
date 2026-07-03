@@ -182,7 +182,7 @@ pub fn canonicalize_module(
 
     // Imports: identity names for builtin modules plus user aliases.
     let mut import_names: HashMap<Name, Vec<Name>> = HashMap::new();
-    let mut add_import_name = |map: &mut HashMap<Name, Vec<Name>>, alias: Name, target: Name| {
+    let add_import_name = |map: &mut HashMap<Name, Vec<Name>>, alias: Name, target: Name| {
         let entry = map.entry(alias).or_default();
         if !entry.contains(&target) {
             entry.push(target);
@@ -604,10 +604,6 @@ fn expose_union_ctors(ctors: &mut HashMap<Name, CtorInfo>, home: &Name, union: &
 }
 
 // DEPENDENCY SORTING
-
-fn def_is_function(def: &can::Def) -> bool {
-    !def.args.is_empty() || matches!(def.body.value, can::Expr_::Lambda(..))
-}
 
 fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Error> {
     let names: Vec<Name> = defs.iter().map(|d| d.name.value.clone()).collect();

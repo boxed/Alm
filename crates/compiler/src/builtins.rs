@@ -305,6 +305,16 @@ pub fn values() -> &'static [BuiltinValue] {
             ),
             V(
                 "Browser",
+                "document",
+                "{ init : flags -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg, view : model -> Browser.Document msg } -> Program flags model msg",
+            ),
+            V(
+                "Browser",
+                "application",
+                "{ init : flags -> Url.Url -> Browser.Navigation.Key -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg, view : model -> Browser.Document msg, onUrlRequest : Browser.UrlRequest -> msg, onUrlChange : Url.Url -> msg } -> Program flags model msg",
+            ),
+            V(
+                "Browser",
                 "element",
                 "{ init : flags -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg, view : model -> Html msg } -> Program flags model msg",
             ),
@@ -494,6 +504,10 @@ pub fn values() -> &'static [BuiltinValue] {
             // Browser.Navigation
             V("Browser.Navigation", "load", "String -> Cmd msg"),
             V("Browser.Navigation", "reload", "Cmd msg"),
+            V("Browser.Navigation", "pushUrl", "Browser.Navigation.Key -> String -> Cmd msg"),
+            V("Browser.Navigation", "replaceUrl", "Browser.Navigation.Key -> String -> Cmd msg"),
+            V("Browser.Navigation", "back", "Browser.Navigation.Key -> Int -> Cmd msg"),
+            V("Browser.Navigation", "forward", "Browser.Navigation.Key -> Int -> Cmd msg"),
             // Random (the effect-module parts reimplemented natively)
             V("Random", "int", "Int -> Int -> Random.Generator Int"),
             V("Random", "float", "Float -> Float -> Random.Generator Float"),
@@ -713,6 +727,9 @@ pub const UNIONS: &[BuiltinUnion] = &[
     ] },
     BuiltinUnion { module: "Browser.Dom", name: "Error", vars: &[], ctors: &[("NotFound", &["String"])] },
     BuiltinUnion { module: "Url", name: "Protocol", vars: &[], ctors: &[("Http", &[]), ("Https", &[])] },
+    BuiltinUnion { module: "Browser", name: "UrlRequest", vars: &[], ctors: &[
+        ("Internal", &["Url.Url"]), ("External", &["String"]),
+    ] },
     BuiltinUnion { module: "UUID", name: "Representation", vars: &[], ctors: &[
         ("Canonical", &[]), ("Compact", &[]), ("Guid", &[]), ("Urn", &[]),
     ] },
@@ -735,6 +752,7 @@ pub const ALIASES: &[(&str, &str, &[&str], &str)] = &[
     ("Svg", "Attribute", &["msg"], "Attribute msg"),
     ("VirtualDom", "Node", &["msg"], "Html msg"),
     ("VirtualDom", "Attribute", &["msg"], "Attribute msg"),
+    ("Browser", "Document", &["msg"], "{ title : String, body : List (Html msg) }"),
 ];
 
 pub fn lookup_alias(module: &str, name: &str) -> Option<(&'static [&'static str], &'static str)> {
@@ -775,6 +793,7 @@ pub fn is_builtin_type(module: &str, name: &str) -> bool {
                 | ("Platform.Sub", "Sub")
                 | ("Random", "Generator")
                 | ("Random", "Seed")
+                | ("Browser.Navigation", "Key")
                 | ("UUID", "UUID")
                 | ("UUID", "Error")
         )

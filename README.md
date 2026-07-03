@@ -53,10 +53,11 @@ app.ports.somePort.subscribe(function (value) { ... });
   published sources; `Elm.Kernel.*` imports resolve to runtime shims
   (elm/parser's kernel is ported).
 - **The Elm Architecture**: virtual DOM with keyed/lazy nodes and SVG,
-  decoder-based events, `Browser.sandbox`/`element`, `Platform.worker`,
-  ports with type-driven JS value conversion, CPS task scheduler
-  (Task/Process), Http via fetch, Time, Random, Browser.Dom/Events/
-  Navigation subscriptions.
+  decoder-based events, `Browser.sandbox`/`element`/`document`/
+  `application` (link interception, pushUrl, popstate, titles),
+  `Platform.worker`, ports with type-driven JS value conversion, CPS
+  task scheduler (Task/Process), Http via fetch, Time, Random,
+  Browser.Dom/Events/Navigation subscriptions.
 - **Code generation** in Elm kernel style (`F2`/`A2` currying, tagged
   objects, cons lists) with tail-call optimization: self tail calls
   compile to loops and run in constant stack space.
@@ -91,12 +92,30 @@ Output compared on production code (string/number formatting, Json
 decoding pipelines, Round, Debug.toString): byte-identical between the
 two compilers (`examples/dryft-compare-test.elm.txt`).
 
+## Real-browser validation
+
+`tests/browser/run.sh` compiles two test apps with alm **and** the
+official compiler and drives both through the identical harness in
+headless Chrome:
+
+- `Browser.element`: 37 assertions — keyed diffing preserves DOM node
+  identity across reorder/insert/remove, controlled inputs, checkbox
+  change events, form submit with preventDefault, stopPropagation,
+  `Html.Events.custom` flags, conditional subtrees, style/class/property
+  patching, SVG namespaces, `Html.map`, `Html.Lazy`, both port
+  directions, async tasks.
+- `Browser.application` (over http, real History API): 12 assertions —
+  link interception, `pushUrl`, `history.back()`/popstate routing,
+  document titles, URL bar state.
+
+alm and elm 0.19.1 both pass 49/49.
+
 ## Not ported
 
 - Effect managers (`effect module`) — Http/Time/Random are native
   runtime implementations instead; third-party effect modules won't
-  compile. `Browser.application` (navigation Keys), WebSockets, elm/bytes,
-  GLSL shaders, and the optimizer pass (`Optimize/*`, decision trees).
+  compile. WebSockets, elm/bytes, GLSL shaders, and the optimizer pass
+  (`Optimize/*`, decision trees).
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
 - The 5,900-line syntax error catalogue of `Reporting.Error.Syntax` —

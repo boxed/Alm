@@ -385,11 +385,6 @@ impl Checker<'_> {
         self.type_to_variable(&scheme.tipe, &mut substitutions, false)
     }
 
-    fn instantiate_rigid(&mut self, tipe: &can::Type) -> Variable {
-        let mut substitutions = HashMap::new();
-        self.type_to_variable(tipe, &mut substitutions, true)
-    }
-
     fn type_to_variable(
         &mut self,
         tipe: &can::Type,
