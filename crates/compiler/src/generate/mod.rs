@@ -161,21 +161,36 @@ impl Generator {
 
     fn top_level_def(&mut self, def: &can::Def) {
         let var = self.global(&def.name.value);
-        let value = self.def_value(def);
+        let value = self.def_value(def, SelfRef::TopLevel);
         writeln!(self.out, "var {} = {};", var, value).unwrap();
     }
 
     /// The JS expression for a definition: a function wrapper when it has
     /// arguments, otherwise its body.
-    fn def_value(&mut self, def: &can::Def) -> String {
-        if def.args.is_empty() {
-            self.expr(&def.body)
-        } else {
-            self.function(&def.args, &def.body)
+    fn def_value(&mut self, def: &can::Def, self_ref: SelfRef) -> String {
+        if !def.args.is_empty() {
+            return self.function_named(Some((&def.name.value, self_ref)), &def.args, &def.body);
         }
+        // `f = \a b -> ...` still gets tail-call optimization.
+        if let can::Expr_::Lambda(args, body) = &def.body.value {
+            return self.function_named(Some((&def.name.value, self_ref)), args, body);
+        }
+        self.expr(&def.body)
     }
 
     fn function(&mut self, args: &[can::Pattern], body: &can::Expr) -> String {
+        self.function_named(None, args, body)
+    }
+
+    /// Generate a function. When `self_ref` is given and the body contains
+    /// tail calls to itself, compile the recursion into a `while` loop —
+    /// the port of Elm's TailDef optimization.
+    fn function_named(
+        &mut self,
+        self_ref: Option<(&Name, SelfRef)>,
+        args: &[can::Pattern],
+        body: &can::Expr,
+    ) -> String {
         let mut params = Vec::new();
         let mut prelude = String::new();
         for arg in args {
@@ -192,18 +207,139 @@ impl Generator {
                 }
             }
         }
-        let body_js = self.expr(body);
         let arity = params.len();
-        let inner = format!(
-            "function ({}) {{ {}return {}; }}",
-            params.join(", "),
-            prelude,
-            body_js
-        );
+
+        let is_tail_recursive = self_ref
+            .as_ref()
+            .is_some_and(|(name, self_ref)| {
+                has_self_tail_call(name, *self_ref, arity, body)
+            });
+
+        let body_js = if is_tail_recursive {
+            let (name, self_kind) = self_ref.unwrap();
+            let tail = Tail::Loop {
+                name: name.clone(),
+                self_kind,
+                params: params.clone(),
+            };
+            let inner = self.stmts(body, &tail);
+            format!("while (true) {{ {}{} }}", prelude, inner)
+        } else {
+            format!("{}{}", prelude, self.stmts(body, &Tail::Return))
+        };
+
+        let inner = format!("function ({}) {{ {} }}", params.join(", "), body_js);
         if arity == 1 {
             inner
         } else {
             format!("F{}({})", arity, inner)
+        }
+    }
+
+    // STATEMENTS — function bodies are statements so that `if`, `case`,
+    // and `let` in tail position produce plain returns (and tail recursion
+    // can `continue` the surrounding loop).
+
+    fn stmts(&mut self, expr: &can::Expr, tail: &Tail) -> String {
+        use can::Expr_::*;
+        match &expr.value {
+            If(branches, otherwise) => {
+                let mut out = String::new();
+                for (condition, branch) in branches {
+                    write!(
+                        out,
+                        "if ({}) {{ {} }} else ",
+                        self.expr(condition),
+                        self.stmts(branch, tail)
+                    )
+                    .unwrap();
+                }
+                write!(out, "{{ {} }}", self.stmts(otherwise, tail)).unwrap();
+                out
+            }
+            Let(decls, body) => {
+                let mut out = String::new();
+                for decl in decls {
+                    self.let_decl_stmts(decl, &mut out);
+                }
+                out.push_str(&self.stmts(body, tail));
+                out
+            }
+            Case(scrutinee, branches) => {
+                let temp = self.fresh_temp();
+                let mut out = format!("var {} = {}; ", temp, self.expr(scrutinee));
+                for (pattern, branch) in branches {
+                    let mut tests = Vec::new();
+                    let mut bindings = Vec::new();
+                    pattern_tests(pattern, &temp, &mut tests, &mut bindings);
+                    let mut body = String::new();
+                    for (name, path) in bindings {
+                        write!(body, "var {} = {}; ", sanitize(&name), path).unwrap();
+                    }
+                    body.push_str(&self.stmts(branch, tail));
+                    if tests.is_empty() {
+                        out.push_str(&body);
+                        return out;
+                    }
+                    write!(out, "if ({}) {{ {} }} ", tests.join(" && "), body).unwrap();
+                }
+                out.push_str(
+                    "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
+                );
+                out
+            }
+            Call(func, call_args) => {
+                if let Tail::Loop {
+                    name,
+                    self_kind,
+                    params,
+                } = tail
+                {
+                    if is_self_ref(func, name, *self_kind) && call_args.len() == params.len() {
+                        // Compute all new arguments before reassigning.
+                        let mut out = String::new();
+                        let temps: Vec<String> = call_args
+                            .iter()
+                            .map(|arg| {
+                                let temp = self.fresh_temp();
+                                write!(out, "var {} = {}; ", temp, self.expr(arg)).unwrap();
+                                temp
+                            })
+                            .collect();
+                        for (param, temp) in params.iter().zip(temps) {
+                            write!(out, "{} = {}; ", param, temp).unwrap();
+                        }
+                        out.push_str("continue;");
+                        return out;
+                    }
+                }
+                format!("return {};", self.expr(expr))
+            }
+            _ => format!("return {};", self.expr(expr)),
+        }
+    }
+
+    fn let_decl_stmts(&mut self, decl: &can::LetDecl, out: &mut String) {
+        match decl {
+            can::LetDecl::Def(def) => {
+                let value = self.def_value(def, SelfRef::Local);
+                write!(out, "var {} = {}; ", sanitize(&def.name.value), value).unwrap();
+            }
+            can::LetDecl::Recursive(defs) => {
+                for def in defs {
+                    let value = self.def_value(def, SelfRef::Local);
+                    write!(out, "var {} = {}; ", sanitize(&def.name.value), value).unwrap();
+                }
+            }
+            can::LetDecl::Destruct(pattern, value) => {
+                let temp = self.fresh_temp();
+                write!(out, "var {} = {}; ", temp, self.expr(value)).unwrap();
+                let mut bindings = Vec::new();
+                destructure(pattern, &temp, &mut bindings);
+                for (name, path) in bindings {
+                    write!(out, "var {} = {}; ", sanitize(&name), path).unwrap();
+                }
+            }
         }
     }
 
@@ -263,37 +399,9 @@ impl Generator {
                     .unwrap();
                 out
             }
-            Let(decls, body) => {
-                let mut out = String::from("(function () { ");
-                for decl in decls {
-                    match decl {
-                        can::LetDecl::Def(def) => {
-                            let value = self.def_value(def);
-                            write!(out, "var {} = {}; ", sanitize(&def.name.value), value)
-                                .unwrap();
-                        }
-                        can::LetDecl::Recursive(defs) => {
-                            for def in defs {
-                                let value = self.def_value(def);
-                                write!(out, "var {} = {}; ", sanitize(&def.name.value), value)
-                                    .unwrap();
-                            }
-                        }
-                        can::LetDecl::Destruct(pattern, value) => {
-                            let temp = self.fresh_temp();
-                            write!(out, "var {} = {}; ", temp, self.expr(value)).unwrap();
-                            let mut bindings = Vec::new();
-                            destructure(pattern, &temp, &mut bindings);
-                            for (name, path) in bindings {
-                                write!(out, "var {} = {}; ", sanitize(&name), path).unwrap();
-                            }
-                        }
-                    }
-                }
-                write!(out, "return {}; }})()", self.expr(body)).unwrap();
-                out
+            Let(..) | Case(..) => {
+                format!("(function () {{ {} }})()", self.stmts(expr, &Tail::Return))
             }
-            Case(scrutinee, branches) => self.case(scrutinee, branches),
             Accessor(field) => format!("function ($) {{ return $.{}; }}", field),
             Access(record, field) => format!("{}.{}", self.expr(record), field.value),
             Update(record, fields) => {
@@ -375,32 +483,56 @@ impl Generator {
         }
     }
 
-    // CASE EXPRESSIONS
+}
 
-    fn case(&mut self, scrutinee: &can::Expr, branches: &[(can::Pattern, can::Expr)]) -> String {
-        let temp = self.fresh_temp();
-        let mut out = format!(
-            "(function () {{ var {} = {}; ",
-            temp,
-            self.expr(scrutinee)
-        );
-        for (pattern, branch) in branches {
-            let mut tests = Vec::new();
-            let mut bindings = Vec::new();
-            pattern_tests(pattern, &temp, &mut tests, &mut bindings);
-            let mut body = String::new();
-            for (name, path) in bindings {
-                write!(body, "var {} = {}; ", sanitize(&name), path).unwrap();
-            }
-            write!(body, "return {};", self.expr(branch)).unwrap();
-            if tests.is_empty() {
-                write!(out, "{} }})()", body).unwrap();
-                return out;
-            }
-            write!(out, "if ({}) {{ {} }} ", tests.join(" && "), body).unwrap();
+/// How a definition refers to itself in its own body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelfRef {
+    TopLevel,
+    Local,
+}
+
+enum Tail {
+    Return,
+    Loop {
+        name: Name,
+        self_kind: SelfRef,
+        params: Vec<String>,
+    },
+}
+
+fn is_self_ref(expr: &can::Expr, name: &Name, self_kind: SelfRef) -> bool {
+    match (&expr.value, self_kind) {
+        (can::Expr_::VarTopLevel(n), SelfRef::TopLevel) => n == name,
+        (can::Expr_::VarLocal(n), SelfRef::Local) => n == name,
+        _ => false,
+    }
+}
+
+/// Does the body contain a call to itself in tail position?
+fn has_self_tail_call(name: &Name, self_kind: SelfRef, arity: usize, body: &can::Expr) -> bool {
+    use can::Expr_::*;
+    match &body.value {
+        Call(func, args) => is_self_ref(func, name, self_kind) && args.len() == arity,
+        If(branches, otherwise) => {
+            branches
+                .iter()
+                .any(|(_, b)| has_self_tail_call(name, self_kind, arity, b))
+                || has_self_tail_call(name, self_kind, arity, otherwise)
         }
-        out.push_str("throw new Error('Missing case branch (this Elm code has a non-exhaustive pattern match)'); })()");
-        out
+        Let(decls, inner) => {
+            // A shadowing let definition would capture the name.
+            let shadowed = decls.iter().any(|decl| match decl {
+                can::LetDecl::Def(def) => def.name.value == *name,
+                can::LetDecl::Recursive(defs) => defs.iter().any(|d| d.name.value == *name),
+                can::LetDecl::Destruct(..) => false,
+            });
+            !shadowed && has_self_tail_call(name, self_kind, arity, inner)
+        }
+        Case(_, branches) => branches
+            .iter()
+            .any(|(_, b)| has_self_tail_call(name, self_kind, arity, b)),
+        _ => false,
     }
 }
 

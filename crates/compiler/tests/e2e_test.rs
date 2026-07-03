@@ -366,3 +366,31 @@ fn tuples() {
         "([1,2],[\"a\",\"b\"])"
     );
 }
+
+#[test]
+fn tail_calls_do_not_grow_the_stack() {
+    // One million iterations would overflow the stack without TCO.
+    assert_eq!(
+        run("count : Int -> Int -> Int\ncount acc n =\n    if n == 0 then\n        acc\n    else\n        count (acc + 1) (n - 1)\n\nmain = String.fromInt (count 0 1000000)"),
+        "1000000"
+    );
+    // Tail recursion through case branches and let bodies.
+    assert_eq!(
+        run("sumList : Int -> List Int -> Int\nsumList acc xs =\n    case xs of\n        [] ->\n            acc\n\n        x :: rest ->\n            let\n                newAcc =\n                    acc + x\n            in\n            sumList newAcc rest\n\nmain = String.fromInt (sumList 0 (List.range 1 100000))"),
+        "5000050000"
+    );
+    // `f = \\x -> ...` style definitions also get the optimization.
+    assert_eq!(
+        run("loop : Int -> Int\nloop =\n    \\n ->\n        if n > 0 then\n            loop (n - 1)\n        else\n            n\n\nmain = String.fromInt (loop 500000)"),
+        "0"
+    );
+}
+
+#[test]
+fn non_tail_recursion_still_works() {
+    // The argument swap must use temporaries: `swap a b = swap b a` style.
+    assert_eq!(
+        run("gcd : Int -> Int -> Int\ngcd a b =\n    if b == 0 then\n        a\n    else\n        gcd b (modBy b a)\n\nmain = String.fromInt (gcd 1071 462)"),
+        "21"
+    );
+}
