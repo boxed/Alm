@@ -4,6 +4,9 @@
 //! mirroring the architecture of `elm/compiler`.
 
 pub mod ast;
+pub mod builtins;
+pub mod canonicalize;
 pub mod data;
 pub mod parse;
 pub mod reporting;
+pub mod typecheck;
