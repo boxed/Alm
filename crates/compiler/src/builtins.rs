@@ -182,6 +182,100 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Debug", "toString", "a -> String"),
             V("Debug", "log", "String -> a -> a"),
             V("Debug", "todo", "String -> a"),
+            // Basics — extras
+            V("Basics", "isNaN", "Float -> Bool"),
+            V("Basics", "isInfinite", "Float -> Bool"),
+            V("Basics", "degrees", "Float -> Float"),
+            V("Basics", "radians", "Float -> Float"),
+            V("Basics", "turns", "Float -> Float"),
+            V("Basics", "toPolar", "( Float, Float ) -> ( Float, Float )"),
+            V("Basics", "fromPolar", "( Float, Float ) -> ( Float, Float )"),
+            // List — extras
+            V("List", "sortWith", "(a -> a -> Order) -> List a -> List a"),
+            V("List", "map3", "(a -> b -> c -> result) -> List a -> List b -> List c -> List result"),
+            // String — extras
+            V("String", "uncons", "String -> Maybe ( Char, String )"),
+            V("String", "cons", "Char -> String -> String"),
+            V("String", "indexes", "String -> String -> List Int"),
+            V("String", "any", "(Char -> Bool) -> String -> Bool"),
+            V("String", "all", "(Char -> Bool) -> String -> Bool"),
+            V("String", "foldl", "(Char -> b -> b) -> b -> String -> b"),
+            V("String", "foldr", "(Char -> b -> b) -> b -> String -> b"),
+            // Char — extras
+            V("Char", "isAlphaNum", "Char -> Bool"),
+            V("Char", "isHexDigit", "Char -> Bool"),
+            // Maybe — extras
+            V("Maybe", "map3", "(a -> b -> c -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe value"),
+            V("Maybe", "map4", "(a -> b -> c -> d -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe value"),
+            // Result — extras
+            V("Result", "map2", "(a -> b -> value) -> Result x a -> Result x b -> Result x value"),
+            // Dict
+            V("Dict", "empty", "Dict k v"),
+            V("Dict", "singleton", "comparable -> v -> Dict comparable v"),
+            V("Dict", "insert", "comparable -> v -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "update", "comparable -> (Maybe v -> Maybe v) -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "remove", "comparable -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "isEmpty", "Dict k v -> Bool"),
+            V("Dict", "member", "comparable -> Dict comparable v -> Bool"),
+            V("Dict", "get", "comparable -> Dict comparable v -> Maybe v"),
+            V("Dict", "size", "Dict k v -> Int"),
+            V("Dict", "keys", "Dict k v -> List k"),
+            V("Dict", "values", "Dict k v -> List v"),
+            V("Dict", "toList", "Dict k v -> List ( k, v )"),
+            V("Dict", "fromList", "List ( comparable, v ) -> Dict comparable v"),
+            V("Dict", "map", "(k -> a -> b) -> Dict k a -> Dict k b"),
+            V("Dict", "foldl", "(k -> v -> b -> b) -> b -> Dict k v -> b"),
+            V("Dict", "foldr", "(k -> v -> b -> b) -> b -> Dict k v -> b"),
+            V("Dict", "filter", "(comparable -> v -> Bool) -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "partition", "(comparable -> v -> Bool) -> Dict comparable v -> ( Dict comparable v, Dict comparable v )"),
+            V("Dict", "union", "Dict comparable v -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "intersect", "Dict comparable v -> Dict comparable v -> Dict comparable v"),
+            V("Dict", "diff", "Dict comparable a -> Dict comparable b -> Dict comparable a"),
+            // Set
+            V("Set", "empty", "Set a"),
+            V("Set", "singleton", "comparable -> Set comparable"),
+            V("Set", "insert", "comparable -> Set comparable -> Set comparable"),
+            V("Set", "remove", "comparable -> Set comparable -> Set comparable"),
+            V("Set", "isEmpty", "Set a -> Bool"),
+            V("Set", "member", "comparable -> Set comparable -> Bool"),
+            V("Set", "size", "Set a -> Int"),
+            V("Set", "toList", "Set a -> List a"),
+            V("Set", "fromList", "List comparable -> Set comparable"),
+            V("Set", "map", "(comparable -> comparable2) -> Set comparable -> Set comparable2"),
+            V("Set", "foldl", "(a -> b -> b) -> b -> Set a -> b"),
+            V("Set", "foldr", "(a -> b -> b) -> b -> Set a -> b"),
+            V("Set", "filter", "(comparable -> Bool) -> Set comparable -> Set comparable"),
+            V("Set", "partition", "(comparable -> Bool) -> Set comparable -> ( Set comparable, Set comparable )"),
+            V("Set", "union", "Set comparable -> Set comparable -> Set comparable"),
+            V("Set", "intersect", "Set comparable -> Set comparable -> Set comparable"),
+            V("Set", "diff", "Set comparable -> Set comparable -> Set comparable"),
+            // Array
+            V("Array", "empty", "Array a"),
+            V("Array", "initialize", "Int -> (Int -> a) -> Array a"),
+            V("Array", "repeat", "Int -> a -> Array a"),
+            V("Array", "fromList", "List a -> Array a"),
+            V("Array", "isEmpty", "Array a -> Bool"),
+            V("Array", "length", "Array a -> Int"),
+            V("Array", "get", "Int -> Array a -> Maybe a"),
+            V("Array", "set", "Int -> a -> Array a -> Array a"),
+            V("Array", "push", "a -> Array a -> Array a"),
+            V("Array", "toList", "Array a -> List a"),
+            V("Array", "toIndexedList", "Array a -> List ( Int, a )"),
+            V("Array", "map", "(a -> b) -> Array a -> Array b"),
+            V("Array", "indexedMap", "(Int -> a -> b) -> Array a -> Array b"),
+            V("Array", "foldl", "(a -> b -> b) -> b -> Array a -> b"),
+            V("Array", "foldr", "(a -> b -> b) -> b -> Array a -> b"),
+            V("Array", "filter", "(a -> Bool) -> Array a -> Array a"),
+            V("Array", "append", "Array a -> Array a -> Array a"),
+            V("Array", "slice", "Int -> Int -> Array a -> Array a"),
+            // Bitwise
+            V("Bitwise", "and", "Int -> Int -> Int"),
+            V("Bitwise", "or", "Int -> Int -> Int"),
+            V("Bitwise", "xor", "Int -> Int -> Int"),
+            V("Bitwise", "complement", "Int -> Int"),
+            V("Bitwise", "shiftLeftBy", "Int -> Int -> Int"),
+            V("Bitwise", "shiftRightBy", "Int -> Int -> Int"),
+            V("Bitwise", "shiftRightZfBy", "Int -> Int -> Int"),
         ]
     })
 }
@@ -249,13 +343,18 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "List" => Some("List"),
         "Maybe" => Some("Maybe"),
         "Result" => Some("Result"),
+        "Dict" => Some("Dict"),
+        "Set" => Some("Set"),
+        "Array" => Some("Array"),
         _ => None,
     }
 }
 
-/// Modules that are implicitly importable (Elm's default imports).
+/// Modules that are implicitly importable (Elm's default imports, plus the
+/// core data structure modules).
 pub const MODULES: &[&str] = &[
-    "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug",
+    "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug", "Dict", "Set",
+    "Array", "Bitwise",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

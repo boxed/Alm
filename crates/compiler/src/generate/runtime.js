@@ -7,9 +7,15 @@ function F(arity, fun, wrapper) { wrapper.a = arity; wrapper.f = fun; return wra
 function F2(fun) { return F(2, fun, function (a) { return function (b) { return fun(a, b); }; }); }
 function F3(fun) { return F(3, fun, function (a) { return function (b) { return function (c) { return fun(a, b, c); }; }; }); }
 function F4(fun) { return F(4, fun, function (a) { return function (b) { return function (c) { return function (d) { return fun(a, b, c, d); }; }; }; }); }
+function F5(fun) { return F(5, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return fun(a, b, c, d, e); }; }; }; }; }); }
+function F6(fun) { return F(6, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return fun(a, b, c, d, e, f); }; }; }; }; }; }); }
+function F7(fun) { return F(7, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return function (g) { return fun(a, b, c, d, e, f, g); }; }; }; }; }; }; }); }
 function A2(f, a, b) { return f.a === 2 ? f.f(a, b) : f(a)(b); }
 function A3(f, a, b, c) { return f.a === 3 ? f.f(a, b, c) : f(a)(b)(c); }
 function A4(f, a, b, c, d) { return f.a === 4 ? f.f(a, b, c, d) : f(a)(b)(c)(d); }
+function A5(f, a, b, c, d, e) { return f.a === 5 ? f.f(a, b, c, d, e) : f(a)(b)(c)(d)(e); }
+function A6(f, a, b, c, d, e, g) { return f.a === 6 ? f.f(a, b, c, d, e, g) : f(a)(b)(c)(d)(e)(g); }
+function A7(f, a, b, c, d, e, g, h) { return f.a === 7 ? f.f(a, b, c, d, e, g, h) : f(a)(b)(c)(d)(e)(g)(h); }
 
 // UNIT AND TUPLES
 
@@ -424,6 +430,15 @@ function _Debug_toString(value) {
     if (tag === '[]' || tag === '::') {
         return '[' + _List_toArray(value).map(_Debug_toString).join(',') + ']';
     }
+    if (tag === 'Dict') {
+        return 'Dict.fromList ' + _Debug_toString($Dict$toList(value));
+    }
+    if (tag === 'Set') {
+        return 'Set.fromList ' + _Debug_toString($Dict$keys(value.d));
+    }
+    if (tag === 'Array') {
+        return 'Array.fromList ' + _Debug_toString(_List_fromArray(value.a));
+    }
     if (tag !== undefined) {
         var out = tag;
         for (var key in value) {
@@ -448,3 +463,317 @@ var $Debug$log = F2(function (label, value) {
 var $Debug$todo = function (message) {
     throw new Error('TODO: ' + message);
 };
+
+// BASICS — extras
+
+var $Basics$isNaN = function (n) { return isNaN(n); };
+var $Basics$isInfinite = function (n) { return n === Infinity || n === -Infinity; };
+var $Basics$degrees = function (d) { return d * Math.PI / 180; };
+var $Basics$radians = function (r) { return r; };
+var $Basics$turns = function (t) { return t * 2 * Math.PI; };
+var $Basics$toPolar = function (p) {
+    return { $: '#2', a: Math.sqrt(p.a * p.a + p.b * p.b), b: Math.atan2(p.b, p.a) };
+};
+var $Basics$fromPolar = function (p) {
+    return { $: '#2', a: p.a * Math.cos(p.b), b: p.a * Math.sin(p.b) };
+};
+
+// LIST — extras
+
+var $List$sortWith = F2(function (compare, xs) {
+    return _List_fromArray(_List_toArray(xs).sort(function (a, b) {
+        var order = A2(compare, a, b);
+        return order.$ === 'LT' ? -1 : order.$ === 'EQ' ? 0 : 1;
+    }));
+});
+var $List$map3 = F4(function (f, xs, ys, zs) {
+    var out = [];
+    for (; xs.$ === '::' && ys.$ === '::' && zs.$ === '::'; xs = xs.b, ys = ys.b, zs = zs.b) {
+        out.push(A3(f, xs.a, ys.a, zs.a));
+    }
+    return _List_fromArray(out);
+});
+
+// STRING — extras
+
+var $String$uncons = function (s) {
+    if (s === '') { return $Maybe$Nothing; }
+    var c = Array.from(s)[0];
+    return $Maybe$Just({ $: '#2', a: c, b: s.slice(c.length) });
+};
+var $String$cons = F2(function (c, s) { return c + s; });
+var $String$indexes = F2(function (sub, s) {
+    if (sub === '') { return _List_Nil; }
+    var out = [];
+    var i = s.indexOf(sub);
+    while (i > -1) { out.push(i); i = s.indexOf(sub, i + sub.length); }
+    return _List_fromArray(out);
+});
+var $String$any = F2(function (isGood, s) {
+    return Array.from(s).some(function (c) { return isGood(c); });
+});
+var $String$all = F2(function (isGood, s) {
+    return Array.from(s).every(function (c) { return isGood(c); });
+});
+var $String$foldl = F3(function (f, acc, s) {
+    var chars = Array.from(s);
+    for (var i = 0; i < chars.length; i++) { acc = A2(f, chars[i], acc); }
+    return acc;
+});
+var $String$foldr = F3(function (f, acc, s) {
+    var chars = Array.from(s);
+    for (var i = chars.length; i--;) { acc = A2(f, chars[i], acc); }
+    return acc;
+});
+
+// CHAR — extras
+
+var $Char$isAlphaNum = function (c) { return /^[a-zA-Z0-9]$/.test(c); };
+var $Char$isHexDigit = function (c) { return /^[0-9a-fA-F]$/.test(c); };
+
+// MAYBE — extras
+
+var $Maybe$map3 = F4(function (f, ma, mb, mc) {
+    return ma.$ === 'Just' && mb.$ === 'Just' && mc.$ === 'Just'
+        ? $Maybe$Just(A3(f, ma.a, mb.a, mc.a))
+        : $Maybe$Nothing;
+});
+var $Maybe$map4 = F5(function (f, ma, mb, mc, md) {
+    return ma.$ === 'Just' && mb.$ === 'Just' && mc.$ === 'Just' && md.$ === 'Just'
+        ? $Maybe$Just(A4(f, ma.a, mb.a, mc.a, md.a))
+        : $Maybe$Nothing;
+});
+
+// RESULT — extras
+
+var $Result$map2 = F3(function (f, ra, rb) {
+    if (ra.$ === 'Err') { return ra; }
+    if (rb.$ === 'Err') { return rb; }
+    return $Result$Ok(A2(f, ra.a, rb.a));
+});
+
+// DICT
+//
+// Elm's Dict is a red-black tree; alm uses an immutable sorted array of
+// keys with a parallel array of values. Same observable behavior;
+// insert/remove are O(n) copies rather than O(log n).
+
+var $Dict$empty = { $: 'Dict', keys: [], vals: [] };
+
+function _Dict_search(dict, key) {
+    // Binary search: returns index if found, otherwise ~insertionPoint.
+    var lo = 0, hi = dict.keys.length - 1;
+    while (lo <= hi) {
+        var mid = (lo + hi) >> 1;
+        var cmp = _Utils_cmp(dict.keys[mid], key);
+        if (cmp === 0) { return mid; }
+        if (cmp < 0) { lo = mid + 1; } else { hi = mid - 1; }
+    }
+    return ~lo;
+}
+
+var $Dict$singleton = F2(function (key, value) {
+    return { $: 'Dict', keys: [key], vals: [value] };
+});
+var $Dict$insert = F3(function (key, value, dict) {
+    var i = _Dict_search(dict, key);
+    var keys = dict.keys.slice();
+    var vals = dict.vals.slice();
+    if (i >= 0) {
+        vals[i] = value;
+    } else {
+        keys.splice(~i, 0, key);
+        vals.splice(~i, 0, value);
+    }
+    return { $: 'Dict', keys: keys, vals: vals };
+});
+var $Dict$remove = F2(function (key, dict) {
+    var i = _Dict_search(dict, key);
+    if (i < 0) { return dict; }
+    var keys = dict.keys.slice();
+    var vals = dict.vals.slice();
+    keys.splice(i, 1);
+    vals.splice(i, 1);
+    return { $: 'Dict', keys: keys, vals: vals };
+});
+var $Dict$update = F3(function (key, alter, dict) {
+    var i = _Dict_search(dict, key);
+    var current = i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
+    var next = alter(current);
+    return next.$ === 'Just'
+        ? A3($Dict$insert, key, next.a, dict)
+        : A2($Dict$remove, key, dict);
+});
+var $Dict$isEmpty = function (dict) { return dict.keys.length === 0; };
+var $Dict$member = F2(function (key, dict) { return _Dict_search(dict, key) >= 0; });
+var $Dict$get = F2(function (key, dict) {
+    var i = _Dict_search(dict, key);
+    return i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
+});
+var $Dict$size = function (dict) { return dict.keys.length; };
+var $Dict$keys = function (dict) { return _List_fromArray(dict.keys); };
+var $Dict$values = function (dict) { return _List_fromArray(dict.vals); };
+var $Dict$toList = function (dict) {
+    return _List_fromArray(dict.keys.map(function (k, i) {
+        return { $: '#2', a: k, b: dict.vals[i] };
+    }));
+};
+var $Dict$fromList = function (pairs) {
+    var dict = $Dict$empty;
+    for (; pairs.$ === '::'; pairs = pairs.b) {
+        dict = A3($Dict$insert, pairs.a.a, pairs.a.b, dict);
+    }
+    return dict;
+};
+var $Dict$map = F2(function (f, dict) {
+    return {
+        $: 'Dict',
+        keys: dict.keys.slice(),
+        vals: dict.vals.map(function (v, i) { return A2(f, dict.keys[i], v); })
+    };
+});
+var $Dict$foldl = F3(function (f, acc, dict) {
+    for (var i = 0; i < dict.keys.length; i++) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
+    return acc;
+});
+var $Dict$foldr = F3(function (f, acc, dict) {
+    for (var i = dict.keys.length; i--;) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
+    return acc;
+});
+var $Dict$filter = F2(function (isGood, dict) {
+    var keys = [], vals = [];
+    for (var i = 0; i < dict.keys.length; i++) {
+        if (A2(isGood, dict.keys[i], dict.vals[i])) {
+            keys.push(dict.keys[i]);
+            vals.push(dict.vals[i]);
+        }
+    }
+    return { $: 'Dict', keys: keys, vals: vals };
+});
+var $Dict$partition = F2(function (isGood, dict) {
+    var yes = { $: 'Dict', keys: [], vals: [] };
+    var no = { $: 'Dict', keys: [], vals: [] };
+    for (var i = 0; i < dict.keys.length; i++) {
+        var target = A2(isGood, dict.keys[i], dict.vals[i]) ? yes : no;
+        target.keys.push(dict.keys[i]);
+        target.vals.push(dict.vals[i]);
+    }
+    return { $: '#2', a: yes, b: no };
+});
+var $Dict$union = F2(function (left, right) {
+    var result = right;
+    for (var i = 0; i < left.keys.length; i++) {
+        result = A3($Dict$insert, left.keys[i], left.vals[i], result);
+    }
+    return result;
+});
+var $Dict$intersect = F2(function (left, right) {
+    return A2($Dict$filter, F2(function (k, _v) { return A2($Dict$member, k, right); }), left);
+});
+var $Dict$diff = F2(function (left, right) {
+    return A2($Dict$filter, F2(function (k, _v) { return !A2($Dict$member, k, right); }), left);
+});
+
+// SET — a Dict with unit values.
+
+var $Set$empty = { $: 'Set', d: $Dict$empty };
+var $Set$singleton = function (key) { return { $: 'Set', d: A2($Dict$singleton, key, 0) }; };
+var $Set$insert = F2(function (key, set) { return { $: 'Set', d: A3($Dict$insert, key, 0, set.d) }; });
+var $Set$remove = F2(function (key, set) { return { $: 'Set', d: A2($Dict$remove, key, set.d) }; });
+var $Set$isEmpty = function (set) { return $Dict$isEmpty(set.d); };
+var $Set$member = F2(function (key, set) { return A2($Dict$member, key, set.d); });
+var $Set$size = function (set) { return $Dict$size(set.d); };
+var $Set$toList = function (set) { return $Dict$keys(set.d); };
+var $Set$fromList = function (xs) {
+    var set = $Set$empty;
+    for (; xs.$ === '::'; xs = xs.b) { set = A2($Set$insert, xs.a, set); }
+    return set;
+};
+var $Set$map = F2(function (f, set) {
+    return $Set$fromList(A2($List$map, f, $Set$toList(set)));
+});
+var $Set$foldl = F3(function (f, acc, set) {
+    return A3($Dict$foldl, F3(function (k, _v, a) { return A2(f, k, a); }), acc, set.d);
+});
+var $Set$foldr = F3(function (f, acc, set) {
+    return A3($Dict$foldr, F3(function (k, _v, a) { return A2(f, k, a); }), acc, set.d);
+});
+var $Set$filter = F2(function (isGood, set) {
+    return { $: 'Set', d: A2($Dict$filter, F2(function (k, _v) { return isGood(k); }), set.d) };
+});
+var $Set$partition = F2(function (isGood, set) {
+    var pair = A2($Dict$partition, F2(function (k, _v) { return isGood(k); }), set.d);
+    return { $: '#2', a: { $: 'Set', d: pair.a }, b: { $: 'Set', d: pair.b } };
+});
+var $Set$union = F2(function (a, b) { return { $: 'Set', d: A2($Dict$union, a.d, b.d) }; });
+var $Set$intersect = F2(function (a, b) { return { $: 'Set', d: A2($Dict$intersect, a.d, b.d) }; });
+var $Set$diff = F2(function (a, b) { return { $: 'Set', d: A2($Dict$diff, a.d, b.d) }; });
+
+// ARRAY — immutable JS array copies (Elm uses a Hickey trie).
+
+var $Array$empty = { $: 'Array', a: [] };
+var $Array$initialize = F2(function (n, f) {
+    var out = [];
+    for (var i = 0; i < n; i++) { out.push(f(i)); }
+    return { $: 'Array', a: out };
+});
+var $Array$repeat = F2(function (n, x) {
+    var out = [];
+    for (var i = 0; i < n; i++) { out.push(x); }
+    return { $: 'Array', a: out };
+});
+var $Array$fromList = function (xs) { return { $: 'Array', a: _List_toArray(xs) }; };
+var $Array$isEmpty = function (arr) { return arr.a.length === 0; };
+var $Array$length = function (arr) { return arr.a.length; };
+var $Array$get = F2(function (i, arr) {
+    return i >= 0 && i < arr.a.length ? $Maybe$Just(arr.a[i]) : $Maybe$Nothing;
+});
+var $Array$set = F3(function (i, x, arr) {
+    if (i < 0 || i >= arr.a.length) { return arr; }
+    var out = arr.a.slice();
+    out[i] = x;
+    return { $: 'Array', a: out };
+});
+var $Array$push = F2(function (x, arr) {
+    var out = arr.a.slice();
+    out.push(x);
+    return { $: 'Array', a: out };
+});
+var $Array$toList = function (arr) { return _List_fromArray(arr.a); };
+var $Array$toIndexedList = function (arr) {
+    return _List_fromArray(arr.a.map(function (x, i) { return { $: '#2', a: i, b: x }; }));
+};
+var $Array$map = F2(function (f, arr) {
+    return { $: 'Array', a: arr.a.map(function (x) { return f(x); }) };
+});
+var $Array$indexedMap = F2(function (f, arr) {
+    return { $: 'Array', a: arr.a.map(function (x, i) { return A2(f, i, x); }) };
+});
+var $Array$foldl = F3(function (f, acc, arr) {
+    for (var i = 0; i < arr.a.length; i++) { acc = A2(f, arr.a[i], acc); }
+    return acc;
+});
+var $Array$foldr = F3(function (f, acc, arr) {
+    for (var i = arr.a.length; i--;) { acc = A2(f, arr.a[i], acc); }
+    return acc;
+});
+var $Array$filter = F2(function (isGood, arr) {
+    return { $: 'Array', a: arr.a.filter(function (x) { return isGood(x); }) };
+});
+var $Array$append = F2(function (a, b) { return { $: 'Array', a: a.a.concat(b.a) }; });
+var $Array$slice = F3(function (from, to, arr) {
+    var len = arr.a.length;
+    if (from < 0) { from = Math.max(0, len + from); }
+    if (to < 0) { to = len + to; }
+    return { $: 'Array', a: arr.a.slice(from, to) };
+});
+
+// BITWISE
+
+var $Bitwise$and = F2(function (a, b) { return a & b; });
+var $Bitwise$or = F2(function (a, b) { return a | b; });
+var $Bitwise$xor = F2(function (a, b) { return a ^ b; });
+var $Bitwise$complement = function (a) { return ~a; };
+var $Bitwise$shiftLeftBy = F2(function (offset, a) { return a << offset; });
+var $Bitwise$shiftRightBy = F2(function (offset, a) { return a >> offset; });
+var $Bitwise$shiftRightZfBy = F2(function (offset, a) { return a >>> offset; });

@@ -394,3 +394,87 @@ fn non_tail_recursion_still_works() {
         "21"
     );
 }
+
+#[test]
+fn dicts() {
+    assert_eq!(
+        run("main = Debug.toString (Dict.get \"b\" (Dict.fromList [ ( \"a\", 1 ), ( \"b\", 2 ) ]))"),
+        "Just 2"
+    );
+    assert_eq!(
+        run("main =\n    Dict.empty\n        |> Dict.insert 3 \"three\"\n        |> Dict.insert 1 \"one\"\n        |> Dict.insert 2 \"two\"\n        |> Dict.remove 2\n        |> Debug.toString"),
+        "Dict.fromList [(1,\"one\"),(3,\"three\")]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (Dict.update \"k\" (Maybe.map (\\n -> n + 1)) (Dict.singleton \"k\" 1))"),
+        "Dict.fromList [(\"k\",2)]"
+    );
+    assert_eq!(
+        run("counts words =\n    List.foldl (\\w d -> Dict.update w (\\m -> Just (Maybe.withDefault 0 m + 1)) d) Dict.empty words\n\nmain = Debug.toString (counts [ \"a\", \"b\", \"a\" ])"),
+        "Dict.fromList [(\"a\",2),(\"b\",1)]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (Dict.union (Dict.fromList [ ( 1, \"L\" ) ]) (Dict.fromList [ ( 1, \"R\" ), ( 2, \"R\" ) ]))"),
+        "Dict.fromList [(1,\"L\"),(2,\"R\")]"
+    );
+}
+
+#[test]
+fn sets() {
+    assert_eq!(
+        run("main = Debug.toString (Set.toList (Set.fromList [ 3, 1, 2, 1, 3 ]))"),
+        "[1,2,3]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (Set.member 2 (Set.fromList [ 1, 2 ]))"),
+        "True"
+    );
+    assert_eq!(
+        run("main = Debug.toString (Set.toList (Set.intersect (Set.fromList [ 1, 2, 3 ]) (Set.fromList [ 2, 3, 4 ])))"),
+        "[2,3]"
+    );
+}
+
+#[test]
+fn arrays() {
+    assert_eq!(
+        run("main = Debug.toString (Array.get 1 (Array.fromList [ 10, 20, 30 ]))"),
+        "Just 20"
+    );
+    assert_eq!(
+        run("main = Debug.toString (Array.toList (Array.set 0 99 (Array.initialize 3 (\\i -> i * i))))"),
+        "[99,1,4]"
+    );
+    assert_eq!(
+        run("main = String.fromInt (Array.foldl (+) 0 (Array.push 4 (Array.fromList [ 1, 2, 3 ])))"),
+        "10"
+    );
+}
+
+#[test]
+fn bitwise() {
+    assert_eq!(
+        run("main = String.fromInt (Bitwise.and 12 10)"),
+        "8"
+    );
+    assert_eq!(
+        run("main = String.fromInt (Bitwise.shiftLeftBy 4 1 + Bitwise.shiftRightZfBy 1 6)"),
+        "19"
+    );
+}
+
+#[test]
+fn string_extras() {
+    assert_eq!(
+        run("main = Debug.toString (String.uncons \"abc\")"),
+        "Just (\"a\",\"bc\")"
+    );
+    assert_eq!(
+        run("main = Debug.toString (String.indexes \"a\" \"banana\")"),
+        "[1,3,5]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (String.any Char.isDigit \"abc1\")"),
+        "True"
+    );
+}
