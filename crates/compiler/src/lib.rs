@@ -9,6 +9,7 @@ pub mod canonicalize;
 pub mod data;
 pub mod generate;
 pub mod interface;
+pub mod nitpick;
 pub mod parse;
 pub mod project;
 pub mod reporting;
@@ -42,6 +43,18 @@ pub fn compile(source: &str) -> Result<String, Vec<Report>> {
             .into_iter()
             .map(|e| Report {
                 title: "TYPE MISMATCH".to_string(),
+                region: e.region,
+                message: e.message,
+            })
+            .collect::<Vec<_>>()
+    })?;
+
+    let interfaces = interface::Interfaces::new();
+    nitpick::check(&canonical, &interfaces).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|e| Report {
+                title: "MISSING PATTERNS".to_string(),
                 region: e.region,
                 message: e.message,
             })

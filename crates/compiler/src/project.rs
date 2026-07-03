@@ -9,7 +9,7 @@ use crate::ast::source as src;
 use crate::data::Name;
 use crate::interface::Interfaces;
 use crate::reporting::{Region, Report};
-use crate::{builtins, canonicalize, generate, parse, typecheck};
+use crate::{builtins, canonicalize, generate, nitpick, parse, typecheck};
 
 pub struct BuildError {
     pub path: PathBuf,
@@ -100,6 +100,21 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
                         source_module.path.clone(),
                         source_module.source.clone(),
                         "TYPE MISMATCH",
+                        e.region,
+                        e.message,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })?;
+
+        nitpick::check(&canonical, &interfaces).map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|e| {
+                    BuildError::new(
+                        source_module.path.clone(),
+                        source_module.source.clone(),
+                        "MISSING PATTERNS",
                         e.region,
                         e.message,
                     )
