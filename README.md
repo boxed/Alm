@@ -68,25 +68,33 @@ app.ports.somePort.subscribe(function (value) { ... });
 
 ## Benchmark
 
-Apple Silicon, production codebase. One 8,357-line entry point and its
-full module graph:
+Apple Silicon, production codebase, median of 5 runs (3 for suites).
+One 8,357-line entry point and its 13-module graph:
 
-| | time |
+| | median | best |
+|---|---|---|
+| elm 0.19.1, project-cold (elm-stuff wiped) | 741 ms | 734 ms |
+| elm 0.19.1, incremental (entry file touched) | 335 ms | 181 ms |
+| elm 0.19.1, no-op (nothing changed at all) | 119 ms | 115 ms |
+| **alm, full rebuild, no cache** | **155 ms** | **141 ms** |
+
+All 19 entry points of the same codebase (~40k lines):
+
+| | median |
 |---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 0.82 s |
-| elm 0.19.1, incremental (one file changed) | 0.22 s |
-| **alm, full rebuild, no cache** | **0.14 s** |
+| elm 0.19.1, project-cold | 2.90 s |
+| elm 0.19.1, all sources touched (warm elm-stuff) | 2.64 s |
+| **alm, full rebuild every time, no cache** | **0.89 s** |
 
-All 19 entry points of the same codebase:
+A full alm rebuild is 2.2x faster than an incremental official rebuild
+and about as fast as the official compiler doing *nothing* (its no-op
+check alone costs ~119 ms). Across the whole suite alm is 3x faster
+while redoing all work every run. (The official compiler reuses
+per-package artifacts from `~/.elm` even when project-cold; alm
+recompiles package sources every run.)
 
-| | time |
-|---|---|
-| elm 0.19.1, warm caches, sources touched | 2.9 s |
-| **alm, full rebuild every time, no cache** | **0.79 s** |
-
-A full alm rebuild is faster than an incremental official rebuild.
-(The official compiler reuses per-package artifacts from `~/.elm` even
-when project-cold; alm recompiles package sources every run.)
+Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm
+`--optimize` 631 KB (all pre-minification).
 
 Output compared on production code (string/number formatting, Json
 decoding pipelines, Round, Debug.toString): byte-identical between the
