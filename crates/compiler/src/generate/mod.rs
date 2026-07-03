@@ -26,6 +26,44 @@ pub fn generate_project(modules: &[can::Module]) -> String {
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
     gen.out.push_str(RUNTIME);
+    gen.out.push_str("\n// HTML HELPERS (generated from the builtin tables)\n");
+    for tag in crate::builtins::HTML_TAGS {
+        let dom_tag = tag.trim_end_matches('_');
+        writeln!(
+            gen.out,
+            "var $Html${} = _VDom_node('{}');",
+            sanitize(tag),
+            dom_tag
+        )
+        .unwrap();
+    }
+    for attr in crate::builtins::HTML_STRING_ATTRS {
+        if *attr == "value" {
+            writeln!(gen.out, "var $Html$Attributes$value = _VDom_prop('value');").unwrap();
+        } else {
+            writeln!(
+                gen.out,
+                "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
+                sanitize(attr),
+                attr.trim_end_matches('_')
+            )
+            .unwrap();
+        }
+    }
+    for attr in crate::builtins::HTML_BOOL_ATTRS {
+        let property = match *attr {
+            "readonly" => "readOnly",
+            "novalidate" => "noValidate",
+            other => other,
+        };
+        writeln!(
+            gen.out,
+            "var $Html$Attributes${} = _VDom_prop('{}');",
+            sanitize(attr),
+            property
+        )
+        .unwrap();
+    }
 
     let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
     for module in modules {
@@ -69,7 +107,7 @@ pub fn generate_project(modules: &[can::Module]) -> String {
             }
             write!(
                 export_fields,
-                "'{}': {}${}",
+                "'{}': _Platform_wrap({}${})",
                 name,
                 module_var,
                 sanitize(name)

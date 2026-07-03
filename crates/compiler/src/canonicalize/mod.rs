@@ -136,6 +136,10 @@ pub fn canonicalize_module(
     for module_name in builtins::MODULES {
         import_names.insert(Name::from(*module_name), Name::from(*module_name));
     }
+    // Elm's default imports include `import Platform.Cmd as Cmd` and
+    // `import Platform.Sub as Sub`.
+    import_names.insert(Name::from("Cmd"), Name::from("Platform.Cmd"));
+    import_names.insert(Name::from("Sub"), Name::from("Platform.Sub"));
     for import in &module.imports {
         let import_name = &import.name.value;
         let is_builtin = builtins::is_builtin_module(import_name.as_str());
@@ -720,6 +724,11 @@ fn resolve_foreign_type(
     name: &Name,
     args: Vec<can::Type>,
 ) -> CResult<can::Type> {
+    // Builtin opaque types exposed through an import, e.g.
+    // `import Html exposing (Html)`.
+    if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
+        return Ok(can::Type::Type(module.clone(), name.clone(), args));
+    }
     let interface = env.interfaces.get(module).ok_or_else(|| {
         Error::new(
             format!("The `{}` module does not have a type named `{}`.", module, name),

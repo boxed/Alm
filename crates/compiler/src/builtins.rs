@@ -28,7 +28,7 @@ const V: fn(&'static str, &'static str, &'static str) -> BuiltinValue =
 pub fn values() -> &'static [BuiltinValue] {
     static VALUES: std::sync::OnceLock<Vec<BuiltinValue>> = std::sync::OnceLock::new();
     VALUES.get_or_init(|| {
-        vec![
+        let mut table = vec![
             // Basics — arithmetic
             V("Basics", "add", "number -> number -> number"),
             V("Basics", "sub", "number -> number -> number"),
@@ -276,9 +276,91 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Bitwise", "shiftLeftBy", "Int -> Int -> Int"),
             V("Bitwise", "shiftRightBy", "Int -> Int -> Int"),
             V("Bitwise", "shiftRightZfBy", "Int -> Int -> Int"),
-        ]
+            // Html
+            V("Html", "text", "String -> Html msg"),
+            V("Html", "node", "String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
+            V("Html", "map", "(a -> msg) -> Html a -> Html msg"),
+            // Html.Attributes
+            V("Html.Attributes", "style", "String -> String -> Attribute msg"),
+            V("Html.Attributes", "attribute", "String -> String -> Attribute msg"),
+            V("Html.Attributes", "map", "(a -> msg) -> Attribute a -> Attribute msg"),
+            // Html.Events
+            V("Html.Events", "onClick", "msg -> Attribute msg"),
+            V("Html.Events", "onDoubleClick", "msg -> Attribute msg"),
+            V("Html.Events", "onMouseDown", "msg -> Attribute msg"),
+            V("Html.Events", "onMouseUp", "msg -> Attribute msg"),
+            V("Html.Events", "onMouseEnter", "msg -> Attribute msg"),
+            V("Html.Events", "onMouseLeave", "msg -> Attribute msg"),
+            V("Html.Events", "onInput", "(String -> msg) -> Attribute msg"),
+            V("Html.Events", "onCheck", "(Bool -> msg) -> Attribute msg"),
+            V("Html.Events", "onSubmit", "msg -> Attribute msg"),
+            // Browser
+            V(
+                "Browser",
+                "sandbox",
+                "{ init : model, update : msg -> model -> model, view : model -> Html msg } -> Program () model msg",
+            ),
+            V(
+                "Browser",
+                "element",
+                "{ init : flags -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg, view : model -> Html msg } -> Program flags model msg",
+            ),
+            // Platform
+            V(
+                "Platform",
+                "worker",
+                "{ init : flags -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg } -> Program flags model msg",
+            ),
+            // Platform.Cmd
+            V("Platform.Cmd", "none", "Cmd msg"),
+            V("Platform.Cmd", "batch", "List (Cmd msg) -> Cmd msg"),
+            V("Platform.Cmd", "map", "(a -> msg) -> Cmd a -> Cmd msg"),
+            // Platform.Sub
+            V("Platform.Sub", "none", "Sub msg"),
+            V("Platform.Sub", "batch", "List (Sub msg) -> Sub msg"),
+            V("Platform.Sub", "map", "(a -> msg) -> Sub a -> Sub msg"),
+        ];
+        for tag in HTML_TAGS {
+            table.push(V(
+                "Html",
+                tag,
+                "List (Attribute msg) -> List (Html msg) -> Html msg",
+            ));
+        }
+        for attr in HTML_STRING_ATTRS {
+            table.push(V("Html.Attributes", attr, "String -> Attribute msg"));
+        }
+        for attr in HTML_BOOL_ATTRS {
+            table.push(V("Html.Attributes", attr, "Bool -> Attribute msg"));
+        }
+        table
     })
 }
+
+/// The standard HTML element helpers, all `List (Attribute msg) ->
+/// List (Html msg) -> Html msg`. Generated from a name list to keep the
+/// signature table readable.
+pub const HTML_TAGS: &[&str] = &[
+    "div", "span", "p", "a", "img", "br", "hr", "pre", "code", "em", "strong", "i", "b", "u",
+    "sub", "sup", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "caption", "thead", "tbody", "tfoot", "tr", "td", "th", "form", "fieldset",
+    "legend", "label", "input", "textarea", "button", "select", "option", "section", "header",
+    "footer", "nav", "article", "aside", "main_", "figure", "figcaption", "blockquote",
+    "iframe", "canvas", "audio", "video", "source", "small", "cite",
+];
+
+/// String-valued HTML attribute helpers in Html.Attributes.
+pub const HTML_STRING_ATTRS: &[&str] = &[
+    "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_",
+    "for", "action", "method", "target", "rel", "wrap", "accept", "autocomplete", "list",
+    "max", "min", "step", "pattern", "lang", "dir",
+];
+
+/// Bool-valued HTML attribute helpers in Html.Attributes.
+pub const HTML_BOOL_ATTRS: &[&str] = &[
+    "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus",
+    "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck",
+];
 
 // INFIX OPERATORS — the table from elm/core's Basics.elm and List.elm.
 
@@ -346,6 +428,10 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "Dict" => Some("Dict"),
         "Set" => Some("Set"),
         "Array" => Some("Array"),
+        "Html" | "Attribute" => Some("Html"),
+        "Program" => Some("Platform"),
+        "Cmd" => Some("Platform.Cmd"),
+        "Sub" => Some("Platform.Sub"),
         _ => None,
     }
 }
@@ -354,7 +440,8 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
 /// core data structure modules).
 pub const MODULES: &[&str] = &[
     "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug", "Dict", "Set",
-    "Array", "Bitwise",
+    "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Browser", "Platform",
+    "Platform.Cmd", "Platform.Sub",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

@@ -777,3 +777,257 @@ var $Bitwise$complement = function (a) { return ~a; };
 var $Bitwise$shiftLeftBy = F2(function (offset, a) { return a << offset; });
 var $Bitwise$shiftRightBy = F2(function (offset, a) { return a >> offset; });
 var $Bitwise$shiftRightZfBy = F2(function (offset, a) { return a >>> offset; });
+
+// VIRTUAL DOM
+
+function _VDom_text(text) { return { $: 'VText', text: text }; }
+function _VDom_node(tag) {
+    return F2(function (attrs, kids) {
+        return { $: 'VNode', tag: tag, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
+    });
+}
+
+var $Html$text = _VDom_text;
+var $Html$node = function (tag) { return _VDom_node(tag); };
+var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
+
+// Attributes are tagged with how they apply to a DOM node.
+var $Html$Attributes$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
+var $Html$Attributes$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
+var $Html$Attributes$map = F2(function (f, attr) {
+    return attr.$ === 'AEvent' ? { $: 'AEvent', name: attr.name, toMsg: function (e) { return f(attr.toMsg(e)); }, opts: attr.opts } : attr;
+});
+function _VDom_prop(key) {
+    return function (val) { return { $: 'AProp', key: key, val: val }; };
+}
+function _VDom_on(name, toMsg, opts) {
+    return { $: 'AEvent', name: name, toMsg: toMsg, opts: opts || {} };
+}
+
+var $Html$Events$onClick = function (msg) { return _VDom_on('click', function (_e) { return msg; }); };
+var $Html$Events$onDoubleClick = function (msg) { return _VDom_on('dblclick', function (_e) { return msg; }); };
+var $Html$Events$onMouseDown = function (msg) { return _VDom_on('mousedown', function (_e) { return msg; }); };
+var $Html$Events$onMouseUp = function (msg) { return _VDom_on('mouseup', function (_e) { return msg; }); };
+var $Html$Events$onMouseEnter = function (msg) { return _VDom_on('mouseenter', function (_e) { return msg; }); };
+var $Html$Events$onMouseLeave = function (msg) { return _VDom_on('mouseleave', function (_e) { return msg; }); };
+var $Html$Events$onInput = function (toMsg) {
+    return _VDom_on('input', function (e) { return toMsg(e.target.value); });
+};
+var $Html$Events$onCheck = function (toMsg) {
+    return _VDom_on('change', function (e) { return toMsg(e.target.checked); });
+};
+var $Html$Events$onSubmit = function (msg) {
+    return _VDom_on('submit', function (e) { return msg; }, { preventDefault: true });
+};
+
+// RENDER — build a real DOM node from a virtual node.
+
+function _VDom_render(vnode, dispatch, doc) {
+    switch (vnode.$) {
+        case 'VText':
+            return doc.createTextNode(vnode.text);
+        case 'VMap': {
+            var f = vnode.f;
+            return _VDom_render(vnode.node, function (msg) { dispatch(f(msg)); }, doc);
+        }
+        default: {
+            var dom = doc.createElement(vnode.tag);
+            dom._almListeners = {};
+            for (var i = 0; i < vnode.attrs.length; i++) {
+                _VDom_applyAttr(dom, vnode.attrs[i], dispatch);
+            }
+            for (var k = 0; k < vnode.kids.length; k++) {
+                dom.appendChild(_VDom_render(vnode.kids[k], dispatch, doc));
+            }
+            return dom;
+        }
+    }
+}
+
+function _VDom_applyAttr(dom, attr, dispatch) {
+    switch (attr.$) {
+        case 'AStyle':
+            dom.style[attr.key] = attr.val;
+            return;
+        case 'AAttr':
+            dom.setAttribute(attr.key, attr.val);
+            return;
+        case 'AProp':
+            dom[attr.key] = attr.val;
+            return;
+        case 'AEvent': {
+            var record = dom._almListeners[attr.name];
+            if (!record) {
+                record = dom._almListeners[attr.name] = {
+                    handler: function (e) {
+                        if (record.opts && record.opts.preventDefault && e.preventDefault) {
+                            e.preventDefault();
+                        }
+                        record.dispatch(record.toMsg(e));
+                    }
+                };
+                dom.addEventListener(attr.name, record.handler);
+            }
+            record.toMsg = attr.toMsg;
+            record.opts = attr.opts;
+            record.dispatch = dispatch;
+            return;
+        }
+    }
+}
+
+function _VDom_attrKey(attr) {
+    return attr.$ + ':' + (attr.key || attr.name);
+}
+
+function _VDom_unapplyAttr(dom, attr) {
+    switch (attr.$) {
+        case 'AStyle':
+            dom.style[attr.key] = '';
+            return;
+        case 'AAttr':
+            dom.removeAttribute(attr.key);
+            return;
+        case 'AProp':
+            dom[attr.key] = typeof attr.val === 'boolean' ? false : '';
+            return;
+        case 'AEvent': {
+            var record = dom._almListeners[attr.name];
+            if (record) {
+                dom.removeEventListener(attr.name, record.handler);
+                delete dom._almListeners[attr.name];
+            }
+            return;
+        }
+    }
+}
+
+// PATCH — diff by position, mutating the existing DOM where possible.
+
+function _VDom_patch(dom, oldV, newV, dispatch, doc) {
+    if (oldV === newV) { return dom; }
+
+    if (oldV.$ === 'VMap' && newV.$ === 'VMap') {
+        var f = newV.f;
+        return _VDom_patch(dom, oldV.node, newV.node, function (msg) { dispatch(f(msg)); }, doc);
+    }
+
+    if (oldV.$ === 'VText' && newV.$ === 'VText') {
+        if (oldV.text !== newV.text) { dom.textContent = newV.text; }
+        return dom;
+    }
+
+    if (oldV.$ !== newV.$ || oldV.tag !== newV.tag) {
+        var replacement = _VDom_render(newV, dispatch, doc);
+        dom.parentNode.replaceChild(replacement, dom);
+        return replacement;
+    }
+
+    // Same tag: patch attributes...
+    var oldAttrs = {};
+    for (var i = 0; i < oldV.attrs.length; i++) {
+        oldAttrs[_VDom_attrKey(oldV.attrs[i])] = oldV.attrs[i];
+    }
+    var newKeys = {};
+    for (var j = 0; j < newV.attrs.length; j++) {
+        var attr = newV.attrs[j];
+        newKeys[_VDom_attrKey(attr)] = true;
+        _VDom_applyAttr(dom, attr, dispatch);
+    }
+    for (var key in oldAttrs) {
+        if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
+    }
+
+    // ...then children by index.
+    var oldKids = oldV.kids, newKids = newV.kids;
+    var shared = Math.min(oldKids.length, newKids.length);
+    for (var k = 0; k < shared; k++) {
+        _VDom_patch(dom.childNodes[k], oldKids[k], newKids[k], dispatch, doc);
+    }
+    for (var d = oldKids.length; d > newKids.length; d--) {
+        dom.removeChild(dom.childNodes[d - 1]);
+    }
+    for (var n = oldKids.length; n < newKids.length; n++) {
+        dom.appendChild(_VDom_render(newKids[n], dispatch, doc));
+    }
+    return dom;
+}
+
+// COMMANDS AND SUBSCRIPTIONS — Cmd/Sub values exist and compose, but no
+// effect managers are ported yet, so executing them is a no-op.
+
+var $Platform$Cmd$none = { $: 'CmdNone' };
+var $Platform$Cmd$batch = function (_cmds) { return $Platform$Cmd$none; };
+var $Platform$Cmd$map = F2(function (_f, _cmd) { return $Platform$Cmd$none; });
+var $Platform$Sub$none = { $: 'SubNone' };
+var $Platform$Sub$batch = function (_subs) { return $Platform$Sub$none; };
+var $Platform$Sub$map = F2(function (_f, _sub) { return $Platform$Sub$none; });
+
+// PROGRAMS
+
+var $Browser$sandbox = function (impl) {
+    return { $: 'Program', kind: 'sandbox', impl: impl };
+};
+var $Browser$element = function (impl) {
+    return { $: 'Program', kind: 'element', impl: impl };
+};
+var $Platform$worker = function (impl) {
+    return { $: 'Program', kind: 'worker', impl: impl };
+};
+
+/// Exported values that are Programs become `{ init: ... }` objects, like
+/// the real Elm runtime; everything else is exported as-is.
+function _Platform_wrap(value) {
+    if (!value || value.$ !== 'Program') { return value; }
+    return {
+        init: function (opts) {
+            return _Platform_initialize(value, opts || {});
+        }
+    };
+}
+
+function _Platform_initialize(program, opts) {
+    var impl = program.impl;
+    var doc = (opts.node && opts.node.ownerDocument) ||
+        (typeof document !== 'undefined' ? document : null);
+
+    var model;
+    if (program.kind === 'sandbox') {
+        model = impl.init;
+    } else {
+        var pair = impl.init(opts.flags);
+        model = pair.a; // (model, Cmd msg) — commands are no-ops for now
+    }
+
+    var view = impl.view;
+    var vnode = null;
+    var root = null;
+
+    function dispatch(msg) {
+        if (program.kind === 'sandbox') {
+            model = A2(impl.update, msg, model);
+        } else {
+            model = A2(impl.update, msg, model).a;
+        }
+        if (view) {
+            var newVnode = view(model);
+            root = _VDom_patch(root, vnode, newVnode, dispatch, doc);
+            vnode = newVnode;
+        }
+    }
+
+    if (view) {
+        if (!opts.node) {
+            throw new Error('This program needs a DOM node: Elm.Main.init({ node: ... })');
+        }
+        vnode = view(model);
+        root = _VDom_render(vnode, dispatch, doc);
+        if (opts.node.parentNode) {
+            opts.node.parentNode.replaceChild(root, opts.node);
+        } else {
+            opts.node.appendChild(root);
+        }
+    }
+
+    return { ports: {} };
+}
