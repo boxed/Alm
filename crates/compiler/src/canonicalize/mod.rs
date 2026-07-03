@@ -11,6 +11,7 @@ use crate::ast::source as src;
 use crate::ast::source::Associativity;
 use crate::builtins;
 use crate::data::Name;
+use crate::interface::{Interface, Interfaces};
 use crate::reporting::{Located, Region};
 
 #[derive(Debug, Clone)]
@@ -37,7 +38,7 @@ struct CtorInfo {
     ctor: can::Ctor,
 }
 
-struct Env {
+struct Env<'a> {
     module_name: Name,
     top_level: HashSet<Name>,
     /// Locally declared unions and the builtin ones.
@@ -48,10 +49,14 @@ struct Env {
     import_names: HashMap<Name, Name>,
     /// Values exposed unqualified through `exposing` clauses on imports.
     exposed_values: HashMap<Name, Name>,
+    /// Types exposed unqualified through `exposing` clauses on imports.
+    exposed_types: HashMap<Name, Name>,
+    /// Interfaces of already-compiled user modules.
+    interfaces: &'a Interfaces,
     scopes: Vec<HashSet<Name>>,
 }
 
-impl Env {
+impl Env<'_> {
     fn is_local(&self, name: &Name) -> bool {
         self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
@@ -61,7 +66,16 @@ impl Env {
     }
 }
 
+/// Canonicalize a single module with no user imports (single-file mode).
 pub fn canonicalize(module: &src::Module) -> Result<can::Module, Vec<Error>> {
+    let interfaces = Interfaces::new();
+    canonicalize_module(module, &interfaces).map(|(canonical, _)| canonical)
+}
+
+pub fn canonicalize_module(
+    module: &src::Module,
+    interfaces: &Interfaces,
+) -> Result<(can::Module, Interface), Vec<Error>> {
     let module_name = module.get_name();
     let mut errors = Vec::new();
 
@@ -118,48 +132,138 @@ pub fn canonicalize(module: &src::Module) -> Result<can::Module, Vec<Error>> {
     // Imports: identity names for builtin modules plus user aliases.
     let mut import_names: HashMap<Name, Name> = HashMap::new();
     let mut exposed_values: HashMap<Name, Name> = HashMap::new();
-    for module_name in ["Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug"] {
-        import_names.insert(Name::from(module_name), Name::from(module_name));
+    let mut exposed_types: HashMap<Name, Name> = HashMap::new();
+    for module_name in builtins::MODULES {
+        import_names.insert(Name::from(*module_name), Name::from(*module_name));
     }
     for import in &module.imports {
         let import_name = &import.name.value;
-        if !builtins::is_builtin_module(import_name.as_str()) {
+        let is_builtin = builtins::is_builtin_module(import_name.as_str());
+        let user_interface = interfaces.get(import_name);
+        if !is_builtin && user_interface.is_none() {
             errors.push(Error::new(
-                format!(
-                    "I cannot find a module named `{}`. alm currently supports single-module programs plus the built-in core modules (Basics, List, String, Char, Maybe, Result, Tuple, Debug).",
-                    import_name
-                ),
+                format!("I cannot find a module named `{}`.", import_name),
                 import.name.region,
             ));
             continue;
         }
+        import_names.insert(import_name.clone(), import_name.clone());
         if let Some(alias) = &import.alias {
             import_names.insert(alias.clone(), import_name.clone());
         }
         match &import.exposing {
             src::Exposing::Open => {
-                for value in builtins::values() {
-                    if value.module == import_name.as_str() {
-                        exposed_values.insert(Name::from(value.name), import_name.clone());
+                if let Some(interface) = user_interface {
+                    for name in &interface.value_names {
+                        exposed_values.insert(name.clone(), import_name.clone());
+                    }
+                    for name in interface.unions.keys() {
+                        exposed_types.insert(name.clone(), import_name.clone());
+                    }
+                    for name in interface.aliases.keys() {
+                        exposed_types.insert(name.clone(), import_name.clone());
+                    }
+                    for union_name in &interface.open_unions {
+                        expose_union_ctors(
+                            &mut ctors,
+                            import_name,
+                            &interface.unions[union_name],
+                        );
+                    }
+                } else {
+                    for value in builtins::values() {
+                        if value.module == import_name.as_str() {
+                            exposed_values.insert(Name::from(value.name), import_name.clone());
+                        }
+                    }
+                    for union in builtins::UNIONS {
+                        if union.module == import_name.as_str() {
+                            exposed_types.insert(Name::from(union.name), import_name.clone());
+                        }
                     }
                 }
             }
             src::Exposing::Explicit(items) => {
                 for item in items {
-                    if let src::Exposed::Lower(name) = item {
-                        if builtins::lookup_value(import_name.as_str(), name.value.as_str())
-                            .is_some()
-                        {
-                            exposed_values.insert(name.value.clone(), import_name.clone());
-                        } else {
-                            errors.push(Error::new(
-                                format!(
-                                    "The `{}` module does not expose a value named `{}`.",
-                                    import_name, name.value
-                                ),
-                                name.region,
-                            ));
+                    match item {
+                        src::Exposed::Lower(name) => {
+                            let exists = match user_interface {
+                                Some(interface) => interface.value_names.contains(&name.value),
+                                None => builtins::lookup_value(
+                                    import_name.as_str(),
+                                    name.value.as_str(),
+                                )
+                                .is_some(),
+                            };
+                            if exists {
+                                exposed_values.insert(name.value.clone(), import_name.clone());
+                            } else {
+                                errors.push(Error::new(
+                                    format!(
+                                        "The `{}` module does not expose a value named `{}`.",
+                                        import_name, name.value
+                                    ),
+                                    name.region,
+                                ));
+                            }
                         }
+                        src::Exposed::Upper(name, privacy) => {
+                            let open = matches!(privacy, src::Privacy::Public(_));
+                            match user_interface {
+                                Some(interface) => {
+                                    if let Some(union) = interface.unions.get(&name.value) {
+                                        exposed_types
+                                            .insert(name.value.clone(), import_name.clone());
+                                        if open {
+                                            if interface.open_unions.contains(&name.value) {
+                                                expose_union_ctors(
+                                                    &mut ctors,
+                                                    import_name,
+                                                    union,
+                                                );
+                                            } else {
+                                                errors.push(Error::new(
+                                                    format!(
+                                                        "The `{}` module exposes the `{}` type opaquely; its constructors are private.",
+                                                        import_name, name.value
+                                                    ),
+                                                    name.region,
+                                                ));
+                                            }
+                                        }
+                                    } else if interface.aliases.contains_key(&name.value) {
+                                        exposed_types
+                                            .insert(name.value.clone(), import_name.clone());
+                                    } else {
+                                        errors.push(Error::new(
+                                            format!(
+                                                "The `{}` module does not expose a type named `{}`.",
+                                                import_name, name.value
+                                            ),
+                                            name.region,
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    exposed_types
+                                        .insert(name.value.clone(), import_name.clone());
+                                    if open {
+                                        if let Some((union, _)) = builtins::lookup_ctor_by_union(
+                                            import_name.as_str(),
+                                            name.value.as_str(),
+                                        ) {
+                                            for (index, _) in union.ctors.iter().enumerate() {
+                                                let info =
+                                                    builtin_ctor_info(union, index as u32);
+                                                ctors.insert(info.ctor.name.clone(), info);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Operators are globally available in alm.
+                        src::Exposed::Operator(..) => {}
                     }
                 }
             }
@@ -188,6 +292,8 @@ pub fn canonicalize(module: &src::Module) -> Result<can::Module, Vec<Error>> {
         aliases,
         import_names,
         exposed_values,
+        exposed_types,
+        interfaces,
         scopes: vec![],
     };
 
@@ -219,11 +325,125 @@ pub fn canonicalize(module: &src::Module) -> Result<can::Module, Vec<Error>> {
         Err(e) => return Err(vec![e]),
     };
 
-    Ok(can::Module {
+    let canonical = can::Module {
         name: module_name,
         decls,
         unions,
-    })
+    };
+    let interface = build_interface(&env, module, &canonical).map_err(|e| vec![e])?;
+    Ok((canonical, interface))
+}
+
+/// Compute what this module exposes, validating the `exposing` list.
+fn build_interface(
+    env: &Env,
+    module: &src::Module,
+    canonical: &can::Module,
+) -> CResult<Interface> {
+    let mut interface = Interface::default();
+    let unions_by_name: HashMap<Name, &can::Union> = canonical
+        .unions
+        .iter()
+        .map(|u| (u.name.clone(), u))
+        .collect();
+
+    let expose_alias = |interface: &mut Interface, name: &Name| -> bool {
+        if let Some((vars, body)) = env.aliases.get(name) {
+            if let Ok(canonical_body) = canonicalize_type(env, body) {
+                interface
+                    .aliases
+                    .insert(name.clone(), (vars.clone(), canonical_body));
+                return true;
+            }
+        }
+        false
+    };
+
+    match &module.exports.value {
+        src::Exposing::Open => {
+            for name in &env.top_level {
+                interface.value_names.insert(name.clone());
+            }
+            for union in &canonical.unions {
+                interface.unions.insert(union.name.clone(), union.clone());
+                interface.open_unions.insert(union.name.clone());
+            }
+            let alias_names: Vec<Name> = env.aliases.keys().cloned().collect();
+            for name in alias_names {
+                expose_alias(&mut interface, &name);
+            }
+        }
+        src::Exposing::Explicit(items) => {
+            for item in items {
+                match item {
+                    src::Exposed::Lower(name) => {
+                        if env.top_level.contains(&name.value) {
+                            interface.value_names.insert(name.value.clone());
+                        } else {
+                            return Err(Error::new(
+                                format!(
+                                    "You are trying to expose `{}`, but it is not defined in this module.",
+                                    name.value
+                                ),
+                                name.region,
+                            ));
+                        }
+                    }
+                    src::Exposed::Upper(name, privacy) => {
+                        if let Some(union) = unions_by_name.get(&name.value) {
+                            interface
+                                .unions
+                                .insert(name.value.clone(), (*union).clone());
+                            if matches!(privacy, src::Privacy::Public(_)) {
+                                interface.open_unions.insert(name.value.clone());
+                            }
+                        } else if expose_alias(&mut interface, &name.value) {
+                            if matches!(privacy, src::Privacy::Public(_)) {
+                                return Err(Error::new(
+                                    format!(
+                                        "`{}` is a type alias; expose it as `{}` without `(..)`.",
+                                        name.value, name.value
+                                    ),
+                                    name.region,
+                                ));
+                            }
+                        } else {
+                            return Err(Error::new(
+                                format!(
+                                    "You are trying to expose a type named `{}`, but it is not defined in this module.",
+                                    name.value
+                                ),
+                                name.region,
+                            ));
+                        }
+                    }
+                    src::Exposed::Operator(region, _) => {
+                        return Err(Error::new(
+                            "Custom operators are not supported.",
+                            *region,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(interface)
+}
+
+fn expose_union_ctors(ctors: &mut HashMap<Name, CtorInfo>, home: &Name, union: &can::Union) {
+    let num_ctors = union.ctors.len() as u32;
+    for ctor in &union.ctors {
+        ctors.entry(ctor.name.clone()).or_insert_with(|| CtorInfo {
+            home: home.clone(),
+            union: union.name.clone(),
+            ctor: can::Ctor {
+                name: ctor.name.clone(),
+                index: ctor.index,
+                arity: ctor.args.len() as u32,
+                num_ctors,
+            },
+        });
+    }
 }
 
 // DEPENDENCY SORTING
@@ -463,6 +683,9 @@ fn resolve_type(
             if let Some((vars, body)) = env.aliases.get(name) {
                 return expand_alias(env, region, name, vars, body, args, depth);
             }
+            if let Some(module) = env.exposed_types.get(name) {
+                return resolve_foreign_type(env, region, module, name, args);
+            }
             if let Some(home) = builtins::lookup_type_home(name.as_str()) {
                 return Ok(can::Type::Type(Name::from(home), name.clone(), args));
             }
@@ -478,15 +701,104 @@ fn resolve_type(
                     region,
                 )
             })?;
+            if module == env.module_name {
+                return resolve_type(env, region, None, name, args, depth);
+            }
             if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
-                Ok(can::Type::Type(module, name.clone(), args))
-            } else {
-                Err(Error::new(
-                    format!("The `{}` module does not have a type named `{}`.", module, name),
-                    region,
-                ))
+                return Ok(can::Type::Type(module, name.clone(), args));
+            }
+            resolve_foreign_type(env, region, &module, name, args)
+        }
+    }
+}
+
+/// A type that lives in another user module: an exported union or alias.
+fn resolve_foreign_type(
+    env: &Env,
+    region: Region,
+    module: &Name,
+    name: &Name,
+    args: Vec<can::Type>,
+) -> CResult<can::Type> {
+    let interface = env.interfaces.get(module).ok_or_else(|| {
+        Error::new(
+            format!("The `{}` module does not have a type named `{}`.", module, name),
+            region,
+        )
+    })?;
+    if let Some(union) = interface.unions.get(name) {
+        if union.vars.len() != args.len() {
+            return Err(Error::new(
+                format!(
+                    "The `{}` type needs {} argument{}, but I see {}.",
+                    name,
+                    union.vars.len(),
+                    if union.vars.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                region,
+            ));
+        }
+        return Ok(can::Type::Type(module.clone(), name.clone(), args));
+    }
+    if let Some((vars, body)) = interface.aliases.get(name) {
+        if vars.len() != args.len() {
+            return Err(Error::new(
+                format!(
+                    "The `{}` type alias needs {} argument{}, but I see {}.",
+                    name,
+                    vars.len(),
+                    if vars.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                region,
+            ));
+        }
+        let map: HashMap<Name, can::Type> = vars.iter().cloned().zip(args).collect();
+        return Ok(subst_can_type(body, &map));
+    }
+    Err(Error::new(
+        format!("The `{}` module does not have a type named `{}`.", module, name),
+        region,
+    ))
+}
+
+/// Substitute type variables in an already-canonical type (used to expand
+/// aliases exported by other modules).
+fn subst_can_type(tipe: &can::Type, map: &HashMap<Name, can::Type>) -> can::Type {
+    match tipe {
+        can::Type::Var(name) => map.get(name).cloned().unwrap_or_else(|| tipe.clone()),
+        can::Type::Lambda(arg, result) => can::Type::Lambda(
+            Box::new(subst_can_type(arg, map)),
+            Box::new(subst_can_type(result, map)),
+        ),
+        can::Type::Type(home, name, args) => can::Type::Type(
+            home.clone(),
+            name.clone(),
+            args.iter().map(|a| subst_can_type(a, map)).collect(),
+        ),
+        can::Type::Record(fields, ext) => {
+            let new_fields: Vec<(Name, can::Type)> = fields
+                .iter()
+                .map(|(n, t)| (n.clone(), subst_can_type(t, map)))
+                .collect();
+            match ext.as_ref().and_then(|e| map.get(e)) {
+                None => can::Type::Record(new_fields, ext.clone()),
+                Some(can::Type::Var(n)) => can::Type::Record(new_fields, Some(n.clone())),
+                Some(can::Type::Record(more_fields, ext2)) => {
+                    let mut merged = new_fields;
+                    merged.extend(more_fields.iter().cloned());
+                    can::Type::Record(merged, ext2.clone())
+                }
+                Some(_) => can::Type::Record(new_fields, ext.clone()),
             }
         }
+        can::Type::Unit => can::Type::Unit,
+        can::Type::Tuple(a, b, c) => can::Type::Tuple(
+            Box::new(subst_can_type(a, map)),
+            Box::new(subst_can_type(b, map)),
+            c.as_ref().map(|c| Box::new(subst_can_type(c, map))),
+        ),
     }
 }
 
@@ -674,6 +986,23 @@ fn find_ctor(
             }
             if let Some((union, index)) = builtins::lookup_ctor(module.as_str(), name.as_str()) {
                 return Ok(builtin_ctor_info(union, index));
+            }
+            if let Some(interface) = env.interfaces.get(&module) {
+                for union_name in &interface.open_unions {
+                    let union = &interface.unions[union_name];
+                    if let Some(ctor) = union.ctors.iter().find(|c| c.name == *name) {
+                        return Ok(CtorInfo {
+                            home: module.clone(),
+                            union: union.name.clone(),
+                            ctor: can::Ctor {
+                                name: ctor.name.clone(),
+                                index: ctor.index,
+                                arity: ctor.args.len() as u32,
+                                num_ctors: union.ctors.len() as u32,
+                            },
+                        });
+                    }
+                }
             }
             Err(Error::new(
                 format!("The `{}` module does not have a `{}` constructor.", module, name),
@@ -863,14 +1192,21 @@ fn find_qualified_var(
     let module = env.resolve_module(qualifier).ok_or_else(|| {
         Error::new(format!("I cannot find a module named `{}`.", qualifier), region)
     })?;
-    if builtins::lookup_value(module.as_str(), name.as_str()).is_some() {
-        Ok(can::Expr_::VarForeign(module, name.clone()))
-    } else {
-        Err(Error::new(
-            format!("The `{}` module does not expose a value named `{}`.", module, name),
-            region,
-        ))
+    if module == env.module_name && env.top_level.contains(name) {
+        return Ok(can::Expr_::VarTopLevel(name.clone()));
     }
+    if builtins::lookup_value(module.as_str(), name.as_str()).is_some() {
+        return Ok(can::Expr_::VarForeign(module, name.clone()));
+    }
+    if let Some(interface) = env.interfaces.get(&module) {
+        if interface.value_names.contains(name) {
+            return Ok(can::Expr_::VarForeign(module, name.clone()));
+        }
+    }
+    Err(Error::new(
+        format!("The `{}` module does not expose a value named `{}`.", module, name),
+        region,
+    ))
 }
 
 // LET

@@ -49,15 +49,7 @@ fn make(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let source = match std::fs::read_to_string(&input) {
-        Ok(source) => source,
-        Err(err) => {
-            eprintln!("I could not read {}: {}", input.display(), err);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    match alm_compiler::compile(&source) {
+    match alm_compiler::project::compile_project(&input) {
         Ok(javascript) => {
             let output = output.unwrap_or_else(|| input.with_extension("js"));
             if let Err(err) = std::fs::write(&output, javascript) {
@@ -67,15 +59,15 @@ fn make(args: &[String]) -> ExitCode {
             println!("Success! Compiled to {}", output.display());
             ExitCode::SUCCESS
         }
-        Err(reports) => {
-            let path = input.display().to_string();
-            for report in &reports {
-                eprintln!("{}", report.render(&path, &source));
+        Err(errors) => {
+            let count: usize = errors.iter().map(|e| e.reports.len()).sum();
+            for error in &errors {
+                eprintln!("{}", error.render());
             }
             eprintln!(
                 "Detected {} problem{}.",
-                reports.len(),
-                if reports.len() == 1 { "" } else { "s" }
+                count,
+                if count == 1 { "" } else { "s" }
             );
             ExitCode::FAILURE
         }

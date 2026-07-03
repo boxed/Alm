@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::canonical as can;
 use crate::builtins;
 use crate::data::Name;
+use crate::interface::Interfaces;
 use crate::reporting::Region;
 use types::{Content, FlatType, Pool, Super, Variable};
 
@@ -50,15 +51,27 @@ struct UnionInfo {
     ctor_args: HashMap<Name, Vec<can::Type>>,
 }
 
-pub struct Checker {
+pub struct Checker<'a> {
     pool: Pool,
     globals: HashMap<Name, Binding>,
     scopes: Vec<HashMap<Name, Binding>>,
     unions: HashMap<(Name, Name), UnionInfo>,
+    interfaces: &'a Interfaces,
     errors: Vec<Error>,
 }
 
+/// Check a single module with no user imports (single-file mode).
 pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
+    let interfaces = Interfaces::new();
+    check_module(module, &interfaces).map(|_| ())
+}
+
+/// Check a module against the interfaces of its dependencies. Returns the
+/// inferred type of every top-level definition.
+pub fn check_module(
+    module: &can::Module,
+    interfaces: &Interfaces,
+) -> Result<HashMap<Name, can::Type>, Vec<Error>> {
     let mut unions = HashMap::new();
     for union in &module.unions {
         unions.insert(
@@ -72,6 +85,21 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
                     .collect(),
             },
         );
+    }
+    for (module_name, interface) in interfaces {
+        for union in interface.unions.values() {
+            unions.insert(
+                (module_name.clone(), union.name.clone()),
+                UnionInfo {
+                    vars: union.vars.clone(),
+                    ctor_args: union
+                        .ctors
+                        .iter()
+                        .map(|c| (c.name.clone(), c.args.clone()))
+                        .collect(),
+                },
+            );
+        }
     }
     for union in builtins::UNIONS {
         unions.insert(
@@ -97,6 +125,7 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
         globals: HashMap::new(),
         scopes: Vec::new(),
         unions,
+        interfaces,
         errors: Vec::new(),
     };
 
@@ -105,7 +134,13 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
     }
 
     if checker.errors.is_empty() {
-        Ok(())
+        let mut types = HashMap::new();
+        for (name, binding) in &checker.globals {
+            if let Binding::Scheme(scheme) = binding {
+                types.insert(name.clone(), scheme.tipe.clone());
+            }
+        }
+        Ok(types)
     } else {
         Err(checker.errors)
     }
@@ -113,7 +148,7 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
 
 type Infer<T> = Result<T, Error>;
 
-impl Checker {
+impl Checker<'_> {
     // ENVIRONMENT
 
     fn lookup(&self, name: &Name) -> Option<&Binding> {
@@ -647,12 +682,18 @@ impl Checker {
                 })
             }
             VarForeign(module, name) => {
-                let value = builtins::lookup_value(module.as_str(), name.as_str())
-                    .ok_or_else(|| Error {
-                        message: format!("I cannot find `{}.{}`.", module, name),
-                        region,
-                    })?;
-                let tipe = builtins::parse_signature(value.signature);
+                let tipe = match builtins::lookup_value(module.as_str(), name.as_str()) {
+                    Some(value) => builtins::parse_signature(value.signature),
+                    None => self
+                        .interfaces
+                        .get(module)
+                        .and_then(|interface| interface.values.get(name))
+                        .cloned()
+                        .ok_or_else(|| Error {
+                            message: format!("I cannot find `{}.{}`.", module, name),
+                            region,
+                        })?,
+                };
                 Ok(self.instantiate(&Scheme::closed(tipe)))
             }
             VarCtor(home, union_name, ctor) => {

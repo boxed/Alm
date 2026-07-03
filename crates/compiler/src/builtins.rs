@@ -253,11 +253,24 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Modules that are implicitly importable (Elm's default imports).
+pub const MODULES: &[&str] = &[
+    "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug",
+];
+
 pub fn is_builtin_module(name: &str) -> bool {
-    matches!(
-        name,
-        "Basics" | "List" | "String" | "Char" | "Maybe" | "Result" | "Tuple" | "Debug"
-    )
+    MODULES.contains(&name)
+}
+
+/// Look up a builtin union by module and type name.
+pub fn lookup_ctor_by_union(
+    module: &str,
+    union_name: &str,
+) -> Option<(&'static BuiltinUnion, u32)> {
+    UNIONS
+        .iter()
+        .find(|u| u.module == module && u.name == union_name)
+        .map(|u| (u, 0))
 }
 
 pub fn lookup_value(module: &str, name: &str) -> Option<&'static BuiltinValue> {

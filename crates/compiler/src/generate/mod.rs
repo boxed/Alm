@@ -12,59 +12,83 @@ use crate::data::Name;
 pub const RUNTIME: &str = include_str!("runtime.js");
 
 pub fn generate(module: &can::Module) -> String {
+    generate_project(std::slice::from_ref(module))
+}
+
+/// Generate a single JavaScript file from all the modules of a project,
+/// given in dependency order (dependencies first).
+pub fn generate_project(modules: &[can::Module]) -> String {
     let mut gen = Generator {
         out: String::new(),
-        module_name: module.name.clone(),
+        module_name: Name::from("?"),
         temp_counter: 0,
     };
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
     gen.out.push_str(RUNTIME);
-    gen.out.push_str("\n// MODULE ");
-    gen.out.push_str(module.name.as_str());
-    gen.out.push_str("\n\n");
 
-    for union in &module.unions {
-        gen.union(union);
-    }
+    let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
+    for module in modules {
+        gen.module_name = module.name.clone();
+        gen.out.push_str("\n// MODULE ");
+        gen.out.push_str(module.name.as_str());
+        gen.out.push_str("\n\n");
 
-    let mut exports = Vec::new();
-    for group in &module.decls {
-        match group {
-            can::DeclGroup::Value(def) => {
-                gen.top_level_def(def);
-                exports.push(def.name.value.clone());
-            }
-            can::DeclGroup::Recursive(defs) => {
-                for def in defs {
+        for union in &module.unions {
+            gen.union(union);
+        }
+
+        let mut exports = Vec::new();
+        for group in &module.decls {
+            match group {
+                can::DeclGroup::Value(def) => {
                     gen.top_level_def(def);
                     exports.push(def.name.value.clone());
                 }
+                can::DeclGroup::Recursive(defs) => {
+                    for def in defs {
+                        gen.top_level_def(def);
+                        exports.push(def.name.value.clone());
+                    }
+                }
             }
         }
+        all_exports.push((module.name.clone(), exports));
     }
 
-    let module_var = mangle_module(&gen.module_name);
-    let mut export_fields = String::new();
-    for (i, name) in exports.iter().enumerate() {
+    let mut module_objects = String::new();
+    for (i, (module_name, exports)) in all_exports.iter().enumerate() {
         if i > 0 {
-            export_fields.push_str(", ");
+            module_objects.push_str(", ");
+        }
+        let module_var = mangle_module(module_name);
+        let mut export_fields = String::new();
+        for (j, name) in exports.iter().enumerate() {
+            if j > 0 {
+                export_fields.push_str(", ");
+            }
+            write!(
+                export_fields,
+                "'{}': {}${}",
+                name,
+                module_var,
+                sanitize(name)
+            )
+            .unwrap();
         }
         write!(
-            export_fields,
-            "'{}': {}${}",
-            name,
-            module_var,
-            sanitize(name)
+            module_objects,
+            "'{}': {{ {} }}",
+            module_name, export_fields
         )
         .unwrap();
     }
     write!(
         gen.out,
-        "\nvar Elm = {{ '{}': {{ {} }} }};\n\
+        "\nvar Elm = {{ {} }};\n\
          if (typeof module !== 'undefined') {{ module.exports = Elm; }} else {{ this.Elm = Elm; }}\n\
          }}).call(this);\n",
-        module.name, export_fields
+        module_objects
     )
     .unwrap();
 

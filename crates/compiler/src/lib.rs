@@ -8,7 +8,9 @@ pub mod builtins;
 pub mod canonicalize;
 pub mod data;
 pub mod generate;
+pub mod interface;
 pub mod parse;
+pub mod project;
 pub mod reporting;
 pub mod typecheck;
 
