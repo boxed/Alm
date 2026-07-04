@@ -556,6 +556,32 @@ fn list_append_and_member() {
 }
 
 #[test]
+fn list_head_tail_maybe() {
+    assert_same(
+        "head_tail",
+        "module Test exposing (..)\n\
+         \n\
+         firstOr : Int -> List Int -> Int\n\
+         firstOr default xs =\n\
+         \x20   case List.head xs of\n\
+         \x20       Just x -> x\n\
+         \x20       Nothing -> default\n\
+         \n\
+         sumTail : List Int -> Int\n\
+         sumTail xs =\n\
+         \x20   case List.tail xs of\n\
+         \x20       Just rest -> List.sum rest\n\
+         \x20       Nothing -> -1\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   firstOr 0 [ 7, 8, 9 ]\n\
+         \x20       + 100 * firstOr 0 []\n\
+         \x20       + 1000 * sumTail [ 7, 8, 9 ]\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

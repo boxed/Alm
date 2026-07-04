@@ -412,7 +412,23 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 ))
             }
         };
-        let struct_ty = self.ctor_struct(&field_layouts);
+        let mut fields = Vec::with_capacity(args.len());
+        for arg in args {
+            fields.push(self.gen(arg)?);
+        }
+        Ok(self.alloc_tagged(&field_layouts, ctor.index, &fields).into())
+    }
+
+    /// Allocate a heap `{i32 tag, fields...}` block and store the tag and
+    /// field values. Shared by constructor application and Maybe-returning
+    /// kernels.
+    fn alloc_tagged(
+        &self,
+        field_layouts: &[Layout],
+        tag: u32,
+        fields: &[BasicValueEnum<'ctx>],
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let struct_ty = self.ctor_struct(field_layouts);
         let size = struct_ty.size_of().unwrap();
         let alloc = self.module.get_function("alm_alloc").unwrap();
         let raw = self
@@ -423,21 +439,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .left()
             .unwrap()
             .into_pointer_value();
-
-        // Store the tag, then each field.
         let tag_ptr = self.builder.build_struct_gep(struct_ty, raw, 0, "tagp").unwrap();
         self.builder
-            .build_store(tag_ptr, self.ctx.i32_type().const_int(ctor.index as u64, false))
+            .build_store(tag_ptr, self.ctx.i32_type().const_int(tag as u64, false))
             .unwrap();
-        for (i, arg) in args.iter().enumerate() {
-            let v = self.gen(arg)?;
+        for (i, v) in fields.iter().enumerate() {
             let fp = self
                 .builder
                 .build_struct_gep(struct_ty, raw, (i + 1) as u32, "fp")
                 .unwrap();
-            self.builder.build_store(fp, v).unwrap();
+            self.builder.build_store(fp, *v).unwrap();
         }
-        Ok(raw.into())
+        raw
     }
 
     fn gen_let(
@@ -664,6 +677,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "reverse") => self.kernel_list_reverse(whole, args),
             ("List", "filter") => self.kernel_list_filter(whole, args),
             ("List", "member") => self.kernel_list_member(args),
+            ("List", "head") => self.kernel_list_head_tail(whole, args, true),
+            ("List", "tail") => self.kernel_list_head_tail(whole, args, false),
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
@@ -1092,6 +1107,50 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let need = b.build_and(r_nz, diff, "need").unwrap();
         let radd = b.build_int_add(r, m, "radd").unwrap();
         Ok(b.build_select(need, radd, r, "mod").unwrap())
+    }
+
+    /// `List.head`/`List.tail : List a -> Maybe _` — Nothing on empty, else
+    /// Just of the head (or the tail list). Maybe's constructors are Just
+    /// (variant 0, one field) and Nothing (variant 1, no fields).
+    fn kernel_list_head_tail(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+        is_head: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let variants = match self.layouts.layout_of(&whole.tipe) {
+            Layout::Tagged(v) => v,
+            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
+        };
+        let elem = self.elem_layout(&args[0].tipe)?;
+        let list = self.gen(&args[0])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let is_null = self.builder.build_is_null(list, "empty").unwrap();
+        let just_bb = self.new_block("mb.just");
+        let nothing_bb = self.new_block("mb.nothing");
+        let merge = self.new_block("mb.end");
+        self.builder.build_conditional_branch(is_null, nothing_bb, just_bb).unwrap();
+
+        self.builder.position_at_end(just_bb);
+        let field: BasicValueEnum = if is_head {
+            let hp = self.builder.build_struct_gep(cell, list, 0, "hp").unwrap();
+            self.builder.build_load(self.llvm_type(&elem), hp, "head").unwrap()
+        } else {
+            let tp = self.builder.build_struct_gep(cell, list, 1, "tp").unwrap();
+            self.builder.build_load(ptr_t, tp, "tail").unwrap()
+        };
+        let just: BasicValueEnum = self.alloc_tagged(&variants[0], 0, &[field]).into();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(nothing_bb);
+        let nothing: BasicValueEnum = self.alloc_tagged(&variants[1], 1, &[]).into();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(ptr_t, "maybe").unwrap();
+        phi.add_incoming(&[(&just as &dyn BasicValue, just_bb), (&nothing as &dyn BasicValue, nothing_bb)]);
+        Ok(phi.as_basic_value())
     }
 
     /// `List.member x xs : Bool` — walk comparing each element to `x`
