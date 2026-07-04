@@ -286,6 +286,40 @@ fn recursive_tree_sum() {
 }
 
 #[test]
+fn list_literal_and_recursive_sum() {
+    assert_same(
+        "list_sum",
+        "module Test exposing (..)\n\
+         \n\
+         sum : List Int -> Int\n\
+         sum xs =\n\
+         \x20   case xs of\n\
+         \x20       [] -> 0\n\
+         \x20       h :: t -> h + sum t\n\
+         \n\
+         main : Int\n\
+         main = sum [ 1, 2, 3, 4, 5 ]\n",
+    );
+}
+
+#[test]
+fn list_cons_and_length() {
+    assert_same(
+        "list_cons",
+        "module Test exposing (..)\n\
+         \n\
+         length : List Int -> Int\n\
+         length xs =\n\
+         \x20   case xs of\n\
+         \x20       [] -> 0\n\
+         \x20       _ :: t -> 1 + length t\n\
+         \n\
+         main : Int\n\
+         main = length (1 :: 2 :: 3 :: [])\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

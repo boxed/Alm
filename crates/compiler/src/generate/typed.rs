@@ -143,7 +143,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Tagged(_) | Layout::Ref => {
                 self.ctx.ptr_type(inkwell::AddressSpace::default()).into()
             }
+            // A list is a pointer to a cons cell (or null for empty).
+            Layout::List(_) => self.ctx.ptr_type(inkwell::AddressSpace::default()).into(),
             _ => self.ctx.i64_type().into(),
+        }
+    }
+
+    /// A cons cell: `{ element, next-pointer }`.
+    fn cons_cell(&self, elem: &Layout) -> inkwell::types::StructType<'ctx> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        self.ctx
+            .struct_type(&[self.llvm_type(elem), ptr_t.into()], false)
+    }
+
+    /// Element layout of a `List` type.
+    fn elem_layout(&self, list_tipe: &crate::ast::canonical::Type) -> Result<Layout, String> {
+        match self.layouts.layout_of(list_tipe) {
+            Layout::List(elem) => Ok(*elem),
+            other => Err(format!("typed backend: expected a list, got {:?}", other)),
         }
     }
 
@@ -275,6 +292,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .unwrap())
             }
             TypedKind::Call(func, args) => self.gen_call(expr, func, args),
+            TypedKind::List(items) => self.gen_list(expr, items),
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "::" => self.gen_cons(expr, l, r),
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
@@ -574,6 +593,61 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
     }
 
+    /// Allocate a cons cell `{elem, tail}` and return the pointer.
+    fn cons(
+        &mut self,
+        elem: &Layout,
+        head: BasicValueEnum<'ctx>,
+        tail: inkwell::values::PointerValue<'ctx>,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let cell = self.cons_cell(elem);
+        let alloc = self.module.get_function("alm_alloc").unwrap();
+        let raw = self
+            .builder
+            .build_call(alloc, &[cell.size_of().unwrap().into()], "cons")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+        let hp = self.builder.build_struct_gep(cell, raw, 0, "hp").unwrap();
+        self.builder.build_store(hp, head).unwrap();
+        let tp = self.builder.build_struct_gep(cell, raw, 1, "tp").unwrap();
+        self.builder.build_store(tp, tail).unwrap();
+        raw
+    }
+
+    fn gen_cons(
+        &mut self,
+        whole: &TypedExpr,
+        head: &TypedExpr,
+        tail: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let h = self.gen(head)?;
+        let t = self.gen(tail)?.into_pointer_value();
+        Ok(self.cons(&elem, h, t).into())
+    }
+
+    fn gen_list(
+        &mut self,
+        whole: &TypedExpr,
+        items: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // Build right-to-left so the head ends up outermost.
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.gen(item)?);
+        }
+        let mut acc = ptr_t.const_null();
+        for v in values.into_iter().rev() {
+            acc = self.cons(&elem, v, acc);
+        }
+        Ok(acc.into())
+    }
+
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
         let v = self.gen(inner)?;
         Ok(match self.layouts.layout_of(&inner.tipe) {
@@ -753,6 +827,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 subject.into_int_value(),
                 self.ctx.i32_type().const_int(*c as u64, false),
             )),
+            // Empty-list pattern: the pointer is null.
+            List(elems) if elems.is_empty() => Some(
+                self.builder
+                    .build_is_null(subject.into_pointer_value(), "isnil")
+                    .unwrap(),
+            ),
+            // Cons pattern: the pointer is non-null.
+            Cons(_, _) => Some(
+                self.builder
+                    .build_is_not_null(subject.into_pointer_value(), "iscons")
+                    .unwrap(),
+            ),
             Ctor(_, _, ctor, _) => match layout {
                 Layout::Bool => Some(eq_i(
                     &self.builder,
@@ -814,6 +900,31 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 self.bind_case_pattern(inner, subject, layout)
             }
             Int(_) | Chr(_) => Ok(()),
+            List(elems) if elems.is_empty() => Ok(()),
+            Cons(head, tail) => {
+                let Layout::List(elem) = layout else {
+                    return Err("typed backend: cons pattern on non-list value".to_string());
+                };
+                let cell = self.cons_cell(elem);
+                let ptr = subject.into_pointer_value();
+                let hp = self.builder.build_struct_gep(cell, ptr, 0, "hp").unwrap();
+                let head_val = self
+                    .builder
+                    .build_load(self.llvm_type(elem), hp, "head")
+                    .unwrap();
+                self.bind_pattern(head, head_val, elem)?;
+                let tp = self.builder.build_struct_gep(cell, ptr, 1, "tp").unwrap();
+                let tail_val = self
+                    .builder
+                    .build_load(
+                        self.ctx.ptr_type(inkwell::AddressSpace::default()),
+                        tp,
+                        "tail",
+                    )
+                    .unwrap();
+                self.bind_pattern(tail, tail_val, layout)?;
+                Ok(())
+            }
             Ctor(_, _, ctor, args) => {
                 if args.is_empty() {
                     return Ok(());
