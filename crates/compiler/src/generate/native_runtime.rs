@@ -64,6 +64,10 @@ static ALLOCATOR: Bump = Bump;
 // VALUES
 
 pub enum Value {
+    /// A heap-boxed integer, used only where pointers are too narrow to
+    /// carry a tagged immediate (wasm32). On 64-bit hosts integers are
+    /// unboxed tagged immediates and this variant is never constructed.
+    Int(i64),
     Float(f64),
     Char(u32),
     Bool(bool),
@@ -117,27 +121,49 @@ fn alloc(value: Value) -> *mut Value {
     Box::into_raw(Box::new(value))
 }
 
-// UNBOXED INTEGERS
+// INTEGERS
 //
-// Integers are not heap-boxed: they are tagged immediates carried in the
-// pointer itself (OCaml/V8-SMI style). Heap allocations are 8-aligned, so
-// their low bit is 0; a low bit of 1 marks a 63-bit immediate integer. The
-// LLVM codegen only ever moves values around opaquely and never
-// dereferences them, so this stays entirely inside the runtime.
+// On 64-bit hosts integers are unboxed tagged immediates carried in the
+// pointer itself (OCaml/V8-SMI style): heap allocations are 8-aligned so
+// their low bit is 0, and a low bit of 1 marks a 63-bit immediate integer.
+// On wasm32 a pointer is only 32 bits — too narrow for a useful immediate —
+// so integers are heap-boxed (`Value::Int`) to keep the full 64 bits. The
+// LLVM codegen only moves values opaquely and never inspects them, so this
+// representation choice lives entirely in the runtime.
 
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn is_int(p: *mut Value) -> bool {
+unsafe fn is_int(p: *mut Value) -> bool {
     (p as i64) & 1 == 1
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn mk_int(n: i64) -> *mut Value {
+unsafe fn mk_int(n: i64) -> *mut Value {
     ((n << 1) | 1) as *mut Value
 }
-
+#[cfg(not(target_arch = "wasm32"))]
 #[inline]
-fn int_val(p: *mut Value) -> i64 {
+unsafe fn int_val(p: *mut Value) -> i64 {
     (p as i64) >> 1
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn is_int(p: *mut Value) -> bool {
+    matches!(&*p, Value::Int(_))
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn mk_int(n: i64) -> *mut Value {
+    alloc(Value::Int(n))
+}
+#[cfg(target_arch = "wasm32")]
+#[inline]
+unsafe fn int_val(p: *mut Value) -> i64 {
+    match &*p {
+        Value::Int(n) => *n,
+        _ => 0,
+    }
 }
 
 /// An exported global holding a `*mut Value`, set once during startup and
@@ -797,17 +823,16 @@ unsafe fn ap2(f: *mut Value, a: *mut Value, b: *mut Value) -> *mut Value {
 // (matching JS, where every number is a double).
 
 // Arithmetic and comparisons: a tiny inlinable fast path for the common
-// case of two unboxed (tagged) integers, with the float/boxed handling
-// pushed out-of-line so LLVM inlines the hot path into generated code.
-// Tagged ints are `2x+1`, so `a + b - 1 == 2(x+y)+1` and `a - b + 1 ==
-// 2(x-y)+1` retag without shifting; ordering and equality of the raw
-// tagged bits match the untagged values.
+// case of two integers, with the float handling pushed out-of-line so LLVM
+// inlines the hot path into generated code. The fast path goes through
+// `int_val`/`mk_int` so it is correct for both the unboxed (host) and boxed
+// (wasm) integer representations.
 
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn rt_add(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return (a as i64).wrapping_add(b as i64).wrapping_sub(1) as *mut Value;
+        return mk_int(int_val(a).wrapping_add(int_val(b)));
     }
     rt_add_slow(a, b)
 }
@@ -820,7 +845,7 @@ unsafe fn rt_add_slow(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_sub(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return (a as i64).wrapping_sub(b as i64).wrapping_add(1) as *mut Value;
+        return mk_int(int_val(a).wrapping_sub(int_val(b)));
     }
     rt_sub_slow(a, b)
 }
@@ -965,15 +990,14 @@ unsafe fn value_cmp(a: *mut Value, b: *mut Value) -> i32 {
     }
 }
 
-// Equal tagged ints have identical bits, and signed comparison of the raw
-// tagged bits matches the untagged ordering — so the two-int case is a
-// direct pointer compare, with structural eq/cmp pushed out-of-line.
+// The two-integer case is a fast path through `int_val` (correct for both
+// the unboxed and boxed representations), with structural eq/cmp out-of-line.
 
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn rt_eq(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool(a == b);
+        return rt_bool(int_val(a) == int_val(b));
     }
     rt_bool(value_eq(a, b))
 }
@@ -981,7 +1005,7 @@ pub unsafe extern "C" fn rt_eq(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_neq(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool(a != b);
+        return rt_bool(int_val(a) != int_val(b));
     }
     rt_bool(!value_eq(a, b))
 }
@@ -989,7 +1013,7 @@ pub unsafe extern "C" fn rt_neq(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_lt(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool((a as i64) < (b as i64));
+        return rt_bool(int_val(a) < int_val(b));
     }
     rt_bool(value_cmp(a, b) < 0)
 }
@@ -997,7 +1021,7 @@ pub unsafe extern "C" fn rt_lt(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_le(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool((a as i64) <= (b as i64));
+        return rt_bool(int_val(a) <= int_val(b));
     }
     rt_bool(value_cmp(a, b) <= 0)
 }
@@ -1005,7 +1029,7 @@ pub unsafe extern "C" fn rt_le(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_gt(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool((a as i64) > (b as i64));
+        return rt_bool(int_val(a) > int_val(b));
     }
     rt_bool(value_cmp(a, b) > 0)
 }
@@ -1013,7 +1037,7 @@ pub unsafe extern "C" fn rt_gt(a: *mut Value, b: *mut Value) -> *mut Value {
 #[inline]
 pub unsafe extern "C" fn rt_ge(a: *mut Value, b: *mut Value) -> *mut Value {
     if is_int(a) && is_int(b) {
-        return rt_bool((a as i64) >= (b as i64));
+        return rt_bool(int_val(a) >= int_val(b));
     }
     rt_bool(value_cmp(a, b) >= 0)
 }
@@ -1900,6 +1924,8 @@ unsafe fn debug_fmt(out: &mut String, v: *mut Value) {
         return;
     }
     match &*v {
+        // Unreachable: `is_int` handles integers above (boxed on wasm).
+        Value::Int(n) => out.push_str(&n.to_string()),
         Value::Float(f) => out.push_str(&fmt_float(*f)),
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         Value::Unit => out.push_str("()"),
