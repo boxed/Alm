@@ -424,6 +424,26 @@ fn to_float_kernel() {
 }
 
 #[test]
+fn short_circuit_boolean_ops() {
+    assert_same(
+        "shortcircuit",
+        "module Test exposing (..)\n\
+         \n\
+         safe : Int -> Bool\n\
+         safe x = x /= 0 && 10 // x > 0\n\
+         \n\
+         describe : Bool -> Int\n\
+         describe b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   describe (safe 0)\n\
+         \x20       + 10 * describe (safe 5)\n\
+         \x20       + 100 * describe (True || safe 0)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

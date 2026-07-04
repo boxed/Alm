@@ -327,6 +327,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "::" => self.gen_cons(expr, l, r),
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "++" => self.gen_append(l, r),
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "&&" || op.as_str() == "||" => {
+                self.gen_and_or(op.as_str(), l, r)
+            }
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
@@ -1250,6 +1253,41 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             _ => (callee.clone(), vec![extra.clone()]),
         };
         self.gen_call(whole, &func, &args)
+    }
+
+    /// Short-circuiting `&&` / `||`: the right operand is only evaluated when
+    /// the left doesn't already decide the result (important since a pure but
+    /// partial RHS — e.g. a division guarded by the LHS — must be skipped).
+    fn gen_and_or(
+        &mut self,
+        op: &str,
+        l: &TypedExpr,
+        r: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let lv = self.gen(l)?.into_int_value();
+        let cur = self.builder.get_insert_block().unwrap();
+        let rhs_bb = self.new_block("sc.rhs");
+        let merge = self.new_block("sc.end");
+        if op == "&&" {
+            self.builder.build_conditional_branch(lv, rhs_bb, merge).unwrap();
+        } else {
+            self.builder.build_conditional_branch(lv, merge, rhs_bb).unwrap();
+        }
+        self.builder.position_at_end(rhs_bb);
+        let rv = self.gen(r)?;
+        let rhs_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(self.ctx.bool_type(), "sc").unwrap();
+        // From `cur`: the short-circuit value (false for &&, true for ||).
+        let shortcut: BasicValueEnum = self
+            .ctx
+            .bool_type()
+            .const_int((op == "||") as u64, false)
+            .into();
+        phi.add_incoming(&[(&shortcut as &dyn BasicValue, cur), (&rv as &dyn BasicValue, rhs_end)]);
+        Ok(phi.as_basic_value())
     }
 
     fn gen_cons(
