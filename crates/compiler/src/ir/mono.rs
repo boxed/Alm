@@ -261,6 +261,324 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
     }
 }
 
+// ---------------------------------------------------------------------------
+// Specialized bodies
+//
+// Having discovered the instance set, `specialize_program` rebuilds each
+// instance's body as a *typed* tree: every node carries its concrete type
+// (the checker-captured type run through the instance's substitution) and
+// every reference to another top-level function is resolved to that callee's
+// mangled specialization name. This is the codegen-ready form; layouts and
+// typed codegen consume it.
+// ---------------------------------------------------------------------------
+
+/// A fully monomorphized program: one typed function per specialization.
+#[derive(Debug)]
+pub struct MonoProgram {
+    pub functions: Vec<TypedFn>,
+}
+
+/// A specialized function: its mangled name, the source name and concrete
+/// type it came from, its typed parameters, and its typed body.
+#[derive(Debug)]
+pub struct TypedFn {
+    pub mangled: Name,
+    pub original: Name,
+    pub tipe: can::Type,
+    pub params: Vec<(can::Pattern, can::Type)>,
+    pub body: TypedExpr,
+}
+
+/// An expression annotated with its concrete type.
+#[derive(Debug)]
+pub struct TypedExpr {
+    pub tipe: can::Type,
+    pub kind: TypedKind,
+}
+
+#[derive(Debug)]
+pub enum TypedKind {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Chr(char),
+    Unit,
+    /// A locally-bound variable (lambda/let/case/argument).
+    Local(Name),
+    /// A resolved reference to another specialization (mangled name).
+    Global(Name),
+    /// A built-in/kernel value — still the uniform representation until
+    /// typed kernels land.
+    Foreign(Name, Name),
+    Ctor(Name, Name, can::Ctor),
+    List(Vec<TypedExpr>),
+    Negate(Box<TypedExpr>),
+    Binop(Name, Name, Name, Box<TypedExpr>, Box<TypedExpr>),
+    Lambda(Vec<(can::Pattern, can::Type)>, Box<TypedExpr>),
+    Call(Box<TypedExpr>, Vec<TypedExpr>),
+    If(Vec<(TypedExpr, TypedExpr)>, Box<TypedExpr>),
+    Let(Vec<TypedLetDecl>, Box<TypedExpr>),
+    Case(Box<TypedExpr>, Vec<(can::Pattern, TypedExpr)>),
+    Accessor(Name),
+    Access(Box<TypedExpr>, Name),
+    Update(Box<TypedExpr>, Vec<(Name, TypedExpr)>),
+    Record(Vec<(Name, TypedExpr)>),
+    Tuple(Box<TypedExpr>, Box<TypedExpr>, Option<Box<TypedExpr>>),
+}
+
+#[derive(Debug)]
+pub enum TypedLetDecl {
+    /// A local definition, specialized with the enclosing substitution.
+    /// (Polymorphic-in-context local helpers are not yet split per type.)
+    Def {
+        name: Name,
+        params: Vec<(can::Pattern, can::Type)>,
+        body: TypedExpr,
+    },
+    Recursive(Vec<TypedLetDecl>),
+    Destruct(can::Pattern, TypedExpr),
+}
+
+/// Analyze, then build a typed body for every discovered instance.
+pub fn specialize_program(
+    module: &can::Module,
+    types: &HashMap<Name, can::Type>,
+    node_types: &HashMap<Region, can::Type>,
+) -> MonoProgram {
+    let set = analyze(module, types, node_types);
+    let defs = index_defs(module);
+    let spec = Specializer { defs: &defs, node_types };
+
+    let mut functions = Vec::new();
+    for instance in &set.instances {
+        let Some(def) = defs.get(&instance.name) else {
+            continue;
+        };
+        let scheme = types
+            .get(&instance.name)
+            .cloned()
+            .unwrap_or_else(|| instance.tipe.clone());
+        let mut subst = HashMap::new();
+        match_type(&scheme, &instance.tipe, &mut subst);
+
+        // Peel argument types off the concrete function type.
+        let mut params = Vec::new();
+        let mut remaining = instance.tipe.clone();
+        for arg in &def.args {
+            match remaining {
+                can::Type::Lambda(a, b) => {
+                    params.push((arg.clone(), *a));
+                    remaining = *b;
+                }
+                other => {
+                    // Fewer arrows than args: leave the rest untyped-ish.
+                    params.push((arg.clone(), other.clone()));
+                    remaining = other;
+                }
+            }
+        }
+
+        functions.push(TypedFn {
+            mangled: mangle(&instance.name, &instance.tipe),
+            original: instance.name.clone(),
+            tipe: instance.tipe.clone(),
+            params,
+            body: spec.expr(&def.body, &subst),
+        });
+    }
+
+    MonoProgram { functions }
+}
+
+struct Specializer<'a> {
+    defs: &'a HashMap<Name, &'a can::Def>,
+    node_types: &'a HashMap<Region, can::Type>,
+}
+
+impl Specializer<'_> {
+    /// The concrete type of a node under a substitution.
+    fn node_ty(&self, expr: &can::Expr, subst: &HashMap<Name, can::Type>) -> can::Type {
+        let captured = self
+            .node_types
+            .get(&expr.region)
+            .cloned()
+            .unwrap_or(can::Type::Unit);
+        apply_subst(subst, &captured)
+    }
+
+    fn expr(&self, expr: &can::Expr, subst: &HashMap<Name, can::Type>) -> TypedExpr {
+        use can::Expr_::*;
+        let tipe = self.node_ty(expr, subst);
+        let kind = match &expr.value {
+            Int(n) => TypedKind::Int(*n),
+            Float(f) => TypedKind::Float(*f),
+            Str(s) => TypedKind::Str(s.clone()),
+            Chr(c) => TypedKind::Chr(*c),
+            Unit => TypedKind::Unit,
+            VarLocal(name) => TypedKind::Local(name.clone()),
+            VarTopLevel(name) => {
+                if self.defs.contains_key(name) {
+                    // Resolve to the callee's specialization at this node's
+                    // concrete type.
+                    TypedKind::Global(mangle(name, &tipe))
+                } else {
+                    TypedKind::Local(name.clone())
+                }
+            }
+            VarForeign(module, name) => TypedKind::Foreign(module.clone(), name.clone()),
+            VarCtor(home, union, ctor) => {
+                TypedKind::Ctor(home.clone(), union.clone(), ctor.clone())
+            }
+            List(items) => {
+                TypedKind::List(items.iter().map(|e| self.expr(e, subst)).collect())
+            }
+            Negate(inner) => TypedKind::Negate(Box::new(self.expr(inner, subst))),
+            Binop(op, home, func, l, r) => TypedKind::Binop(
+                op.clone(),
+                home.clone(),
+                func.clone(),
+                Box::new(self.expr(l, subst)),
+                Box::new(self.expr(r, subst)),
+            ),
+            Lambda(args, body) => {
+                // The lambda node's type is arg1 -> .. -> argN -> body; peel
+                // it to type each parameter.
+                let mut params = Vec::new();
+                let mut remaining = tipe.clone();
+                for arg in args {
+                    match remaining {
+                        can::Type::Lambda(a, b) => {
+                            params.push((arg.clone(), *a));
+                            remaining = *b;
+                        }
+                        other => {
+                            params.push((arg.clone(), other.clone()));
+                            remaining = other;
+                        }
+                    }
+                }
+                TypedKind::Lambda(params, Box::new(self.expr(body, subst)))
+            }
+            Call(func, args) => TypedKind::Call(
+                Box::new(self.expr(func, subst)),
+                args.iter().map(|e| self.expr(e, subst)).collect(),
+            ),
+            If(branches, otherwise) => TypedKind::If(
+                branches
+                    .iter()
+                    .map(|(c, b)| (self.expr(c, subst), self.expr(b, subst)))
+                    .collect(),
+                Box::new(self.expr(otherwise, subst)),
+            ),
+            Let(decls, body) => TypedKind::Let(
+                decls.iter().map(|d| self.let_decl(d, subst)).collect(),
+                Box::new(self.expr(body, subst)),
+            ),
+            Case(scrutinee, branches) => TypedKind::Case(
+                Box::new(self.expr(scrutinee, subst)),
+                branches
+                    .iter()
+                    .map(|(p, b)| (p.clone(), self.expr(b, subst)))
+                    .collect(),
+            ),
+            Accessor(field) => TypedKind::Accessor(field.clone()),
+            Access(record, field) => {
+                TypedKind::Access(Box::new(self.expr(record, subst)), field.value.clone())
+            }
+            Update(record, fields) => TypedKind::Update(
+                Box::new(self.expr(record, subst)),
+                fields
+                    .iter()
+                    .map(|(n, v)| (n.value.clone(), self.expr(v, subst)))
+                    .collect(),
+            ),
+            Record(fields) => TypedKind::Record(
+                fields
+                    .iter()
+                    .map(|(n, v)| (n.value.clone(), self.expr(v, subst)))
+                    .collect(),
+            ),
+            Tuple(a, b, rest) => TypedKind::Tuple(
+                Box::new(self.expr(a, subst)),
+                Box::new(self.expr(b, subst)),
+                rest.first().map(|c| Box::new(self.expr(c, subst))),
+            ),
+        };
+        TypedExpr { tipe, kind }
+    }
+
+    fn let_decl(
+        &self,
+        decl: &can::LetDecl,
+        subst: &HashMap<Name, can::Type>,
+    ) -> TypedLetDecl {
+        match decl {
+            can::LetDecl::Def(def) => TypedLetDecl::Def {
+                name: def.name.value.clone(),
+                params: def
+                    .args
+                    .iter()
+                    .map(|a| (a.clone(), can::Type::Unit))
+                    .collect(),
+                body: self.expr(&def.body, subst),
+            },
+            can::LetDecl::Recursive(defs) => TypedLetDecl::Recursive(
+                defs.iter()
+                    .map(|def| TypedLetDecl::Def {
+                        name: def.name.value.clone(),
+                        params: def
+                            .args
+                            .iter()
+                            .map(|a| (a.clone(), can::Type::Unit))
+                            .collect(),
+                        body: self.expr(&def.body, subst),
+                    })
+                    .collect(),
+            ),
+            can::LetDecl::Destruct(pattern, value) => {
+                TypedLetDecl::Destruct(pattern.clone(), self.expr(value, subst))
+            }
+        }
+    }
+}
+
+/// Mangle a `(name, concrete type)` pair into a unique symbol. Provisional
+/// scheme — readable and injective enough for the types we see; codegen only
+/// needs distinct names per instance.
+pub fn mangle(name: &Name, tipe: &can::Type) -> Name {
+    Name::from(format!("{}${}", name, mangle_type(tipe)))
+}
+
+fn mangle_type(tipe: &can::Type) -> String {
+    use can::Type::*;
+    match tipe {
+        Var(n) => format!("v{}", n),
+        Type(_, name, args) if args.is_empty() => name.to_string(),
+        Type(_, name, args) => format!(
+            "{}${}",
+            name,
+            args.iter().map(mangle_type).collect::<Vec<_>>().join("$")
+        ),
+        Lambda(a, b) => format!("Fn${}${}", mangle_type(a), mangle_type(b)),
+        Tuple(a, b, c) => {
+            let mut parts = vec![mangle_type(a), mangle_type(b)];
+            if let Some(c) = c {
+                parts.push(mangle_type(c));
+            }
+            format!("Tup${}", parts.join("$"))
+        }
+        Record(fields, _) => format!(
+            "Rec${}",
+            fields
+                .iter()
+                .map(|(n, t)| format!("{}_{}", n, mangle_type(t)))
+                .collect::<Vec<_>>()
+                .join("$")
+        ),
+        Unit => "Unit".to_string(),
+    }
+}
+
 /// Apply a substitution to a type, replacing bound variables.
 fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type {
     use can::Type::*;
