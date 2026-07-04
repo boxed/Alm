@@ -383,6 +383,24 @@ fn lambdas_in_kernels() {
 }
 
 #[test]
+fn filter_reverse_pipeline() {
+    assert_same(
+        "filter_reverse",
+        "module Test exposing (..)\n\
+         \n\
+         isEven : Int -> Bool\n\
+         isEven n = n - (n // 2) * 2 == 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   List.range 1 20\n\
+         \x20       |> List.filter isEven\n\
+         \x20       |> List.reverse\n\
+         \x20       |> List.sum\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

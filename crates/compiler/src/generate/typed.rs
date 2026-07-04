@@ -646,6 +646,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "range") => self.kernel_list_range(whole, args),
             ("List", "foldl") => self.kernel_list_foldl(whole, args),
             ("List", "map") => self.kernel_list_map(whole, args),
+            ("List", "reverse") => self.kernel_list_reverse(whole, args),
+            ("List", "filter") => self.kernel_list_filter(whole, args),
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
@@ -844,6 +846,115 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(done_bb);
         Ok(self.builder.build_load(ptr_t, result, "mapped").unwrap())
+    }
+
+    /// `List.reverse : List a -> List a` — cons each element onto an
+    /// accumulator, which reverses.
+    fn kernel_list_reverse(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let list = self.gen(&args[0])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let elem_ty = self.llvm_type(&elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("rev.loop");
+        let body_bb = self.new_block("rev.body");
+        let done_bb = self.new_block("rev.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let acc = self.builder.build_phi(ptr_t, "acc").unwrap();
+        let null = ptr_t.const_null();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&null as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let new_acc: BasicValueEnum = self
+            .cons(&elem, head, acc.as_basic_value().into_pointer_value())
+            .into();
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&new_acc as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
+    }
+
+    /// `List.filter : (a -> Bool) -> List a -> List a` — keep elements the
+    /// predicate accepts, building the result in order.
+    fn kernel_list_filter(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let elem_ty = self.llvm_type(&elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("filt.loop");
+        let body_bb = self.new_block("filt.body");
+        let keep_bb = self.new_block("filt.keep");
+        let cont_bb = self.new_block("filt.cont");
+        let done_bb = self.new_block("filt.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let keep = self.apply_fn_expr(&args[0], &[head])?.into_int_value();
+        self.builder
+            .build_conditional_branch(keep, keep_bb, cont_bb)
+            .unwrap();
+
+        self.builder.position_at_end(keep_bb);
+        let newcell = self.cons(&elem, head, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nextfield = self.builder.build_struct_gep(cell, newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nextfield).unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+
+        self.builder.position_at_end(cont_bb);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let cont_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, cont_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "filtered").unwrap())
     }
 
     /// `List.sum : List number -> number` — walk the cons list accumulating.
