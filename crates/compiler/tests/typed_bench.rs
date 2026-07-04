@@ -50,11 +50,30 @@ fn best_ms(cmd: &mut Command, runs: u32) -> f64 {
     best
 }
 
+// A list pipeline: range -> map -> foldl. The typed backend emits inline
+// unboxed loops calling the specialized functions; the uniform backend boxes
+// every element and closure-applies each step. Sum of 2n for 1..1e6 ~ 1e12,
+// under 2^53 so JS's f64 stays exact.
+const LIST: &str = "module Test exposing (..)\n\
+     \n\
+     double : Int -> Int\n\
+     double n = n + n\n\
+     \n\
+     add : Int -> Int -> Int\n\
+     add x acc = x + acc\n\
+     \n\
+     main : Int\n\
+     main =\n\
+     \x20   List.range 1 1000000\n\
+     \x20       |> List.map double\n\
+     \x20       |> List.foldl add 0\n";
+
 #[test]
 #[ignore]
 fn bench() {
     bench_one("fib 33", FIB);
     bench_one("record-acc 10M", ACC);
+    bench_one("list range|>map|>foldl 1M", LIST);
 }
 
 fn bench_one(label: &str, src: &str) {
