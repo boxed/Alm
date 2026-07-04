@@ -667,24 +667,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
     }
 
-    /// Resolve a function-valued argument to a concrete LLVM function. Only
-    /// named (already-specialized) functions are supported; lambda arguments
-    /// need closure conversion.
-    fn global_fn(&self, arg: &TypedExpr) -> Result<FunctionValue<'ctx>, String> {
-        match &arg.kind {
-            TypedKind::Global(name) => self
-                .functions
-                .get(&name.to_string())
-                .copied()
-                .ok_or_else(|| format!("typed backend: unknown function `{}`", name)),
-            _ => Err(
-                "typed backend: higher-order kernels need a named function argument \
-                 (lambdas require closures, not yet supported)"
-                    .to_string(),
-            ),
-        }
-    }
-
     fn call_fn(
         &self,
         f: FunctionValue<'ctx>,
@@ -699,6 +681,67 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .unwrap()
     }
 
+    /// Apply a function-valued expression to already-evaluated arguments.
+    /// A named function is called directly; a lambda is inlined in place —
+    /// its parameters bound to the arguments, its free variables already in
+    /// scope as the enclosing function's locals. This lets kernels accept
+    /// lambdas without general closure conversion.
+    fn apply_fn_expr(
+        &mut self,
+        func: &TypedExpr,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match &func.kind {
+            TypedKind::Global(name) => {
+                let f = *self
+                    .functions
+                    .get(&name.to_string())
+                    .ok_or_else(|| format!("typed backend: unknown function `{}`", name))?;
+                Ok(self.call_fn(f, args))
+            }
+            TypedKind::Lambda(params, body) => {
+                if params.len() != args.len() {
+                    return Err(
+                        "typed backend: partially-applied lambda in a kernel is not supported"
+                            .to_string(),
+                    );
+                }
+                let mut saved: Vec<(String, Option<BasicValueEnum<'ctx>>)> = Vec::new();
+                for ((pat, _), val) in params.iter().zip(args) {
+                    match simple_param_name(pat) {
+                        Some(n) => {
+                            saved.push((n.clone(), self.locals.get(&n).copied()));
+                            self.locals.insert(n, *val);
+                        }
+                        None => {
+                            return Err(
+                                "typed backend: destructuring lambda parameters are not \
+                                 supported in kernels yet"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                }
+                let v = self.gen(body)?;
+                for (n, old) in saved {
+                    match old {
+                        Some(v) => {
+                            self.locals.insert(n, v);
+                        }
+                        None => {
+                            self.locals.remove(&n);
+                        }
+                    }
+                }
+                Ok(v)
+            }
+            _ => Err(
+                "typed backend: higher-order kernels need a named function or lambda argument"
+                    .to_string(),
+            ),
+        }
+    }
+
     /// `List.foldl : (a -> b -> b) -> b -> List a -> b` — fold left, calling
     /// the specialized element function with no boxing.
     fn kernel_list_foldl(
@@ -706,7 +749,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         whole: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let f = self.global_fn(&args[0])?;
         let elem = self.elem_layout(&args[2].tipe)?;
         let init = self.gen(&args[1])?;
         let list = self.gen(&args[2])?.into_pointer_value();
@@ -734,7 +776,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.position_at_end(body_bb);
         let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
         let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
-        let new_acc = self.call_fn(f, &[head, acc.as_basic_value()]);
+        let new_acc = self.apply_fn_expr(&args[0], &[head, acc.as_basic_value()])?;
         let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
         let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
         let body_end = self.builder.get_insert_block().unwrap();
@@ -753,7 +795,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         whole: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let f = self.global_fn(&args[0])?;
         let src_elem = self.elem_layout(&args[1].tipe)?;
         let dst_elem = self.elem_layout(&whole.tipe)?;
         let list = self.gen(&args[1])?.into_pointer_value();
@@ -787,7 +828,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.position_at_end(body_bb);
         let hp = self.builder.build_struct_gep(src_cell, cur_ptr, 0, "hp").unwrap();
         let head = self.builder.build_load(src_elem_ty, hp, "head").unwrap();
-        let mapped = self.call_fn(f, &[head]);
+        let mapped = self.apply_fn_expr(&args[0], &[head])?;
         let newcell = self.cons(&dst_elem, mapped, ptr_t.const_null());
         // *slot = newcell
         let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();

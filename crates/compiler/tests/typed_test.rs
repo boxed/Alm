@@ -366,6 +366,23 @@ fn strings_and_fromint() {
 }
 
 #[test]
+fn lambdas_in_kernels() {
+    assert_same(
+        "lambdas",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       k = 3\n\
+         \x20   in\n\
+         \x20   List.range 1 10\n\
+         \x20       |> List.map (\\x -> x * k)\n\
+         \x20       |> List.foldl (\\x acc -> x + acc) 0\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
