@@ -22,6 +22,7 @@
 //! through (for unboxing and monomorphization) is a later, separate step.
 
 pub mod lower;
+pub mod mono;
 
 use std::fmt::Write;
 
