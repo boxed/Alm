@@ -124,7 +124,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     elems.iter().map(|l| self.llvm_type(l)).collect();
                 self.ctx.struct_type(&fields, false).into()
             }
+            Layout::Record(fields) => {
+                let fields: Vec<BasicTypeEnum> =
+                    fields.iter().map(|(_, l)| self.llvm_type(l)).collect();
+                self.ctx.struct_type(&fields, false).into()
+            }
             _ => self.ctx.i64_type().into(),
+        }
+    }
+
+    /// The sorted field names of a record type — the canonical struct order
+    /// (matches [`Layout::Record`]).
+    fn record_fields(&self, tipe: &crate::ast::canonical::Type) -> Result<Vec<String>, String> {
+        match self.layouts.layout_of(tipe) {
+            Layout::Record(fields) => Ok(fields.iter().map(|(n, _)| n.to_string()).collect()),
+            other => Err(format!("typed backend: expected a record layout, got {:?}", other)),
         }
     }
 
@@ -245,6 +259,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Case(scrutinee, branches) => self.gen_case(scrutinee, branches, expr),
             TypedKind::Negate(inner) => self.gen_negate(inner),
             TypedKind::Tuple(a, b, c) => self.gen_tuple(expr, a, b, c.as_deref()),
+            TypedKind::Record(fields) => self.gen_record(expr, fields),
+            TypedKind::Access(record, field) => self.gen_access(record, field.as_str()),
+            TypedKind::Update(record, fields) => self.gen_update(record, fields),
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
                 std::mem::discriminant(other)
@@ -291,7 +308,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 }
                 Destruct(pattern, value) => {
                     let v = self.gen(value)?;
-                    self.bind_pattern(pattern, v)?;
+                    let layout = self.layouts.layout_of(&value.tipe);
+                    self.bind_pattern(pattern, v, &layout)?;
                 }
                 _ => {
                     return Err(
@@ -329,12 +347,78 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(agg.into())
     }
 
-    /// Bind a pattern's variables to (parts of) a value. Supports variables,
-    /// wildcards, aliases, and tuple destructuring of unboxed structs.
+    fn gen_record(
+        &mut self,
+        whole: &TypedExpr,
+        fields: &[(crate::data::Name, TypedExpr)],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let order = self.record_fields(&whole.tipe)?;
+        let struct_ty = self
+            .llvm_type(&self.layouts.layout_of(&whole.tipe))
+            .into_struct_type();
+        let mut agg = struct_ty.get_undef();
+        for (name, value) in fields {
+            let idx = order
+                .iter()
+                .position(|n| n == name.as_str())
+                .ok_or_else(|| format!("typed backend: record has no field `{}`", name))?;
+            let v = self.gen(value)?;
+            agg = self
+                .builder
+                .build_insert_value(agg, v, idx as u32, "rec")
+                .unwrap()
+                .into_struct_value();
+        }
+        Ok(agg.into())
+    }
+
+    fn gen_access(
+        &mut self,
+        record: &TypedExpr,
+        field: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let order = self.record_fields(&record.tipe)?;
+        let idx = order
+            .iter()
+            .position(|n| n == field)
+            .ok_or_else(|| format!("typed backend: record has no field `{}`", field))?;
+        let sv = self.gen(record)?.into_struct_value();
+        Ok(self
+            .builder
+            .build_extract_value(sv, idx as u32, "field")
+            .unwrap())
+    }
+
+    fn gen_update(
+        &mut self,
+        record: &TypedExpr,
+        fields: &[(crate::data::Name, TypedExpr)],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let order = self.record_fields(&record.tipe)?;
+        let mut agg = self.gen(record)?.into_struct_value();
+        for (name, value) in fields {
+            let idx = order
+                .iter()
+                .position(|n| n == name.as_str())
+                .ok_or_else(|| format!("typed backend: record has no field `{}`", name))?;
+            let v = self.gen(value)?;
+            agg = self
+                .builder
+                .build_insert_value(agg, v, idx as u32, "upd")
+                .unwrap()
+                .into_struct_value();
+        }
+        Ok(agg.into())
+    }
+
+    /// Bind a pattern's variables to (parts of) a value, guided by the
+    /// value's layout. Supports variables, wildcards, aliases, and tuple and
+    /// record destructuring of unboxed structs.
     fn bind_pattern(
         &mut self,
         pattern: &crate::ast::canonical::Pattern,
         value: BasicValueEnum<'ctx>,
+        layout: &Layout,
     ) -> Result<(), String> {
         use crate::ast::canonical::Pattern_::*;
         match &pattern.value {
@@ -345,18 +429,40 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Anything => Ok(()),
             Alias(inner, name) => {
                 self.locals.insert(name.value.to_string(), value);
-                self.bind_pattern(inner, value)
+                self.bind_pattern(inner, value, layout)
             }
             Tuple(a, b, rest) => {
+                let Layout::Tuple(elem_layouts) = layout else {
+                    return Err("typed backend: tuple pattern on non-tuple value".to_string());
+                };
                 let sv = value.into_struct_value();
-                let parts: Vec<&crate::ast::canonical::Pattern> =
-                    std::iter::once(a.as_ref()).chain(std::iter::once(b.as_ref())).chain(rest.iter()).collect();
+                let parts: Vec<&crate::ast::canonical::Pattern> = std::iter::once(a.as_ref())
+                    .chain(std::iter::once(b.as_ref()))
+                    .chain(rest.iter())
+                    .collect();
                 for (i, p) in parts.into_iter().enumerate() {
+                    let elem = self.builder.build_extract_value(sv, i as u32, "elt").unwrap();
+                    self.bind_pattern(p, elem, &elem_layouts[i])?;
+                }
+                Ok(())
+            }
+            Record(field_names) => {
+                let Layout::Record(fields) = layout else {
+                    return Err("typed backend: record pattern on non-record value".to_string());
+                };
+                let sv = value.into_struct_value();
+                for located in field_names {
+                    let idx = fields
+                        .iter()
+                        .position(|(n, _)| n.as_str() == located.value.as_str())
+                        .ok_or_else(|| {
+                            format!("typed backend: record has no field `{}`", located.value)
+                        })?;
                     let elem = self
                         .builder
-                        .build_extract_value(sv, i as u32, "elt")
+                        .build_extract_value(sv, idx as u32, "field")
                         .unwrap();
-                    self.bind_pattern(p, elem)?;
+                    self.locals.insert(located.value.to_string(), elem);
                 }
                 Ok(())
             }

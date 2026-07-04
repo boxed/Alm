@@ -168,6 +168,45 @@ fn polymorphic_identity_specialized_to_int() {
 }
 
 #[test]
+fn records_construct_access_update() {
+    assert_same(
+        "records",
+        "module Test exposing (..)\n\
+         \n\
+         type alias Point = { x : Int, y : Int }\n\
+         \n\
+         origin : Point\n\
+         origin = { x = 3, y = 4 }\n\
+         \n\
+         moved : Point\n\
+         moved = { origin | x = origin.x + 10 }\n\
+         \n\
+         main : Int\n\
+         main = moved.x * 100 + moved.y\n",
+    );
+}
+
+#[test]
+fn record_field_destructure() {
+    assert_same(
+        "record_destructure",
+        "module Test exposing (..)\n\
+         \n\
+         type alias Point = { x : Int, y : Int }\n\
+         \n\
+         sum : Point -> Int\n\
+         sum p =\n\
+         \x20   let\n\
+         \x20       { x, y } = p\n\
+         \x20   in\n\
+         \x20   x + y\n\
+         \n\
+         main : Int\n\
+         main = sum { x = 40, y = 2 }\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
