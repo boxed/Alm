@@ -507,6 +507,35 @@ fn string_length_and_join() {
 }
 
 #[test]
+fn kitchen_sink_composition() {
+    // Records in a list, filter+map with lambdas doing field access, a named
+    // function passed to map, foldl accumulation, string building and join —
+    // all composed into one String result.
+    assert_same(
+        "kitchen_sink",
+        "module Test exposing (..)\n\
+         \n\
+         type alias Item = { name : String, qty : Int }\n\
+         \n\
+         total : List Item -> Int\n\
+         total items = List.foldl (\\i acc -> acc + i.qty) 0 items\n\
+         \n\
+         describe : Item -> String\n\
+         describe i = i.name ++ \":\" ++ String.fromInt i.qty\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       items = [ { name = \"a\", qty = 3 }, { name = \"b\", qty = 5 }, { name = \"c\", qty = 2 } ]\n\
+         \x20       big = List.filter (\\i -> i.qty > 2) items\n\
+         \x20   in\n\
+         \x20   String.join \", \" (List.map describe big)\n\
+         \x20       ++ \" total=\"\n\
+         \x20       ++ String.fromInt (total items)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
