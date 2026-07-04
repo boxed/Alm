@@ -66,6 +66,19 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
         .verify()
         .map_err(|e| format!("internal error: generated invalid LLVM IR:\n{}", e))?;
 
+    finish(&cg.module, &context, output, target)
+}
+
+/// Shared back half of every native/wasm build: pick the target machine,
+/// merge the runtime bitcode for cross-module inlining, run the optimizer,
+/// emit an object, and link it against the runtime. Used by both the uniform
+/// backend above and the typed (monomorphized) backend.
+pub(crate) fn finish<'ctx>(
+    module: &Module<'ctx>,
+    context: &'ctx Context,
+    output: &Path,
+    target: Target,
+) -> Result<(), String> {
     let (triple, machine) = match target {
         Target::Native => {
             LlvmTarget::initialize_native(&InitializationConfig::default())?;
@@ -105,8 +118,8 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
             (triple, m)
         }
     };
-    cg.module.set_triple(&triple);
-    cg.module
+    module.set_triple(&triple);
+    module
         .set_data_layout(&machine.get_target_data().get_data_layout());
 
     let (runtime_bc, runtime_lib) = match target {
@@ -126,7 +139,7 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
     // symbol is duplicated).
     let bc_path = build_dir.join("alm_runtime.bc");
     std::fs::write(&bc_path, runtime_bc).map_err(|e| e.to_string())?;
-    let runtime_module = Module::parse_bitcode_from_path(&bc_path, &context)
+    let runtime_module = Module::parse_bitcode_from_path(&bc_path, context)
         .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
     // Only exported (external-linkage) definitions live in the static
     // library, so only those may become `available_externally` (inline-only,
@@ -145,13 +158,13 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
             g.set_linkage(Linkage::AvailableExternally);
         }
     }
-    cg.module
+    module
         .link_in_module(runtime_module)
         .map_err(|e| format!("could not merge runtime bitcode: {}", e))?;
 
     // Run LLVM's optimization pipeline (inlining, mem2reg, GVN, …). With the
     // runtime merged in, this inlines it into the generated code.
-    cg.module
+    module
         .run_passes(
             "default<O2>",
             &machine,
@@ -160,12 +173,12 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
         .map_err(|e| e.to_string())?;
 
     if std::env::var("ALM_DUMP_IR").is_ok() {
-        let _ = cg.module.print_to_file(build_dir.join("program.ll"));
+        let _ = module.print_to_file(build_dir.join("program.ll"));
     }
 
     let object = build_dir.join("program.o");
     machine
-        .write_to_file(&cg.module, FileType::Object, &object)
+        .write_to_file(&module, FileType::Object, &object)
         .map_err(|e| e.to_string())?;
 
     let runtime = build_dir.join("runtime.a");
