@@ -401,6 +401,29 @@ fn filter_reverse_pipeline() {
 }
 
 #[test]
+fn basics_numeric_kernels() {
+    assert_same(
+        "basics",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   modBy 7 100 + remainderBy 7 -100 + abs -42\n",
+    );
+}
+
+#[test]
+fn to_float_kernel() {
+    assert_same(
+        "to_float",
+        "module Test exposing (..)\n\
+         \n\
+         main : Float\n\
+         main = toFloat 10 * 1.5 + toFloat (abs -3)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

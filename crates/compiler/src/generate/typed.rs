@@ -662,6 +662,40 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let boxed = self.call_box("rt_float", f);
                 Ok(self.call_named("rtb$String$fromFloat", &[boxed]))
             }
+            ("Basics", "modBy") => self.kernel_mod_by(args),
+            ("Basics", "remainderBy") => {
+                let m = self.gen(&args[0])?.into_int_value();
+                let x = self.gen(&args[1])?.into_int_value();
+                Ok(self.builder.build_int_signed_rem(x, m, "rem").unwrap().into())
+            }
+            ("Basics", "abs") => {
+                let v = self.gen(&args[0])?;
+                Ok(if matches!(self.layouts.layout_of(&args[0].tipe), Layout::Float) {
+                    let x = v.into_float_value();
+                    let neg = self.builder.build_float_neg(x, "neg").unwrap();
+                    let is_neg = self
+                        .builder
+                        .build_float_compare(FloatPredicate::OLT, x, self.ctx.f64_type().const_zero(), "lt")
+                        .unwrap();
+                    self.builder.build_select(is_neg, neg, x, "abs").unwrap()
+                } else {
+                    let x = v.into_int_value();
+                    let neg = self.builder.build_int_neg(x, "neg").unwrap();
+                    let is_neg = self
+                        .builder
+                        .build_int_compare(IntPredicate::SLT, x, self.ctx.i64_type().const_zero(), "lt")
+                        .unwrap();
+                    self.builder.build_select(is_neg, neg, x, "abs").unwrap()
+                })
+            }
+            ("Basics", "toFloat") => {
+                let n = self.gen(&args[0])?.into_int_value();
+                Ok(self
+                    .builder
+                    .build_signed_int_to_float(n, self.ctx.f64_type(), "tof")
+                    .unwrap()
+                    .into())
+            }
             _ => Err(format!(
                 "typed backend: built-in `{}.{}` has no generated kernel yet",
                 module, name
@@ -846,6 +880,23 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(done_bb);
         Ok(self.builder.build_load(ptr_t, result, "mapped").unwrap())
+    }
+
+    /// `modBy m x` — floored modulo (the result takes the sign of the
+    /// modulus), matching Elm/JS semantics rather than truncated remainder.
+    fn kernel_mod_by(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let m = self.gen(&args[0])?.into_int_value();
+        let x = self.gen(&args[1])?.into_int_value();
+        let b = &self.builder;
+        let zero = self.ctx.i64_type().const_zero();
+        let r = b.build_int_signed_rem(x, m, "r").unwrap();
+        let r_nz = b.build_int_compare(IntPredicate::NE, r, zero, "rnz").unwrap();
+        let r_neg = b.build_int_compare(IntPredicate::SLT, r, zero, "rneg").unwrap();
+        let m_neg = b.build_int_compare(IntPredicate::SLT, m, zero, "mneg").unwrap();
+        let diff = b.build_xor(r_neg, m_neg, "diff").unwrap();
+        let need = b.build_and(r_nz, diff, "need").unwrap();
+        let radd = b.build_int_add(r, m, "radd").unwrap();
+        Ok(b.build_select(need, radd, r, "mod").unwrap())
     }
 
     /// `List.reverse : List a -> List a` — cons each element onto an
