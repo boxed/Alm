@@ -598,6 +598,25 @@ fn map2_and_indexed_map() {
 }
 
 #[test]
+fn string_equality_compares_contents() {
+    // Regression: == on strings must compare contents, not pointer words —
+    // two separately-built equal strings must be equal.
+    assert_same(
+        "string_eq",
+        "module Test exposing (..)\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   boolInt ((\"a\" ++ \"b\") == \"ab\")\n\
+         \x20       + 10 * boolInt (\"ab\" == \"ba\")\n\
+         \x20       + 100 * boolInt (\"abc\" < \"abd\")\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

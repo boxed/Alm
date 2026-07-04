@@ -109,6 +109,19 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Some(Linkage::External),
             );
         }
+        // Value comparison (for strings and other boxed values) + truthiness.
+        for name in ["rt_eq", "rt_neq", "rt_lt", "rt_le", "rt_gt", "rt_ge"] {
+            self.module.add_function(
+                name,
+                i64_t.fn_type(&[i64_t.into(), i64_t.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "rt_is_true",
+            self.ctx.bool_type().fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
         // Boundary unboxing: uniform word -> raw scalar.
         self.module.add_function(
             "rt_unint",
@@ -1848,7 +1861,25 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         l: &TypedExpr,
         r: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let is_float = matches!(self.layouts.layout_of(&l.tipe), Layout::Float);
+        let layout = self.layouts.layout_of(&l.tipe);
+        // Comparisons on boxed values (strings) must compare contents, not the
+        // pointer words — route through the runtime's value comparison.
+        if matches!(layout, Layout::Str) {
+            let sym = match op {
+                "==" => "rt_eq",
+                "/=" => "rt_neq",
+                "<" => "rt_lt",
+                "<=" => "rt_le",
+                ">" => "rt_gt",
+                ">=" => "rt_ge",
+                _ => return Err(format!("typed backend: `{}` is not supported on strings", op)),
+            };
+            let lv = self.gen(l)?;
+            let rv = self.gen(r)?;
+            let cmp = self.call_named(sym, &[lv, rv]);
+            return Ok(self.call_named("rt_is_true", &[cmp]));
+        }
+        let is_float = matches!(layout, Layout::Float);
         let lv = self.gen(l)?;
         let rv = self.gen(r)?;
         let b = &self.builder;
