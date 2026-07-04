@@ -648,6 +648,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "length") => self.kernel_list_length(args),
             ("List", "range") => self.kernel_list_range(whole, args),
             ("List", "foldl") => self.kernel_list_foldl(whole, args),
+            ("List", "foldr") => self.kernel_list_foldr(whole, args),
             ("List", "map") => self.kernel_list_map(whole, args),
             ("List", "reverse") => self.kernel_list_reverse(whole, args),
             ("List", "filter") => self.kernel_list_filter(whole, args),
@@ -699,6 +700,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .unwrap()
                     .into())
             }
+            ("Basics", "min") => self.kernel_min_max(args, true),
+            ("Basics", "max") => self.kernel_min_max(args, false),
             _ => Err(format!(
                 "typed backend: built-in `{}.{}` has no generated kernel yet",
                 module, name
@@ -792,8 +795,35 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let init = self.gen(&args[1])?;
         let list = self.gen(&args[2])?.into_pointer_value();
         let acc_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
-        let elem_ty = self.llvm_type(&elem);
-        let cell = self.cons_cell(&elem);
+        self.emit_foldl(list, &elem, init, &args[0], acc_ty)
+    }
+
+    /// `List.foldr f init xs` = `foldl f init (reverse xs)` — same element
+    /// function, list walked right-to-left.
+    fn kernel_list_foldr(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[2].tipe)?;
+        let list = self.gen(&args[2])?.into_pointer_value();
+        let reversed = self.emit_reverse(list, &elem);
+        let init = self.gen(&args[1])?;
+        let acc_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
+        self.emit_foldl(reversed, &elem, init, &args[0], acc_ty)
+    }
+
+    /// Emit a left-fold loop over a cons list, calling `f` per element.
+    fn emit_foldl(
+        &mut self,
+        list: inkwell::values::PointerValue<'ctx>,
+        elem: &Layout,
+        init: BasicValueEnum<'ctx>,
+        f: &TypedExpr,
+        acc_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem_ty = self.llvm_type(elem);
+        let cell = self.cons_cell(elem);
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let entry = self.builder.get_insert_block().unwrap();
         let loop_bb = self.new_block("foldl.loop");
@@ -815,7 +845,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.position_at_end(body_bb);
         let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
         let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
-        let new_acc = self.apply_fn_expr(&args[0], &[head, acc.as_basic_value()])?;
+        let new_acc = self.apply_fn_expr(f, &[head, acc.as_basic_value()])?;
         let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
         let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
         let body_end = self.builder.get_insert_block().unwrap();
@@ -885,6 +915,28 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(self.builder.build_load(ptr_t, result, "mapped").unwrap())
     }
 
+    /// `min`/`max` on Int or Float — a comparison and select.
+    fn kernel_min_max(
+        &mut self,
+        args: &[TypedExpr],
+        is_min: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let a = self.gen(&args[0])?;
+        let b = self.gen(&args[1])?;
+        let cond = if matches!(self.layouts.layout_of(&args[0].tipe), Layout::Float) {
+            let pred = if is_min { FloatPredicate::OLT } else { FloatPredicate::OGT };
+            self.builder
+                .build_float_compare(pred, a.into_float_value(), b.into_float_value(), "mm")
+                .unwrap()
+        } else {
+            let pred = if is_min { IntPredicate::SLT } else { IntPredicate::SGT };
+            self.builder
+                .build_int_compare(pred, a.into_int_value(), b.into_int_value(), "mm")
+                .unwrap()
+        };
+        Ok(self.builder.build_select(cond, a, b, "minmax").unwrap())
+    }
+
     /// `modBy m x` — floored modulo (the result takes the sign of the
     /// modulus), matching Elm/JS semantics rather than truncated remainder.
     fn kernel_mod_by(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
@@ -911,8 +963,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let elem = self.elem_layout(&whole.tipe)?;
         let list = self.gen(&args[0])?.into_pointer_value();
-        let cell = self.cons_cell(&elem);
-        let elem_ty = self.llvm_type(&elem);
+        Ok(self.emit_reverse(list, &elem).into())
+    }
+
+    /// Emit a loop that reverses a cons list, returning the new head pointer.
+    fn emit_reverse(
+        &mut self,
+        list: inkwell::values::PointerValue<'ctx>,
+        elem: &Layout,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let cell = self.cons_cell(elem);
+        let elem_ty = self.llvm_type(elem);
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let entry = self.builder.get_insert_block().unwrap();
         let loop_bb = self.new_block("rev.loop");
@@ -936,7 +997,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
         let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
         let new_acc: BasicValueEnum = self
-            .cons(&elem, head, acc.as_basic_value().into_pointer_value())
+            .cons(elem, head, acc.as_basic_value().into_pointer_value())
             .into();
         let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
         let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
@@ -946,7 +1007,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         acc.add_incoming(&[(&new_acc as &dyn BasicValue, body_end)]);
 
         self.builder.position_at_end(done_bb);
-        Ok(acc.as_basic_value())
+        acc.as_basic_value().into_pointer_value()
     }
 
     /// `List.filter : (a -> Bool) -> List a -> List a` — keep elements the

@@ -444,6 +444,20 @@ fn short_circuit_boolean_ops() {
 }
 
 #[test]
+fn foldr_and_minmax() {
+    assert_same(
+        "foldr_minmax",
+        "module Test exposing (..)\n\
+         \n\
+         diffs : Int\n\
+         diffs = List.foldr (\\x acc -> x - acc) 0 [ 1, 2, 3, 4 ]\n\
+         \n\
+         main : Int\n\
+         main = diffs + min 3 9 + max 3 9\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
