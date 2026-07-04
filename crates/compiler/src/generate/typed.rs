@@ -702,6 +702,32 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             ("Basics", "min") => self.kernel_min_max(args, true),
             ("Basics", "max") => self.kernel_min_max(args, false),
+            ("Basics", "truncate") => {
+                let x = self.gen(&args[0])?.into_float_value();
+                Ok(self.f_to_int(x))
+            }
+            ("Basics", "floor") => {
+                let x = self.gen(&args[0])?.into_float_value();
+                let f = self.call_f64_intrinsic("llvm.floor.f64", x);
+                Ok(self.f_to_int(f))
+            }
+            ("Basics", "ceiling") => {
+                let x = self.gen(&args[0])?.into_float_value();
+                let f = self.call_f64_intrinsic("llvm.ceil.f64", x);
+                Ok(self.f_to_int(f))
+            }
+            ("Basics", "round") => {
+                // Elm/JS round-half-up: floor(x + 0.5).
+                let x = self.gen(&args[0])?.into_float_value();
+                let half = self.ctx.f64_type().const_float(0.5);
+                let shifted = self.builder.build_float_add(x, half, "half").unwrap();
+                let f = self.call_f64_intrinsic("llvm.floor.f64", shifted);
+                Ok(self.f_to_int(f))
+            }
+            ("Basics", "sqrt") => {
+                let x = self.gen(&args[0])?.into_float_value();
+                Ok(self.call_f64_intrinsic("llvm.sqrt.f64", x).into())
+            }
             _ => Err(format!(
                 "typed backend: built-in `{}.{}` has no generated kernel yet",
                 module, name
@@ -913,6 +939,34 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(done_bb);
         Ok(self.builder.build_load(ptr_t, result, "mapped").unwrap())
+    }
+
+    /// Truncate an f64 toward zero to an i64.
+    fn f_to_int(&self, x: inkwell::values::FloatValue<'ctx>) -> BasicValueEnum<'ctx> {
+        self.builder
+            .build_float_to_signed_int(x, self.ctx.i64_type(), "toint")
+            .unwrap()
+            .into()
+    }
+
+    /// Call a unary f64 LLVM intrinsic (e.g. `llvm.floor.f64`), declaring it
+    /// on first use.
+    fn call_f64_intrinsic(
+        &self,
+        name: &str,
+        x: inkwell::values::FloatValue<'ctx>,
+    ) -> inkwell::values::FloatValue<'ctx> {
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let f64 = self.ctx.f64_type();
+            self.module.add_function(name, f64.fn_type(&[f64.into()], false), None)
+        });
+        self.builder
+            .build_call(f, &[x.into()], "intr")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_float_value()
     }
 
     /// `min`/`max` on Int or Float — a comparison and select.

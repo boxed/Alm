@@ -476,6 +476,22 @@ fn let_bound_number_defaults_to_int() {
 }
 
 #[test]
+fn float_to_int_kernels() {
+    assert_same(
+        "float_kernels",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   round 2.5\n\
+         \x20       + floor 2.9\n\
+         \x20       + ceiling 2.1\n\
+         \x20       + truncate -2.9\n\
+         \x20       + round (sqrt 16.0)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
