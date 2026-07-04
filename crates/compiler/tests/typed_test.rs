@@ -166,3 +166,20 @@ fn polymorphic_identity_specialized_to_int() {
          main = identity 7 + identity 35\n",
     );
 }
+
+#[test]
+fn deep_tail_recursion() {
+    // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
+    // elimination turns it into a loop we're fine; otherwise this overflows
+    // the stack (signalling the typed backend needs its own tail-loop).
+    assert_same(
+        "deep_tail",
+        "module Test exposing (..)\n\
+         \n\
+         sum : Int -> Int -> Int\n\
+         sum n acc = if n <= 0 then acc else sum (n - 1) (acc + n)\n\
+         \n\
+         main : Int\n\
+         main = sum 1000000 0\n",
+    );
+}
