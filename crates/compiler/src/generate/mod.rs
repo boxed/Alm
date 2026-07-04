@@ -11,6 +11,16 @@ use crate::data::Name;
 
 pub const RUNTIME: &str = include_str!("runtime.js");
 
+/// The runtime source to embed. `ALM_RUNTIME_JS` overrides the compiled-in
+/// kernel — used by the mutation test harness to inject mutated runtimes
+/// without rebuilding the compiler.
+fn runtime_source() -> String {
+    match std::env::var("ALM_RUNTIME_JS") {
+        Ok(path) => std::fs::read_to_string(path).expect("ALM_RUNTIME_JS must be readable"),
+        Err(_) => RUNTIME.to_string(),
+    }
+}
+
 pub fn generate(module: &can::Module) -> String {
     generate_project(std::slice::from_ref(module))
 }
@@ -25,7 +35,7 @@ pub fn generate_project(modules: &[can::Module]) -> String {
     };
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
-    gen.out.push_str(RUNTIME);
+    gen.out.push_str(&runtime_source());
     gen.out.push_str("\n// HIGHER-ARITY CURRY HELPERS\n");
     for n in 8..=64 {
         let params: Vec<String> = (0..n).map(|i| format!("v{}", i)).collect();
