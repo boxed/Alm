@@ -458,6 +458,24 @@ fn foldr_and_minmax() {
 }
 
 #[test]
+fn let_bound_number_defaults_to_int() {
+    // `total` is generalized by the checker to a `number` scheme; the
+    // unresolved number must default to Int (as Elm does) so the list and
+    // arithmetic inside get an Int layout.
+    assert_same(
+        "let_number",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       total = List.sum [ 1, 2, 3, 4 ] + 10\n\
+         \x20   in\n\
+         \x20   total * 2\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

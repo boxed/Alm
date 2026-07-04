@@ -127,6 +127,11 @@ impl LayoutCtx {
                 fields.sort_by(|a, b| a.0.cmp(&b.0));
                 Layout::Record(fields)
             }
+            // An unresolved `number` variable defaults to Int, exactly as
+            // Elm does at the end of inference. Other leftover variables
+            // (from generalized bindings mono did not specialize) fall back to
+            // an opaque boxed reference.
+            Var(name) if name.as_str().starts_with("number") => Layout::Int,
             Var(_) => Layout::Ref,
             Type(home, name, args) => self.app_layout(home, name, args, visiting),
         }
