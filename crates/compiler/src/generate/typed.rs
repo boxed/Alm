@@ -83,6 +83,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             i64_t.fn_type(&[f64_t.into()], false),
             Some(Linkage::External),
         );
+        // Raw heap allocation for tagged constructors: alm_alloc(size) -> ptr.
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        self.module.add_function(
+            "alm_alloc",
+            ptr_t.fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
 
         // Forward-declare every specialization so calls resolve.
         for f in &mono.functions {
@@ -131,8 +138,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     fields.iter().map(|(_, l)| self.llvm_type(l)).collect();
                 self.ctx.struct_type(&fields, false).into()
             }
+            // A data-carrying union is a pointer to a heap {tag, fields}
+            // block; a boxed recursive reference is likewise a pointer.
+            Layout::Tagged(_) | Layout::Ref => {
+                self.ctx.ptr_type(inkwell::AddressSpace::default()).into()
+            }
             _ => self.ctx.i64_type().into(),
         }
+    }
+
+    /// The heap struct type for one constructor: an i32 tag followed by the
+    /// constructor's field types.
+    fn ctor_struct(&self, fields: &[Layout]) -> inkwell::types::StructType<'ctx> {
+        let mut members: Vec<BasicTypeEnum> = vec![self.ctx.i32_type().into()];
+        members.extend(fields.iter().map(|l| self.llvm_type(l)));
+        self.ctx.struct_type(&members, false)
     }
 
     /// The sorted field names of a record type — the canonical struct order
@@ -254,7 +274,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .left()
                     .unwrap())
             }
-            TypedKind::Call(func, args) => self.gen_call(func, args),
+            TypedKind::Call(func, args) => self.gen_call(expr, func, args),
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
@@ -274,9 +294,14 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     fn gen_call(
         &mut self,
+        whole: &TypedExpr,
         func: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A saturated constructor application builds a tagged heap value.
+        if let TypedKind::Ctor(_, _, ctor) = &func.kind {
+            return self.gen_ctor_apply(whole, ctor, args);
+        }
         let TypedKind::Global(name) = &func.kind else {
             return Err("typed backend: only direct calls are supported yet".to_string());
         };
@@ -295,6 +320,54 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .try_as_basic_value()
             .left()
             .unwrap())
+    }
+
+    /// Build a data-carrying constructor: allocate `{tag, fields}` on the
+    /// heap, store the tag and each argument, and yield the pointer.
+    fn gen_ctor_apply(
+        &mut self,
+        whole: &TypedExpr,
+        ctor: &crate::ast::canonical::Ctor,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let field_layouts = match self.layouts.layout_of(&whole.tipe) {
+            Layout::Tagged(variants) => variants
+                .get(ctor.index as usize)
+                .cloned()
+                .ok_or_else(|| format!("typed backend: bad ctor index for `{}`", ctor.name))?,
+            other => {
+                return Err(format!(
+                    "typed backend: applying `{}` to layout {:?} is not supported",
+                    ctor.name, other
+                ))
+            }
+        };
+        let struct_ty = self.ctor_struct(&field_layouts);
+        let size = struct_ty.size_of().unwrap();
+        let alloc = self.module.get_function("alm_alloc").unwrap();
+        let raw = self
+            .builder
+            .build_call(alloc, &[size.into()], "box")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        // Store the tag, then each field.
+        let tag_ptr = self.builder.build_struct_gep(struct_ty, raw, 0, "tagp").unwrap();
+        self.builder
+            .build_store(tag_ptr, self.ctx.i32_type().const_int(ctor.index as u64, false))
+            .unwrap();
+        for (i, arg) in args.iter().enumerate() {
+            let v = self.gen(arg)?;
+            let fp = self
+                .builder
+                .build_struct_gep(struct_ty, raw, (i + 1) as u32, "fp")
+                .unwrap();
+            self.builder.build_store(fp, v).unwrap();
+        }
+        Ok(raw.into())
     }
 
     fn gen_let(
@@ -491,6 +564,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .i32_type()
                 .const_int(ctor.index as u64, false)
                 .into()),
+            // A nullary constructor of a data-carrying union (e.g. Nothing in
+            // Maybe): a heap {tag} block with no fields.
+            Layout::Tagged(_) => self.gen_ctor_apply(whole, ctor, &[]),
             other => Err(format!(
                 "typed backend: constructing `{}` (layout {:?}) is not supported yet",
                 ctor.name, other
@@ -603,8 +679,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         branches: &[(crate::ast::canonical::Pattern, TypedExpr)],
         whole: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::Pattern_::*;
         let subject = self.gen(scrutinee)?;
+        let subject_layout = self.layouts.layout_of(&scrutinee.tipe);
         let result_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
         let merge = self.new_block("case.end");
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
@@ -612,74 +688,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let mut matched_all = false;
 
         for (pattern, body) in branches {
-            let test: Option<inkwell::values::IntValue<'ctx>> = match &pattern.value {
-                Var(name) => {
-                    self.locals.insert(name.to_string(), subject);
-                    None
-                }
-                Anything => None,
-                Alias(inner, name) if matches!(inner.value, Anything | Var(_)) => {
-                    self.locals.insert(name.value.to_string(), subject);
-                    None
-                }
-                Int(n) => Some(
-                    self.builder
-                        .build_int_compare(
-                            IntPredicate::EQ,
-                            subject.into_int_value(),
-                            self.ctx.i64_type().const_int(*n as u64, true),
-                            "casei",
-                        )
-                        .unwrap(),
-                ),
-                Chr(c) => Some(
-                    self.builder
-                        .build_int_compare(
-                            IntPredicate::EQ,
-                            subject.into_int_value(),
-                            self.ctx.i32_type().const_int(*c as u64, false),
-                            "casec",
-                        )
-                        .unwrap(),
-                ),
-                Ctor(_, _, ctor, args) if args.is_empty() => {
-                    let expected = match self.layouts.layout_of(&scrutinee.tipe) {
-                        Layout::Bool => self
-                            .ctx
-                            .bool_type()
-                            .const_int((ctor.name.as_str() == "True") as u64, false),
-                        Layout::Enum(_) => {
-                            self.ctx.i32_type().const_int(ctor.index as u64, false)
-                        }
-                        other => {
-                            return Err(format!(
-                                "typed backend: case on layout {:?} is not supported yet",
-                                other
-                            ))
-                        }
-                    };
-                    Some(
-                        self.builder
-                            .build_int_compare(
-                                IntPredicate::EQ,
-                                subject.into_int_value(),
-                                expected,
-                                "casetag",
-                            )
-                            .unwrap(),
-                    )
-                }
-                _ => {
-                    return Err(
-                        "typed backend: only scalar/wildcard case patterns are supported yet"
-                            .to_string(),
-                    )
-                }
-            };
-
-            match test {
+            match self.pattern_test(pattern, subject, &subject_layout)? {
                 None => {
-                    // Catch-all: this branch always matches; stop here.
+                    // Irrefutable: always matches; bind and stop.
+                    self.bind_case_pattern(pattern, subject, &subject_layout)?;
                     let v = self.gen(body)?;
                     incoming.push((v, self.builder.get_insert_block().unwrap()));
                     self.builder.build_unconditional_branch(merge).unwrap();
@@ -693,6 +705,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                         .build_conditional_branch(cond, then_bb, else_bb)
                         .unwrap();
                     self.builder.position_at_end(then_bb);
+                    self.bind_case_pattern(pattern, subject, &subject_layout)?;
                     let v = self.gen(body)?;
                     incoming.push((v, self.builder.get_insert_block().unwrap()));
                     self.builder.build_unconditional_branch(merge).unwrap();
@@ -713,6 +726,122 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             phi.add_incoming(&[(val as &dyn BasicValue, *bb)]);
         }
         Ok(phi.as_basic_value())
+    }
+
+    /// The condition under which a pattern matches `subject`, or `None` if the
+    /// pattern is irrefutable (always matches).
+    fn pattern_test(
+        &mut self,
+        pattern: &crate::ast::canonical::Pattern,
+        subject: BasicValueEnum<'ctx>,
+        layout: &Layout,
+    ) -> Result<Option<inkwell::values::IntValue<'ctx>>, String> {
+        use crate::ast::canonical::Pattern_::*;
+        let eq_i = |b: &inkwell::builder::Builder<'ctx>, x, y| {
+            b.build_int_compare(IntPredicate::EQ, x, y, "casetest").unwrap()
+        };
+        Ok(match &pattern.value {
+            Var(_) | Anything => None,
+            Alias(inner, _) => self.pattern_test(inner, subject, layout)?,
+            Int(n) => Some(eq_i(
+                &self.builder,
+                subject.into_int_value(),
+                self.ctx.i64_type().const_int(*n as u64, true),
+            )),
+            Chr(c) => Some(eq_i(
+                &self.builder,
+                subject.into_int_value(),
+                self.ctx.i32_type().const_int(*c as u64, false),
+            )),
+            Ctor(_, _, ctor, _) => match layout {
+                Layout::Bool => Some(eq_i(
+                    &self.builder,
+                    subject.into_int_value(),
+                    self.ctx
+                        .bool_type()
+                        .const_int((ctor.name.as_str() == "True") as u64, false),
+                )),
+                Layout::Enum(_) => Some(eq_i(
+                    &self.builder,
+                    subject.into_int_value(),
+                    self.ctx.i32_type().const_int(ctor.index as u64, false),
+                )),
+                Layout::Tagged(_) => {
+                    // Load the tag from the front of the heap block.
+                    let tag = self
+                        .builder
+                        .build_load(self.ctx.i32_type(), subject.into_pointer_value(), "tag")
+                        .unwrap()
+                        .into_int_value();
+                    Some(eq_i(
+                        &self.builder,
+                        tag,
+                        self.ctx.i32_type().const_int(ctor.index as u64, false),
+                    ))
+                }
+                other => {
+                    return Err(format!(
+                        "typed backend: case on layout {:?} is not supported yet",
+                        other
+                    ))
+                }
+            },
+            _ => {
+                return Err(
+                    "typed backend: unsupported case pattern (nested refutable patterns \
+                     are not compiled yet)"
+                        .to_string(),
+                )
+            }
+        })
+    }
+
+    /// Bind the variables a pattern introduces, given a successful match.
+    /// Called while positioned in the matched branch.
+    fn bind_case_pattern(
+        &mut self,
+        pattern: &crate::ast::canonical::Pattern,
+        subject: BasicValueEnum<'ctx>,
+        layout: &Layout,
+    ) -> Result<(), String> {
+        use crate::ast::canonical::Pattern_::*;
+        match &pattern.value {
+            Var(_) | Anything | Tuple(..) | Record(_) => {
+                self.bind_pattern(pattern, subject, layout)
+            }
+            Alias(inner, name) => {
+                self.locals.insert(name.value.to_string(), subject);
+                self.bind_case_pattern(inner, subject, layout)
+            }
+            Int(_) | Chr(_) => Ok(()),
+            Ctor(_, _, ctor, args) => {
+                if args.is_empty() {
+                    return Ok(());
+                }
+                let Layout::Tagged(variants) = layout else {
+                    return Err("typed backend: constructor pattern on non-tagged value".to_string());
+                };
+                let field_layouts = variants
+                    .get(ctor.index as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("typed backend: bad ctor index for `{}`", ctor.name))?;
+                let struct_ty = self.ctor_struct(&field_layouts);
+                let ptr = subject.into_pointer_value();
+                for (i, argpat) in args.iter().enumerate() {
+                    let fp = self
+                        .builder
+                        .build_struct_gep(struct_ty, ptr, (i + 1) as u32, "fp")
+                        .unwrap();
+                    let val = self
+                        .builder
+                        .build_load(self.llvm_type(&field_layouts[i]), fp, "fld")
+                        .unwrap();
+                    self.bind_pattern(argpat, val, &field_layouts[i])?;
+                }
+                Ok(())
+            }
+            _ => Err("typed backend: unsupported case pattern".to_string()),
+        }
     }
 
     fn new_block(&mut self, base: &str) -> inkwell::basic_block::BasicBlock<'ctx> {

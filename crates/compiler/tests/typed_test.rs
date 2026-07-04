@@ -247,6 +247,45 @@ fn bool_case_and_construction() {
 }
 
 #[test]
+fn maybe_construct_and_match() {
+    assert_same(
+        "maybe",
+        "module Test exposing (..)\n\
+         \n\
+         safeDiv : Int -> Int -> Maybe Int\n\
+         safeDiv a b = if b == 0 then Nothing else Just (a // b)\n\
+         \n\
+         orZero : Maybe Int -> Int\n\
+         orZero m =\n\
+         \x20   case m of\n\
+         \x20       Just x -> x\n\
+         \x20       Nothing -> 0\n\
+         \n\
+         main : Int\n\
+         main = orZero (safeDiv 42 6) * 100 + orZero (safeDiv 1 0)\n",
+    );
+}
+
+#[test]
+fn recursive_tree_sum() {
+    assert_same(
+        "tree",
+        "module Test exposing (..)\n\
+         \n\
+         type Tree = Leaf Int | Node Tree Tree\n\
+         \n\
+         sum : Tree -> Int\n\
+         sum t =\n\
+         \x20   case t of\n\
+         \x20       Leaf n -> n\n\
+         \x20       Node l r -> sum l + sum r\n\
+         \n\
+         main : Int\n\
+         main = sum (Node (Node (Leaf 3) (Leaf 4)) (Leaf 5))\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

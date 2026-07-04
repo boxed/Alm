@@ -118,6 +118,15 @@ fn alloc(value: Value) -> u64 {
     Box::into_raw(Box::new(value)) as u64
 }
 
+/// Raw 8-byte-aligned allocation for the typed backend's unboxed heap
+/// objects (tagged constructors, boxed recursive fields). Bump-allocated,
+/// never freed — like everything else here.
+#[no_mangle]
+pub unsafe extern "C" fn alm_alloc(size: usize) -> *mut u8 {
+    let layout = Layout::from_size_align(size.max(1), 8).unwrap();
+    std::alloc::alloc(layout)
+}
+
 /// View a pointer value word as a `&Value`. Only valid for non-integer
 /// words (`is_int` false); the cast truncates to the target pointer width.
 #[inline]
