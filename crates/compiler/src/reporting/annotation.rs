@@ -3,7 +3,7 @@
 //! The Haskell compiler packs positions into a Word64 for memory density.
 //! We keep row/col as plain u32 fields; Rust structs make this free.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position {
     pub row: u32,
     pub col: u32,
@@ -15,7 +15,7 @@ impl Position {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Region {
     pub start: Position,
     pub end: Position,

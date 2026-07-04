@@ -62,6 +62,22 @@ pub struct Checker<'a> {
     /// annotations reuse them so `a` means the same thing throughout.
     rigid_scope: Vec<HashMap<Name, Variable>>,
     errors: Vec<Error>,
+    /// Every inferred expression's `(region, result variable)`, in source
+    /// order. After each definition is generalized, the slice belonging to
+    /// its body is zonked into `node_types` using that definition's naming
+    /// state, so a subexpression's captured type shares variable names with
+    /// the enclosing function's scheme. Monomorphization relies on that
+    /// alignment to substitute structurally.
+    node_vars: Vec<(Region, Variable)>,
+    node_types: HashMap<Region, can::Type>,
+}
+
+/// The result of checking a module: the type of every top-level definition
+/// plus the concrete (zonked) type of every expression, keyed by source
+/// region. `node_types` is what monomorphization consumes.
+pub struct Checked {
+    pub types: HashMap<Name, can::Type>,
+    pub node_types: HashMap<Region, can::Type>,
 }
 
 /// Check a single module with no user imports (single-file mode).
@@ -71,11 +87,12 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
 }
 
 /// Check a module against the interfaces of its dependencies. Returns the
-/// inferred type of every top-level definition.
+/// inferred type of every top-level definition plus the per-expression
+/// types monomorphization consumes.
 pub fn check_module(
     module: &can::Module,
     interfaces: &Interfaces,
-) -> Result<HashMap<Name, can::Type>, Vec<Error>> {
+) -> Result<Checked, Vec<Error>> {
     let mut unions = HashMap::new();
     for union in &module.unions {
         unions.insert(
@@ -133,6 +150,8 @@ pub fn check_module(
         module_name: module.name.clone(),
         rigid_scope: Vec::new(),
         errors: Vec::new(),
+        node_vars: Vec::new(),
+        node_types: HashMap::new(),
     };
 
     for port in &module.ports {
@@ -153,7 +172,10 @@ pub fn check_module(
                 types.insert(name.clone(), scheme.tipe.clone());
             }
         }
-        Ok(types)
+        Ok(Checked {
+            types,
+            node_types: checker.node_types,
+        })
     } else {
         Err(checker.errors)
     }
@@ -286,9 +308,14 @@ impl Checker<'_> {
             self.bind_local(def.name.value.clone(), binding);
         }
 
+        // Body node ranges, one per def, so each can be zonked under its
+        // own scheme's naming during the generalization pass below.
+        let mut bounds: Vec<(usize, usize)> = Vec::with_capacity(defs.len());
         let result = (|| {
             for (def, mono) in defs.iter().zip(&mono_vars) {
+                let start = self.node_vars.len();
                 let def_type = self.infer_def_type(def)?;
+                bounds.push((start, self.node_vars.len()));
                 if let Some(var) = mono {
                     self.unify(*var, def_type, def.name.region, || {
                         format!("The definition of `{}`", def.name.value)
@@ -302,10 +329,14 @@ impl Checker<'_> {
         result?;
 
         // Generalize after the whole group.
-        for (def, mono) in defs.iter().zip(&mono_vars) {
+        for ((def, mono), (start, end)) in defs.iter().zip(&mono_vars).zip(&bounds) {
             let scheme = match (&def.annotation, mono) {
-                (Some(annotation), _) => Scheme::closed(annotation.clone()),
-                (None, Some(var)) => self.generalize(*var),
+                (Some(annotation), _) => {
+                    let mut state = Self::fresh_generalize_state();
+                    self.zonk_nodes(*start, *end, &mut state, &HashSet::new());
+                    Scheme::closed(annotation.clone())
+                }
+                (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end),
                 (None, None) => unreachable!(),
             };
             bind(self, def.name.value.clone(), Binding::Scheme(scheme));
@@ -316,10 +347,18 @@ impl Checker<'_> {
     /// Infer (and, when annotated, check) the type of one definition.
     /// Returns the generalizable scheme for non-recursive bindings.
     fn check_def(&mut self, def: &can::Def) -> Infer<Scheme> {
+        let body_start = self.node_vars.len();
         let def_type = self.infer_def_type(def)?;
+        let body_end = self.node_vars.len();
         match &def.annotation {
-            Some(annotation) => Ok(Scheme::closed(annotation.clone())),
-            None => Ok(self.generalize(def_type)),
+            Some(annotation) => {
+                // Body nodes already resolve to the annotation's rigid
+                // variables, so a fresh naming state reproduces those names.
+                let mut state = Self::fresh_generalize_state();
+                self.zonk_nodes(body_start, body_end, &mut state, &HashSet::new());
+                Ok(Scheme::closed(annotation.clone()))
+            }
+            None => Ok(self.generalize_and_zonk(def_type, body_start, body_end)),
         }
     }
 
@@ -464,9 +503,38 @@ impl Checker<'_> {
 
     // GENERALIZATION
 
-    /// Turn an inferred type into a scheme, quantifying every flexible
-    /// variable that is not shared with the enclosing environment.
-    fn generalize(&mut self, var: Variable) -> Scheme {
+    /// Zonk the expression nodes recorded in `node_vars[start..]` into
+    /// `node_types`, reusing `state` so their variable names match the
+    /// enclosing definition's scheme (and each other). Called once per
+    /// definition, right after it is generalized.
+    ///
+    /// The innermost generalizing scope wins: a `let`-bound polymorphic
+    /// helper generalizes (and claims its own body nodes) before the outer
+    /// definition zonks the remainder, so each node ends up typed relative
+    /// to the tightest scope that quantifies its variables — which is what
+    /// monomorphization needs to specialize that scope independently.
+    fn zonk_nodes(
+        &mut self,
+        start: usize,
+        end: usize,
+        state: &mut GeneralizeState,
+        env_free: &HashSet<Variable>,
+    ) {
+        let slice: Vec<(Region, Variable)> = self.node_vars[start..end].to_vec();
+        for (region, var) in slice {
+            if self.node_types.contains_key(&region) {
+                continue;
+            }
+            let tipe = self.variable_to_type(var, env_free, state);
+            self.node_types.insert(region, tipe);
+        }
+    }
+
+    /// Generalize a definition's inferred type and, with the very same
+    /// naming state, zonk the body expressions recorded in `start..end`.
+    /// Sharing the state is what makes a subexpression's captured type use
+    /// the same variable names as the function's scheme.
+    fn generalize_and_zonk(&mut self, var: Variable, start: usize, end: usize) -> Scheme {
         let env_free = self.env_free_vars();
         let mut state = GeneralizeState {
             names: HashMap::new(),
@@ -474,9 +542,21 @@ impl Checker<'_> {
             counter: 0,
         };
         let tipe = self.variable_to_type(var, &env_free, &mut state);
+        self.zonk_nodes(start, end, &mut state, &env_free);
         Scheme {
             tipe,
             free: state.free,
+        }
+    }
+
+    /// A fresh naming state for zonking annotated definitions, whose body
+    /// nodes already resolve to the annotation's rigid variables (so their
+    /// names are fixed and need no shared counter).
+    fn fresh_generalize_state() -> GeneralizeState {
+        GeneralizeState {
+            names: HashMap::new(),
+            free: HashMap::new(),
+            counter: 0,
         }
     }
 
@@ -735,6 +815,14 @@ impl Checker<'_> {
     // EXPRESSIONS
 
     fn infer_expr(&mut self, expr: &can::Expr) -> Infer<Variable> {
+        let var = self.infer_expr_inner(expr)?;
+        // Record for monomorphization; zonked later with the enclosing
+        // definition's naming state so variable names line up.
+        self.node_vars.push((expr.region, var));
+        Ok(var)
+    }
+
+    fn infer_expr_inner(&mut self, expr: &can::Expr) -> Infer<Variable> {
         use can::Expr_::*;
         let region = expr.region;
         match &expr.value {

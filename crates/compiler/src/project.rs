@@ -53,6 +53,10 @@ struct SourceModule {
 pub struct CheckedProject {
     pub modules: Vec<can::Module>,
     pub interfaces: Interfaces,
+    /// Per-module, the concrete type of every expression keyed by source
+    /// region (regions are only unique within a module). Monomorphization
+    /// consumes this; other backends ignore it.
+    pub node_types: HashMap<Name, HashMap<Region, can::Type>>,
 }
 
 pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
@@ -108,6 +112,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     // Compile each module against the interfaces of its dependencies.
     let mut interfaces = Interfaces::new();
     let mut canonical_modules = Vec::new();
+    let mut all_node_types: HashMap<Name, HashMap<Region, can::Type>> = HashMap::new();
     for name in &order {
         let source_module = &modules[name];
         let (canonical, mut interface) =
@@ -128,7 +133,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
                 },
             )?;
 
-        let types = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
+        let checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
             errors
                 .into_iter()
                 .map(|e| {
@@ -142,6 +147,8 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
                 })
                 .collect::<Vec<_>>()
         })?;
+        let types = checked.types;
+        all_node_types.insert(name.clone(), checked.node_types);
 
         nitpick::check(&canonical, &interfaces).map_err(|errors| {
             errors
@@ -173,6 +180,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     Ok(CheckedProject {
         modules: canonical_modules,
         interfaces,
+        node_types: all_node_types,
     })
 }
 
