@@ -118,6 +118,24 @@ fn let_bindings() {
 }
 
 #[test]
+fn case_on_integers() {
+    assert_same(
+        "case_int",
+        "module Test exposing (..)\n\
+         \n\
+         classify : Int -> Int\n\
+         classify n =\n\
+         \x20   case n of\n\
+         \x20       0 -> 100\n\
+         \x20       1 -> 200\n\
+         \x20       other -> other * 10\n\
+         \n\
+         main : Int\n\
+         main = classify 0 + classify 1 + classify 5\n",
+    );
+}
+
+#[test]
 fn polymorphic_identity_specialized_to_int() {
     assert_same(
         "poly_identity",

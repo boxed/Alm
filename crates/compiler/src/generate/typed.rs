@@ -237,6 +237,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
+            TypedKind::Case(scrutinee, branches) => self.gen_case(scrutinee, branches, expr),
             TypedKind::Negate(inner) => self.gen_negate(inner),
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
@@ -398,6 +399,99 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(merge);
         let phi = self.builder.build_phi(result_ty, "if").unwrap();
+        for (val, bb) in &incoming {
+            phi.add_incoming(&[(val as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
+    /// `case` on a scalar scrutinee (Int/Char), with literal patterns and a
+    /// variable/wildcard catch-all. Compiles to a test chain feeding a phi.
+    fn gen_case(
+        &mut self,
+        scrutinee: &TypedExpr,
+        branches: &[(crate::ast::canonical::Pattern, TypedExpr)],
+        whole: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Pattern_::*;
+        let subject = self.gen(scrutinee)?;
+        let result_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
+        let merge = self.new_block("case.end");
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let mut matched_all = false;
+
+        for (pattern, body) in branches {
+            let test: Option<inkwell::values::IntValue<'ctx>> = match &pattern.value {
+                Var(name) => {
+                    self.locals.insert(name.to_string(), subject);
+                    None
+                }
+                Anything => None,
+                Alias(inner, name) if matches!(inner.value, Anything | Var(_)) => {
+                    self.locals.insert(name.value.to_string(), subject);
+                    None
+                }
+                Int(n) => Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            subject.into_int_value(),
+                            self.ctx.i64_type().const_int(*n as u64, true),
+                            "casei",
+                        )
+                        .unwrap(),
+                ),
+                Chr(c) => Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            subject.into_int_value(),
+                            self.ctx.i32_type().const_int(*c as u64, false),
+                            "casec",
+                        )
+                        .unwrap(),
+                ),
+                _ => {
+                    return Err(
+                        "typed backend: only scalar/wildcard case patterns are supported yet"
+                            .to_string(),
+                    )
+                }
+            };
+
+            match test {
+                None => {
+                    // Catch-all: this branch always matches; stop here.
+                    let v = self.gen(body)?;
+                    incoming.push((v, self.builder.get_insert_block().unwrap()));
+                    self.builder.build_unconditional_branch(merge).unwrap();
+                    matched_all = true;
+                    break;
+                }
+                Some(cond) => {
+                    let then_bb = self.new_block("case.then");
+                    let else_bb = self.new_block("case.else");
+                    self.builder
+                        .build_conditional_branch(cond, then_bb, else_bb)
+                        .unwrap();
+                    self.builder.position_at_end(then_bb);
+                    let v = self.gen(body)?;
+                    incoming.push((v, self.builder.get_insert_block().unwrap()));
+                    self.builder.build_unconditional_branch(merge).unwrap();
+                    self.builder.position_at_end(else_bb);
+                }
+            }
+        }
+
+        // Elm case-expressions are exhaustive; if the source had no explicit
+        // catch-all the final else is unreachable.
+        if !matched_all {
+            self.builder.build_unreachable().unwrap();
+        }
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(result_ty, "case").unwrap();
         for (val, bb) in &incoming {
             phi.add_incoming(&[(val as &dyn BasicValue, *bb)]);
         }
