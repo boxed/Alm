@@ -140,3 +140,57 @@ fn refutable_destructuring_is_rejected() {
 fn wildcards_make_anything_exhaustive() {
     ok("type Big\n    = A\n    | B\n    | C\n    | D\n\nf x =\n    case x of\n        A ->\n            1\n\n        _ ->\n            0\n");
 }
+
+#[test]
+fn missing_pattern_rendering() {
+    // Char literals in the missing-pattern message.
+    missing(
+        "f c =\n    case c of\n        'a' ->\n            1\n",
+        "_",
+    );
+    // Right-nested cons renders flat; a cons in head position needs parens.
+    missing(
+        "f xs =\n    case xs of\n        [] ->\n            0\n\n        [ x ] ->\n            x\n",
+        "_ :: _ :: _",
+    );
+    missing(
+        "f xss =\n    case xss of\n        [] ->\n            0\n\n        [] :: _ ->\n            1\n",
+        "(_ :: _) :: _",
+    );
+    // Tuple-of-union missing combination renders as a tuple.
+    missing(
+        "f v =\n    case v of\n        ( Just _, _ ) ->\n            1\n",
+        "( Nothing,",
+    );
+}
+
+#[test]
+fn redundant_wildcard_after_complete_match() {
+    let err = check(
+        "f b =\n    case b of\n        True ->\n            1\n\n        False ->\n            2\n\n        _ ->\n            3\n",
+    )
+    .unwrap_err();
+    assert!(err.contains("redundant"), "got: {}", err);
+}
+
+#[test]
+fn expressions_inside_every_container_are_checked() {
+    // The nitpick walker descends into records, updates, accessors, and
+    // tuples; an incomplete case buried in each must still be caught.
+    let err = check(
+        "base = { field = 0 }\n\nbad m =\n    { base | field = case m of\n            Just n ->\n                n\n    }\n",
+    )
+    .unwrap_err();
+    assert!(err.contains("MISSING PATTERNS"), "got: {}", err);
+
+    let err = check(
+        "bad m =\n    ( case m of\n        Just n ->\n            n\n    , (case m of\n        Just k ->\n            k\n      ).x\n    )\n",
+    )
+    .unwrap_err();
+    assert!(err.contains("MISSING PATTERNS"), "got: {}", err);
+
+    let ok_result = check(
+        "f m =\n    { a = case m of\n            Just n ->\n                n\n\n            Nothing ->\n                0\n    , b = -(case m of\n            _ ->\n                1\n      )\n    }\n",
+    );
+    assert!(ok_result.is_ok());
+}

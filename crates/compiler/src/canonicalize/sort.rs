@@ -202,9 +202,7 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
         .iter()
         .map(|decl| match decl {
             can::LetDecl::Def(def) => vec![def.name.value.clone()],
-            can::LetDecl::Recursive(defs) => {
-                defs.iter().map(|d| d.name.value.clone()).collect()
-            }
+            can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
             can::LetDecl::Destruct(pattern, _) => pattern_names(pattern),
         })
         .collect();
@@ -221,9 +219,7 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
             let mut refs = HashSet::new();
             match decl {
                 can::LetDecl::Def(def) => collect_refs(&def.body, &mut refs),
-                can::LetDecl::Recursive(defs) => {
-                    defs.iter().for_each(|d| collect_refs(&d.body, &mut refs))
-                }
+                can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
                 can::LetDecl::Destruct(_, e) => collect_refs(e, &mut refs),
             }
             let mut deps: Vec<usize> = refs
@@ -247,13 +243,7 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
                         collect_direct_refs(&def.body, &mut refs);
                     }
                 }
-                can::LetDecl::Recursive(defs) => {
-                    for def in defs {
-                        if def.args.is_empty() {
-                            collect_direct_refs(&def.body, &mut refs);
-                        }
-                    }
-                }
+                can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
                 can::LetDecl::Destruct(_, e) => collect_direct_refs(e, &mut refs),
             }
             let mut deps: Vec<usize> = refs
@@ -284,13 +274,7 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
                     },
                     def.name.region,
                 ),
-                can::LetDecl::Recursive(defs) => (
-                    format!(
-                        "The value `{}` is part of a definition cycle.",
-                        defs[0].name.value
-                    ),
-                    defs[0].name.region,
-                ),
+                can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
                 can::LetDecl::Destruct(pattern, _) => (
                     if directly_cyclic[i] == 1 {
                         "This destructuring refers to a name it binds.".to_string()
@@ -332,7 +316,7 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
             for &i in &group {
                 match decls[i].take().unwrap() {
                     can::LetDecl::Def(def) => group_defs.push(def),
-                    can::LetDecl::Recursive(defs) => group_defs.extend(defs),
+                    can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
                     can::LetDecl::Destruct(pattern, _) => {
                         return Err(Error::new(
                             "This destructuring is part of a definition cycle.",

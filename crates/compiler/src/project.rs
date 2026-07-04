@@ -346,18 +346,11 @@ fn sort_modules(
     modules: &HashMap<Name, SourceModule>,
     entry: &Name,
 ) -> Result<Vec<Name>, Name> {
+    // Every module in the map was reached from the entry, so one DFS
+    // covers them all.
     let mut order = Vec::new();
     let mut state: HashMap<Name, u8> = HashMap::new(); // 1 = visiting, 2 = done
     visit(modules, entry, &mut state, &mut order)?;
-    // Any modules not reachable from the entry (possible when several files
-    // were loaded eagerly) — include them too for completeness.
-    let mut names: Vec<&Name> = modules.keys().collect();
-    names.sort();
-    for name in names {
-        if !state.contains_key(name) {
-            visit(modules, name, &mut state, &mut order)?;
-        }
-    }
     Ok(order)
 }
 

@@ -59,18 +59,4 @@ impl<T> Located<T> {
         }
     }
 
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Located<U> {
-        Located {
-            region: self.region,
-            value: f(self.value),
-        }
-    }
-
-    /// Port of `merge`: wrap a value in the region spanning two located things.
-    pub fn merge<A, B>(a: &Located<A>, b: &Located<B>, value: T) -> Located<T> {
-        Located {
-            region: a.region.merge(b.region),
-            value,
-        }
-    }
 }

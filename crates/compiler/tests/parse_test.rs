@@ -331,3 +331,52 @@ fn surrogate_pair_escapes() {
     assert_eq!(m.values[0].value.body.value, Expr_::Str("𝔄".into()));
     assert_eq!(m.values[1].value.body.value, Expr_::Str("💩".into()));
 }
+
+#[test]
+fn negation_in_parens() {
+    let m = parse_ok("module M exposing (..)\n\nx = (-5) + 1\ny = (-x)\nz = (-)\n");
+    assert!(matches!(&m.values[0].value.body.value, Expr_::Binops(..)));
+    assert!(matches!(&m.values[2].value.body.value, Expr_::Op(..)));
+    parse_err("module M exposing (..)\n\nz = (- )\n");
+}
+
+#[test]
+fn headerless_module_defaults_to_main() {
+    let m = parse_ok("x = 1\n");
+    assert_eq!(m.get_name().as_str(), "Main");
+}
+
+#[test]
+fn as_patterns_and_cons_in_case() {
+    let m = parse_ok(
+        "module M exposing (..)\n\nf v =\n    case v of\n        ( x :: rest ) as whole ->\n            1\n\n        _ ->\n            0\n",
+    );
+    assert_eq!(m.values.len(), 1);
+}
+
+#[test]
+fn name_debug_formatting() {
+    let m = parse_ok("module M exposing (..)\n\nx = 1\n");
+    let name = &m.values[0].value.name.value;
+    assert_eq!(format!("{:?}", name), "\"x\"");
+    assert_eq!(format!("{}", name), "x");
+}
+
+#[test]
+fn char_escapes_parse() {
+    let m = parse_ok("module M exposing (..)\n\na = '\\t'\nb = '\\''\nc = '\\u{1F4A9}'\n");
+    assert_eq!(m.values[0].value.body.value, Expr_::Chr('\t'));
+    assert_eq!(m.values[1].value.body.value, Expr_::Chr('\''));
+    assert_eq!(m.values[2].value.body.value, Expr_::Chr('💩'));
+}
+
+#[test]
+fn multiline_string_escapes() {
+    let m = parse_ok(r##"module M exposing (..)
+
+x = """a\""""
+y = """tab\there"""
+"##);
+    assert_eq!(m.values[0].value.body.value, Expr_::Str("a\"".into()));
+    assert_eq!(m.values[1].value.body.value, Expr_::Str("tab\there".into()));
+}

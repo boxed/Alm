@@ -18,10 +18,6 @@ impl Name {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    pub fn is_upper(&self) -> bool {
-        self.0.chars().next().is_some_and(|c| c.is_uppercase())
-    }
 }
 
 impl fmt::Debug for Name {

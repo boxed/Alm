@@ -357,3 +357,159 @@ fn collections_long_tail() {
         "(Just 6,Nothing,Ok 1)"
     );
 }
+
+// PORT PAYLOAD CONVERSION — every converter shape, both directions
+
+#[test]
+fn port_payload_shapes() {
+    let source = r#"port module Test exposing (main)
+
+port askRecord : ({ n : Int, tags : List String } -> msg) -> Sub msg
+
+port askTriple : (( Int, String, Bool ) -> msg) -> Sub msg
+
+port askMaybe : (Maybe Int -> msg) -> Sub msg
+
+port askArray : (Array.Array Float -> msg) -> Sub msg
+
+port sendRecord : { n : Int, ok : Bool } -> Cmd msg
+
+port sendPair : ( Int, Maybe String ) -> Cmd msg
+
+port sendUnit : () -> Cmd msg
+
+port sendList : List Int -> Cmd msg
+
+import Array
+
+type Msg
+    = GotRecord { n : Int, tags : List String }
+    | GotTriple ( Int, String, Bool )
+    | GotMaybe (Maybe Int)
+    | GotArray (Array.Array Float)
+
+update : Msg -> () -> ( (), Cmd Msg )
+update msg model =
+    case msg of
+        GotRecord r ->
+            ( model
+            , Cmd.batch
+                [ sendRecord { n = r.n * 2, ok = not (List.isEmpty r.tags) }
+                , sendList (List.map String.length r.tags)
+                ]
+            )
+
+        GotTriple ( n, s, b ) ->
+            ( model, sendPair ( n + String.length s, if b then Just s else Nothing ) )
+
+        GotMaybe m ->
+            ( model
+            , case m of
+                Just n ->
+                    sendPair ( n, Nothing )
+
+                Nothing ->
+                    sendUnit ()
+            )
+
+        GotArray arr ->
+            ( model, sendList (List.map round (Array.toList arr)) )
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Cmd.none )
+        , update = update
+        , subscriptions =
+            \_ ->
+                Sub.batch
+                    [ askRecord GotRecord
+                    , askTriple GotTriple
+                    , askMaybe GotMaybe
+                    , askArray GotArray
+                    ]
+        }
+"#;
+    // imports must precede ports: rebuild source in legal order
+    let source = source.replace(
+        "port sendList : List Int -> Cmd msg\n\nimport Array\n",
+        "port sendList : List Int -> Cmd msg\n",
+    );
+    let source = source.replace(
+        "port module Test exposing (main)\n",
+        "port module Test exposing (main)\n\nimport Array\n",
+    );
+    let javascript = common::compile_single("Test.elm", &source);
+    let js_path = common::write_js("runtime-payloads", &javascript);
+    let script = format!(
+        r#"var Elm = require({:?});
+var app = Elm.Test.main.init({{}});
+var log = [];
+app.ports.sendRecord.subscribe(function (v) {{ log.push('record:' + JSON.stringify(v)); }});
+app.ports.sendPair.subscribe(function (v) {{ log.push('pair:' + JSON.stringify(v)); }});
+app.ports.sendUnit.subscribe(function (v) {{ log.push('unit:' + JSON.stringify(v)); }});
+app.ports.sendList.subscribe(function (v) {{ log.push('list:' + JSON.stringify(v)); }});
+app.ports.askRecord.send({{ n: 21, tags: ['ab', 'cde'] }});
+app.ports.askTriple.send([4, 'xyz', true]);
+app.ports.askMaybe.send(7);
+app.ports.askMaybe.send(null);
+app.ports.askArray.send([1.4, 2.6]);
+setTimeout(function () {{ log.forEach(function (s) {{ console.log(s); }}); process.exit(0); }}, 100);"#,
+        js_path.to_str().unwrap()
+    );
+    let out = common::run_node(&script, &javascript);
+    assert!(out.contains(r#"record:{"n":42,"ok":true}"#), "got: {}", out);
+    assert!(out.contains("list:[2,3]"), "got: {}", out);
+    assert!(out.contains(r#"pair:[7,"xyz"]"#), "got: {}", out);
+    assert!(out.contains("pair:[7,null]"), "got: {}", out);
+    assert!(out.contains("unit:null"), "got: {}", out);
+    assert!(out.contains("list:[1,3]"), "got: {}", out);
+}
+
+#[test]
+fn outgoing_array_and_value_ports() {
+    let source = r#"port module Test exposing (main)
+
+import Array
+import Json.Encode
+
+port askUnit : (() -> msg) -> Sub msg
+
+port sendArray : Array.Array Int -> Cmd msg
+
+port sendValue : Json.Encode.Value -> Cmd msg
+
+type Msg
+    = Go ()
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Cmd.none )
+        , update =
+            \(Go _) model ->
+                ( model
+                , Cmd.batch
+                    [ sendArray (Array.fromList [ 7, 8 ])
+                    , sendValue (Json.Encode.object [ ( "raw", Json.Encode.bool True ) ])
+                    ]
+                )
+        , subscriptions = \_ -> askUnit Go
+        }
+"#;
+    let javascript = common::compile_single("Test.elm", source);
+    let js_path = common::write_js("runtime-outarray", &javascript);
+    let script = format!(
+        r#"var Elm = require({:?});
+var app = Elm.Test.main.init({{}});
+var log = [];
+app.ports.sendArray.subscribe(function (v) {{ log.push('arr:' + JSON.stringify(v)); }});
+app.ports.sendValue.subscribe(function (v) {{ log.push('val:' + JSON.stringify(v)); }});
+app.ports.askUnit.send(null);
+setTimeout(function () {{ console.log(log.join('|')); process.exit(0); }}, 80);"#,
+        js_path.to_str().unwrap()
+    );
+    let out = common::run_node(&script, &javascript);
+    assert!(out.contains("arr:[7,8]"), "got: {}", out);
+    assert!(out.contains(r#"val:{"raw":true}"#), "got: {}", out);
+}

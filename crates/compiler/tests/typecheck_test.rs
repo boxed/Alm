@@ -198,3 +198,117 @@ fn infinite_types_are_rejected() {
     err("f x = f\n");
     err("bad g = g g\n");
 }
+
+// COVERAGE: constrained type variables (rigid and flexible supers)
+
+#[test]
+fn rigid_super_variables() {
+    // A rigid `number` satisfies number-constrained operations.
+    ok("f : number -> number\nf x = x + x\n");
+    // A rigid `comparable` satisfies comparison operators.
+    ok("f : comparable -> comparable -> Bool\nf a b = a < b\n");
+    // A rigid `appendable` satisfies ++ but not +.
+    ok("f : appendable -> appendable -> appendable\nf a b = a ++ b\n");
+    err("f : appendable -> appendable\nf x = x + x\n");
+    // A rigid `number` is comparable.
+    ok("f : number -> number -> Bool\nf a b = a < b\n");
+    // A plain rigid var satisfies nothing.
+    err("f : a -> a\nf x = x ++ x\n");
+}
+
+#[test]
+fn super_combinations() {
+    // appendable + comparable = compappend (Strings and Lists qualify).
+    ok("f x y = ( x ++ y, x < y )\ng = f \"a\" \"b\"\n");
+    ok("f x y = ( x ++ y, x < y )\ng = f [ 1 ] [ 2 ]\n");
+    // number + appendable has no intersection.
+    err("f x = ( x ++ x, x + x )\n");
+    // number + comparable = number.
+    ok("f x y = ( x + y, x < y )\ng = f 1 2\n");
+    err("f x y = ( x + y, x < y )\ng = f \"a\" \"b\"\n");
+}
+
+#[test]
+fn record_updates_are_checked() {
+    err("notARecord = 5\n\nbad = { notARecord | x = 1 }\n");
+    // The rendered error includes an extensible record type.
+    err("f r = { r | x = r.x + 1, missing : Int }\n");
+    err("addField r = { r | x = 1 }\n\nbad = addField { y = 2 }\n");
+}
+
+#[test]
+fn partial_generalization_keeps_outer_vars_mono() {
+    // `g` is polymorphic in its own argument but shares `x`'s type var
+    // with the enclosing scope.
+    ok("f x =\n    let\n        g y =\n            ( x, y )\n    in\n    ( g 1, g \"s\" )\n");
+    // Using g to force x to two different types must fail.
+    err("f x =\n    let\n        g y =\n            ( x + y, y )\n    in\n    ( g 1, g \"s\" )\n");
+}
+
+#[test]
+fn error_rendering_covers_type_shapes() {
+    // Three-element tuples in the rendered mismatch.
+    err("x : ( Int, Int, Int )\nx = ( 1, 2, \"3\" )\n");
+    // Function types as arguments get parenthesized in messages.
+    err("apply : (Int -> Int) -> Int\napply f = f 1\n\nbad = apply 5\n");
+    // Extensible records render with their row variable.
+    err("getX : { r | x : Int } -> Int\ngetX r = r.x\n\nbad = getX \"not a record\"\n");
+    // Unit in messages.
+    err("f : () -> Int\nf _ = 1\n\nbad = f 0\n");
+}
+
+#[test]
+fn many_type_variables_generalize() {
+    // More than 26 fresh variables exercises the name generator overflow
+    // (a..z then wrapping).
+    ok("f a b c d e g h i j k l m n o p q r s t u v w x y z aa ab =\n    { f1 = a, f2 = b, f3 = c, f4 = d, f5 = e, f6 = g, f7 = h, f8 = i, f9 = j, f10 = k, f11 = l, f12 = m, f13 = n, f14 = o, f15 = p, f16 = q, f17 = r, f18 = s, f19 = t, f20 = u, f21 = v, f22 = w, f23 = x, f24 = y, f25 = z, f26 = aa, f27 = ab }\n");
+}
+
+#[test]
+fn mutually_recursive_with_annotations() {
+    ok("even : Int -> Bool\neven n =\n    if n == 0 then\n        True\n    else\n        odd (n - 1)\n\nodd n =\n    if n == 0 then\n        False\n    else\n        even (n - 1)\n");
+    // An annotated member of a recursive group whose body violates the
+    // annotation.
+    err("even : Int -> String\neven n =\n    if n == 0 then\n        True\n    else\n        odd (n - 1)\n\nodd n =\n    if n == 0 then\n        False\n    else\n        even (n - 1)\n");
+}
+
+#[test]
+fn pattern_type_errors() {
+    err("f xs =\n    case xs of\n        [ a ] ->\n            a\n\n        x :: rest ->\n            x + String.length rest\n\n        [] ->\n            0\n");
+    err("f p =\n    case p of\n        { name } ->\n            name ++ \"!\"\n\ng = f { name = 5 }\n");
+    err("f v =\n    case v of\n        ( a, b ) ->\n            a\n\ng = f 5\n");
+}
+
+#[test]
+fn as_patterns_typecheck() {
+    ok("f (( a, b ) as pair) = ( a + b, pair )\n\nx = f ( 1, 2 )\n");
+    ok("g v =\n    case v of\n        (Just n) as whole ->\n            ( n, whole )\n\n        Nothing ->\n            ( 0, Nothing )\n");
+}
+
+#[test]
+fn char_and_string_patterns_typecheck() {
+    ok("f c =\n    case c of\n        'x' ->\n            1\n\n        _ ->\n            0\n\ng = f 'y'\n");
+    err("f c =\n    case c of\n        'x' ->\n            1\n\n        _ ->\n            0\n\ng = f \"not a char\"\n");
+    ok("h s =\n    case s of\n        \"lit\" ->\n            1\n\n        _ ->\n            0\n");
+}
+
+#[test]
+fn rigid_vars_flow_into_inner_lets() {
+    // The inner unannotated definition's type mentions the outer rigid
+    // `number`; generalization must keep it shared.
+    ok("f : number -> number\nf x =\n    let\n        doubled =\n            x + x\n    in\n    doubled\n");
+    ok("f : comparable -> comparable -> comparable\nf a b =\n    let\n        smaller =\n            if a < b then\n                a\n            else\n                b\n    in\n    smaller\n");
+}
+
+#[test]
+fn annotation_variable_names_are_reused_in_errors() {
+    // Rendered messages use the annotation's own variable names.
+    err("f : thing -> thing\nf x = x + 1\n");
+    err("swap : ( first, second ) -> ( second, first )\nswap ( a, b ) = ( a, b )\n");
+}
+
+#[test]
+fn list_pattern_element_mismatch() {
+    err("f xs =\n    case xs of\n        [ a, b ] ->\n            a + b\n\n        _ ->\n            0\n\ng = f [ \"x\" ]\n");
+    err("f v =\n    case v of\n        x :: _ ->\n            x + 1\n\n        [] ->\n            0\n\ng = f [ \"s\" ]\n");
+}

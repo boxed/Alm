@@ -294,3 +294,211 @@ fn annotation_type_must_exist_in_let() {
         "I cannot find a type named `Missing`",
     );
 }
+
+// COVERAGE: more parser error branches
+
+#[test]
+fn expression_parse_errors() {
+    expect("x = (+ \n", "closing `)` after this operator");
+    expect(
+        "x =\n    case 1 of\n        1 ->\n            2\n        oops~\n",
+        "",
+    );
+    expect("x = [ 1, 2\ny = 3\n", "in the middle of a list");
+    expect("x = ( 1, 2\ny = 3\n", "");
+    expect("x = { a = 1 b = 2 }\n", "I was expecting a `,` or `}`");
+    expect("x = { a 1 }\n", "I was expecting `=` or `|`");
+    expect("x = .\n", "field name after this `.`");
+}
+
+#[test]
+fn string_and_escape_errors() {
+    expect("x = \"\"\"never closed\n", "closing `\"\"\"`");
+    expect("x = \"\\u{D835}\"\n", "surrogate pair");
+    expect("x = \"\\u{D835}\\u{0041}\"\n", "surrogate pair");
+    expect("x = \"\\u{}\"\n", "hex digits");
+    expect("x = \"\\u{41\"\n", "closing `}`");
+    expect("x = ''\n", "character literal");
+}
+
+#[test]
+fn type_parse_errors() {
+    expect("x : { a : Int\nx = 1\n", "record type");
+    expect("x : ( Int, )\nx = 1\n", "Expecting a type");
+    expect("x : { a | }\nx = 1\n", "");
+    expect("f : Int ->\nf = 1\n", "I was expecting a type after this `->`");
+}
+
+#[test]
+fn module_header_errors() {
+    expect_module("module exposing (..)\n\nx = 1\n", "");
+    expect_module(
+        "module Test exposing (x, )\n\nx = 1\n",
+        "",
+    );
+    expect_module(
+        "module Test exposing (..)\n\nimport \n\nx = 1\n",
+        "",
+    );
+    expect_module(
+        "module Test exposing (..)\n\ninfix sideways 5 (|?|) = f\n\nf = 1\n",
+        "I was expecting `left`, `right`, or `non`",
+    );
+    expect_module(
+        "module Test exposing (..)\n\ninfix left 99 (|?|) = f\n\nf = 1\n",
+        "Precedence must be an integer from 0 to 9",
+    );
+}
+
+#[test]
+fn pattern_parse_error_branches() {
+    // `as` with a non-name after it
+    expect(
+        "f v =\n    case v of\n        ( 1, _ ) as 5 ->\n            0\n\nx = 1\n",
+        "",
+    );
+    // cons pattern with garbage after ::
+    expect(
+        "f v =\n    case v of\n        x :: ->\n            0\n\nx = 1\n",
+        "",
+    );
+}
+
+// COVERAGE: remaining canonicalize/typecheck error branches
+
+#[test]
+fn type_error_through_compile() {
+    expect("x : String\nx = 1\n", "I needed");
+}
+
+#[test]
+fn single_file_unknown_import() {
+    expect_module(
+        "module Test exposing (..)\n\nimport Absolutely.Missing\n\nx = 1\n",
+        "I cannot find a module named `Absolutely.Missing`",
+    );
+}
+
+#[test]
+fn builtin_open_and_ctor_exposing() {
+    // These must compile: builtin `exposing (..)` and `Union(..)` imports.
+    let ok = alm_compiler::compile(
+        "module Test exposing (..)\n\nimport Maybe exposing (..)\nimport Result exposing (Result(..))\n\nf : Maybe Int -> Result String Int\nf m =\n    case m of\n        Just n ->\n            Ok n\n\n        Nothing ->\n            Err \"none\"\n",
+    );
+    assert!(ok.is_ok(), "builtin exposing forms should compile");
+}
+
+#[test]
+fn duplicate_port_names() {
+    expect_module(
+        "port module Test exposing (..)\n\nport send : String -> Cmd msg\n\nsend : String -> Cmd msg\nsend s = Cmd.none\n\nx = 1\n",
+        "multiple definitions named `send`",
+    );
+}
+
+#[test]
+fn union_and_port_type_errors() {
+    expect(
+        "type T\n    = T Missing\n\nx = 1\n",
+        "I cannot find a type named `Missing`",
+    );
+    expect_module(
+        "port module Test exposing (..)\n\nport bad : Missing -> Cmd msg\n\nx = 1\n",
+        "I cannot find a type named `Missing`",
+    );
+}
+
+#[test]
+fn bad_alias_in_open_exposing_is_skipped() {
+    // The alias body fails to canonicalize; open exposing skips it rather
+    // than crashing, and the module still compiles.
+    let result = alm_compiler::compile(
+        "module Test exposing (..)\n\ntype alias Broken =\n    AbsolutelyMissing\n\nx = 1\n",
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn record_pattern_duplicate_fields() {
+    expect(
+        "f { a, a } = a\n\nx = f { a = 1 }\n",
+        "bound more than once",
+    );
+}
+
+#[test]
+fn alias_used_as_ctor_must_be_record() {
+    expect(
+        "type alias I =\n    Int\n\nx = I\n",
+        "I cannot find a `I` constructor",
+    );
+}
+
+#[test]
+fn builtin_record_alias_as_constructor() {
+    // Http.Metadata is a builtin record alias: usable as a constructor.
+    let result = alm_compiler::compile(
+        "module Test exposing (..)\n\nmeta = Http.Metadata \"http://x\" 200 \"OK\" Dict.empty\n\nmain = meta.statusText\n",
+    );
+    assert!(result.is_ok(), "{:?}", result.err().map(|e| e[0].message.clone()));
+}
+
+#[test]
+fn tuple_in_alias_body() {
+    expect(
+        "type alias Q =\n    ( Int, Int, Int, Int )\n\nx : Q\nx = Debug.todo \"\"\n",
+        "Tuples can only hold two or three values",
+    );
+}
+
+#[test]
+fn builtin_alias_arity_error() {
+    expect(
+        "x : Svg.Svg\nx = Debug.todo \"\"\n",
+        "The `Svg` type alias needs 1 argument",
+    );
+}
+
+// COVERAGE: let-block cycle diagnostics and destructure patterns
+
+#[test]
+fn let_cycle_diagnostics() {
+    expect(
+        "x =\n    let\n        a =\n            b + 1\n\n        b =\n            a + 1\n    in\n    a\n",
+        "part of a definition cycle",
+    );
+    expect(
+        "x =\n    let\n        ( a, b ) =\n            ( c, c )\n\n        c =\n            a\n    in\n    a\n",
+        "destructuring is part of a definition cycle",
+    );
+    // A destructure on a full-dependency cycle whose references are all
+    // delayed still gets rejected (destructures cannot be recursive).
+    expect(
+        "x =\n    let\n        ( f, g ) =\n            ( \\v -> g v, \\w -> f w )\n    in\n    f 1\n",
+        "destructuring",
+    );
+}
+
+#[test]
+fn destructure_pattern_shapes_flow_through_sorting() {
+    // Record, alias, and single-ctor patterns in let destructures bind
+    // names that participate in dependency sorting.
+    let ok = alm_compiler::compile(
+        "module Test exposing (..)\n\ntype Wrap\n    = Wrap Int\n\nx =\n    let\n        total =\n            named + aliased + unwrapped\n\n        { named } =\n            { named = 1 }\n\n        (( a, b ) as pair) =\n            ( 2, 3 )\n\n        aliased =\n            a + b + Tuple.first pair\n\n        (Wrap unwrapped) =\n            Wrap 4\n    in\n    total\n",
+    );
+    assert!(ok.is_ok(), "{:?}", ok.err().map(|e| e[0].message.clone()));
+}
+
+#[test]
+fn refutable_lambda_argument() {
+    expect(
+        "f = \\(Just x) -> x\n\ny = f (Just 1)\n",
+        "Argument patterns must match everything",
+    );
+}
+
+#[test]
+fn unclosed_char_and_trailing_escape() {
+    expect("x = 'a\n", "");
+    expect("x = \"oops\\", "");
+}

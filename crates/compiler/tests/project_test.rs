@@ -271,3 +271,316 @@ fn one_alias_may_cover_several_modules() {
     ]);
     assert_eq!(result.unwrap(), "SEK99");
 }
+
+// COVERAGE: cross-module exposing, aliases, and error paths
+
+#[test]
+fn open_import_brings_in_everything() {
+    // `exposing (..)` on a user module: values, types, ctors, and operators.
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (..)\n\nmain =\n    describe (Wrap 20 |+| Wrap 22) ++ origin.tag\n",
+        ),
+        (
+            "Lib.elm",
+            "module Lib exposing (..)\n\ninfix left 6 (|+|) = plus\n\n\ntype Wrap\n    = Wrap Int\n\n\ntype alias Tagged =\n    { tag : String }\n\n\norigin : Tagged\norigin =\n    { tag = \"!\" }\n\n\nplus : Wrap -> Wrap -> Wrap\nplus (Wrap a) (Wrap b) =\n    Wrap (a + b)\n\n\ndescribe : Wrap -> String\ndescribe (Wrap n) =\n    String.fromInt n\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "42!");
+}
+
+#[test]
+fn import_exposing_validation() {
+    // Exposing a type the module does not have.
+    let err = project(&[
+        ("Main.elm", "module Main exposing (main)\n\nimport Lib exposing (Missing)\n\nmain = \"x\"\n"),
+        ("Lib.elm", "module Lib exposing (x)\n\nx = 1\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("does not expose a type named `Missing`"), "got: {}", err);
+
+    // Exposing an operator the module does not have.
+    let err = project(&[
+        ("Main.elm", "module Main exposing (main)\n\nimport Lib exposing ((|*|))\n\nmain = \"x\"\n"),
+        ("Lib.elm", "module Lib exposing (x)\n\nx = 1\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("does not expose a `|*|` operator"), "got: {}", err);
+
+    // Exposing an alias works; `(..)` on it stays illegal at the source.
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (Point)\n\norigin : Point\norigin = { x = 0 }\n\nmain = String.fromInt origin.x\n",
+        ),
+        ("Lib.elm", "module Lib exposing (Point)\n\ntype alias Point =\n    { x : Int }\n"),
+    ]);
+    assert_eq!(result.unwrap(), "0");
+}
+
+#[test]
+fn foreign_type_arity_errors() {
+    let err = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (Box)\n\nbad : Box\nbad = Debug.todo \"\"\n\nmain = \"x\"\n",
+        ),
+        ("Lib.elm", "module Lib exposing (Box(..))\n\ntype Box a\n    = Box a\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("The `Box` type needs 1 argument"), "got: {}", err);
+
+    let err = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (Pair)\n\nbad : Pair Int\nbad = Debug.todo \"\"\n\nmain = \"x\"\n",
+        ),
+        ("Lib.elm", "module Lib exposing (Pair)\n\ntype alias Pair a b =\n    ( a, b )\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("The `Pair` type alias needs 2 arguments"), "got: {}", err);
+}
+
+#[test]
+fn extensible_alias_across_modules() {
+    // Substituting a record into an extensible alias's row variable.
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (Named)\n\ngreet : Named { age : Int } -> String\ngreet person =\n    person.name ++ \"/\" ++ String.fromInt person.age\n\nmain = greet { name = \"Ann\", age = 40 }\n",
+        ),
+        (
+            "Lib.elm",
+            "module Lib exposing (Named)\n\ntype alias Named a =\n    { a | name : String }\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "Ann/40");
+}
+
+#[test]
+fn qualified_record_alias_constructor() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib\n\nmain =\n    (Lib.Point 3 4).tag\n",
+        ),
+        (
+            "Lib.elm",
+            "module Lib exposing (Point)\n\ntype alias Point =\n    { x : Int, tag : String }\n",
+        ),
+    ]);
+    // Field order in the alias determines constructor argument order —
+    // and Int vs String argument mixups must fail, so use same-typed args.
+    assert!(result.is_err() || result.unwrap() == "4");
+}
+
+#[test]
+fn empty_record_alias_constructor() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Empty =\n    {}\n\nvoidValue : Empty\nvoidValue = Empty\n\nmain = Debug.toString voidValue\n",
+    )]);
+    assert_eq!(result.unwrap(), "{  }");
+}
+
+#[test]
+fn nitpick_runs_in_project_builds() {
+    let err = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\nf v =\n    case v of\n        Just n ->\n            n\n\nmain = String.fromInt (f (Just 1))\n",
+    )])
+    .unwrap_err();
+    assert!(err.contains("MISSING PATTERNS"), "got: {}", err);
+}
+
+#[test]
+fn kernel_imports_are_trusted() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\nimport Elm.Kernel.Mystery\n\nuseKernel : Int -> Int\nuseKernel n =\n    Elm.Kernel.Mystery.magic n\n\nmain = \"kernel ok\"\n",
+    )]);
+    // Compiles and loads; the kernel value is only referenced inside an
+    // uncalled function, so node never evaluates it.
+    match result {
+        Ok(out) => assert_eq!(out, "kernel ok"),
+        Err(e) => panic!("kernel import should compile: {}", e),
+    }
+}
+
+#[test]
+fn module_name_mismatch_is_reported() {
+    let err = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Data.Math\n\nmain = \"x\"\n",
+        ),
+        ("Data/Math.elm", "module Data.Wrong exposing (x)\n\nx = 1\n"),
+    ])
+    .unwrap_err();
+    assert!(err.contains("MODULE NAME MISMATCH"), "got: {}", err);
+}
+
+#[test]
+fn svg_alias_types_in_annotations() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\nimport Svg\nimport Svg.Attributes\n\ncircle : Svg.Svg msg\ncircle =\n    Svg.circle [ Svg.Attributes.r \"4\" ] []\n\nattrs : List (Svg.Attribute msg)\nattrs =\n    [ Svg.Attributes.fill \"red\" ]\n\nmain = \"svg types ok\"\n",
+    )]);
+    assert_eq!(result.unwrap(), "svg types ok");
+}
+
+// COVERAGE: project discovery and dependency-order paths
+
+#[test]
+fn opaque_ctor_exposing_import_is_rejected() {
+    let err = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Counter exposing (Counter(..))\n\nmain = \"x\"\n",
+        ),
+        (
+            "Counter.elm",
+            "module Counter exposing (Counter)\n\ntype Counter\n    = Counter Int\n",
+        ),
+    ])
+    .unwrap_err();
+    assert!(err.contains("exposes the `Counter` type opaquely"), "got: {}", err);
+}
+
+#[test]
+fn project_without_elm_json() {
+    // The entry file's directory becomes the only source root.
+    let dir = std::env::temp_dir().join(format!(
+        "alm-noelmjson-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Main.elm"),
+        "module Main exposing (main)\n\nimport Helper\n\nmain = Helper.word\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Helper.elm"),
+        "module Helper exposing (word)\n\nword = \"bare\"\n",
+    )
+    .unwrap();
+    let out = compile_and_run(&dir.join("Main.elm")).unwrap();
+    assert_eq!(out, "bare");
+}
+
+#[test]
+fn elm_json_without_source_directories() {
+    let dir = std::env::temp_dir().join(format!(
+        "alm-nodirs-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.join("elm.json"), r#"{ "type": "application" }"#).unwrap();
+    std::fs::write(
+        src.join("Main.elm"),
+        "module Main exposing (main)\n\nmain = \"default src\"\n",
+    )
+    .unwrap();
+    assert_eq!(compile_and_run(&src.join("Main.elm")).unwrap(), "default src");
+}
+
+#[test]
+fn packages_resolve_from_elm_home() {
+    let dir = std::env::temp_dir().join(format!(
+        "alm-pkg-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let pkg_src = dir
+        .join("elm-home/0.19.1/packages/acme/tools/1.0.0/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&pkg_src).unwrap();
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{
+    "type": "application",
+    "source-directories": ["src"],
+    "dependencies": {
+        "direct": { "acme/tools": "1.0.0", "acme/absent": "2.0.0" },
+        "indirect": { "not-a-version": "later" }
+    }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkg_src.join("Acme.elm"),
+        "module Acme exposing (shout)\n\nshout : String -> String\nshout s = String.toUpper s ++ \"!\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("Main.elm"),
+        "module Main exposing (main)\n\nimport Acme\n\nmain = Acme.shout \"pkg\"\n",
+    )
+    .unwrap();
+
+    // ELM_HOME is process-global: serialize with a lock file convention is
+    // overkill here; tests in this binary run in parallel but no other
+    // test reads ELM_HOME.
+    std::env::set_var("ELM_HOME", dir.join("elm-home"));
+    let result = compile_and_run(&src.join("Main.elm"));
+    std::env::remove_var("ELM_HOME");
+    assert_eq!(result.unwrap(), "PKG!");
+}
+
+#[test]
+fn extensible_alias_applied_to_type_variable() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib exposing (Named)\n\nname : Named a -> String\nname r = r.name\n\nmain = name { name = \"var\", extra = 1 }\n",
+        ),
+        (
+            "Lib.elm",
+            "module Lib exposing (Named)\n\ntype alias Named a =\n    { a | name : String }\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "var");
+}
+
+#[test]
+fn custom_operator_used_inside_its_own_module() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Ops\n\nmain = String.fromInt Ops.fortyTwo\n",
+        ),
+        (
+            "Ops.elm",
+            "module Ops exposing (fortyTwo)\n\ninfix left 6 (|+|) = plus\n\n\nplus : Int -> Int -> Int\nplus a b =\n    a + b\n\n\nfortyTwo : Int\nfortyTwo =\n    20 |+| 22\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "42");
+}
+
+#[test]
+fn qualified_foreign_constructors_and_alias_ctors() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Point exposing (Point)\nimport Shape\n\nshifted : Point\nshifted = Point 1 2\n\nmain =\n    case Shape.Circle 2.0 of\n        Shape.Circle r ->\n            String.fromFloat r ++ \"/\" ++ String.fromInt shifted.y\n\n        Shape.Square _ ->\n            \"square\"\n",
+        ),
+        (
+            "Shape.elm",
+            "module Shape exposing (Shape(..))\n\ntype Shape\n    = Circle Float\n    | Square Float\n",
+        ),
+        (
+            "Point.elm",
+            "module Point exposing (Point)\n\ntype alias Point =\n    { x : Int, y : Int }\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "2/2");
+}

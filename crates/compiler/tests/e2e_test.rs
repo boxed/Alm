@@ -449,3 +449,49 @@ fn string_extras() {
         "True"
     );
 }
+
+#[test]
+fn codegen_branches() {
+    // Char and negative-int patterns.
+    assert_eq!(
+        run("grade c =\n    case c of\n        'a' ->\n            \"top\"\n\n        _ ->\n            \"other\"\n\nsign n =\n    case n of\n        -1 ->\n            \"neg\"\n\n        _ ->\n            \"non-neg\"\n\nmain = grade 'a' ++ \"/\" ++ sign -1"),
+        "top/neg"
+    );
+    // String patterns and unit patterns.
+    assert_eq!(
+        run("f s =\n    case s of\n        \"yes\" ->\n            1\n\n        _ ->\n            0\n\ng () = 2\n\nmain = String.fromInt (f \"yes\" + g ())"),
+        "3"
+    );
+    // String escapes in generated literals.
+    assert_eq!(
+        run("main = String.length \"a\\tb\\r\\nc\\u{0007}\""),
+        "7"
+    );
+    // Float scientific notation survives codegen.
+    assert_eq!(run("main = String.fromFloat 1.0e21"), "1e+21");
+    // Shadowing a recursive function's name inside a let.
+    assert_eq!(
+        run("f n =\n    let\n        g =\n            \\x -> x\n    in\n    if n == 0 then\n        0\n    else\n        f (g (n - 1))\n\nmain = String.fromInt (f 3)"),
+        "0"
+    );
+    // Record pattern in a case branch.
+    assert_eq!(
+        run("f v =\n    case v of\n        { name } ->\n            name\n\nmain = f { name = \"rec\" }"),
+        "rec"
+    );
+}
+
+#[test]
+fn dependency_sorting_walks_every_expression_shape() {
+    // Every definition references ones defined later, through a different
+    // expression form each time, so the reference walker visits them all.
+    assert_eq!(
+        run("viaUpdate = { viaRecord | a = viaAccess }\n\nviaRecord = { a = viaTuple }\n\nviaAccess = viaPair.first\n\nviaPair = { first = viaTuple }\n\nviaTuple = Tuple.first ( viaNegate, 0 )\n\nviaNegate = -viaIf\n\nviaIf =\n    if viaCase > 0 then\n        viaCase\n    else\n        0\n\nviaCase =\n    case viaList of\n        [ x ] ->\n            x\n\n        _ ->\n            0\n\nviaList = [ viaLet ]\n\nviaLet =\n    let\n        ( a, _ ) =\n            ( viaCall, 1 )\n    in\n    a\n\nviaCall = identity base\n\nbase = 42\n\nmain = String.fromInt viaUpdate.a"),
+        "-42"
+    );
+    // The same shapes inside a let block (the direct-reference walker).
+    assert_eq!(
+        run("main =\n    let\n        viaUpdate =\n            { viaRecord | a = viaAccess }\n\n        viaRecord =\n            { a = 0 }\n\n        viaAccess =\n            viaPair.first\n\n        viaPair =\n            { first = viaTuple }\n\n        viaTuple =\n            Tuple.first ( viaNegate, 0 )\n\n        viaNegate =\n            -viaIf\n\n        viaIf =\n            if viaCase > 0 then\n                viaCase\n            else\n                0\n\n        viaCase =\n            case viaList of\n                [ x ] ->\n                    x\n\n                _ ->\n                    0\n\n        viaList =\n            [ base ]\n\n        base =\n            42\n    in\n    String.fromInt viaUpdate.a"),
+        "-42"
+    );
+}
