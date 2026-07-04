@@ -19,7 +19,8 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
+    TargetTriple,
 };
 use inkwell::types::{FloatType, IntType, PointerType};
 use inkwell::values::{
@@ -40,8 +41,23 @@ pub const RUNTIME_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_
 /// static library at link time.
 pub const RUNTIME_BC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alm_runtime.bc"));
 
-/// Compile `program` into an executable at `output`.
-pub fn build(program: &Program, output: &Path) -> Result<(), String> {
+/// The same runtime and wasm link inputs, built for wasm32-wasi.
+pub const RUNTIME_LIB_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_runtime_wasm.a"));
+pub const RUNTIME_BC_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alm_runtime_wasm.bc"));
+const WASM_CRT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt1-command.o"));
+const WASM_LIBC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libc.a"));
+
+/// Which machine target to emit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// A native executable for the host.
+    Native,
+    /// A `wasm32-wasi` module (runnable with wasmtime or node's WASI).
+    Wasm,
+}
+
+/// Compile `program` into an executable (native) or `.wasm` module at `output`.
+pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), String> {
     let context = Context::create();
     let mut cg = Codegen::new(&context);
     cg.emit_program(program);
@@ -50,27 +66,53 @@ pub fn build(program: &Program, output: &Path) -> Result<(), String> {
         .verify()
         .map_err(|e| format!("internal error: generated invalid LLVM IR:\n{}", e))?;
 
-    Target::initialize_native(&InitializationConfig::default())?;
-    let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    // Use the host cpu/features so the generated functions' target
-    // attributes match the runtime bitcode's (built with target-cpu=native),
-    // letting LLVM inline the runtime into generated code.
-    let cpu = TargetMachine::get_host_cpu_name();
-    let features = TargetMachine::get_host_cpu_features();
-    let machine = target
-        .create_target_machine(
-            &triple,
-            cpu.to_str().unwrap(),
-            features.to_str().unwrap(),
-            OptimizationLevel::Default,
-            RelocMode::PIC,
-            CodeModel::Default,
-        )
-        .ok_or("could not create target machine")?;
+    let (triple, machine) = match target {
+        Target::Native => {
+            LlvmTarget::initialize_native(&InitializationConfig::default())?;
+            let triple = TargetMachine::get_default_triple();
+            let t = LlvmTarget::from_triple(&triple).map_err(|e| e.to_string())?;
+            // Host cpu/features so generated functions' target attributes
+            // match the runtime bitcode's (built with target-cpu=native),
+            // letting LLVM inline the runtime into generated code.
+            let cpu = TargetMachine::get_host_cpu_name();
+            let features = TargetMachine::get_host_cpu_features();
+            let m = t
+                .create_target_machine(
+                    &triple,
+                    cpu.to_str().unwrap(),
+                    features.to_str().unwrap(),
+                    OptimizationLevel::Default,
+                    RelocMode::PIC,
+                    CodeModel::Default,
+                )
+                .ok_or("could not create target machine")?;
+            (triple, m)
+        }
+        Target::Wasm => {
+            LlvmTarget::initialize_webassembly(&InitializationConfig::default());
+            let triple = TargetTriple::create("wasm32-wasi");
+            let t = LlvmTarget::from_triple(&triple).map_err(|e| e.to_string())?;
+            let m = t
+                .create_target_machine(
+                    &triple,
+                    "generic",
+                    "",
+                    OptimizationLevel::Default,
+                    RelocMode::Static,
+                    CodeModel::Default,
+                )
+                .ok_or("could not create wasm target machine")?;
+            (triple, m)
+        }
+    };
     cg.module.set_triple(&triple);
     cg.module
         .set_data_layout(&machine.get_target_data().get_data_layout());
+
+    let (runtime_bc, runtime_lib) = match target {
+        Target::Native => (RUNTIME_BC, RUNTIME_LIB),
+        Target::Wasm => (RUNTIME_BC_WASM, RUNTIME_LIB_WASM),
+    };
 
     let build_dir = output.with_extension("build");
     std::fs::create_dir_all(&build_dir)
@@ -83,7 +125,7 @@ pub fn build(program: &Program, output: &Path) -> Result<(), String> {
     // real symbols still resolve to the static library at link time (and no
     // symbol is duplicated).
     let bc_path = build_dir.join("alm_runtime.bc");
-    std::fs::write(&bc_path, RUNTIME_BC).map_err(|e| e.to_string())?;
+    std::fs::write(&bc_path, runtime_bc).map_err(|e| e.to_string())?;
     let runtime_module = Module::parse_bitcode_from_path(&bc_path, &context)
         .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
     // Only exported (external-linkage) definitions live in the static
@@ -126,18 +168,55 @@ pub fn build(program: &Program, output: &Path) -> Result<(), String> {
         .write_to_file(&cg.module, FileType::Object, &object)
         .map_err(|e| e.to_string())?;
 
-    let runtime = build_dir.join("libalm_runtime.a");
-    std::fs::write(&runtime, RUNTIME_LIB).map_err(|e| e.to_string())?;
+    let runtime = build_dir.join("runtime.a");
+    std::fs::write(&runtime, runtime_lib).map_err(|e| e.to_string())?;
 
-    // Link the emitted object against the Rust runtime static library. The
-    // C compiler driver is used purely as a linker here — no C is compiled.
-    let result = Command::new("cc")
-        .arg(&object)
-        .arg(&runtime)
-        .arg("-o")
-        .arg(output)
+    match target {
+        Target::Native => {
+            // The C compiler driver is used purely as a linker — no C is compiled.
+            run_linker(
+                "cc",
+                &[&object, &runtime, Path::new("-o"), output],
+            )
+        }
+        Target::Wasm => {
+            // Link a WASI command module: crt + program + runtime + libc.
+            // The runtime and libc are mutually dependent (the runtime calls
+            // libc's fd_write/clock; libc's crt calls the runtime's `main`),
+            // so wrap them in a group so wasm-ld re-scans to resolve both.
+            let crt = build_dir.join("crt1-command.o");
+            let libc = build_dir.join("libc.a");
+            std::fs::write(&crt, WASM_CRT).map_err(|e| e.to_string())?;
+            std::fs::write(&libc, WASM_LIBC).map_err(|e| e.to_string())?;
+            // `--undefined=main` forces `main` to be pulled from the runtime
+            // archive during its scan, so libc's crt (`__main_void`, listed
+            // after) resolves it without needing archive re-scanning.
+            let result = Command::new(env!("ALM_WASM_LD"))
+                .arg("--undefined=main")
+                .arg(&crt)
+                .arg(&object)
+                .arg(&runtime)
+                .arg(&libc)
+                .arg("-o")
+                .arg(output)
+                .output()
+                .map_err(|e| format!("could not run wasm-ld: {}", e))?;
+            if !result.status.success() {
+                return Err(format!(
+                    "linking failed:\n{}",
+                    String::from_utf8_lossy(&result.stderr)
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_linker(linker: &str, args: &[&Path]) -> Result<(), String> {
+    let result = Command::new(linker)
+        .args(args)
         .output()
-        .map_err(|e| format!("could not run the linker: {}", e))?;
+        .map_err(|e| format!("could not run {}: {}", linker, e))?;
     if !result.status.success() {
         return Err(format!(
             "linking failed:\n{}",

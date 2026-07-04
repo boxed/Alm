@@ -30,18 +30,25 @@ fn print_help() {
 }
 
 fn make(args: &[String]) -> ExitCode {
+    use alm_compiler::generate::native::Target;
+    #[derive(PartialEq)]
+    enum Backend {
+        Js,
+        Native(Target),
+    }
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
-    let mut native = false;
+    let mut backend = Backend::Js;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
-                "js" => native = false,
-                "native" => native = true,
+                "js" => backend = Backend::Js,
+                "native" => backend = Backend::Native(Target::Native),
+                "wasm" => backend = Backend::Native(Target::Wasm),
                 other => {
-                    eprintln!("Unknown target `{}`. I know js and native.", other);
+                    eprintln!("Unknown target `{}`. I know js, native and wasm.", other);
                     return ExitCode::FAILURE;
                 }
             }
@@ -61,19 +68,20 @@ fn make(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let result = if native {
-        let output = output.unwrap_or_else(|| input.with_extension(""));
-        alm_compiler::project::compile_project_native(&input, &output)
-            .map(|()| output)
-    } else {
-        alm_compiler::project::compile_project(&input).and_then(|javascript| {
+    let result = match backend {
+        Backend::Native(target) => {
+            let ext = if target == Target::Wasm { "wasm" } else { "" };
+            let output = output.unwrap_or_else(|| input.with_extension(ext));
+            alm_compiler::project::compile_project_native(&input, &output, target).map(|()| output)
+        }
+        Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));
             std::fs::write(&output, javascript).map_err(|err| {
                 eprintln!("I could not write {}: {}", output.display(), err);
                 Vec::new()
             })?;
             Ok(output)
-        })
+        }),
     };
 
     match result {

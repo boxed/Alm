@@ -60,11 +60,16 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
     Ok(generate::generate_project(&checked.modules))
 }
 
-/// Compile a project to a native binary at `output` via the LLVM backend.
-pub fn compile_project_native(entry: &Path, output: &Path) -> Result<(), Vec<BuildError>> {
+/// Compile a project to a native binary or wasm module at `output` via the
+/// LLVM backend.
+pub fn compile_project_native(
+    entry: &Path,
+    output: &Path,
+    target: generate::native::Target,
+) -> Result<(), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let program = crate::ir::lower::lower_project(&checked.modules);
-    generate::native::build(&program, output).map_err(|message| {
+    generate::native::build(&program, output, target).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

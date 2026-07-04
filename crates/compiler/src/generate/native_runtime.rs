@@ -2553,8 +2553,23 @@ extern "C" {
     fn alm_main() -> *mut Value;
 }
 
+// Entry point. The host C runtime calls `main`; WASI's crt instead calls
+// `__main_argc_argv` (WebAssembly checks signatures strictly, so we provide
+// the exact symbol WASI expects rather than a plain `main`). Both just run
+// the shared body.
+#[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
-pub unsafe extern "C" fn main() -> i32 {
+pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    alm_entry()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const u8) -> i32 {
+    alm_entry()
+}
+
+unsafe fn alm_entry() -> i32 {
     runtime_init();
     alm_init();
     let v = alm_main();
