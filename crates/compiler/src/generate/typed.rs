@@ -663,6 +663,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "map") => self.kernel_list_map(whole, args),
             ("List", "reverse") => self.kernel_list_reverse(whole, args),
             ("List", "filter") => self.kernel_list_filter(whole, args),
+            ("List", "member") => self.kernel_list_member(args),
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
@@ -1093,6 +1094,69 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(b.build_select(need, radd, r, "mod").unwrap())
     }
 
+    /// `List.member x xs : Bool` — walk comparing each element to `x`
+    /// (scalar elements only), short-circuiting on the first match.
+    fn kernel_list_member(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[1].tipe)?;
+        if !elem.is_scalar() {
+            return Err("typed backend: List.member is only supported on scalar elements".to_string());
+        }
+        let is_float = matches!(elem, Layout::Float);
+        let target = self.gen(&args[0])?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let elem_ty = self.llvm_type(&elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("mem.loop");
+        let body_bb = self.new_block("mem.body");
+        let cont_bb = self.new_block("mem.cont");
+        let found_bb = self.new_block("mem.found");
+        let none_bb = self.new_block("mem.none");
+        let merge = self.new_block("mem.end");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder.build_conditional_branch(is_null, none_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let eq = if is_float {
+            self.builder
+                .build_float_compare(FloatPredicate::OEQ, head.into_float_value(), target.into_float_value(), "eq")
+                .unwrap()
+        } else {
+            self.builder
+                .build_int_compare(IntPredicate::EQ, head.into_int_value(), target.into_int_value(), "eq")
+                .unwrap()
+        };
+        self.builder.build_conditional_branch(eq, found_bb, cont_bb).unwrap();
+
+        self.builder.position_at_end(cont_bb);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let cont_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, cont_end)]);
+
+        self.builder.position_at_end(found_bb);
+        self.builder.build_unconditional_branch(merge).unwrap();
+        self.builder.position_at_end(none_bb);
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(self.ctx.bool_type(), "member").unwrap();
+        let t: BasicValueEnum = self.ctx.bool_type().const_int(1, false).into();
+        let f: BasicValueEnum = self.ctx.bool_type().const_int(0, false).into();
+        phi.add_incoming(&[(&t as &dyn BasicValue, found_bb), (&f as &dyn BasicValue, none_bb)]);
+        Ok(phi.as_basic_value())
+    }
+
     /// `List.reverse : List a -> List a` — cons each element onto an
     /// accumulator, which reverses.
     fn kernel_list_reverse(
@@ -1411,26 +1475,83 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .unwrap())
     }
 
-    /// `++` on strings: the operands are uniform string words, appended by the
-    /// runtime. (List append is not handled by this path.)
+    /// `++`: strings go through the runtime; lists are concatenated by copying
+    /// the left cons cells and pointing the copy's tail at the right list.
     fn gen_append(
         &mut self,
         l: &TypedExpr,
         r: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        if !matches!(self.layouts.layout_of(&l.tipe), Layout::Str) {
-            return Err("typed backend: ++ is only supported on strings yet".to_string());
+        match self.layouts.layout_of(&l.tipe) {
+            Layout::Str => {
+                let lv = self.gen(l)?;
+                let rv = self.gen(r)?;
+                let rt_append = self.module.get_function("rt_append").unwrap();
+                Ok(self
+                    .builder
+                    .build_call(rt_append, &[lv.into(), rv.into()], "app")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap())
+            }
+            Layout::List(elem) => self.gen_list_append(&elem, l, r),
+            other => Err(format!("typed backend: ++ is not supported on {:?}", other)),
         }
-        let lv = self.gen(l)?;
-        let rv = self.gen(r)?;
-        let rt_append = self.module.get_function("rt_append").unwrap();
-        Ok(self
-            .builder
-            .build_call(rt_append, &[lv.into(), rv.into()], "app")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap())
+    }
+
+    fn gen_list_append(
+        &mut self,
+        elem: &Layout,
+        l: &TypedExpr,
+        r: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let left = self.gen(l)?.into_pointer_value();
+        let right = self.gen(r)?.into_pointer_value();
+        let cell = self.cons_cell(elem);
+        let elem_ty = self.llvm_type(elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("app.loop");
+        let body_bb = self.new_block("app.body");
+        let done_bb = self.new_block("app.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        cur.add_incoming(&[(&left as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let newcell = self.cons(elem, head, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nf = self.builder.build_struct_gep(cell, newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nf).unwrap();
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        // Point the tail (last cell's next, or `result` if left was empty) at
+        // the right-hand list.
+        let dest = self.builder.build_load(ptr_t, slot, "dest2").unwrap().into_pointer_value();
+        self.builder.build_store(dest, right).unwrap();
+        Ok(self.builder.build_load(ptr_t, result, "appended").unwrap())
     }
 
     /// `x |> f` and `f <| x` are application. Normalize to a flattened call —

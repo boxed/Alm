@@ -536,6 +536,26 @@ fn kitchen_sink_composition() {
 }
 
 #[test]
+fn list_append_and_member() {
+    assert_same(
+        "list_append",
+        "module Test exposing (..)\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       joined = [ 1, 2, 3 ] ++ [ 4, 5 ]\n\
+         \x20   in\n\
+         \x20   List.sum joined * 100\n\
+         \x20       + boolInt (List.member 4 joined) * 10\n\
+         \x20       + boolInt (List.member 9 joined)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
