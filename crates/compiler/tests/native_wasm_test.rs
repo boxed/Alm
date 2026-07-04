@@ -65,6 +65,64 @@ fn run(command: &mut Command) -> String {
     String::from_utf8_lossy(&output.stdout).trim_end().to_string()
 }
 
+/// Compile a `Platform.worker` program to wasm and run it under node's
+/// WASI, returning what it printed (the TEA event loop drives sleep/timers
+/// through WASI's poll_oneoff/clock_time_get).
+fn run_worker_wasm(test_name: &str, source: &str) -> String {
+    let dir = std::env::temp_dir()
+        .join("alm-wasm-tea")
+        .join(format!("{}-{}", test_name, std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|errors| {
+        panic!("check failed:\n{}", errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let program = ir::lower::lower_project(&checked.modules);
+    let wasm = dir.join("test.wasm");
+    generate::native::build(&program, &wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| panic!("wasm build failed: {}", e));
+    let runner = dir.join("run.cjs");
+    std::fs::write(
+        &runner,
+        format!(
+            "const {{WASI}}=require('node:wasi');const fs=require('fs');(async()=>{{\
+             const wasi=new WASI({{version:'preview1',args:['p'],env:{{}},returnOnExit:true}});\
+             const m=await WebAssembly.compile(fs.readFileSync({:?}));\
+             const i=await WebAssembly.instantiate(m,wasi.getImportObject());\
+             wasi.start(i);}})();",
+            wasm.display()
+        ),
+    )
+    .expect("write runner");
+    run(Command::new("node").arg("--no-warnings").arg(&runner))
+}
+
+#[test]
+fn tea_worker_and_timers() {
+    // The TEA event loop, timer subscriptions and Process.sleep all run
+    // under WASI (sleep/clock via poll_oneoff/clock_time_get).
+    let ticks = run_worker_wasm(
+        "ticks",
+        "module Test exposing (..)\n\
+         \n\
+         import Time\n\
+         \n\
+         type Msg = Tick Time.Posix\n\
+         \n\
+         main =\n\
+         \x20   Platform.worker { init = \\_ -> ( 0, Cmd.none ), update = update, subscriptions = subs }\n\
+         \n\
+         update msg model =\n\
+         \x20   case msg of\n\
+         \x20       Tick _ -> ( model + 1, Terminal.writeLine (\"tick \" ++ String.fromInt (model + 1)) )\n\
+         \n\
+         subs model =\n\
+         \x20   if model < 3 then Time.every 10 Tick else Sub.none\n",
+    );
+    assert_eq!(ticks, "tick 1\ntick 2\ntick 3");
+}
+
 fn assert_same(test_name: &str, source: &str) {
     let (js, wasm) = run_both(test_name, source);
     assert!(!js.is_empty(), "JS output is empty");
