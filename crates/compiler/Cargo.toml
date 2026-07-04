@@ -5,3 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+inkwell = { version = "0.5", features = ["llvm16-0"] }

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::ast::canonical as can;
 use crate::ast::source as src;
 use crate::data::Name;
 use crate::interface::Interfaces;
@@ -46,7 +47,37 @@ struct SourceModule {
     imports: Vec<Name>,
 }
 
+/// Everything the front half of the compiler produces: the canonical
+/// modules in dependency order plus their interfaces. Backends (JS today,
+/// native later) consume this.
+pub struct CheckedProject {
+    pub modules: Vec<can::Module>,
+    pub interfaces: Interfaces,
+}
+
 pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    Ok(generate::generate_project(&checked.modules))
+}
+
+/// Compile a project to a native binary at `output` via the LLVM backend.
+pub fn compile_project_native(entry: &Path, output: &Path) -> Result<(), Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    let program = crate::ir::lower::lower_project(&checked.modules);
+    generate::native::build(&program, output).map_err(|message| {
+        vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "NATIVE BACKEND",
+            Region::ZERO,
+            message,
+        )]
+    })
+}
+
+/// Run the whole front end — load, parse, canonicalize, type check, and
+/// exhaustiveness check every module — without generating any code.
+pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     let source_dirs = find_source_directories(entry);
 
     // Load the entry module and, transitively, everything it imports.
@@ -134,7 +165,10 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
         canonical_modules.push(canonical);
     }
 
-    Ok(generate::generate_project(&canonical_modules))
+    Ok(CheckedProject {
+        modules: canonical_modules,
+        interfaces,
+    })
 }
 
 /// Walk up from the entry file looking for elm.json; fall back to treating

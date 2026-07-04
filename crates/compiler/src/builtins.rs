@@ -436,6 +436,9 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Task", "sequence", "List (Task x a) -> Task x (List a)"),
             // Process
             V("Process", "sleep", "Float -> Task x ()"),
+            // Terminal — server-side output (the start of the native
+            // platform surface; also works in the JS backend via console).
+            V("Terminal", "writeLine", "String -> Cmd msg"),
             // Time
             V("Time", "now", "Task x Time.Posix"),
             V("Time", "posixToMillis", "Time.Posix -> Int"),
@@ -832,7 +835,7 @@ pub const MODULES: &[&str] = &[
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
     "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process", "Time",
-    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID", "VirtualDom",
+    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID", "VirtualDom", "Terminal",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

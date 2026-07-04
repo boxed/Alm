@@ -1,0 +1,4 @@
+# The native backend links against libLLVM via inkwell/llvm-sys. Point
+# llvm-sys at the Homebrew LLVM 16 keg so the build needs no manual env.
+[env]
+LLVM_SYS_160_PREFIX = "/opt/homebrew/opt/llvm@16"

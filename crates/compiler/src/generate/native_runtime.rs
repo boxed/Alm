@@ -1,0 +1,2587 @@
+//! alm native runtime — the Rust twin of the JS backend's `runtime.js`.
+//!
+//! This is a standalone file compiled by `build.rs` into a static library
+//! (`libalm_runtime.a`) and linked into every native binary the compiler
+//! produces. It is NOT a module of the compiler crate.
+//!
+//! Every Elm value is a boxed, immutable [`Value`] behind a raw pointer,
+//! matching the uniform representation the LLVM codegen assumes. All the
+//! entry points the generated code calls are `extern "C"` with the exact
+//! signatures declared in `generate::native`. Memory is allocated and
+//! never freed for now; reference counting is a planned pass.
+//!
+//! Compiled with `panic = abort`, so a Rust panic never unwinds across the
+//! C ABI boundary into generated code.
+
+#![allow(non_upper_case_globals, non_snake_case, static_mut_refs)]
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::UnsafeCell;
+use std::ffi::CStr;
+use std::io::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// BUMP ALLOCATOR
+//
+// The runtime never frees (reference counting is a future pass), so a
+// pointer-bump allocator over large chunks is both correct and far faster
+// than hitting the system malloc for every boxed value. Single-threaded,
+// matching the runtime.
+
+struct Bump;
+
+static mut BUMP_CUR: usize = 0;
+static mut BUMP_END: usize = 0;
+const BUMP_CHUNK: usize = 64 << 20; // 64 MiB
+
+unsafe impl GlobalAlloc for Bump {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let align = layout.align().max(1);
+        let size = layout.size();
+        let mut p = (BUMP_CUR + align - 1) & !(align - 1);
+        if p + size > BUMP_END {
+            let chunk = BUMP_CHUNK.max(size + align);
+            let base = System.alloc(Layout::from_size_align_unchecked(chunk, 4096));
+            if base.is_null() {
+                return std::ptr::null_mut();
+            }
+            BUMP_CUR = base as usize;
+            BUMP_END = BUMP_CUR + chunk;
+            p = (BUMP_CUR + align - 1) & !(align - 1);
+        }
+        BUMP_CUR = p + size;
+        p as *mut u8
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // Intentionally leak — see module docs.
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Bump = Bump;
+
+// VALUES
+
+pub enum Value {
+    Float(f64),
+    Char(u32),
+    Bool(bool),
+    Unit,
+    Str(Vec<u8>),
+    /// A list: a slice of length `len` into a contiguous, refcounted
+    /// backing array. Elements are stored REVERSED — the Elm head is at
+    /// `backing.data[len - 1]` — so `::` (prepend) is a push at the back
+    /// and `tail` is just `len - 1` sharing the same backing.
+    List {
+        backing: *mut Backing,
+        len: usize,
+    },
+    Ctor {
+        name: *const u8,
+        index: u32,
+        argc: u32,
+        // The first argument is stored inline so 0- and 1-argument
+        // constructors (Maybe/Result/most custom types) allocate once
+        // rather than also heap-allocating an argument array. `rest` holds
+        // arguments 1.. and stays unallocated (empty Vec) for argc <= 1.
+        arg0: *mut Value,
+        rest: Vec<*mut Value>,
+    },
+    Closure {
+        func: *const (),
+        arity: u32,
+        applied: u32,
+        args: Vec<*mut Value>,
+    },
+    Record {
+        fields: Vec<(*const u8, *mut Value)>,
+    },
+    Tuple(Vec<*mut Value>),
+}
+
+/// A list's backing store, shared by a list and its tails. `rc` counts how
+/// many list values reference it (used to decide in-place mutation);
+/// `data` holds elements in reversed order (head last).
+pub struct Backing {
+    rc: usize,
+    data: Vec<*mut Value>,
+}
+
+fn alloc_backing(data: Vec<*mut Value>) -> *mut Backing {
+    Box::into_raw(Box::new(Backing { rc: 1, data }))
+}
+
+/// Allocate a value on the heap. Never freed (see module docs).
+fn alloc(value: Value) -> *mut Value {
+    Box::into_raw(Box::new(value))
+}
+
+// UNBOXED INTEGERS
+//
+// Integers are not heap-boxed: they are tagged immediates carried in the
+// pointer itself (OCaml/V8-SMI style). Heap allocations are 8-aligned, so
+// their low bit is 0; a low bit of 1 marks a 63-bit immediate integer. The
+// LLVM codegen only ever moves values around opaquely and never
+// dereferences them, so this stays entirely inside the runtime.
+
+#[inline]
+fn is_int(p: *mut Value) -> bool {
+    (p as i64) & 1 == 1
+}
+
+#[inline]
+fn mk_int(n: i64) -> *mut Value {
+    ((n << 1) | 1) as *mut Value
+}
+
+#[inline]
+fn int_val(p: *mut Value) -> i64 {
+    (p as i64) >> 1
+}
+
+/// An exported global holding a `*mut Value`, set once during startup and
+/// read by generated code as a plain `ptr`. `repr(transparent)` so its
+/// symbol is exactly the pointer.
+#[repr(transparent)]
+struct Global(UnsafeCell<*mut Value>);
+unsafe impl Sync for Global {}
+impl Global {
+    const NULL: Global = Global(UnsafeCell::new(std::ptr::null_mut()));
+    #[inline]
+    unsafe fn set(&self, value: *mut Value) {
+        *self.0.get() = value;
+    }
+    #[inline]
+    unsafe fn get(&self) -> *mut Value {
+        *self.0.get()
+    }
+}
+
+// The three singletons generated code loads directly.
+#[export_name = "rt_true_v"]
+static RT_TRUE: Global = Global::NULL;
+#[export_name = "rt_false_v"]
+static RT_FALSE: Global = Global::NULL;
+#[export_name = "rt_unit_v"]
+static RT_UNIT: Global = Global::NULL;
+
+// Internal singletons.
+static NIL: Global = Global::NULL;
+static NOTHING: Global = Global::NULL;
+static LT: Global = Global::NULL;
+static EQ: Global = Global::NULL;
+static GT: Global = Global::NULL;
+
+unsafe fn tru() -> *mut Value {
+    RT_TRUE.get()
+}
+unsafe fn fls() -> *mut Value {
+    RT_FALSE.get()
+}
+unsafe fn unit() -> *mut Value {
+    RT_UNIT.get()
+}
+unsafe fn nil() -> *mut Value {
+    NIL.get()
+}
+unsafe fn nothing() -> *mut Value {
+    NOTHING.get()
+}
+unsafe fn rt_bool(b: bool) -> *mut Value {
+    if b {
+        tru()
+    } else {
+        fls()
+    }
+}
+
+// CRASH
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_crash(message: *const u8) -> ! {
+    let text = CStr::from_ptr(message as *const i8).to_bytes();
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(b"alm: ");
+    let _ = handle.write_all(text);
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
+    std::process::exit(1);
+}
+
+macro_rules! crash {
+    ($msg:literal) => {
+        rt_crash(concat!($msg, "\0").as_ptr())
+    };
+}
+
+// ACCESSORS / HELPERS
+
+#[inline]
+unsafe fn is_num(p: *mut Value) -> bool {
+    // `is_int` short-circuits so an immediate is never dereferenced.
+    is_int(p) || matches!(&*p, Value::Float(_))
+}
+
+#[inline]
+unsafe fn is_float(p: *mut Value) -> bool {
+    !is_int(p) && matches!(&*p, Value::Float(_))
+}
+
+#[inline]
+unsafe fn num(p: *mut Value) -> f64 {
+    if is_int(p) {
+        return int_val(p) as f64;
+    }
+    match &*p {
+        Value::Float(f) => *f,
+        Value::Char(c) => *c as f64,
+        Value::Bool(b) => *b as u8 as f64,
+        _ => crash!("expected a number"),
+    }
+}
+
+#[inline]
+unsafe fn as_int(p: *mut Value) -> i64 {
+    if is_int(p) {
+        return int_val(p);
+    }
+    match &*p {
+        Value::Char(c) => *c as i64,
+        Value::Bool(b) => *b as i64,
+        Value::Float(f) => *f as i64,
+        _ => crash!("expected an int"),
+    }
+}
+
+unsafe fn sbytes<'a>(p: *mut Value) -> &'a [u8] {
+    match &*p {
+        Value::Str(b) => b.as_slice(),
+        _ => crash!("expected a string"),
+    }
+}
+
+unsafe fn sstr<'a>(p: *mut Value) -> &'a str {
+    // Elm strings are UTF-8 and every runtime operation preserves that.
+    std::str::from_utf8_unchecked(sbytes(p))
+}
+
+fn mkstr(bytes: Vec<u8>) -> *mut Value {
+    alloc(Value::Str(bytes))
+}
+
+/// The list's `(backing, len)`. Panics/crashes if `v` is not a list.
+#[inline]
+unsafe fn list_view(v: *mut Value) -> (*mut Backing, usize) {
+    match &*v {
+        Value::List { backing, len } => (*backing, *len),
+        _ => crash!("expected a list"),
+    }
+}
+
+#[inline]
+unsafe fn list_len(v: *mut Value) -> usize {
+    match &*v {
+        Value::List { len, .. } => *len,
+        _ => 0,
+    }
+}
+
+/// The active elements in reversed storage order (head is the last).
+#[inline]
+unsafe fn list_store<'a>(v: *mut Value) -> &'a [*mut Value] {
+    let (backing, len) = list_view(v);
+    &(*backing).data[..len]
+}
+
+/// Build a list value from elements already in reversed storage order.
+#[inline]
+unsafe fn list_from_store(data: Vec<*mut Value>) -> *mut Value {
+    let len = data.len();
+    alloc(Value::List {
+        backing: alloc_backing(data),
+        len,
+    })
+}
+
+#[inline]
+unsafe fn cons(head: *mut Value, tail: *mut Value) -> *mut Value {
+    let (backing, len) = list_view(tail);
+    // Grow in place when this list sits at the tip of its backing (its view
+    // covers all stored elements). Appending only ever EXTENDS the buffer
+    // (writes at data.len(), never overwrites), so no other view — which
+    // reads a prefix data[..its_len] — is disturbed; and if two lists share
+    // a backing, only the first extends (the second then sees len !=
+    // data.len() and copies). This is sound with no refcount, and Vec's
+    // exponential growth makes repeated `::` O(1) amortized. `len > 0`
+    // avoids mutating the shared empty-list singleton.
+    if len > 0 && (*backing).data.len() == len {
+        (*backing).data.push(head);
+        return alloc(Value::List {
+            backing,
+            len: len + 1,
+        });
+    }
+    let mut data = Vec::with_capacity(len + 1);
+    data.extend_from_slice(&(*backing).data[..len]);
+    data.push(head); // head lives at the back of the reversed store
+    list_from_store(data)
+}
+
+/// Elm-order elements (head first).
+unsafe fn to_vec(xs: *mut Value) -> Vec<*mut Value> {
+    list_store(xs).iter().rev().copied().collect()
+}
+
+/// Build a list from elements in Elm order (head first).
+unsafe fn list_from_slice(items: &[*mut Value]) -> *mut Value {
+    list_from_store(items.iter().rev().copied().collect())
+}
+
+unsafe fn collect(args: *const *mut Value, n: i32) -> Vec<*mut Value> {
+    if n <= 0 || args.is_null() {
+        return Vec::new();
+    }
+    (0..n as usize).map(|i| *args.add(i)).collect()
+}
+
+unsafe fn cname<'a>(name: *const u8) -> &'a str {
+    CStr::from_ptr(name as *const i8).to_str().unwrap_or("?")
+}
+
+unsafe fn ceq(a: *const u8, b: *const u8) -> bool {
+    a == b || CStr::from_ptr(a as *const i8) == CStr::from_ptr(b as *const i8)
+}
+
+// CONSTRUCTION (called from generated code)
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_int(n: i64) -> *mut Value {
+    mk_int(n)
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_float(f: f64) -> *mut Value {
+    alloc(Value::Float(f))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_chr(c: i32) -> *mut Value {
+    alloc(Value::Char(c as u32))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_str(ptr: *const u8, len: i64) -> *mut Value {
+    let bytes = if len <= 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(ptr, len as usize).to_vec()
+    };
+    mkstr(bytes)
+}
+
+unsafe fn ctor(name: *const u8, index: u32, args: Vec<*mut Value>) -> *mut Value {
+    let argc = args.len() as u32;
+    let mut it = args.into_iter();
+    let arg0 = it.next().unwrap_or(std::ptr::null_mut());
+    let rest: Vec<*mut Value> = it.collect();
+    alloc(Value::Ctor {
+        name,
+        index,
+        argc,
+        arg0,
+        rest,
+    })
+}
+
+/// Allocate a 0- or 1-argument constructor without building an argument
+/// Vec (the common case: Nothing, Just, Ok, Err, …).
+#[inline]
+unsafe fn ctor0(name: *const u8, index: u32) -> *mut Value {
+    alloc(Value::Ctor {
+        name,
+        index,
+        argc: 0,
+        arg0: std::ptr::null_mut(),
+        rest: Vec::new(),
+    })
+}
+#[inline]
+unsafe fn ctor1(name: *const u8, index: u32, arg0: *mut Value) -> *mut Value {
+    alloc(Value::Ctor {
+        name,
+        index,
+        argc: 1,
+        arg0,
+        rest: Vec::new(),
+    })
+}
+
+/// The i-th argument of a constructor value (arg0 inline, rest spilled).
+#[inline]
+unsafe fn ctor_get(v: *mut Value, i: usize) -> *mut Value {
+    match &*v {
+        Value::Ctor { arg0, rest, .. } => {
+            if i == 0 {
+                *arg0
+            } else {
+                rest[i - 1]
+            }
+        }
+        _ => crash!("not a constructor"),
+    }
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_ctor(
+    name: *const u8,
+    index: i32,
+    argc: i32,
+    args: *const *mut Value,
+) -> *mut Value {
+    // Read arguments directly into the inline slot + spill; no intermediate
+    // Vec, so 0/1-argument constructors allocate only the Value itself.
+    let argc = argc.max(0) as usize;
+    let arg0 = if argc >= 1 {
+        *args
+    } else {
+        std::ptr::null_mut()
+    };
+    let rest: Vec<*mut Value> = if argc >= 2 {
+        (1..argc).map(|i| *args.add(i)).collect()
+    } else {
+        Vec::new()
+    };
+    alloc(Value::Ctor {
+        name,
+        index: index as u32,
+        argc: argc as u32,
+        arg0,
+        rest,
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_list(n: i32, items: *const *mut Value) -> *mut Value {
+    list_from_slice(&collect(items, n))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_cons(head: *mut Value, tail: *mut Value) -> *mut Value {
+    cons(head, tail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_tuple(n: i32, items: *const *mut Value) -> *mut Value {
+    alloc(Value::Tuple(collect(items, n)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_closure(
+    func: *const (),
+    arity: i32,
+    ncaps: i32,
+    caps: *const *mut Value,
+) -> *mut Value {
+    let arity = arity as usize;
+    let ncaps = ncaps as usize;
+    let mut args = vec![std::ptr::null_mut(); arity];
+    if ncaps > 0 && !caps.is_null() {
+        for (i, slot) in args.iter_mut().enumerate().take(ncaps) {
+            *slot = *caps.add(i);
+        }
+    }
+    alloc(Value::Closure {
+        func,
+        arity: arity as u32,
+        applied: ncaps as u32,
+        args,
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_closure_set(closure: *mut Value, i: i32, value: *mut Value) {
+    if let Value::Closure { args, .. } = &mut *closure {
+        args[i as usize] = value;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_record_new(n: i32) -> *mut Value {
+    alloc(Value::Record {
+        fields: vec![(std::ptr::null(), std::ptr::null_mut()); n as usize],
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_record_set(
+    record: *mut Value,
+    i: i32,
+    name: *const u8,
+    value: *mut Value,
+) {
+    if let Value::Record { fields } = &mut *record {
+        fields[i as usize] = (name, value);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_record_clone(record: *mut Value) -> *mut Value {
+    match &*record {
+        Value::Record { fields } => alloc(Value::Record {
+            fields: fields.clone(),
+        }),
+        _ => crash!("record clone: not a record"),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_record_replace(record: *mut Value, name: *const u8, value: *mut Value) {
+    if let Value::Record { fields } = &mut *record {
+        for field in fields.iter_mut() {
+            if ceq(field.0, name) {
+                field.1 = value;
+                return;
+            }
+        }
+    }
+    crash!("record update: unknown field");
+}
+
+// ACCESS
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_access(record: *mut Value, name: *const u8) -> *mut Value {
+    if let Value::Record { fields } = &*record {
+        for &(field_name, value) in fields {
+            if ceq(field_name, name) {
+                return value;
+            }
+        }
+    }
+    crash!("record access: unknown field");
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_ctor_arg(v: *mut Value, i: i32) -> *mut Value {
+    ctor_get(v, i as usize)
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_tuple_item(v: *mut Value, i: i32) -> *mut Value {
+    match &*v {
+        Value::Tuple(items) => items[i as usize],
+        _ => crash!("not a tuple"),
+    }
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_list_head(v: *mut Value) -> *mut Value {
+    let store = list_store(v);
+    match store.last() {
+        Some(&h) => h, // head is the last element of the reversed store
+        None => crash!("head of an empty list"),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_list_tail(v: *mut Value) -> *mut Value {
+    let (backing, len) = list_view(v);
+    if len == 0 {
+        crash!("tail of an empty list");
+    }
+    // Drop the head (the last stored element) by shrinking the view; the
+    // backing is shared.
+    (*backing).rc += 1;
+    alloc(Value::List {
+        backing,
+        len: len - 1,
+    })
+}
+
+// TESTS
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_true(v: *mut Value) -> bool {
+    !is_int(v) && matches!(&*v, Value::Bool(true))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_ctor(v: *mut Value, index: i32) -> bool {
+    !is_int(v) && matches!(&*v, Value::Ctor { index: i, .. } if *i == index as u32)
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_bool(v: *mut Value, b: bool) -> bool {
+    !is_int(v) && matches!(&*v, Value::Bool(x) if *x == b)
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_int(v: *mut Value, n: i64) -> bool {
+    is_int(v) && int_val(v) == n
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_chr(v: *mut Value, c: i32) -> bool {
+    !is_int(v) && matches!(&*v, Value::Char(x) if *x == c as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_is_str(v: *mut Value, ptr: *const u8, len: i64) -> bool {
+    if is_int(v) {
+        return false;
+    }
+    match &*v {
+        Value::Str(b) => b.len() == len as usize && b.as_slice() == std::slice::from_raw_parts(ptr, len as usize),
+        _ => false,
+    }
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_cons(v: *mut Value) -> bool {
+    !is_int(v) && matches!(&*v, Value::List { len, .. } if *len > 0)
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_is_nil(v: *mut Value) -> bool {
+    !is_int(v) && matches!(&*v, Value::List { len: 0, .. })
+}
+
+// CURRYING — the Rust twin of the JS F/A helpers.
+
+type Fn1 = unsafe extern "C" fn(*mut Value) -> *mut Value;
+type Fn2 = unsafe extern "C" fn(*mut Value, *mut Value) -> *mut Value;
+type Fn3 = unsafe extern "C" fn(*mut Value, *mut Value, *mut Value) -> *mut Value;
+type Fn4 = unsafe extern "C" fn(*mut Value, *mut Value, *mut Value, *mut Value) -> *mut Value;
+type Fn5 = unsafe extern "C" fn(*mut Value, *mut Value, *mut Value, *mut Value, *mut Value) -> *mut Value;
+type Fn6 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+) -> *mut Value;
+type Fn7 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+) -> *mut Value;
+type Fn8 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+) -> *mut Value;
+type Fn9 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+    *mut Value,
+) -> *mut Value;
+type Fn10 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+    *mut Value, *mut Value,
+) -> *mut Value;
+type Fn11 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+    *mut Value, *mut Value, *mut Value,
+) -> *mut Value;
+type Fn12 = unsafe extern "C" fn(
+    *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value, *mut Value,
+    *mut Value, *mut Value, *mut Value, *mut Value,
+) -> *mut Value;
+
+#[inline]
+unsafe fn call_fn(func: *const (), arity: usize, a: &[*mut Value]) -> *mut Value {
+    use std::mem::transmute;
+    match arity {
+        1 => (transmute::<_, Fn1>(func))(a[0]),
+        2 => (transmute::<_, Fn2>(func))(a[0], a[1]),
+        3 => (transmute::<_, Fn3>(func))(a[0], a[1], a[2]),
+        4 => (transmute::<_, Fn4>(func))(a[0], a[1], a[2], a[3]),
+        5 => (transmute::<_, Fn5>(func))(a[0], a[1], a[2], a[3], a[4]),
+        6 => (transmute::<_, Fn6>(func))(a[0], a[1], a[2], a[3], a[4], a[5]),
+        7 => (transmute::<_, Fn7>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6]),
+        8 => (transmute::<_, Fn8>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]),
+        9 => (transmute::<_, Fn9>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]),
+        10 => (transmute::<_, Fn10>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]),
+        11 => (transmute::<_, Fn11>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]),
+        12 => (transmute::<_, Fn12>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]),
+        _ => crash!("function arity too large (max 12 for now)"),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_apply(mut f: *mut Value, n: i32, mut args: *const *mut Value) -> *mut Value {
+    let mut n = n as usize;
+    while n > 0 {
+        let (func, arity, applied) = match &*f {
+            Value::Closure { func, arity, applied, .. } => {
+                (*func, *arity as usize, *applied as usize)
+            }
+            _ => crash!("applied a non-function"),
+        };
+        let missing = arity - applied;
+        let take = n.min(missing);
+        // Build the argument list on the stack — closure application is
+        // extremely hot, so this must not allocate. Arity is bounded by
+        // call_fn's max (12).
+        let mut all: [*mut Value; 16] = [std::ptr::null_mut(); 16];
+        if let Value::Closure { args: caps, .. } = &*f {
+            all[..applied].copy_from_slice(&caps[..applied]);
+        }
+        for i in 0..take {
+            all[applied + i] = *args.add(i);
+        }
+        if take < missing {
+            return rt_closure(func, arity as i32, (applied + take) as i32, all.as_ptr());
+        }
+        f = call_fn(func, arity, &all[..arity]);
+        args = args.add(take);
+        n -= take;
+    }
+    f
+}
+
+/// Apply a one-argument call. The saturating case (this call completes the
+/// closure) is handled inline so it folds into the hot kernel loops
+/// (`List.map`/`foldl`/…) instead of calling the general `rt_apply`.
+#[inline(always)]
+unsafe fn ap1(f: *mut Value, a: *mut Value) -> *mut Value {
+    let mut all: [*mut Value; 16] = [std::ptr::null_mut(); 16];
+    let (func, arity) = match &*f {
+        Value::Closure { func, arity, applied, args } => {
+            let (func, arity, applied) = (*func, *arity as usize, *applied as usize);
+            if applied + 1 != arity {
+                return rt_apply(f, 1, [a].as_ptr());
+            }
+            all[..applied].copy_from_slice(&args[..applied]);
+            all[applied] = a;
+            (func, arity)
+        }
+        _ => return rt_apply(f, 1, [a].as_ptr()),
+    };
+    call_fn(func, arity, &all[..arity])
+}
+
+#[inline(always)]
+unsafe fn ap2(f: *mut Value, a: *mut Value, b: *mut Value) -> *mut Value {
+    let mut all: [*mut Value; 16] = [std::ptr::null_mut(); 16];
+    let (func, arity) = match &*f {
+        Value::Closure { func, arity, applied, args } => {
+            let (func, arity, applied) = (*func, *arity as usize, *applied as usize);
+            if applied + 2 != arity {
+                return rt_apply(f, 2, [a, b].as_ptr());
+            }
+            all[..applied].copy_from_slice(&args[..applied]);
+            all[applied] = a;
+            all[applied + 1] = b;
+            (func, arity)
+        }
+        _ => return rt_apply(f, 2, [a, b].as_ptr()),
+    };
+    call_fn(func, arity, &all[..arity])
+}
+
+// NUMBERS
+//
+// Elm number literals are polymorphic and the IR is untyped, so an
+// Int-boxed literal can flow into a Float operation. Float ops coerce with
+// `num`, and int/float dispatch treats "either side is a float" as float
+// (matching JS, where every number is a double).
+
+// Arithmetic and comparisons: a tiny inlinable fast path for the common
+// case of two unboxed (tagged) integers, with the float/boxed handling
+// pushed out-of-line so LLVM inlines the hot path into generated code.
+// Tagged ints are `2x+1`, so `a + b - 1 == 2(x+y)+1` and `a - b + 1 ==
+// 2(x-y)+1` retag without shifting; ordering and equality of the raw
+// tagged bits match the untagged values.
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_add(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return (a as i64).wrapping_add(b as i64).wrapping_sub(1) as *mut Value;
+    }
+    rt_add_slow(a, b)
+}
+#[inline(never)]
+unsafe fn rt_add_slow(a: *mut Value, b: *mut Value) -> *mut Value {
+    rt_float(num(a) + num(b))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_sub(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return (a as i64).wrapping_sub(b as i64).wrapping_add(1) as *mut Value;
+    }
+    rt_sub_slow(a, b)
+}
+#[inline(never)]
+unsafe fn rt_sub_slow(a: *mut Value, b: *mut Value) -> *mut Value {
+    rt_float(num(a) - num(b))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_mul(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return mk_int(int_val(a).wrapping_mul(int_val(b)));
+    }
+    rt_mul_slow(a, b)
+}
+#[inline(never)]
+unsafe fn rt_mul_slow(a: *mut Value, b: *mut Value) -> *mut Value {
+    rt_float(num(a) * num(b))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_fdiv(a: *mut Value, b: *mut Value) -> *mut Value {
+    rt_float(num(a) / num(b))
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_idiv(a: *mut Value, b: *mut Value) -> *mut Value {
+    // Match Elm's JS semantics: x // 0 == 0.
+    let d = as_int(b);
+    if d == 0 {
+        rt_int(0)
+    } else {
+        rt_int(as_int(a) / d)
+    }
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_pow(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_float(a) || is_float(b) {
+        rt_float(num(a).powf(num(b)))
+    } else {
+        rt_int((as_int(a) as f64).powf(as_int(b) as f64) as i64)
+    }
+}
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_neg(a: *mut Value) -> *mut Value {
+    if is_float(a) {
+        rt_float(-num(a))
+    } else {
+        rt_int(-as_int(a))
+    }
+}
+
+// EQUALITY AND ORDERING
+
+#[inline]
+unsafe fn value_eq(a: *mut Value, b: *mut Value) -> bool {
+    // Numbers first: this also handles a polymorphic-literal Int flowing
+    // into a Float comparison (immediate int vs boxed float).
+    if is_num(a) && is_num(b) {
+        return num(a) == num(b);
+    }
+    if a == b {
+        return true;
+    }
+    if is_int(a) || is_int(b) {
+        // One side is an immediate int, the other a non-number pointer.
+        return false;
+    }
+    match (&*a, &*b) {
+        (Value::Char(x), Value::Char(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::Unit, Value::Unit) => true,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::List { .. }, Value::List { .. }) => {
+            let (x, y) = (list_store(a), list_store(b));
+            x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
+        }
+        (Value::Ctor { index: i1, argc: n1, .. }, Value::Ctor { index: i2, argc: n2, .. }) => {
+            i1 == i2 && n1 == n2 && (0..*n1 as usize).all(|i| value_eq(ctor_get(a, i), ctor_get(b, i)))
+        }
+        (Value::Tuple(x), Value::Tuple(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
+        }
+        (Value::Record { fields }, Value::Record { .. }) => {
+            fields.iter().all(|&(name, value)| value_eq(value, rt_access(b, name)))
+        }
+        _ => false,
+    }
+}
+
+#[inline]
+unsafe fn value_cmp(a: *mut Value, b: *mut Value) -> i32 {
+    if is_num(a) && is_num(b) {
+        let (x, y) = (num(a), num(b));
+        return if x < y {
+            -1
+        } else if x > y {
+            1
+        } else {
+            0
+        };
+    }
+    match (&*a, &*b) {
+        (Value::Char(x), Value::Char(y)) => (*x as i64 - *y as i64).signum() as i32,
+        (Value::Str(x), Value::Str(y)) => match x.cmp(y) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+        (Value::List { .. }, Value::List { .. }) => {
+            // Lexicographic in Elm order (head first = reversed store).
+            let (x, y) = (list_store(a), list_store(b));
+            let mut i = x.len();
+            let mut j = y.len();
+            while i > 0 && j > 0 {
+                i -= 1;
+                j -= 1;
+                let c = value_cmp(x[i], y[j]);
+                if c != 0 {
+                    return c;
+                }
+            }
+            (x.len() as i64 - y.len() as i64).signum() as i32
+        }
+        (Value::Tuple(x), Value::Tuple(y)) => {
+            for (&p, &q) in x.iter().zip(y) {
+                let c = value_cmp(p, q);
+                if c != 0 {
+                    return c;
+                }
+            }
+            0
+        }
+        _ => crash!("cannot order these values"),
+    }
+}
+
+// Equal tagged ints have identical bits, and signed comparison of the raw
+// tagged bits matches the untagged ordering — so the two-int case is a
+// direct pointer compare, with structural eq/cmp pushed out-of-line.
+
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_eq(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool(a == b);
+    }
+    rt_bool(value_eq(a, b))
+}
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_neq(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool(a != b);
+    }
+    rt_bool(!value_eq(a, b))
+}
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_lt(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool((a as i64) < (b as i64));
+    }
+    rt_bool(value_cmp(a, b) < 0)
+}
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_le(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool((a as i64) <= (b as i64));
+    }
+    rt_bool(value_cmp(a, b) <= 0)
+}
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_gt(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool((a as i64) > (b as i64));
+    }
+    rt_bool(value_cmp(a, b) > 0)
+}
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn rt_ge(a: *mut Value, b: *mut Value) -> *mut Value {
+    if is_int(a) && is_int(b) {
+        return rt_bool((a as i64) >= (b as i64));
+    }
+    rt_bool(value_cmp(a, b) >= 0)
+}
+
+// APPEND — strings and lists.
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_append(a: *mut Value, b: *mut Value) -> *mut Value {
+    match &*a {
+        Value::Str(x) => {
+            let mut bytes = x.clone();
+            bytes.extend_from_slice(sbytes(b));
+            mkstr(bytes)
+        }
+        Value::List { .. } => {
+            // Result in Elm order is a ++ b; in reversed storage that is
+            // b's store followed by a's store.
+            let (sa, sb) = (list_store(a), list_store(b));
+            let mut data = Vec::with_capacity(sa.len() + sb.len());
+            data.extend_from_slice(sb);
+            data.extend_from_slice(sa);
+            list_from_store(data)
+        }
+        _ => crash!("++ on a non-appendable"),
+    }
+}
+
+// BUILTIN CTOR HELPERS — indices match `builtins.rs`:
+// Just=0/Nothing=1, Ok=0/Err=1, LT=0/EQ=1/GT=2.
+
+unsafe fn just(v: *mut Value) -> *mut Value {
+    ctor1(b"Just\0".as_ptr(), 0, v)
+}
+unsafe fn res_ok(v: *mut Value) -> *mut Value {
+    ctor1(b"Ok\0".as_ptr(), 0, v)
+}
+unsafe fn res_err(v: *mut Value) -> *mut Value {
+    ctor1(b"Err\0".as_ptr(), 1, v)
+}
+unsafe fn is_ctor0(v: *mut Value) -> bool {
+    matches!(&*v, Value::Ctor { index: 0, .. })
+}
+unsafe fn pair(a: *mut Value, b: *mut Value) -> *mut Value {
+    alloc(Value::Tuple(vec![a, b]))
+}
+
+// FLOAT FORMATTING — Rust's shortest round-tripping decimal matches JS
+// `String(n)` for all non-exponential magnitudes (the range Elm programs
+// use); NaN/Infinity/-0 are special-cased to Elm's spellings.
+
+fn fmt_float(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".to_string();
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { "-Infinity" } else { "Infinity" }.to_string();
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    format!("{}", x)
+}
+
+// BASICS
+
+unsafe extern "C" fn basics_identity(a: *mut Value) -> *mut Value {
+    a
+}
+unsafe extern "C" fn basics_always(a: *mut Value, _b: *mut Value) -> *mut Value {
+    a
+}
+unsafe extern "C" fn basics_not(b: *mut Value) -> *mut Value {
+    rt_bool(!rt_is_true(b))
+}
+unsafe extern "C" fn basics_xor(a: *mut Value, b: *mut Value) -> *mut Value {
+    rt_bool(rt_is_true(a) != rt_is_true(b))
+}
+#[export_name = "rtb$Basics$modBy"]
+unsafe extern "C" fn basics_mod_by(m: *mut Value, n: *mut Value) -> *mut Value {
+    let m = as_int(m);
+    if m == 0 {
+        crash!("modBy 0 is undefined");
+    }
+    let mut r = as_int(n) % m;
+    if (r > 0 && m < 0) || (r < 0 && m > 0) {
+        r += m;
+    }
+    rt_int(r)
+}
+#[export_name = "rtb$Basics$remainderBy"]
+unsafe extern "C" fn basics_remainder_by(m: *mut Value, n: *mut Value) -> *mut Value {
+    let m = as_int(m);
+    if m == 0 {
+        crash!("remainderBy 0 is undefined");
+    }
+    rt_int(as_int(n) % m)
+}
+unsafe extern "C" fn basics_abs(a: *mut Value) -> *mut Value {
+    if is_float(a) {
+        rt_float(num(a).abs())
+    } else {
+        rt_int(as_int(a).abs())
+    }
+}
+unsafe extern "C" fn basics_min(a: *mut Value, b: *mut Value) -> *mut Value {
+    if value_cmp(a, b) < 0 {
+        a
+    } else {
+        b
+    }
+}
+unsafe extern "C" fn basics_max(a: *mut Value, b: *mut Value) -> *mut Value {
+    if value_cmp(a, b) > 0 {
+        a
+    } else {
+        b
+    }
+}
+#[export_name = "rtb$Basics$clamp"]
+unsafe extern "C" fn basics_clamp(lo: *mut Value, hi: *mut Value, x: *mut Value) -> *mut Value {
+    if value_cmp(x, lo) < 0 {
+        lo
+    } else if value_cmp(x, hi) > 0 {
+        hi
+    } else {
+        x
+    }
+}
+unsafe extern "C" fn basics_compare(a: *mut Value, b: *mut Value) -> *mut Value {
+    match value_cmp(a, b) {
+        c if c < 0 => LT.get(),
+        c if c > 0 => GT.get(),
+        _ => EQ.get(),
+    }
+}
+unsafe extern "C" fn basics_to_float(n: *mut Value) -> *mut Value {
+    rt_float(num(n))
+}
+unsafe extern "C" fn basics_round(x: *mut Value) -> *mut Value {
+    // Math.round: half rounds toward +infinity.
+    rt_int((num(x) + 0.5).floor() as i64)
+}
+unsafe extern "C" fn basics_floor(x: *mut Value) -> *mut Value {
+    rt_int(num(x).floor() as i64)
+}
+unsafe extern "C" fn basics_ceiling(x: *mut Value) -> *mut Value {
+    rt_int(num(x).ceil() as i64)
+}
+unsafe extern "C" fn basics_truncate(x: *mut Value) -> *mut Value {
+    rt_int(num(x) as i64)
+}
+unsafe extern "C" fn basics_sqrt(x: *mut Value) -> *mut Value {
+    rt_float(num(x).sqrt())
+}
+unsafe extern "C" fn basics_log_base(base: *mut Value, x: *mut Value) -> *mut Value {
+    rt_float(num(x).ln() / num(base).ln())
+}
+unsafe extern "C" fn basics_compose_l(g: *mut Value, f: *mut Value, x: *mut Value) -> *mut Value {
+    ap1(g, ap1(f, x))
+}
+unsafe extern "C" fn basics_compose_r(f: *mut Value, g: *mut Value, x: *mut Value) -> *mut Value {
+    ap1(g, ap1(f, x))
+}
+unsafe extern "C" fn basics_ap_l(f: *mut Value, x: *mut Value) -> *mut Value {
+    ap1(f, x)
+}
+unsafe extern "C" fn basics_ap_r(x: *mut Value, f: *mut Value) -> *mut Value {
+    ap1(f, x)
+}
+unsafe extern "C" fn basics_never(_n: *mut Value) -> *mut Value {
+    crash!("Basics.never was called (this is impossible in well-typed code)");
+}
+
+// LIST
+
+unsafe extern "C" fn list_singleton(x: *mut Value) -> *mut Value {
+    list_from_store(vec![x])
+}
+#[export_name = "rtb$List$repeat"]
+unsafe extern "C" fn list_repeat(n: *mut Value, x: *mut Value) -> *mut Value {
+    // Build the backing directly — repeated `cons` would copy-on-write each
+    // step (O(n^2)).
+    let n = as_int(n).max(0) as usize;
+    list_from_store(vec![x; n])
+}
+#[export_name = "rtb$List$range"]
+unsafe extern "C" fn list_range(lo: *mut Value, hi: *mut Value) -> *mut Value {
+    let (lo, hi) = (as_int(lo), as_int(hi));
+    if hi < lo {
+        return nil();
+    }
+    // Reversed storage (head = lo at the back): [hi, hi-1, ..., lo].
+    let mut data = Vec::with_capacity((hi - lo + 1) as usize);
+    let mut h = hi;
+    while h >= lo {
+        data.push(mk_int(h));
+        h -= 1;
+    }
+    list_from_store(data)
+}
+#[export_name = "rtb$List$map"]
+unsafe extern "C" fn list_map(f: *mut Value, xs: *mut Value) -> *mut Value {
+    // Store stays reversed under the map, so build the new store directly.
+    let store = list_store(xs);
+    let data: Vec<*mut Value> = store.iter().map(|&x| ap1(f, x)).collect();
+    list_from_store(data)
+}
+#[export_name = "rtb$List$indexedMap"]
+unsafe extern "C" fn list_indexed_map(f: *mut Value, xs: *mut Value) -> *mut Value {
+    let store = list_store(xs);
+    let n = store.len();
+    // store[i] is Elm index (n-1-i); build results in Elm order then store.
+    let mut out = Vec::with_capacity(n);
+    for (elm_i, &x) in store.iter().rev().enumerate() {
+        out.push(ap2(f, mk_int(elm_i as i64), x));
+    }
+    list_from_slice(&out)
+}
+#[export_name = "rtb$List$foldl"]
+unsafe extern "C" fn list_foldl(f: *mut Value, mut acc: *mut Value, xs: *mut Value) -> *mut Value {
+    // Elm order = reversed store.
+    for &x in list_store(xs).iter().rev() {
+        acc = ap2(f, x, acc);
+    }
+    acc
+}
+#[export_name = "rtb$List$foldr"]
+unsafe extern "C" fn list_foldr(f: *mut Value, mut acc: *mut Value, xs: *mut Value) -> *mut Value {
+    // Right fold visits last-to-first = store order.
+    for &x in list_store(xs) {
+        acc = ap2(f, x, acc);
+    }
+    acc
+}
+#[export_name = "rtb$List$filter"]
+unsafe extern "C" fn list_filter(is_good: *mut Value, xs: *mut Value) -> *mut Value {
+    let store = list_store(xs);
+    let data: Vec<*mut Value> = store
+        .iter()
+        .copied()
+        .filter(|&x| rt_is_true(ap1(is_good, x)))
+        .collect();
+    list_from_store(data)
+}
+#[export_name = "rtb$List$filterMap"]
+unsafe extern "C" fn list_filter_map(f: *mut Value, xs: *mut Value) -> *mut Value {
+    let store = list_store(xs);
+    let mut data = Vec::new();
+    for &x in store {
+        let m = ap1(f, x);
+        if is_ctor0(m) {
+            data.push(rt_ctor_arg(m, 0));
+        }
+    }
+    list_from_store(data)
+}
+#[export_name = "rtb$List$length"]
+unsafe extern "C" fn list_length(xs: *mut Value) -> *mut Value {
+    rt_int(list_len(xs) as i64)
+}
+#[export_name = "rtb$List$reverse"]
+unsafe extern "C" fn list_reverse(xs: *mut Value) -> *mut Value {
+    // Reversing the list reverses the store.
+    list_from_store(list_store(xs).iter().rev().copied().collect())
+}
+#[export_name = "rtb$List$member"]
+unsafe extern "C" fn list_member(y: *mut Value, xs: *mut Value) -> *mut Value {
+    rt_bool(to_vec(xs).into_iter().any(|x| value_eq(y, x)))
+}
+unsafe extern "C" fn list_all(is_good: *mut Value, xs: *mut Value) -> *mut Value {
+    rt_bool(to_vec(xs).into_iter().all(|x| rt_is_true(ap1(is_good, x))))
+}
+unsafe extern "C" fn list_any(is_good: *mut Value, xs: *mut Value) -> *mut Value {
+    rt_bool(to_vec(xs).into_iter().any(|x| rt_is_true(ap1(is_good, x))))
+}
+unsafe extern "C" fn list_maximum(xs: *mut Value) -> *mut Value {
+    let items = to_vec(xs);
+    match items.split_first() {
+        None => nothing(),
+        Some((&first, rest)) => {
+            let mut best = first;
+            for &x in rest {
+                if value_cmp(x, best) > 0 {
+                    best = x;
+                }
+            }
+            just(best)
+        }
+    }
+}
+unsafe extern "C" fn list_minimum(xs: *mut Value) -> *mut Value {
+    let items = to_vec(xs);
+    match items.split_first() {
+        None => nothing(),
+        Some((&first, rest)) => {
+            let mut best = first;
+            for &x in rest {
+                if value_cmp(x, best) < 0 {
+                    best = x;
+                }
+            }
+            just(best)
+        }
+    }
+}
+#[export_name = "rtb$List$sum"]
+unsafe extern "C" fn list_sum(xs: *mut Value) -> *mut Value {
+    let items = to_vec(xs);
+    if items.iter().any(|&x| is_float(x)) {
+        rt_float(items.iter().map(|&x| num(x)).sum())
+    } else {
+        rt_int(items.iter().map(|&x| as_int(x)).sum())
+    }
+}
+#[export_name = "rtb$List$product"]
+unsafe extern "C" fn list_product(xs: *mut Value) -> *mut Value {
+    let items = to_vec(xs);
+    if items.iter().any(|&x| is_float(x)) {
+        rt_float(items.iter().map(|&x| num(x)).product())
+    } else {
+        rt_int(items.iter().map(|&x| as_int(x)).product())
+    }
+}
+#[export_name = "rtb$List$concat"]
+unsafe extern "C" fn list_concat(xss: *mut Value) -> *mut Value {
+    let mut out = Vec::new();
+    for xs in to_vec(xss) {
+        out.extend(to_vec(xs));
+    }
+    list_from_slice(&out)
+}
+unsafe extern "C" fn list_concat_map(f: *mut Value, xs: *mut Value) -> *mut Value {
+    list_concat(list_map(f, xs))
+}
+unsafe extern "C" fn list_intersperse(sep: *mut Value, xs: *mut Value) -> *mut Value {
+    let items = to_vec(xs);
+    let mut out = Vec::new();
+    for (i, &x) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
+        out.push(x);
+    }
+    list_from_slice(&out)
+}
+#[export_name = "rtb$List$map2"]
+unsafe extern "C" fn list_map2(f: *mut Value, xs: *mut Value, ys: *mut Value) -> *mut Value {
+    let (xs, ys) = (to_vec(xs), to_vec(ys));
+    let out: Vec<*mut Value> = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(&a, &b)| ap2(f, a, b))
+        .collect();
+    list_from_slice(&out)
+}
+#[export_name = "rtb$List$isEmpty"]
+unsafe extern "C" fn list_is_empty(xs: *mut Value) -> *mut Value {
+    rt_bool(list_len(xs) == 0)
+}
+#[export_name = "rtb$List$head"]
+unsafe extern "C" fn list_head(xs: *mut Value) -> *mut Value {
+    match list_store(xs).last() {
+        Some(&h) => just(h),
+        None => nothing(),
+    }
+}
+#[export_name = "rtb$List$tail"]
+unsafe extern "C" fn list_tail(xs: *mut Value) -> *mut Value {
+    if list_len(xs) == 0 {
+        nothing()
+    } else {
+        just(rt_list_tail(xs))
+    }
+}
+#[export_name = "rtb$List$take"]
+unsafe extern "C" fn list_take(n: *mut Value, xs: *mut Value) -> *mut Value {
+    let store = list_store(xs);
+    let count = (as_int(n).max(0) as usize).min(store.len());
+    // Take the first `count` in Elm order = the last `count` of the store.
+    list_from_store(store[store.len() - count..].to_vec())
+}
+#[export_name = "rtb$List$drop"]
+unsafe extern "C" fn list_drop(n: *mut Value, xs: *mut Value) -> *mut Value {
+    let (backing, len) = list_view(xs);
+    let drop = (as_int(n).max(0) as usize).min(len);
+    // Dropping `drop` from the head (the back of the store) shrinks the
+    // view and shares the backing.
+    (*backing).rc += 1;
+    alloc(Value::List {
+        backing,
+        len: len - drop,
+    })
+}
+unsafe extern "C" fn list_partition(is_good: *mut Value, xs: *mut Value) -> *mut Value {
+    let (mut yes, mut no) = (Vec::new(), Vec::new());
+    for x in to_vec(xs) {
+        if rt_is_true(ap1(is_good, x)) {
+            yes.push(x);
+        } else {
+            no.push(x);
+        }
+    }
+    pair(list_from_slice(&yes), list_from_slice(&no))
+}
+unsafe extern "C" fn list_unzip(pairs: *mut Value) -> *mut Value {
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    for p in to_vec(pairs) {
+        if let Value::Tuple(items) = &*p {
+            xs.push(items[0]);
+            ys.push(items[1]);
+        }
+    }
+    pair(list_from_slice(&xs), list_from_slice(&ys))
+}
+
+/// Sort modes: 0 = plain, 1 = by key, 2 = by an Order-returning function.
+unsafe fn sort_list(xs: *mut Value, mode: u8, f: *mut Value) -> *mut Value {
+    let mut items = to_vec(xs);
+    items.sort_by(|&a, &b| {
+        let c = match mode {
+            0 => value_cmp(a, b),
+            1 => value_cmp(ap1(f, a), ap1(f, b)),
+            _ => match &*ap2(f, a, b) {
+                Value::Ctor { index: 0, .. } => -1,
+                Value::Ctor { index: 1, .. } => 0,
+                _ => 1,
+            },
+        };
+        c.cmp(&0)
+    });
+    list_from_slice(&items)
+}
+unsafe extern "C" fn list_sort(xs: *mut Value) -> *mut Value {
+    sort_list(xs, 0, std::ptr::null_mut())
+}
+unsafe extern "C" fn list_sort_by(f: *mut Value, xs: *mut Value) -> *mut Value {
+    sort_list(xs, 1, f)
+}
+unsafe extern "C" fn list_sort_with(f: *mut Value, xs: *mut Value) -> *mut Value {
+    sort_list(xs, 2, f)
+}
+
+// STRING
+
+fn ascii_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b')
+}
+
+/// Byte offset of the `idx`-th codepoint, clamped to the string length.
+fn char_byte(s: &str, idx: usize) -> usize {
+    s.char_indices().nth(idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+unsafe fn slice_cp(p: *mut Value, mut start: i64, mut end: i64) -> *mut Value {
+    let s = sstr(p);
+    let len = s.chars().count() as i64;
+    if start < 0 {
+        start += len;
+    }
+    if end < 0 {
+        end += len;
+    }
+    start = start.max(0);
+    end = end.min(len);
+    if end <= start {
+        return mkstr(Vec::new());
+    }
+    let from = char_byte(s, start as usize);
+    let to = char_byte(s, end as usize);
+    mkstr(s.as_bytes()[from..to].to_vec())
+}
+
+#[export_name = "rtb$String$fromInt"]
+unsafe extern "C" fn string_from_int(n: *mut Value) -> *mut Value {
+    mkstr(as_int(n).to_string().into_bytes())
+}
+#[export_name = "rtb$String$fromFloat"]
+unsafe extern "C" fn string_from_float(n: *mut Value) -> *mut Value {
+    mkstr(fmt_float(num(n)).into_bytes())
+}
+#[export_name = "rtb$String$length"]
+unsafe extern "C" fn string_length(s: *mut Value) -> *mut Value {
+    rt_int(sstr(s).chars().count() as i64)
+}
+unsafe extern "C" fn string_is_empty(s: *mut Value) -> *mut Value {
+    rt_bool(sbytes(s).is_empty())
+}
+unsafe extern "C" fn string_reverse(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).chars().rev().collect::<String>().into_bytes())
+}
+unsafe extern "C" fn string_repeat(n: *mut Value, s: *mut Value) -> *mut Value {
+    let count = as_int(n);
+    if count < 1 {
+        return mkstr(Vec::new());
+    }
+    mkstr(sbytes(s).repeat(count as usize))
+}
+unsafe extern "C" fn string_concat(xs: *mut Value) -> *mut Value {
+    let mut out = Vec::new();
+    for x in to_vec(xs) {
+        out.extend_from_slice(sbytes(x));
+    }
+    mkstr(out)
+}
+#[export_name = "rtb$String$join"]
+unsafe extern "C" fn string_join(sep: *mut Value, xs: *mut Value) -> *mut Value {
+    let sep = sbytes(sep);
+    let mut out = Vec::new();
+    for (i, x) in to_vec(xs).into_iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(sep);
+        }
+        out.extend_from_slice(sbytes(x));
+    }
+    mkstr(out)
+}
+unsafe extern "C" fn string_split(sep: *mut Value, s: *mut Value) -> *mut Value {
+    let (sep, s) = (sstr(sep), sstr(s));
+    let parts: Vec<*mut Value> = if sep.is_empty() {
+        s.chars().map(|c| mkstr(c.to_string().into_bytes())).collect()
+    } else {
+        s.split(sep).map(|p| mkstr(p.as_bytes().to_vec())).collect()
+    };
+    list_from_slice(&parts)
+}
+unsafe extern "C" fn string_replace(before: *mut Value, after: *mut Value, s: *mut Value) -> *mut Value {
+    string_join(after, string_split(before, s))
+}
+unsafe extern "C" fn string_words(s: *mut Value) -> *mut Value {
+    let parts: Vec<*mut Value> = sstr(s)
+        .split_whitespace()
+        .map(|w| mkstr(w.as_bytes().to_vec()))
+        .collect();
+    list_from_slice(&parts)
+}
+unsafe extern "C" fn string_lines(s: *mut Value) -> *mut Value {
+    let parts: Vec<*mut Value> = sstr(s)
+        .split('\n')
+        .map(|l| mkstr(l.as_bytes().to_vec()))
+        .collect();
+    list_from_slice(&parts)
+}
+unsafe extern "C" fn string_slice(a: *mut Value, b: *mut Value, s: *mut Value) -> *mut Value {
+    slice_cp(s, as_int(a), as_int(b))
+}
+unsafe extern "C" fn string_left(n: *mut Value, s: *mut Value) -> *mut Value {
+    if as_int(n) < 1 {
+        mkstr(Vec::new())
+    } else {
+        slice_cp(s, 0, as_int(n))
+    }
+}
+unsafe extern "C" fn string_right(n: *mut Value, s: *mut Value) -> *mut Value {
+    let n = as_int(n);
+    if n < 1 {
+        mkstr(Vec::new())
+    } else {
+        slice_cp(s, -n, sstr(s).chars().count() as i64)
+    }
+}
+unsafe extern "C" fn string_drop_left(n: *mut Value, s: *mut Value) -> *mut Value {
+    if as_int(n) < 1 {
+        s
+    } else {
+        slice_cp(s, as_int(n), sstr(s).chars().count() as i64)
+    }
+}
+unsafe extern "C" fn string_drop_right(n: *mut Value, s: *mut Value) -> *mut Value {
+    if as_int(n) < 1 {
+        s
+    } else {
+        slice_cp(s, 0, -as_int(n))
+    }
+}
+unsafe extern "C" fn string_contains(sub: *mut Value, s: *mut Value) -> *mut Value {
+    rt_bool(sstr(s).contains(sstr(sub)))
+}
+unsafe extern "C" fn string_starts_with(sub: *mut Value, s: *mut Value) -> *mut Value {
+    rt_bool(sstr(s).starts_with(sstr(sub)))
+}
+unsafe extern "C" fn string_ends_with(sub: *mut Value, s: *mut Value) -> *mut Value {
+    rt_bool(sstr(s).ends_with(sstr(sub)))
+}
+unsafe extern "C" fn string_indexes(sub: *mut Value, s: *mut Value) -> *mut Value {
+    let (sub, s) = (sstr(sub), sstr(s));
+    if sub.is_empty() {
+        return nil();
+    }
+    // Codepoint indices of each byte match, mapped through char positions.
+    let mut byte_to_cp = std::collections::HashMap::new();
+    for (cp, (byte, _)) in s.char_indices().enumerate() {
+        byte_to_cp.insert(byte, cp);
+    }
+    let out: Vec<*mut Value> = s
+        .match_indices(sub)
+        .filter_map(|(byte, _)| byte_to_cp.get(&byte).map(|&cp| rt_int(cp as i64)))
+        .collect();
+    list_from_slice(&out)
+}
+unsafe extern "C" fn string_to_int(s: *mut Value) -> *mut Value {
+    let bytes = sbytes(s);
+    let (mut i, negative) = match bytes.first() {
+        Some(b'+') => (1, false),
+        Some(b'-') => (1, true),
+        _ => (0, false),
+    };
+    let digits = &bytes[i..];
+    // Reject empty, and leading zeros (matching the JS round-trip rule).
+    if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+        return nothing();
+    }
+    let mut n: i64 = 0;
+    while i < bytes.len() {
+        let d = bytes[i];
+        if !d.is_ascii_digit() {
+            return nothing();
+        }
+        n = n * 10 + (d - b'0') as i64;
+        i += 1;
+    }
+    if negative && n == 0 {
+        return nothing();
+    }
+    just(rt_int(if negative { -n } else { n }))
+}
+unsafe extern "C" fn string_to_float(s: *mut Value) -> *mut Value {
+    let text = sstr(s);
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.' | b'e' | b'E'))
+    {
+        return nothing();
+    }
+    match text.parse::<f64>() {
+        Ok(f) => just(rt_float(f)),
+        Err(_) => nothing(),
+    }
+}
+unsafe extern "C" fn string_from_char(c: *mut Value) -> *mut Value {
+    let ch = char::from_u32(as_int(c) as u32).unwrap_or('\u{fffd}');
+    mkstr(ch.to_string().into_bytes())
+}
+unsafe extern "C" fn string_cons(c: *mut Value, s: *mut Value) -> *mut Value {
+    rt_append(string_from_char(c), s)
+}
+unsafe extern "C" fn string_uncons(s: *mut Value) -> *mut Value {
+    match sstr(s).chars().next() {
+        None => nothing(),
+        Some(ch) => {
+            let rest = &sbytes(s)[ch.len_utf8()..];
+            just(pair(rt_chr(ch as i32), mkstr(rest.to_vec())))
+        }
+    }
+}
+unsafe extern "C" fn string_to_list(s: *mut Value) -> *mut Value {
+    let chars: Vec<*mut Value> = sstr(s).chars().map(|c| rt_chr(c as i32)).collect();
+    list_from_slice(&chars)
+}
+unsafe extern "C" fn string_from_list(chars: *mut Value) -> *mut Value {
+    let mut out = String::new();
+    for c in to_vec(chars) {
+        out.push(char::from_u32(as_int(c) as u32).unwrap_or('\u{fffd}'));
+    }
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn string_to_upper(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).chars().map(|c| c.to_ascii_uppercase()).collect::<String>().into_bytes())
+}
+unsafe extern "C" fn string_to_lower(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).chars().map(|c| c.to_ascii_lowercase()).collect::<String>().into_bytes())
+}
+unsafe extern "C" fn string_trim(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).trim_matches(ascii_space).as_bytes().to_vec())
+}
+unsafe extern "C" fn string_trim_left(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).trim_start_matches(ascii_space).as_bytes().to_vec())
+}
+unsafe extern "C" fn string_trim_right(s: *mut Value) -> *mut Value {
+    mkstr(sstr(s).trim_end_matches(ascii_space).as_bytes().to_vec())
+}
+unsafe extern "C" fn string_pad_left(n: *mut Value, c: *mut Value, s: *mut Value) -> *mut Value {
+    let ch = char::from_u32(as_int(c) as u32).unwrap_or(' ');
+    let deficit = as_int(n) - sstr(s).chars().count() as i64;
+    let mut out = String::new();
+    for _ in 0..deficit.max(0) {
+        out.push(ch);
+    }
+    out.push_str(sstr(s));
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn string_pad_right(n: *mut Value, c: *mut Value, s: *mut Value) -> *mut Value {
+    let ch = char::from_u32(as_int(c) as u32).unwrap_or(' ');
+    let deficit = as_int(n) - sstr(s).chars().count() as i64;
+    let mut out = String::from(sstr(s));
+    for _ in 0..deficit.max(0) {
+        out.push(ch);
+    }
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn string_map(f: *mut Value, s: *mut Value) -> *mut Value {
+    let mut out = String::new();
+    for ch in sstr(s).chars() {
+        let mapped = ap1(f, rt_chr(ch as i32));
+        out.push(char::from_u32(as_int(mapped) as u32).unwrap_or('\u{fffd}'));
+    }
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn string_filter(is_good: *mut Value, s: *mut Value) -> *mut Value {
+    let mut out = String::new();
+    for ch in sstr(s).chars() {
+        if rt_is_true(ap1(is_good, rt_chr(ch as i32))) {
+            out.push(ch);
+        }
+    }
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn string_any(is_good: *mut Value, s: *mut Value) -> *mut Value {
+    rt_bool(sstr(s).chars().any(|ch| rt_is_true(ap1(is_good, rt_chr(ch as i32)))))
+}
+unsafe extern "C" fn string_all(is_good: *mut Value, s: *mut Value) -> *mut Value {
+    rt_bool(sstr(s).chars().all(|ch| rt_is_true(ap1(is_good, rt_chr(ch as i32)))))
+}
+
+// CHAR (ASCII case only, matching the JS backend for the tested range)
+
+unsafe extern "C" fn char_to_code(c: *mut Value) -> *mut Value {
+    rt_int(as_int(c))
+}
+unsafe extern "C" fn char_from_code(n: *mut Value) -> *mut Value {
+    rt_chr(as_int(n) as i32)
+}
+unsafe extern "C" fn char_is_digit(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    rt_bool((b'0' as i64..=b'9' as i64).contains(&n))
+}
+unsafe extern "C" fn char_is_upper(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    rt_bool((b'A' as i64..=b'Z' as i64).contains(&n))
+}
+unsafe extern "C" fn char_is_lower(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    rt_bool((b'a' as i64..=b'z' as i64).contains(&n))
+}
+unsafe extern "C" fn char_is_alpha(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    rt_bool((b'a' as i64..=b'z' as i64).contains(&n) || (b'A' as i64..=b'Z' as i64).contains(&n))
+}
+unsafe extern "C" fn char_to_upper(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    if (b'a' as i64..=b'z' as i64).contains(&n) {
+        rt_chr((n - 32) as i32)
+    } else {
+        c
+    }
+}
+unsafe extern "C" fn char_to_lower(c: *mut Value) -> *mut Value {
+    let n = as_int(c);
+    if (b'A' as i64..=b'Z' as i64).contains(&n) {
+        rt_chr((n + 32) as i32)
+    } else {
+        c
+    }
+}
+
+// MAYBE
+
+unsafe extern "C" fn maybe_with_default(fallback: *mut Value, m: *mut Value) -> *mut Value {
+    if is_ctor0(m) {
+        rt_ctor_arg(m, 0)
+    } else {
+        fallback
+    }
+}
+unsafe extern "C" fn maybe_map(f: *mut Value, m: *mut Value) -> *mut Value {
+    if is_ctor0(m) {
+        just(ap1(f, rt_ctor_arg(m, 0)))
+    } else {
+        m
+    }
+}
+unsafe extern "C" fn maybe_map2(f: *mut Value, ma: *mut Value, mb: *mut Value) -> *mut Value {
+    if is_ctor0(ma) && is_ctor0(mb) {
+        just(ap2(f, rt_ctor_arg(ma, 0), rt_ctor_arg(mb, 0)))
+    } else {
+        nothing()
+    }
+}
+unsafe extern "C" fn maybe_and_then(f: *mut Value, m: *mut Value) -> *mut Value {
+    if is_ctor0(m) {
+        ap1(f, rt_ctor_arg(m, 0))
+    } else {
+        m
+    }
+}
+
+// RESULT
+
+unsafe extern "C" fn result_with_default(fallback: *mut Value, r: *mut Value) -> *mut Value {
+    if is_ctor0(r) {
+        rt_ctor_arg(r, 0)
+    } else {
+        fallback
+    }
+}
+unsafe extern "C" fn result_map(f: *mut Value, r: *mut Value) -> *mut Value {
+    if is_ctor0(r) {
+        res_ok(ap1(f, rt_ctor_arg(r, 0)))
+    } else {
+        r
+    }
+}
+unsafe extern "C" fn result_map_error(f: *mut Value, r: *mut Value) -> *mut Value {
+    if is_ctor0(r) {
+        r
+    } else {
+        res_err(ap1(f, rt_ctor_arg(r, 0)))
+    }
+}
+unsafe extern "C" fn result_and_then(f: *mut Value, r: *mut Value) -> *mut Value {
+    if is_ctor0(r) {
+        ap1(f, rt_ctor_arg(r, 0))
+    } else {
+        r
+    }
+}
+unsafe extern "C" fn result_to_maybe(r: *mut Value) -> *mut Value {
+    if is_ctor0(r) {
+        just(rt_ctor_arg(r, 0))
+    } else {
+        nothing()
+    }
+}
+unsafe extern "C" fn result_from_maybe(e: *mut Value, m: *mut Value) -> *mut Value {
+    if is_ctor0(m) {
+        res_ok(rt_ctor_arg(m, 0))
+    } else {
+        res_err(e)
+    }
+}
+
+// TUPLE
+
+unsafe extern "C" fn tuple_pair(a: *mut Value, b: *mut Value) -> *mut Value {
+    pair(a, b)
+}
+unsafe extern "C" fn tuple_first(t: *mut Value) -> *mut Value {
+    rt_tuple_item(t, 0)
+}
+unsafe extern "C" fn tuple_second(t: *mut Value) -> *mut Value {
+    rt_tuple_item(t, 1)
+}
+unsafe extern "C" fn tuple_map_first(f: *mut Value, t: *mut Value) -> *mut Value {
+    pair(ap1(f, rt_tuple_item(t, 0)), rt_tuple_item(t, 1))
+}
+unsafe extern "C" fn tuple_map_second(f: *mut Value, t: *mut Value) -> *mut Value {
+    pair(rt_tuple_item(t, 0), ap1(f, rt_tuple_item(t, 1)))
+}
+unsafe extern "C" fn tuple_map_both(f: *mut Value, g: *mut Value, t: *mut Value) -> *mut Value {
+    pair(ap1(f, rt_tuple_item(t, 0)), ap1(g, rt_tuple_item(t, 1)))
+}
+
+// DEBUG — mirrors runtime.js's _Debug_toString formatting.
+
+fn debug_string(out: &mut String, bytes: &[u8]) {
+    out.push('"');
+    for &b in bytes {
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            c if c < 0x20 => out.push_str(&format!("\\u{:04x}", c)),
+            c => out.push(c as char),
+        }
+    }
+    out.push('"');
+}
+
+unsafe fn debug_fmt(out: &mut String, v: *mut Value) {
+    if is_int(v) {
+        out.push_str(&int_val(v).to_string());
+        return;
+    }
+    match &*v {
+        Value::Float(f) => out.push_str(&fmt_float(*f)),
+        Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+        Value::Unit => out.push_str("()"),
+        // The JS runtime represents chars as strings, so they format like
+        // one-character strings.
+        Value::Char(c) => {
+            let s = char::from_u32(*c).unwrap_or('\u{fffd}').to_string();
+            debug_string(out, s.as_bytes());
+        }
+        Value::Str(b) => debug_string(out, b),
+        Value::List { .. } => {
+            out.push('[');
+            for (i, x) in to_vec(v).into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                debug_fmt(out, x);
+            }
+            out.push(']');
+        }
+        Value::Tuple(items) => {
+            out.push('(');
+            for (i, &x) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                debug_fmt(out, x);
+            }
+            out.push(')');
+        }
+        Value::Record { fields } => {
+            out.push_str("{ ");
+            for (i, &(name, value)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(cname(name));
+                out.push_str(" = ");
+                debug_fmt(out, value);
+            }
+            out.push_str(" }");
+        }
+        Value::Ctor { name, argc, .. } => {
+            out.push_str(cname(*name));
+            for i in 0..*argc as usize {
+                out.push(' ');
+                let mut inner = String::new();
+                debug_fmt(&mut inner, ctor_get(v, i));
+                let head = inner.chars().next().unwrap_or(' ');
+                let wrap = inner.contains(' ') && !matches!(head, '"' | '{' | '(' | '[');
+                if wrap {
+                    out.push('(');
+                }
+                out.push_str(&inner);
+                if wrap {
+                    out.push(')');
+                }
+            }
+        }
+        Value::Closure { .. } => out.push_str("<function>"),
+    }
+}
+
+unsafe extern "C" fn debug_to_string(v: *mut Value) -> *mut Value {
+    let mut out = String::new();
+    debug_fmt(&mut out, v);
+    mkstr(out.into_bytes())
+}
+unsafe extern "C" fn debug_log(label: *mut Value, v: *mut Value) -> *mut Value {
+    let rendered = debug_to_string(v);
+    let mut line = sbytes(label).to_vec();
+    line.extend_from_slice(b": ");
+    line.extend_from_slice(sbytes(rendered));
+    out_line(&line);
+    v
+}
+unsafe extern "C" fn debug_todo(message: *mut Value) -> *mut Value {
+    let mut text = b"TODO: ".to_vec();
+    text.extend_from_slice(sbytes(message));
+    text.push(0);
+    rt_crash(text.as_ptr());
+}
+
+// TASK / CMD / SUB / TIME / PLATFORM — see the TEA section below.
+
+const TT_SUCCEED: u32 = 0;
+const TT_FAIL: u32 = 1;
+const TT_AND_THEN: u32 = 2;
+const TT_ON_ERROR: u32 = 3;
+const TT_SLEEP: u32 = 4;
+const TT_NOW: u32 = 5;
+
+const CT_NONE: u32 = 0;
+const CT_BATCH: u32 = 1;
+const CT_MAP: u32 = 2;
+const CT_TASK: u32 = 3;
+const CT_WRITE: u32 = 4;
+
+const ST_NONE: u32 = 0;
+const ST_BATCH: u32 = 1;
+const ST_MAP: u32 = 2;
+const ST_TIME: u32 = 3;
+
+unsafe fn ctor_index(v: *mut Value) -> u32 {
+    match &*v {
+        Value::Ctor { index, .. } => *index,
+        _ => crash!("expected a constructor"),
+    }
+}
+
+unsafe fn closure(func: *const (), arity: i32, caps: &[*mut Value]) -> *mut Value {
+    let ptr = if caps.is_empty() {
+        std::ptr::null()
+    } else {
+        caps.as_ptr()
+    };
+    rt_closure(func, arity, caps.len() as i32, ptr)
+}
+
+unsafe fn time_posix(ms: f64) -> *mut Value {
+    ctor(b"Posix\0".as_ptr(), 0, vec![rt_int(ms as i64)])
+}
+
+// Task constructors.
+unsafe extern "C" fn task_succeed(v: *mut Value) -> *mut Value {
+    ctor(b"TaskSucceed\0".as_ptr(), TT_SUCCEED, vec![v])
+}
+unsafe extern "C" fn task_fail(e: *mut Value) -> *mut Value {
+    ctor(b"TaskFail\0".as_ptr(), TT_FAIL, vec![e])
+}
+unsafe extern "C" fn task_and_then(f: *mut Value, t: *mut Value) -> *mut Value {
+    ctor(b"TaskAndThen\0".as_ptr(), TT_AND_THEN, vec![f, t])
+}
+unsafe extern "C" fn task_on_error(f: *mut Value, t: *mut Value) -> *mut Value {
+    ctor(b"TaskOnError\0".as_ptr(), TT_ON_ERROR, vec![f, t])
+}
+
+unsafe extern "C" fn task_map_step(f: *mut Value, a: *mut Value) -> *mut Value {
+    task_succeed(ap1(f, a))
+}
+unsafe extern "C" fn task_map(f: *mut Value, t: *mut Value) -> *mut Value {
+    task_and_then(closure(task_map_step as *const (), 2, &[f]), t)
+}
+unsafe extern "C" fn task_map2_inner(f: *mut Value, a: *mut Value, b: *mut Value) -> *mut Value {
+    ap2(f, a, b)
+}
+unsafe extern "C" fn task_map2_step(f: *mut Value, tb: *mut Value, a: *mut Value) -> *mut Value {
+    task_map(closure(task_map2_inner as *const (), 3, &[f, a]), tb)
+}
+unsafe extern "C" fn task_map2(f: *mut Value, ta: *mut Value, tb: *mut Value) -> *mut Value {
+    task_and_then(closure(task_map2_step as *const (), 3, &[f, tb]), ta)
+}
+unsafe extern "C" fn task_map_error_step(f: *mut Value, e: *mut Value) -> *mut Value {
+    task_fail(ap1(f, e))
+}
+unsafe extern "C" fn task_map_error(f: *mut Value, t: *mut Value) -> *mut Value {
+    task_on_error(closure(task_map_error_step as *const (), 2, &[f]), t)
+}
+unsafe extern "C" fn task_sequence_cons(v: *mut Value, vs: *mut Value) -> *mut Value {
+    cons(v, vs)
+}
+unsafe extern "C" fn task_sequence_step(rest: *mut Value, v: *mut Value) -> *mut Value {
+    task_map(closure(task_sequence_cons as *const (), 2, &[v]), task_sequence(rest))
+}
+unsafe extern "C" fn task_sequence(tasks: *mut Value) -> *mut Value {
+    if list_len(tasks) == 0 {
+        task_succeed(nil())
+    } else {
+        let head = rt_list_head(tasks);
+        let tail = rt_list_tail(tasks);
+        task_and_then(closure(task_sequence_step as *const (), 2, &[tail]), head)
+    }
+}
+unsafe extern "C" fn task_perform(to_msg: *mut Value, t: *mut Value) -> *mut Value {
+    ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_map(to_msg, t)])
+}
+unsafe extern "C" fn task_attempt_ok(v: *mut Value) -> *mut Value {
+    task_succeed(res_ok(v))
+}
+unsafe extern "C" fn task_attempt_err(e: *mut Value) -> *mut Value {
+    task_succeed(res_err(e))
+}
+unsafe extern "C" fn task_attempt(to_msg: *mut Value, t: *mut Value) -> *mut Value {
+    let wrapped = task_on_error(
+        closure(task_attempt_err as *const (), 1, &[]),
+        task_and_then(closure(task_attempt_ok as *const (), 1, &[]), t),
+    );
+    ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_map(to_msg, wrapped)])
+}
+
+unsafe extern "C" fn process_sleep(ms: *mut Value) -> *mut Value {
+    ctor(b"TaskSleep\0".as_ptr(), TT_SLEEP, vec![ms])
+}
+
+unsafe extern "C" fn time_every(interval: *mut Value, to_msg: *mut Value) -> *mut Value {
+    ctor(b"SubTime\0".as_ptr(), ST_TIME, vec![interval, to_msg])
+}
+unsafe extern "C" fn time_millis_to_posix(n: *mut Value) -> *mut Value {
+    ctor(b"Posix\0".as_ptr(), 0, vec![n])
+}
+unsafe extern "C" fn time_posix_to_millis(p: *mut Value) -> *mut Value {
+    rt_ctor_arg(p, 0)
+}
+
+unsafe extern "C" fn cmd_batch(cmds: *mut Value) -> *mut Value {
+    ctor(b"CmdBatch\0".as_ptr(), CT_BATCH, vec![cmds])
+}
+unsafe extern "C" fn cmd_map(f: *mut Value, cmd: *mut Value) -> *mut Value {
+    ctor(b"CmdMap\0".as_ptr(), CT_MAP, vec![f, cmd])
+}
+unsafe extern "C" fn sub_batch(subs: *mut Value) -> *mut Value {
+    ctor(b"SubBatch\0".as_ptr(), ST_BATCH, vec![subs])
+}
+unsafe extern "C" fn sub_map(f: *mut Value, sub: *mut Value) -> *mut Value {
+    ctor(b"SubMap\0".as_ptr(), ST_MAP, vec![f, sub])
+}
+unsafe extern "C" fn platform_worker(impl_: *mut Value) -> *mut Value {
+    ctor(b"Program\0".as_ptr(), 0, vec![impl_])
+}
+unsafe extern "C" fn terminal_write_line(s: *mut Value) -> *mut Value {
+    ctor(b"CmdWrite\0".as_ptr(), CT_WRITE, vec![s])
+}
+
+// KERNEL VALUE TABLE — the globals the generated code imports.
+
+macro_rules! kernel_fns {
+    ($( $id:ident $sym:literal $f:path , $ar:literal ; )*) => {
+        $( #[export_name = $sym] static $id: Global = Global::NULL; )*
+        unsafe fn init_kernel_fns() {
+            $( $id.set(rt_closure(($f as usize) as *const (), $ar, 0, std::ptr::null())); )*
+        }
+    };
+}
+
+macro_rules! kernel_vals {
+    ($( $id:ident $sym:literal ; )*) => {
+        $( #[export_name = $sym] static $id: Global = Global::NULL; )*
+    };
+}
+
+kernel_fns! {
+    G_BASICS_IDENTITY "$Basics$identity" basics_identity, 1;
+    G_BASICS_ALWAYS "$Basics$always" basics_always, 2;
+    G_BASICS_NOT "$Basics$not" basics_not, 1;
+    G_BASICS_XOR "$Basics$xor" basics_xor, 2;
+    G_BASICS_MODBY "$Basics$modBy" basics_mod_by, 2;
+    G_BASICS_REMBY "$Basics$remainderBy" basics_remainder_by, 2;
+    G_BASICS_ABS "$Basics$abs" basics_abs, 1;
+    G_BASICS_NEGATE "$Basics$negate" rt_neg, 1;
+    G_BASICS_MIN "$Basics$min" basics_min, 2;
+    G_BASICS_MAX "$Basics$max" basics_max, 2;
+    G_BASICS_CLAMP "$Basics$clamp" basics_clamp, 3;
+    G_BASICS_COMPARE "$Basics$compare" basics_compare, 2;
+    G_BASICS_TOFLOAT "$Basics$toFloat" basics_to_float, 1;
+    G_BASICS_ROUND "$Basics$round" basics_round, 1;
+    G_BASICS_FLOOR "$Basics$floor" basics_floor, 1;
+    G_BASICS_CEILING "$Basics$ceiling" basics_ceiling, 1;
+    G_BASICS_TRUNCATE "$Basics$truncate" basics_truncate, 1;
+    G_BASICS_SQRT "$Basics$sqrt" basics_sqrt, 1;
+    G_BASICS_LOGBASE "$Basics$logBase" basics_log_base, 2;
+    G_BASICS_COMPOSEL "$Basics$composeL" basics_compose_l, 3;
+    G_BASICS_COMPOSER "$Basics$composeR" basics_compose_r, 3;
+    G_BASICS_APL "$Basics$apL" basics_ap_l, 2;
+    G_BASICS_APR "$Basics$apR" basics_ap_r, 2;
+    G_BASICS_NEVER "$Basics$never" basics_never, 1;
+    G_BASICS_APPEND "$Basics$append" rt_append, 2;
+
+    G_LIST_SINGLETON "$List$singleton" list_singleton, 1;
+    G_LIST_REPEAT "$List$repeat" list_repeat, 2;
+    G_LIST_RANGE "$List$range" list_range, 2;
+    G_LIST_MAP "$List$map" list_map, 2;
+    G_LIST_INDEXEDMAP "$List$indexedMap" list_indexed_map, 2;
+    G_LIST_FOLDL "$List$foldl" list_foldl, 3;
+    G_LIST_FOLDR "$List$foldr" list_foldr, 3;
+    G_LIST_FILTER "$List$filter" list_filter, 2;
+    G_LIST_FILTERMAP "$List$filterMap" list_filter_map, 2;
+    G_LIST_LENGTH "$List$length" list_length, 1;
+    G_LIST_REVERSE "$List$reverse" list_reverse, 1;
+    G_LIST_MEMBER "$List$member" list_member, 2;
+    G_LIST_ALL "$List$all" list_all, 2;
+    G_LIST_ANY "$List$any" list_any, 2;
+    G_LIST_MAXIMUM "$List$maximum" list_maximum, 1;
+    G_LIST_MINIMUM "$List$minimum" list_minimum, 1;
+    G_LIST_SUM "$List$sum" list_sum, 1;
+    G_LIST_PRODUCT "$List$product" list_product, 1;
+    G_LIST_APPEND "$List$append" rt_append, 2;
+    G_LIST_CONCAT "$List$concat" list_concat, 1;
+    G_LIST_CONCATMAP "$List$concatMap" list_concat_map, 2;
+    G_LIST_INTERSPERSE "$List$intersperse" list_intersperse, 2;
+    G_LIST_MAP2 "$List$map2" list_map2, 3;
+    G_LIST_ISEMPTY "$List$isEmpty" list_is_empty, 1;
+    G_LIST_HEAD "$List$head" list_head, 1;
+    G_LIST_TAIL "$List$tail" list_tail, 1;
+    G_LIST_TAKE "$List$take" list_take, 2;
+    G_LIST_DROP "$List$drop" list_drop, 2;
+    G_LIST_PARTITION "$List$partition" list_partition, 2;
+    G_LIST_UNZIP "$List$unzip" list_unzip, 1;
+    G_LIST_SORT "$List$sort" list_sort, 1;
+    G_LIST_SORTBY "$List$sortBy" list_sort_by, 2;
+    G_LIST_SORTWITH "$List$sortWith" list_sort_with, 2;
+    G_LIST_CONS "$List$cons" rt_cons, 2;
+
+    G_STRING_FROMINT "$String$fromInt" string_from_int, 1;
+    G_STRING_FROMFLOAT "$String$fromFloat" string_from_float, 1;
+    G_STRING_LENGTH "$String$length" string_length, 1;
+    G_STRING_ISEMPTY "$String$isEmpty" string_is_empty, 1;
+    G_STRING_REVERSE "$String$reverse" string_reverse, 1;
+    G_STRING_REPEAT "$String$repeat" string_repeat, 2;
+    G_STRING_REPLACE "$String$replace" string_replace, 3;
+    G_STRING_APPEND "$String$append" rt_append, 2;
+    G_STRING_CONCAT "$String$concat" string_concat, 1;
+    G_STRING_SPLIT "$String$split" string_split, 2;
+    G_STRING_JOIN "$String$join" string_join, 2;
+    G_STRING_WORDS "$String$words" string_words, 1;
+    G_STRING_LINES "$String$lines" string_lines, 1;
+    G_STRING_SLICE "$String$slice" string_slice, 3;
+    G_STRING_LEFT "$String$left" string_left, 2;
+    G_STRING_RIGHT "$String$right" string_right, 2;
+    G_STRING_DROPLEFT "$String$dropLeft" string_drop_left, 2;
+    G_STRING_DROPRIGHT "$String$dropRight" string_drop_right, 2;
+    G_STRING_CONTAINS "$String$contains" string_contains, 2;
+    G_STRING_STARTSWITH "$String$startsWith" string_starts_with, 2;
+    G_STRING_ENDSWITH "$String$endsWith" string_ends_with, 2;
+    G_STRING_INDEXES "$String$indexes" string_indexes, 2;
+    G_STRING_TOINT "$String$toInt" string_to_int, 1;
+    G_STRING_TOFLOAT "$String$toFloat" string_to_float, 1;
+    G_STRING_FROMCHAR "$String$fromChar" string_from_char, 1;
+    G_STRING_CONS "$String$cons" string_cons, 2;
+    G_STRING_UNCONS "$String$uncons" string_uncons, 1;
+    G_STRING_TOLIST "$String$toList" string_to_list, 1;
+    G_STRING_FROMLIST "$String$fromList" string_from_list, 1;
+    G_STRING_TOUPPER "$String$toUpper" string_to_upper, 1;
+    G_STRING_TOLOWER "$String$toLower" string_to_lower, 1;
+    G_STRING_TRIM "$String$trim" string_trim, 1;
+    G_STRING_TRIMLEFT "$String$trimLeft" string_trim_left, 1;
+    G_STRING_TRIMRIGHT "$String$trimRight" string_trim_right, 1;
+    G_STRING_PADLEFT "$String$padLeft" string_pad_left, 3;
+    G_STRING_PADRIGHT "$String$padRight" string_pad_right, 3;
+    G_STRING_MAP "$String$map" string_map, 2;
+    G_STRING_FILTER "$String$filter" string_filter, 2;
+    G_STRING_ANY "$String$any" string_any, 2;
+    G_STRING_ALL "$String$all" string_all, 2;
+
+    G_CHAR_TOCODE "$Char$toCode" char_to_code, 1;
+    G_CHAR_FROMCODE "$Char$fromCode" char_from_code, 1;
+    G_CHAR_ISDIGIT "$Char$isDigit" char_is_digit, 1;
+    G_CHAR_ISUPPER "$Char$isUpper" char_is_upper, 1;
+    G_CHAR_ISLOWER "$Char$isLower" char_is_lower, 1;
+    G_CHAR_ISALPHA "$Char$isAlpha" char_is_alpha, 1;
+    G_CHAR_TOUPPER "$Char$toUpper" char_to_upper, 1;
+    G_CHAR_TOLOWER "$Char$toLower" char_to_lower, 1;
+
+    G_MAYBE_WITHDEFAULT "$Maybe$withDefault" maybe_with_default, 2;
+    G_MAYBE_MAP "$Maybe$map" maybe_map, 2;
+    G_MAYBE_MAP2 "$Maybe$map2" maybe_map2, 3;
+    G_MAYBE_ANDTHEN "$Maybe$andThen" maybe_and_then, 2;
+
+    G_RESULT_WITHDEFAULT "$Result$withDefault" result_with_default, 2;
+    G_RESULT_MAP "$Result$map" result_map, 2;
+    G_RESULT_MAPERROR "$Result$mapError" result_map_error, 2;
+    G_RESULT_ANDTHEN "$Result$andThen" result_and_then, 2;
+    G_RESULT_TOMAYBE "$Result$toMaybe" result_to_maybe, 1;
+    G_RESULT_FROMMAYBE "$Result$fromMaybe" result_from_maybe, 2;
+
+    G_TUPLE_PAIR "$Tuple$pair" tuple_pair, 2;
+    G_TUPLE_FIRST "$Tuple$first" tuple_first, 1;
+    G_TUPLE_SECOND "$Tuple$second" tuple_second, 1;
+    G_TUPLE_MAPFIRST "$Tuple$mapFirst" tuple_map_first, 2;
+    G_TUPLE_MAPSECOND "$Tuple$mapSecond" tuple_map_second, 2;
+    G_TUPLE_MAPBOTH "$Tuple$mapBoth" tuple_map_both, 3;
+
+    G_DEBUG_TOSTRING "$Debug$toString" debug_to_string, 1;
+    G_DEBUG_LOG "$Debug$log" debug_log, 2;
+    G_DEBUG_TODO "$Debug$todo" debug_todo, 1;
+
+    G_TASK_SUCCEED "$Task$succeed" task_succeed, 1;
+    G_TASK_FAIL "$Task$fail" task_fail, 1;
+    G_TASK_ANDTHEN "$Task$andThen" task_and_then, 2;
+    G_TASK_ONERROR "$Task$onError" task_on_error, 2;
+    G_TASK_MAP "$Task$map" task_map, 2;
+    G_TASK_MAP2 "$Task$map2" task_map2, 3;
+    G_TASK_MAPERROR "$Task$mapError" task_map_error, 2;
+    G_TASK_SEQUENCE "$Task$sequence" task_sequence, 1;
+    G_TASK_PERFORM "$Task$perform" task_perform, 2;
+    G_TASK_ATTEMPT "$Task$attempt" task_attempt, 2;
+
+    G_PROCESS_SLEEP "$Process$sleep" process_sleep, 1;
+
+    G_TIME_EVERY "$Time$every" time_every, 2;
+    G_TIME_MILLISTOPOSIX "$Time$millisToPosix" time_millis_to_posix, 1;
+    G_TIME_POSIXTOMILLIS "$Time$posixToMillis" time_posix_to_millis, 1;
+
+    G_PLATFORM_WORKER "$Platform$worker" platform_worker, 1;
+    G_PLATFORM_CMD_BATCH "$Platform$Cmd$batch" cmd_batch, 1;
+    G_PLATFORM_CMD_MAP "$Platform$Cmd$map" cmd_map, 2;
+    G_PLATFORM_SUB_BATCH "$Platform$Sub$batch" sub_batch, 1;
+    G_PLATFORM_SUB_MAP "$Platform$Sub$map" sub_map, 2;
+
+    G_TERMINAL_WRITELINE "$Terminal$writeLine" terminal_write_line, 1;
+}
+
+kernel_vals! {
+    G_BASICS_PI "$Basics$pi";
+    G_BASICS_E "$Basics$e";
+    G_TIME_NOW "$Time$now";
+    G_TIME_UTC "$Time$utc";
+    G_TIME_HERE "$Time$here";
+    G_PLATFORM_CMD_NONE "$Platform$Cmd$none";
+    G_PLATFORM_SUB_NONE "$Platform$Sub$none";
+}
+
+unsafe fn runtime_init() {
+    RT_TRUE.set(alloc(Value::Bool(true)));
+    RT_FALSE.set(alloc(Value::Bool(false)));
+    RT_UNIT.set(alloc(Value::Unit));
+    NIL.set(alloc(Value::List {
+        backing: alloc_backing(Vec::new()),
+        len: 0,
+    }));
+    NOTHING.set(ctor(b"Nothing\0".as_ptr(), 1, Vec::new()));
+    LT.set(ctor(b"LT\0".as_ptr(), 0, Vec::new()));
+    EQ.set(ctor(b"EQ\0".as_ptr(), 1, Vec::new()));
+    GT.set(ctor(b"GT\0".as_ptr(), 2, Vec::new()));
+
+    init_kernel_fns();
+
+    G_BASICS_PI.set(rt_float(std::f64::consts::PI));
+    G_BASICS_E.set(rt_float(std::f64::consts::E));
+    G_TIME_NOW.set(ctor(b"TaskNow\0".as_ptr(), TT_NOW, Vec::new()));
+    let utc = ctor(b"Zone\0".as_ptr(), 0, vec![rt_int(0), nil()]);
+    G_TIME_UTC.set(utc);
+    G_TIME_HERE.set(task_succeed(utc));
+    G_PLATFORM_CMD_NONE.set(ctor(b"CmdNone\0".as_ptr(), CT_NONE, Vec::new()));
+    G_PLATFORM_SUB_NONE.set(ctor(b"SubNone\0".as_ptr(), ST_NONE, Vec::new()));
+}
+
+// THE EVENT LOOP — the Rust twin of runtime.js's _Platform_initialize for
+// `Platform.worker` programs. Tasks are data interpreted by `run_task`
+// with an explicit continuation-frame stack; the loop exits when nothing
+// is pending (the same reason a node process exits). Single-threaded.
+
+struct Frame {
+    kind: u8, // 0 = andThen, 1 = onError
+    f: *mut Value,
+}
+
+struct Pending {
+    fire_at: f64,
+    task: *mut Value,
+    frames: Vec<Frame>,
+    tagger: *mut Value,
+}
+
+struct SubTimer {
+    fire_at: f64,
+    interval: f64,
+    to_msg: *mut Value,
+    tagger: *mut Value,
+}
+
+static mut TEA_MODEL: *mut Value = std::ptr::null_mut();
+static mut TEA_UPDATE: *mut Value = std::ptr::null_mut();
+static mut TEA_SUBSCRIPTIONS: *mut Value = std::ptr::null_mut();
+static mut PENDING: Vec<Pending> = Vec::new();
+static mut TIMERS: Vec<SubTimer> = Vec::new();
+
+fn now_ms() -> f64 {
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    d.as_secs_f64() * 1000.0
+}
+
+fn out_line(bytes: &[u8]) {
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(bytes);
+    let _ = handle.write_all(b"\n");
+    let _ = handle.flush();
+}
+
+unsafe extern "C" fn tagger_compose_step(outer: *mut Value, f: *mut Value, m: *mut Value) -> *mut Value {
+    ap1(outer, ap1(f, m))
+}
+unsafe fn tagger_compose(outer: *mut Value, f: *mut Value) -> *mut Value {
+    closure(tagger_compose_step as *const (), 3, &[outer, f])
+}
+unsafe fn identity() -> *mut Value {
+    G_BASICS_IDENTITY.get()
+}
+
+unsafe fn run_task(mut task: *mut Value, mut frames: Vec<Frame>, tagger: *mut Value) {
+    loop {
+        match ctor_index(task) {
+            TT_SUCCEED => {
+                let v = rt_ctor_arg(task, 0);
+                while frames.last().is_some_and(|f| f.kind != 0) {
+                    frames.pop();
+                }
+                match frames.pop() {
+                    None => {
+                        tea_dispatch(ap1(tagger, v));
+                        return;
+                    }
+                    Some(frame) => task = ap1(frame.f, v),
+                }
+            }
+            TT_FAIL => {
+                let e = rt_ctor_arg(task, 0);
+                while frames.last().is_some_and(|f| f.kind != 1) {
+                    frames.pop();
+                }
+                match frames.pop() {
+                    None => {
+                        let rendered = debug_to_string(e);
+                        let mut line = b"Task failed without an error handler: ".to_vec();
+                        line.extend_from_slice(sbytes(rendered));
+                        line.push(0);
+                        rt_crash(line.as_ptr());
+                    }
+                    Some(frame) => task = ap1(frame.f, e),
+                }
+            }
+            TT_AND_THEN => {
+                frames.push(Frame {
+                    kind: 0,
+                    f: rt_ctor_arg(task, 0),
+                });
+                task = rt_ctor_arg(task, 1);
+            }
+            TT_ON_ERROR => {
+                frames.push(Frame {
+                    kind: 1,
+                    f: rt_ctor_arg(task, 0),
+                });
+                task = rt_ctor_arg(task, 1);
+            }
+            TT_SLEEP => {
+                let ms = num(rt_ctor_arg(task, 0));
+                PENDING.push(Pending {
+                    fire_at: now_ms() + ms,
+                    task: task_succeed(unit()),
+                    frames,
+                    tagger,
+                });
+                return;
+            }
+            TT_NOW => task = task_succeed(time_posix(now_ms())),
+            _ => crash!("unknown task"),
+        }
+    }
+}
+
+unsafe fn run_cmd(cmd: *mut Value, tagger: *mut Value) {
+    match ctor_index(cmd) {
+        CT_NONE => {}
+        CT_BATCH => {
+            for c in to_vec(rt_ctor_arg(cmd, 0)) {
+                run_cmd(c, tagger);
+            }
+        }
+        CT_MAP => run_cmd(rt_ctor_arg(cmd, 1), tagger_compose(tagger, rt_ctor_arg(cmd, 0))),
+        CT_TASK => run_task(rt_ctor_arg(cmd, 0), Vec::new(), tagger),
+        CT_WRITE => out_line(sbytes(rt_ctor_arg(cmd, 0))),
+        _ => crash!("unknown command"),
+    }
+}
+
+unsafe fn collect_subs(sub: *mut Value, tagger: *mut Value) {
+    match ctor_index(sub) {
+        ST_NONE => {}
+        ST_BATCH => {
+            for s in to_vec(rt_ctor_arg(sub, 0)) {
+                collect_subs(s, tagger);
+            }
+        }
+        ST_MAP => collect_subs(rt_ctor_arg(sub, 1), tagger_compose(tagger, rt_ctor_arg(sub, 0))),
+        ST_TIME => {
+            let interval = num(rt_ctor_arg(sub, 0));
+            TIMERS.push(SubTimer {
+                fire_at: now_ms() + interval,
+                interval,
+                to_msg: rt_ctor_arg(sub, 1),
+                tagger,
+            });
+        }
+        _ => crash!("unknown subscription"),
+    }
+}
+
+/// Re-collect subscriptions after every dispatch (this also restarts the
+/// interval timers), matching the JS runtime.
+unsafe fn update_subs() {
+    TIMERS.clear();
+    collect_subs(ap1(TEA_SUBSCRIPTIONS, TEA_MODEL), identity());
+}
+
+unsafe fn tea_dispatch(msg: *mut Value) {
+    let next = ap2(TEA_UPDATE, msg, TEA_MODEL);
+    TEA_MODEL = rt_tuple_item(next, 0);
+    run_cmd(rt_tuple_item(next, 1), identity());
+    update_subs();
+}
+
+unsafe fn tea_run(impl_: *mut Value) {
+    TEA_UPDATE = rt_access(impl_, b"update\0".as_ptr());
+    TEA_SUBSCRIPTIONS = rt_access(impl_, b"subscriptions\0".as_ptr());
+    let init = ap1(rt_access(impl_, b"init\0".as_ptr()), unit());
+    TEA_MODEL = rt_tuple_item(init, 0);
+    run_cmd(rt_tuple_item(init, 1), identity());
+    update_subs();
+
+    loop {
+        let now = now_ms();
+
+        // Fire one due pending task, then rescan (a dispatch rebuilds the
+        // timers).
+        if let Some(i) = PENDING.iter().position(|p| p.fire_at <= now) {
+            let p = PENDING.remove(i);
+            run_task(p.task, p.frames, p.tagger);
+            continue;
+        }
+        if let Some(i) = TIMERS.iter().position(|t| t.fire_at <= now) {
+            let (to_msg, tagger) = (TIMERS[i].to_msg, TIMERS[i].tagger);
+            tea_dispatch(ap1(tagger, ap1(to_msg, time_posix(now))));
+            continue;
+        }
+
+        // Nothing due: sleep until the earliest deadline, or exit when
+        // nothing is pending at all.
+        let mut next = f64::INFINITY;
+        for p in PENDING.iter() {
+            next = next.min(p.fire_at);
+        }
+        for t in TIMERS.iter() {
+            next = next.min(t.fire_at);
+        }
+        if next.is_infinite() {
+            return;
+        }
+        let wait = next - now_ms();
+        if wait > 0.0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(wait / 1000.0));
+        }
+    }
+}
+
+// ENTRY — initialize the runtime and the program's globals, then either
+// run a `Platform.worker` program or print the entry module's `main`.
+
+extern "C" {
+    fn alm_init();
+    fn alm_main() -> *mut Value;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn main() -> i32 {
+    runtime_init();
+    alm_init();
+    let v = alm_main();
+    if v.is_null() {
+        eprintln!("alm: this program has no main");
+        return 1;
+    }
+    if is_int(v) {
+        out_line(int_val(v).to_string().as_bytes());
+        return 0;
+    }
+    match &*v {
+        Value::Ctor { name, .. } if cname(*name) == "Program" => {
+            tea_run(rt_ctor_arg(v, 0));
+            0
+        }
+        Value::Str(bytes) => {
+            out_line(bytes);
+            0
+        }
+        Value::Float(f) => {
+            out_line(fmt_float(*f).as_bytes());
+            0
+        }
+        _ => {
+            eprintln!("alm: main is not a printable value");
+            1
+        }
+    }
+}

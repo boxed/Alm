@@ -4,6 +4,8 @@
 //! curried functions, `{ $: 'Ctor', a: ..., b: ... }` objects for custom
 //! types, cons cells for lists, and plain objects for records.
 
+pub mod native;
+
 use std::fmt::Write;
 
 use crate::ast::canonical as can;

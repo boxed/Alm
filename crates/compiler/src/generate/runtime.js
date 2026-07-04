@@ -1404,6 +1404,8 @@ var $Process$sleep = function (ms) {
     });
 };
 
+var $Terminal$writeLine = function (s) { return { $: 'CmdWrite', s: s }; };
+
 // TIME
 
 function _Time_posix(ms) { return { $: 'Posix', ms: ms }; }
@@ -2029,6 +2031,9 @@ function _Platform_initialize(program, opts) {
                 }
                 return;
             }
+            case 'CmdWrite':
+                console.log(cmd.s);
+                return;
             case 'CmdTask':
                 cmd.task.fork(
                     function (msg) { dispatch(tagger(msg)); },

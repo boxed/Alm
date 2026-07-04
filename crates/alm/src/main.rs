@@ -21,18 +21,30 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file.js>]\n\n\
-         Compiles an Elm module to JavaScript. The output defaults to the\n\
-         input file name with a .js extension."
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native]\n\n\
+         Compiles an Elm module. The default target is JavaScript, with\n\
+         the output defaulting to the input file name with a .js\n\
+         extension. `--target=native` compiles to a binary instead (the\n\
+         output defaults to the input file name without an extension)."
     );
 }
 
 fn make(args: &[String]) -> ExitCode {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut native = false;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
+        } else if let Some(target) = arg.strip_prefix("--target=") {
+            match target {
+                "js" => native = false,
+                "native" => native = true,
+                other => {
+                    eprintln!("Unknown target `{}`. I know js and native.", other);
+                    return ExitCode::FAILURE;
+                }
+            }
         } else if arg.starts_with("--") {
             eprintln!("Unknown flag `{}`.", arg);
             return ExitCode::FAILURE;
@@ -49,13 +61,23 @@ fn make(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    match alm_compiler::project::compile_project(&input) {
-        Ok(javascript) => {
+    let result = if native {
+        let output = output.unwrap_or_else(|| input.with_extension(""));
+        alm_compiler::project::compile_project_native(&input, &output)
+            .map(|()| output)
+    } else {
+        alm_compiler::project::compile_project(&input).and_then(|javascript| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));
-            if let Err(err) = std::fs::write(&output, javascript) {
+            std::fs::write(&output, javascript).map_err(|err| {
                 eprintln!("I could not write {}: {}", output.display(), err);
-                return ExitCode::FAILURE;
-            }
+                Vec::new()
+            })?;
+            Ok(output)
+        })
+    };
+
+    match result {
+        Ok(output) => {
             println!("Success! Compiled to {}", output.display());
             ExitCode::SUCCESS
         }
@@ -64,11 +86,13 @@ fn make(args: &[String]) -> ExitCode {
             for error in &errors {
                 eprintln!("{}", error.render());
             }
-            eprintln!(
-                "Detected {} problem{}.",
-                count,
-                if count == 1 { "" } else { "s" }
-            );
+            if count > 0 {
+                eprintln!(
+                    "Detected {} problem{}.",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                );
+            }
             ExitCode::FAILURE
         }
     }
