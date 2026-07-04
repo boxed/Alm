@@ -22,6 +22,23 @@ const FIB: &str = "module Test exposing (..)\n\
      main : Int\n\
      main = fib 33\n";
 
+// A tail-recursive record accumulator: the uniform backend allocates a
+// fresh record each iteration, the typed backend keeps it in registers.
+const ACC: &str = "module Test exposing (..)\n\
+     \n\
+     type alias Acc = { sum : Int, cnt : Int }\n\
+     \n\
+     step : Int -> Acc -> Acc\n\
+     step n a =\n\
+     \x20   if n <= 0 then a else step (n - 1) { sum = a.sum + n, cnt = a.cnt + 1 }\n\
+     \n\
+     main : Int\n\
+     main =\n\
+     \x20   let\n\
+     \x20       a = step 10000000 { sum = 0, cnt = 0 }\n\
+     \x20   in\n\
+     \x20   a.sum + a.cnt\n";
+
 fn best_ms(cmd: &mut Command, runs: u32) -> f64 {
     let mut best = f64::MAX;
     for _ in 0..runs {
@@ -35,11 +52,20 @@ fn best_ms(cmd: &mut Command, runs: u32) -> f64 {
 
 #[test]
 #[ignore]
-fn bench_fib() {
-    let dir = std::env::temp_dir().join(format!("alm-typed-bench-{}", std::process::id()));
+fn bench() {
+    bench_one("fib 33", FIB);
+    bench_one("record-acc 10M", ACC);
+}
+
+fn bench_one(label: &str, src: &str) {
+    let dir = std::env::temp_dir().join(format!(
+        "alm-typed-bench-{}-{}",
+        label.replace(' ', "_"),
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
 
-    let module = parse::parse_module(FIB).unwrap();
+    let module = parse::parse_module(src).unwrap();
     let canonical = canonicalize::canonicalize(&module).unwrap();
     let checked = typecheck::check_module(&canonical, &Interfaces::new()).unwrap();
 
@@ -80,7 +106,7 @@ fn bench_fib() {
     let uni_ms = best_ms(&mut Command::new(&uni), runs);
     let typ_ms = best_ms(&mut Command::new(&typ), runs);
 
-    println!("\nfib 33  (result {})", expect);
+    println!("\n{}  (result {})", label, expect);
     println!("  node          {:>8.1} ms", node_ms);
     println!("  uniform native{:>8.1} ms  ({:.2}x vs node)", uni_ms, node_ms / uni_ms);
     println!("  typed native  {:>8.1} ms  ({:.2}x vs node, {:.2}x vs uniform)", typ_ms, node_ms / typ_ms, uni_ms / typ_ms);
