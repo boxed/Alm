@@ -513,3 +513,464 @@ setTimeout(function () {{ console.log(log.join('|')); process.exit(0); }}, 80);"
     assert!(out.contains("arr:[7,8]"), "got: {}", out);
     assert!(out.contains(r#"val:{"raw":true}"#), "got: {}", out);
 }
+
+// MUTATION KILLS — pin behavior that single-operator mutants can break.
+
+#[test]
+fn operator_sections_hit_the_kernel_functions() {
+    // Inline codegen handles infix uses; sections go through $Basics$*.
+    assert_eq!(
+        run("main = Debug.toString ( List.foldl (-) 0 [ 1, 2 ], List.foldl (*) 1 [ 3, 4 ], List.map2 (//) [ 7, 9 ] [ 2, 4 ] )"),
+        "(1,12,[3,2])"
+    );
+    assert_eq!(
+        run("main = Debug.toString ( List.map2 (/=) [ 1, 2 ] [ 1, 3 ], List.map2 (==) [ 1 ] [ 1 ] )"),
+        "([False,True],[True])"
+    );
+    // Comparison sections on EQUAL values pin strictness.
+    assert_eq!(
+        run("main = Debug.toString ( List.map2 (<) [ 1, 1 ] [ 1, 2 ], List.map2 (<=) [ 1, 2 ] [ 1, 1 ], List.map2 (>) [ 1, 2 ] [ 1, 1 ] )"),
+        "([False,True],[True,False],[False,True])"
+    );
+    assert_eq!(
+        run("main = Debug.toString ( List.map2 (>=) [ 1, 1 ] [ 1, 2 ], List.map2 (&&) [ True, True ] [ True, False ], List.map2 (||) [ False, False ] [ True, False ] )"),
+        "([True,False],[True,False],[True,False])"
+    );
+    assert_eq!(
+        run("main = String.join \"|\" [ Debug.toString (List.map2 xor [ True, True ] [ True, False ]), String.append \"a\" \"b\", Debug.toString (List.map2 max [ 1, 5 ] [ 2, 2 ]), Debug.toString (List.map2 min [ 1, 5 ] [ 2, 2 ]) ]"),
+        "[False,True]|ab|[2,5]|[1,2]"
+    );
+}
+
+#[test]
+fn compare_equal_values() {
+    assert_eq!(
+        run("main = Debug.toString [ compare 1 1, compare ( 1, \"a\", 'c' ) ( 1, \"a\", 'c' ), compare [ 1 ] [ 1 ], compare [ 1 ] [ 1, 2 ], compare [ 1, 2 ] [ 1 ], compare \"a\" \"a\" ]"),
+        "[EQ,EQ,EQ,LT,GT,EQ]"
+    );
+}
+
+#[test]
+fn negative_modulus_and_remainder() {
+    assert_eq!(
+        run("main = Debug.toString [ modBy -3 6, modBy -3 7, modBy 3 7, modBy 1 5, remainderBy 3 7, remainderBy 3 -7 ]"),
+        "[0,-2,1,0,1,-1]"
+    );
+    assert_eq!(
+        run("main = Debug.toString [ abs 0.5, abs -0.5, clamp 1 5 0.5, clamp 1 5 9, clamp 1 5 3 ]"),
+        "[0.5,0.5,1,5,3]"
+    );
+    assert_eq!(
+        run("main = Debug.toString ( truncate 2.9, truncate -3.7 )"),
+        "(2,-3)"
+    );
+}
+
+#[test]
+fn string_slice_boundaries() {
+    assert_eq!(
+        run(r#"main = Debug.toString [ String.left 0 "abc", String.left 2 "abc", String.right 0 "abc", String.right 2 "abc" ]"#),
+        r#"["","ab","","bc"]"#
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString [ String.dropLeft 0 "abc", String.dropLeft 2 "abc", String.dropRight 0 "abc", String.dropRight 2 "abc" ]"#),
+        r#"["abc","c","abc","a"]"#
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString [ String.repeat 0 "x", String.cons 'a' "bc" ]"#),
+        r#"["","abc"]"#
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString [ String.contains "zz" "az", String.contains "az" "az", String.startsWith "b" "ab" ]"#),
+        "[False,True,False]"
+    );
+}
+
+#[test]
+fn char_predicate_boundaries() {
+    // Characters adjacent to the class boundaries kill range mutants.
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isDigit [ '/', '0', '9', ':' ])"),
+        "[False,True,True,False]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isUpper [ '@', 'A', 'Z', '[', 'a' ])"),
+        "[False,True,True,False,False]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isLower [ '`', 'a', 'z', '{', 'A' ])"),
+        "[False,True,True,False,False]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isAlpha [ 'B', 'y', '+', '5', '[' ])"),
+        "[True,True,False,False,False]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isAlphaNum [ 'B', 'y', '8', '9', '+', '[' ])"),
+        "[True,True,True,True,False,False]"
+    );
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isHexDigit [ '0', '9', 'a', 'f', 'g', 'A', 'F', 'G' ])"),
+        "[True,True,True,True,False,True,True,False]"
+    );
+}
+
+#[test]
+fn maybe_short_circuits_every_position() {
+    assert_eq!(
+        run("f = Maybe.map3 (\\a b c -> a + b + c)\n\nmain = Debug.toString [ f Nothing (Just 2) (Just 3), f (Just 1) Nothing (Just 3), f (Just 1) (Just 2) Nothing, f (Just 1) (Just 2) (Just 3) ]"),
+        "[Nothing,Nothing,Nothing,Just 6]"
+    );
+    assert_eq!(
+        run("f = Maybe.map4 (\\a b c d -> a + b + c + d)\n\nmain = Debug.toString [ f Nothing (Just 2) (Just 3) (Just 4), f (Just 1) Nothing (Just 3) (Just 4), f (Just 1) (Just 2) Nothing (Just 4), f (Just 1) (Just 2) (Just 3) (Just 4) ]"),
+        "[Nothing,Nothing,Nothing,Just 10]"
+    );
+}
+
+#[test]
+fn dict_binary_search_boundaries() {
+    // Multi-key dicts probe first/last/missing on both sides plus
+    // overwrite, exercising every branch of the binary search.
+    assert_eq!(
+        run("d = Dict.fromList [ ( 10, \"a\" ), ( 20, \"b\" ), ( 30, \"c\" ), ( 40, \"d\" ), ( 50, \"e\" ) ]\n\nmain = Debug.toString [ Dict.get 10 d, Dict.get 50 d, Dict.get 5 d, Dict.get 55 d, Dict.get 25 d, Dict.get 30 d ]"),
+        "[Just \"a\",Just \"e\",Nothing,Nothing,Nothing,Just \"c\"]"
+    );
+    assert_eq!(
+        run("d = Dict.fromList [ ( 2, \"x\" ), ( 1, \"y\" ) ]\n\nmain = String.join \"|\" [ Debug.toString (Dict.toList (Dict.insert 1 \"z\" d)), Debug.toString ( Dict.member 1 d, Dict.member 3 d ), Debug.toString (Dict.toList (Dict.remove 9 d)) ]"),
+        "[(1,\"z\"),(2,\"x\")]|(True,False)|[(1,\"y\"),(2,\"x\")]"
+    );
+    assert_eq!(
+        run("main = String.join \"|\" [ Debug.toString ( Array.get -1 (Array.fromList [ 1 ]), Array.get 1 (Array.fromList [ 1 ]) ), Debug.toString (Array.isEmpty Array.empty), Debug.toString (Array.toList (Array.set 5 9 (Array.fromList [ 1 ]))) ]"),
+        "(Nothing,Nothing)|True|[1]"
+    );
+}
+
+#[test]
+fn json_decoder_edges() {
+    assert_eq!(
+        run(r#"main = Debug.toString ( Json.Decode.decodeString Json.Decode.int "1.5" |> Result.toMaybe, Json.Decode.decodeString (Json.Decode.nullable Json.Decode.int) "3" )"#),
+        "(Nothing,Ok (Just 3))"
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString ( Result.toMaybe (Json.Decode.decodeString (Json.Decode.field "k" Json.Decode.int) "9"), Result.toMaybe (Json.Decode.decodeString (Json.Decode.index 2 Json.Decode.int) "[1,2]"), Json.Decode.decodeString (Json.Decode.index 1 Json.Decode.int) "[1,2]" )"#),
+        "(Nothing,Nothing,Ok 2)"
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString ( Result.toMaybe (Json.Decode.decodeString (Json.Decode.keyValuePairs Json.Decode.int) "[1]"), Result.toMaybe (Json.Decode.decodeString (Json.Decode.dict Json.Decode.int) "null") )"#),
+        "(Nothing,Nothing)"
+    );
+    // Comparing kernel null values goes through _Utils_eq's null guard.
+    assert_eq!(
+        run(r#"main = Debug.toString ( Json.Encode.null == Json.Encode.string "x", Json.Encode.null == Json.Encode.null )"#),
+        "(False,True)"
+    );
+}
+
+#[test]
+fn debug_tostring_parenthesization() {
+    assert_eq!(
+        run(r#"type Tag
+    = Tag String { n : Int } (List Int) ( Int, Int )
+
+main = Debug.toString (Tag "a b" { n = 1 } [ 1 ] ( 1, 2 ))"#),
+        r#"Tag "a b" { n = 1 } [1] (1,2)"#
+    );
+    assert_eq!(
+        run("main = Debug.toString (Just (Just 1))"),
+        "Just (Just 1)"
+    );
+}
+
+/// Exact PRNG outputs for the current mulberry32 implementation.
+const PINNED_RANDOM: &str = "(601103,448290,11704)";
+
+#[test]
+fn random_pinned_outputs() {
+    // Pin the PRNG algorithm exactly: any constant or operator mutation
+    // inside _Random_next changes these values.
+    let program = "main =\n    let\n        ( a, s2 ) =\n            Random.step (Random.int 0 999999) (Random.initialSeed 42)\n\n        ( b, _ ) =\n            Random.step (Random.int 0 999999) s2\n\n        ( c, _ ) =\n            Random.step (Random.float 0 1) (Random.initialSeed 7)\n    in\n    Debug.toString ( a, b, truncate (c * 1000000) )";
+    let out = run(program);
+    assert!(out.starts_with('(') && out.split(',').count() == 3, "got: {}", out);
+    // Pin the exact values so any PRNG constant/operator mutation is caught.
+    assert_eq!(out, PINNED_RANDOM, "PRNG output changed — update PINNED_RANDOM if intentional");
+}
+
+#[test]
+fn random_bounds_and_constants() {
+    assert_eq!(
+        run("main = Debug.toString ( Random.minInt, Random.maxInt )"),
+        "(-2147483648,2147483647)"
+    );
+    // Tight bounds make off-by-one in the range formula visible.
+    assert_eq!(
+        run("main =\n    let\n        ( v, _ ) =\n            Random.step (Random.int 5 5) (Random.initialSeed 1)\n\n        ( w, _ ) =\n            Random.step (Random.int 0 1) (Random.initialSeed 2)\n    in\n    Debug.toString ( v, w >= 0 && w <= 1 )"),
+        "(5,True)"
+    );
+}
+
+#[test]
+fn url_field_permutations() {
+    assert_eq!(
+        run(r#"show s =
+    case Url.fromString s of
+        Just u ->
+            Debug.toString ( u.port_, u.query, u.fragment )
+
+        Nothing ->
+            "no parse"
+
+main =
+    String.join " | "
+        [ show "http://x.com/p"
+        , show "http://x.com:80/p?q=2"
+        , show "http://x.com/p#f"
+        , show "http://x.com/?#"
+        ]"#),
+        r#"(Nothing,Nothing,Nothing) | (Just 80,Just "q=2",Nothing) | (Nothing,Nothing,Just "f") | (Nothing,Just "",Just "")"#
+    );
+}
+
+#[test]
+fn uuid_representations() {
+    assert_eq!(
+        run(r#"main =
+    case UUID.fromString "123e4567-e89b-12d3-a456-426614174000" of
+        Ok u ->
+            UUID.toRepresentation UUID.Guid u ++ " / " ++ UUID.toRepresentation UUID.Urn u
+
+        Err _ ->
+            "bad""#),
+        "{123e4567-e89b-12d3-a456-426614174000} / urn:uuid:123e4567-e89b-12d3-a456-426614174000"
+    );
+}
+
+#[test]
+fn time_zone_eras() {
+    // A zone with eras: times after the era start use the era offset,
+    // older times fall back to the default.
+    assert_eq!(
+        run("zone = Time.customZone 0 [ { start = 100, offset = 120 } ]\n\nmain = Debug.toString ( Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 0) )"),
+        "(5,0)"
+    );
+}
+
+#[test]
+fn http_progress_boundaries() {
+    assert_eq!(
+        run("main = Debug.toString ( Http.fractionSent { sent = 0, size = 0 }, Http.fractionReceived { received = 1, size = Just 0 } )"),
+        "(1,0)"
+    );
+}
+
+#[test]
+fn string_indexes_and_number_parsing() {
+    assert_eq!(
+        run(r#"main = Debug.toString ( String.indexes "aa" "aaaa", String.toFloat "", String.toFloat "5e1x" )"#),
+        "([0,2],Nothing,Nothing)"
+    );
+    assert_eq!(
+        run("main = String.join \"|\" [ Debug.toString (List.maximum [ 5, 5, 3 ]), Debug.toString (List.minimum [ 3, 3, 5 ]), Debug.toString ( List.all (\\x -> x > 0) [ 1, -1 ], List.all (\\x -> x > 0) [ 1, 2 ] ) ]"),
+        "Just 5|Just 3|(False,True)"
+    );
+}
+
+// MUTATION KILLS, wave 3
+
+#[test]
+fn equality_ignores_no_extra_keys() {
+    assert_eq!(
+        run(r#"main = Debug.toString ( Json.Encode.object [ ( "a", Json.Encode.int 1 ) ] == Json.Encode.object [ ( "a", Json.Encode.int 1 ), ( "b", Json.Encode.int 2 ) ] )"#),
+        "False"
+    );
+}
+
+#[test]
+fn compare_pairs_and_triples() {
+    assert_eq!(
+        run("main = Debug.toString [ compare ( 1, 2 ) ( 1, 2 ), compare ( 1, 1, 'a' ) ( 1, 1, 'b' ), compare ( 1, 1, 'b' ) ( 1, 1, 'a' ) ]"),
+        "[EQ,LT,GT]"
+    );
+}
+
+#[test]
+fn string_slices_at_one() {
+    assert_eq!(
+        run(r#"main = Debug.toString [ String.left 1 "abc", String.right 1 "abc", String.dropLeft 1 "abc", String.dropRight 1 "abc", String.repeat 1 "ab" ]"#),
+        r#"["a","c","bc","ab","ab"]"#
+    );
+}
+
+#[test]
+fn infinity_and_polar_angles() {
+    assert_eq!(
+        run("main = Debug.toString [ isInfinite (-1 / 0), isInfinite 1, isInfinite (1 / 0) ]"),
+        "[True,False,True]"
+    );
+    // A non-trivial angle distinguishes multiply from divide.
+    assert_eq!(
+        run("main =\n    let\n        ( x, y ) =\n            fromPolar ( 2, pi / 2 )\n    in\n    Debug.toString ( round (x * 1000), round y )"),
+        "(0,2)"
+    );
+}
+
+#[test]
+fn hex_digit_interior_chars() {
+    assert_eq!(
+        run("main = Debug.toString (List.map Char.isHexDigit [ '5', 'c', 'C', '+' ])"),
+        "[True,True,True,False]"
+    );
+}
+
+#[test]
+fn dict_model_fuzz() {
+    // Drive Dict through a fixed op sequence and compare against the
+    // same operations replayed on an association list.
+    assert_eq!(
+        run("step op ( dict, model ) =\n    case op of\n        ( 0, k ) ->\n            ( Dict.insert k (k * 2) dict\n            , ( k, k * 2 ) :: List.filter (\\( mk, _ ) -> mk /= k) model\n            )\n\n        ( _, k ) ->\n            ( Dict.remove k dict\n            , List.filter (\\( mk, _ ) -> mk /= k) model\n            )\n\nops =\n    [ ( 0, 5 ), ( 0, 3 ), ( 0, 9 ), ( 0, 1 ), ( 0, 7 ), ( 1, 3 ), ( 0, 4 ), ( 1, 9 ), ( 0, 5 ), ( 1, 2 ), ( 0, 8 ), ( 0, 2 ), ( 1, 1 ) ]\n\nmain =\n    let\n        ( dict, model ) =\n            List.foldl step ( Dict.empty, [] ) ops\n\n        sortedModel =\n            List.sortBy Tuple.first model\n    in\n    Debug.toString ( Dict.toList dict == sortedModel, Dict.toList dict, List.map (\\k -> Dict.get k dict) (List.range 0 10) )"),
+        "(True,[(2,4),(4,8),(5,10),(7,14),(8,16)],[Nothing,Nothing,Just 4,Nothing,Just 8,Just 10,Nothing,Just 14,Just 16,Nothing,Nothing])"
+    );
+}
+
+#[test]
+fn array_index_boundaries() {
+    assert_eq!(
+        run("arr = Array.fromList [ 10, 20 ]\n\nmain = Debug.toString [ Array.get 0 arr, Array.get 1 arr, Array.get 2 arr ]"),
+        "[Just 10,Just 20,Nothing]"
+    );
+    assert_eq!(
+        run("main = Debug.toString ( Array.toList (Array.set 1 9 (Array.fromList [ 5 ])), Array.toList (Array.set 0 9 (Array.fromList [ 5 ])) )"),
+        "([5],[9])"
+    );
+}
+
+#[test]
+fn bitwise_or_and_xor_values() {
+    assert_eq!(
+        run("main = Debug.toString [ Bitwise.or 12 10, Bitwise.xor 12 10, Bitwise.and 12 10 ]"),
+        "[14,6,8]"
+    );
+}
+
+#[test]
+fn json_error_messages_distinguish_failures() {
+    assert_eq!(
+        run(r#"describe r =
+    case r of
+        Ok _ ->
+            "ok"
+
+        Err e ->
+            Json.Decode.errorToString e
+
+main =
+    String.join " %% "
+        [ describe (Json.Decode.decodeString (Json.Decode.field "k" Json.Decode.int) "{}")
+        , describe (Json.Decode.decodeString (Json.Decode.index 2 Json.Decode.int) "[1,2]")
+        ]"#)
+        .contains("field named `k`")
+        .then_some("both")
+        .is_some()
+        && run(r#"main =
+    case Json.Decode.decodeString (Json.Decode.index 2 Json.Decode.int) "[1,2]" of
+        Ok _ ->
+            "ok"
+
+        Err e ->
+            Json.Decode.errorToString e"#)
+            .contains("LONGER"),
+        true
+    );
+    assert_eq!(
+        run(r#"main = Debug.toString (Json.Decode.decodeString (Json.Decode.oneOf [ Json.Decode.int, Json.Decode.fail "no" ]) "3")"#),
+        "Ok 3"
+    );
+}
+
+#[test]
+fn time_era_boundary_and_millis() {
+    // The era starts at exactly ms/60000 for this posix: any drift in the
+    // 60000 constants moves the boundary.
+    assert_eq!(
+        run("zone = Time.customZone 0 [ { start = 200, offset = 120 } ]\n\nmain = Debug.toString [ Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 12000001), Time.toMillis zone (Time.millisToPosix 12000001) ]"),
+        "[3,5,1]"
+    );
+}
+
+#[test]
+fn http_fraction_small_sizes() {
+    assert_eq!(
+        run("main = Debug.toString ( Http.fractionSent { sent = 0, size = 1 }, Http.fractionReceived { received = 1, size = Just 1 } )"),
+        "(0,1)"
+    );
+}
+
+#[test]
+fn random_full_precision_and_combinators() {
+    let program = "main =\n    let\n        ( c, _ ) =\n            Random.step (Random.float 0 1) (Random.initialSeed 7)\n\n        ( pair, _ ) =\n            Random.step (Random.map2 Tuple.pair (Random.int 0 999999) (Random.int 0 999999)) (Random.initialSeed 11)\n\n        ( xs, _ ) =\n            Random.step (Random.list 3 (Random.int 0 99)) (Random.initialSeed 13)\n\n        ( nested, _ ) =\n            Random.step (Random.andThen (\\n -> Random.int n (n + 1)) (Random.int 10 20)) (Random.initialSeed 17)\n    in\n    Debug.toString ( c, pair, ( xs, nested ) )";
+    let out = run(program);
+    assert_eq!(out, PINNED_RANDOM_FULL, "PRNG chain output changed");
+}
+
+/// Full-precision pinned PRNG outputs (see random_pinned_outputs).
+const PINNED_RANDOM_FULL: &str = "(0.011704753153026104,(511587,529946),([56,36,7],17))";
+
+#[test]
+fn animation_frame_subscription_under_node() {
+    let out = run_worker(
+        "type Msg\n    = Ask ()\n    | Tick Float\n\nupdate msg ( model, done ) =\n    case msg of\n        Ask _ ->\n            ( ( True, done ), Cmd.none )\n\n        Tick delta ->\n            if done then\n                ( ( model, done ), Cmd.none )\n            else\n                ( ( model, True ), answer (\"tick:\" ++ Debug.toString (delta >= 0)) )\n\nsubscriptions ( active, _ ) =\n    Sub.batch\n        [ ask Ask\n        , if active then\n            Browser.Events.onAnimationFrameDelta Tick\n          else\n            Sub.none\n        ]\n\nmain =\n    Platform.worker\n        { init = \\_ -> ( ( False, False ), Cmd.none )\n        , update = update\n        , subscriptions = subscriptions\n        }",
+    );
+    assert_eq!(out, vec!["tick:True"]);
+}
+
+// MUTATION KILLS, wave 4
+
+#[test]
+fn tostring_parenthesizes_space_containing_delimited_args() {
+    assert_eq!(
+        run(r#"type Wrap
+    = Wrap ( Int, String ) (List String)
+
+main = Debug.toString (Wrap ( 1, "a b" ) [ "c d" ])"#),
+        r#"Wrap (1,"a b") ["c d"]"#
+    );
+    assert_eq!(run("main = Debug.toString Json.Encode.null"), "<internal>");
+}
+
+#[test]
+fn uuid_hex_ranges_every_group() {
+    // Every group exercises both digit and letter interiors.
+    assert_eq!(
+        run(r#"main =
+    case UUID.fromString "0b0c0d0e-0bcd-0b1d-a0cd-0bcdef012345" of
+        Ok u ->
+            UUID.toString u
+
+        Err _ ->
+            "rejected""#),
+        "0b0c0d0e-0bcd-0b1d-a0cd-0bcdef012345"
+    );
+}
+
+#[test]
+fn dict_and_set_folds_pin_keys() {
+    assert_eq!(
+        run("d = Dict.fromList [ ( 1, \"a\" ), ( 2, \"b\" ) ]\n\nmain = Dict.foldl (\\k v acc -> acc ++ String.fromInt k ++ v) \"\" d ++ \"/\" ++ Dict.foldr (\\k v acc -> acc ++ String.fromInt k ++ v) \"\" d"),
+        "1a2b/2b1a"
+    );
+    assert_eq!(
+        run("s = Set.fromList [ 3, 1 ]\n\nmain = Set.foldl (\\k acc -> acc ++ String.fromInt k) \"\" s"),
+        "13"
+    );
+    assert_eq!(
+        run("main = Debug.toString ( Dict.map (\\k v -> k + v) (Dict.fromList [ ( 1, 10 ), ( 2, 20 ) ]) |> Dict.values, Dict.filter (\\k _ -> k > 1) (Dict.fromList [ ( 1, 10 ), ( 2, 20 ) ]) |> Dict.keys )"),
+        "([11,22],[2])"
+    );
+}
+
+#[test]
+fn random_float_ranges_and_seed_threading() {
+    let program = "main =\n    let\n        ( f1, s1 ) =\n            Random.step (Random.float 2 5) (Random.initialSeed 3)\n\n        ( p, s2 ) =\n            Random.step (Random.map2 Tuple.pair (Random.int 0 9) (Random.int 0 9)) s1\n\n        ( after, _ ) =\n            Random.step (Random.int 0 999999) s2\n\n        ( nested, _ ) =\n            Random.step (Random.andThen (\\n -> Random.int 0 (n * 100000)) (Random.int 1 9)) (Random.initialSeed 23)\n    in\n    Debug.toString ( f1, p, ( after, nested ) )";
+    assert_eq!(run(program), PINNED_RANDOM_THREADED);
+}
+
+const PINNED_RANDOM_THREADED: &str = "(4.160680351313204,(0,4),(74928,6831))";

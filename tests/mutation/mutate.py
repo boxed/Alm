@@ -15,6 +15,7 @@ Usage:
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,64 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUNTIME = os.path.join(ROOT, "crates/compiler/src/generate/runtime.js")
-TIMEOUT = 90  # seconds per test binary; a hang counts as killed
+TIMEOUT = int(os.environ.get("MUTANT_TIMEOUT", "90"))  # per test binary; a hang counts as killed
+
+# Loop-condition mutants create BUSY-INFINITE loops in the node processes
+# the test binaries spawn. A busy JS loop never yields to timers, so the
+# only reliable way to stop one is to kill it from outside. Every test
+# binary therefore runs in its own process group, and the whole group is
+# killed on every exit path. sweep_strays() is a second line of defense.
+
+
+def run_group(binary, env):
+    """Run a test binary in its own process group; on timeout or exit,
+    kill the ENTIRE group so no node child ever outlives the run.
+    Returns (returncode, timed_out)."""
+    proc = subprocess.Popen(
+        [binary], env=env, cwd=ROOT,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,  # new process group, pgid == proc.pid
+    )
+    try:
+        returncode = proc.wait(timeout=TIMEOUT)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        returncode, timed_out = None, True
+    finally:
+        # Kill the whole group unconditionally: on the timeout path this
+        # stops the runaway node children; on the normal path it is a
+        # no-op sweep of anything the binary failed to reap.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    return returncode, timed_out
+
+
+def sweep_strays():
+    """Kill any node process still referencing our temp bundles."""
+    out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True)
+    killed = 0
+    for line in out.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, command = parts
+        if "node" not in command:
+            continue
+        our_bundle = re.search(r"alm-(e2e|tea|runtime|project|noelmjson|nodirs|pkg|cli)", command)
+        if our_bundle or "mutant_" in command:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+                killed += 1
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+    if killed:
+        print(f"swept {killed} stray node process(es)", file=sys.stderr)
 
 # ---------------------------------------------------------------- lexing
 
@@ -218,14 +276,11 @@ def run_mutant(args):
         f.write(mutated)
     env = dict(os.environ, ALM_RUNTIME_JS=path)
     for name, binary in binaries:
-        try:
-            r = subprocess.run(
-                [binary], env=env, capture_output=True, timeout=TIMEOUT, cwd=ROOT,
-            )
-        except subprocess.TimeoutExpired:
+        returncode, timed_out = run_group(binary, env)
+        if timed_out:
             os.unlink(path)
             return (index, "killed", f"timeout in {name}", desc, pos)
-        if r.returncode != 0:
+        if returncode != 0:
             os.unlink(path)
             return (index, "killed", name, desc, pos)
     os.unlink(path)
@@ -269,6 +324,7 @@ def main():
     started = time.time()
     survivors = []
     killed = 0
+    sweep_strays()
     with tempfile.TemporaryDirectory() as workdir:
         jobs = [
             (i, pos, length, repl, desc, src, binaries, workdir)
@@ -285,6 +341,7 @@ def main():
                     elapsed = time.time() - started
                     print(f"  {n+1}/{len(muts)}  killed={killed} survived={len(survivors)}  ({elapsed:.0f}s)")
 
+    sweep_strays()
     survivors.sort()
     print(f"\nmutation score: {killed}/{len(muts)} = {killed/len(muts)*100:.1f}%")
     print(f"SURVIVORS ({len(survivors)}):")

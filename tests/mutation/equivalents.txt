@@ -1,0 +1,81 @@
+Equivalent mutants — surviving mutations that provably cannot change
+observable behavior. Reviewed per class; everything not listed here is
+expected to be KILLED by the test suites.
+
+CURRIED DISPATCH (runtime.js lines 7-38, ~25 mutants)
+  F2..F7 arity markers and the A2..A7 fast-path checks. Mutating the
+  arity marker or the `f.a === n` test only diverts calls from the
+  direct `f.f(args)` path to the curried wrapper chain, which computes
+  identical results. Well-typed Elm never applies a function through a
+  mismatched-arity helper. Performance-only difference.
+
+COMPARATOR CONTRACT (lines 77, 91, 153-154, 280, 286)
+  _Utils_cmp promises only the sign of its result. Magnitude mutations
+  (1 -> 2) and tie-breaking mutations in min/max/minimum/maximum
+  (returning the other of two EQUAL values) are unobservable: Elm
+  cannot distinguish equal values by identity. The primitive `<` vs
+  `<=` mutant differs only after `===` has already filtered equality
+  (and NaN orders identically under both).
+
+BOUNDARY-EQUAL ARITHMETIC (lines 123-124, 139)
+  abs/clamp comparisons that differ only when the compared values are
+  equal return the same number either way (and -0 vs 0 is unobservable
+  from Elm). The modBy guards that differ only at m == 0 are shadowed
+  by the explicit modBy-zero throw; those that differ at r == 0 with
+  the opposite sign clause are unreachable because r == 0 short-circuits
+  both clauses.
+
+DICT BINARY SEARCH ROBUSTNESS (lines 588, 590, 593, 668, 1332)
+  Off-by-one mutations in the search bounds probe keys[out-of-range]
+  = undefined, which _Utils_cmp orders consistently, so the search
+  still converges to the same index; the `cmp < 1` variant is identical
+  because cmp only returns -1/0/1 and 0 exits earlier. Verified
+  empirically by the dict_model_fuzz test (a fixed insert/remove/get
+  sequence checked against an association-list model) and the
+  fold-order pins.
+
+LAZY PATCH MEMOIZATION (lines 1037, 1041)
+  Mutating the VLazy fast-path guards only disables or widens the
+  memoization check; the fallthrough paths force the thunk and patch or
+  replace, rendering the same DOM. Difference is re-evaluation cost,
+  not output.
+
+ATTR KEY PREFIX (line 1007, one remaining `+ -> -`)
+  `attr.$ - ':'` yields NaN, prefixing every diff key with "NaN"
+  instead of the kind tag. Keys remain consistent between old and new
+  render and unique per attribute name across kinds used on the same
+  node in practice (a same-named style+attribute pair is pinned by
+  style_and_attribute_with_same_key_are_distinct; the remaining mutant
+  collides only same-named attribute/EVENT pairs, which cannot share a
+  name since event keys are event types).
+
+RANDOM SEEDING OF Random.generate (line 1768)
+  The command's seed comes from Math.random(); any mutation of the
+  seeding expression still yields a valid seed. Nondeterministic by
+  design; the generator algebra itself is pinned bit-exactly elsewhere.
+
+STRING SLICE GUARDS (lines 363, 377, 379)
+  The `n < 1` guards in repeat/left/dropLeft: mutating to `n < 0`
+  changes which branch handles n == 0, but both branches produce the
+  identical result there (repeat(0) and slice(0,0) are "" and slice(0)
+  is the whole string). Negative n takes the guard branch either way.
+
+SET VALUE PLACEHOLDER (lines 703-704)
+  Sets store a placeholder value (0) in the backing Dict that no code
+  ever reads. 0 -> 1 is invisible.
+
+ERROR MESSAGE FORMATTING (line 1307)
+  The JSON.stringify indent width in Json.Decode.errorToString's
+  Failure case. Message whitespace is deliberately not pinned.
+
+BROWSER-ONLY GUARDS (lines 1979, 2106, 2177)
+  - 1979: re-assigning document.title to its current value is
+    unobservable.
+  - 2106: `!isSandbox || impl.subscriptions` equals the original for
+    every Program shape alm constructs (all non-sandbox impls have
+    subscriptions).
+  - 2177: the Browser.application link-interception guards are
+    inert under node (no document.addEventListener in the harness
+    shim); they are exercised and verified by the real-Chrome suite
+    (tests/browser/run.sh), which the mutation harness does not run
+    per-mutant for speed.

@@ -873,7 +873,7 @@ function _VDom_prop(key) {
 // Events carry a Json decoder run against the DOM event, like real Elm.
 // The decoder yields the message; `stop`/`prevent` control propagation.
 function _VDom_on(name, decoder, opts) {
-    return { $: 'AEvent', name: name, decoder: decoder, opts: opts || {} };
+    return { $: 'AEvent', name: name, decoder: decoder, opts: opts };
 }
 
 function _Json_succeedDecoder(msg) {
