@@ -21,6 +21,7 @@
 //! like the JS backend's runtime conventions. Threading inferred types
 //! through (for unboxing and monomorphization) is a later, separate step.
 
+pub mod layout;
 pub mod lower;
 pub mod mono;
 
