@@ -102,13 +102,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             i64_t.fn_type(&[i64_t.into(), i64_t.into()], false),
             Some(Linkage::External),
         );
-        for name in ["rtb$String$fromInt", "rtb$String$fromFloat"] {
+        for name in ["rtb$String$fromInt", "rtb$String$fromFloat", "rtb$String$length"] {
             self.module.add_function(
                 name,
                 i64_t.fn_type(&[i64_t.into()], false),
                 Some(Linkage::External),
             );
         }
+        // Boundary unboxing: uniform word -> raw scalar.
+        self.module.add_function(
+            "rt_unint",
+            i64_t.fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_unfloat",
+            f64_t.fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
 
         // Forward-declare every specialization so calls resolve.
         for f in &mono.functions {
@@ -666,6 +677,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let boxed = self.call_box("rt_float", f);
                 Ok(self.call_named("rtb$String$fromFloat", &[boxed]))
             }
+            ("String", "length") => {
+                let s = self.gen(&args[0])?;
+                let boxed_len = self.call_named("rtb$String$length", &[s]);
+                // rtb$String$length returns a uniform int word; unbox it.
+                Ok(self.call_named("rt_unint", &[boxed_len]))
+            }
+            ("String", "join") => self.kernel_string_join(args),
             ("Basics", "modBy") => self.kernel_mod_by(args),
             ("Basics", "remainderBy") => {
                 let m = self.gen(&args[0])?.into_int_value();
@@ -967,6 +985,73 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .left()
             .unwrap()
             .into_float_value()
+    }
+
+    /// `String.join sep xs` — walk the (cons-cell) list of string words,
+    /// appending each with the separator between elements.
+    fn kernel_string_join(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let sep = self.gen(&args[0])?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let i64_t = self.ctx.i64_type();
+        let i1_t = self.ctx.bool_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let cell = self.cons_cell(&Layout::Str);
+        let rt_append = self.module.get_function("rt_append").unwrap();
+        let empty = self.gen_string("")?;
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("join.loop");
+        let body_bb = self.new_block("join.body");
+        let done_bb = self.new_block("join.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let result = self.builder.build_phi(i64_t, "res").unwrap();
+        let first = self.builder.build_phi(i1_t, "first").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        result.add_incoming(&[(&empty as &dyn BasicValue, entry)]);
+        let true_v: BasicValueEnum = i1_t.const_int(1, false).into();
+        first.add_incoming(&[(&true_v as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(i64_t, hp, "head").unwrap();
+        let res_val = result.as_basic_value();
+        let with_sep = self
+            .builder
+            .build_call(rt_append, &[res_val.into(), sep.into()], "ws")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        let r1 = self
+            .builder
+            .build_select(first.as_basic_value().into_int_value(), res_val, with_sep, "r1")
+            .unwrap();
+        let r2 = self
+            .builder
+            .build_call(rt_append, &[r1.into(), head.into()], "r2")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        result.add_incoming(&[(&r2 as &dyn BasicValue, body_end)]);
+        let false_v: BasicValueEnum = i1_t.const_int(0, false).into();
+        first.add_incoming(&[(&false_v as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(result.as_basic_value())
     }
 
     /// `min`/`max` on Int or Float — a comparison and select.

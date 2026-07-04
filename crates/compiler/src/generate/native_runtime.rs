@@ -127,6 +127,22 @@ pub unsafe extern "C" fn alm_alloc(size: usize) -> *mut u8 {
     std::alloc::alloc(layout)
 }
 
+/// Unbox a uniform int/float value word into a raw machine value — the
+/// typed backend's boundary conversion when a uniform runtime kernel
+/// returns a value it wants unboxed. The inverses of `rt_int`/`rt_float`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_unint(w: u64) -> i64 {
+    int_val(w)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_unfloat(w: u64) -> f64 {
+    match deref(w) {
+        Value::Float(f) => *f,
+        _ => 0.0,
+    }
+}
+
 /// View a pointer value word as a `&Value`. Only valid for non-integer
 /// words (`is_int` false); the cast truncates to the target pointer width.
 #[inline]

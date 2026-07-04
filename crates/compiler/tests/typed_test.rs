@@ -492,6 +492,21 @@ fn float_to_int_kernels() {
 }
 
 #[test]
+fn string_length_and_join() {
+    assert_same(
+        "string_join",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       joined = String.join \", \" [ \"a\", \"bb\", \"ccc\" ]\n\
+         \x20   in\n\
+         \x20   joined ++ \" len=\" ++ String.fromInt (String.length joined)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
