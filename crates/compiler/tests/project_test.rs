@@ -2,7 +2,8 @@
 //! directory, compile it with `compile_project`, and run it with node.
 
 use std::path::Path;
-use std::process::Command;
+
+mod common;
 
 fn project(files: &[(&str, &str)]) -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
@@ -23,10 +24,10 @@ fn project(files: &[(&str, &str)]) -> Result<String, String> {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
-    compile_and_run(&src.join(files[0].0), &files[0].1)
+    compile_and_run(&src.join(files[0].0))
 }
 
-fn compile_and_run(entry: &Path, _entry_source: &str) -> Result<String, String> {
+fn compile_and_run(entry: &Path) -> Result<String, String> {
     let javascript = alm_compiler::project::compile_project(entry)
         .map_err(|errors| {
             errors
@@ -37,22 +38,13 @@ fn compile_and_run(entry: &Path, _entry_source: &str) -> Result<String, String> 
         })?;
     let js_path = entry.with_extension("js");
     std::fs::write(&js_path, &javascript).unwrap();
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(format!(
+    Ok(common::run_node(
+        &format!(
             "console.log(require({:?})['Main']['main']);",
             js_path.to_str().unwrap()
-        ))
-        .output()
-        .expect("failed to run node");
-    if !output.status.success() {
-        return Err(format!(
-            "node failed:\n{}\n\nJS:\n{}",
-            String::from_utf8_lossy(&output.stderr),
-            javascript
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+        ),
+        &javascript,
+    ))
 }
 
 #[test]

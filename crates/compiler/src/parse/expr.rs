@@ -565,14 +565,13 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
         }
         def_name = p.located(|p| p.lower_name("a definition name"))?;
         if def_name.value != name.value {
-            return Err(ParseErrorAt(
-                def_name.region,
+            return Err(super::ParseError::new(
                 format!(
                     "I just saw the type annotation for `{}`, but this definition is named `{}`. They must match!",
                     name.value, def_name.value
                 ),
-            )
-            .into());
+                def_name.region,
+            ));
         }
         p.chomp_and_check_indent("I was expecting `=` or arguments after this name")?;
     }
@@ -592,15 +591,6 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
         }
         arg_patterns.push(pattern::term(p)?);
         p.chomp_and_check_indent("I was expecting `=` or another argument")?;
-    }
-}
-
-/// Helper for building a ParseError at a specific region.
-struct ParseErrorAt(crate::reporting::Region, String);
-
-impl From<ParseErrorAt> for super::ParseError {
-    fn from(e: ParseErrorAt) -> super::ParseError {
-        super::ParseError::new(e.1, e.0)
     }
 }
 

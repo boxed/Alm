@@ -1,6 +1,6 @@
 //! Port of `Parse.Pattern`.
 
-use super::{one_of, NumberLit, PResult, Parser};
+use super::{NumberLit, PResult, Parser};
 use crate::ast::source::{Pattern, Pattern_};
 use crate::reporting::{Located, Region};
 
@@ -208,7 +208,7 @@ fn term_with_args(p: &mut Parser) -> PResult<Pattern> {
             p.restore(snapshot);
             break;
         }
-        match one_of(p, &mut [&mut term]) {
+        match term(p) {
             Ok(arg) => args.push(arg),
             Err(_) => {
                 p.restore(snapshot);

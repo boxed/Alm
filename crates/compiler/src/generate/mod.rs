@@ -20,7 +20,7 @@ pub fn generate(module: &can::Module) -> String {
 pub fn generate_project(modules: &[can::Module]) -> String {
     let mut gen = Generator {
         out: String::new(),
-        module_name: Name::from("?"),
+        module_name: None,
         temp_counter: 0,
     };
 
@@ -53,31 +53,7 @@ pub fn generate_project(modules: &[can::Module]) -> String {
         }
         let module_var = mangle_module(&Name::from(union.module));
         for (ctor_name, args) in union.ctors {
-            let var = format!("{}${}", module_var, sanitize(ctor_name));
-            match args.len() {
-                0 => writeln!(gen.out, "var {} = {{ $: '{}' }};", var, ctor_name).unwrap(),
-                1 => writeln!(
-                    gen.out,
-                    "var {} = function (a) {{ return {{ $: '{}', a: a }}; }};",
-                    var, ctor_name
-                )
-                .unwrap(),
-                n => {
-                    let params: Vec<String> = (0..n).map(field_name).collect();
-                    let fields: Vec<String> =
-                        params.iter().map(|p| format!("{}: {}", p, p)).collect();
-                    writeln!(
-                        gen.out,
-                        "var {} = F{}(function ({}) {{ return {{ $: '{}', {} }}; }});",
-                        var,
-                        n,
-                        params.join(", "),
-                        ctor_name,
-                        fields.join(", ")
-                    )
-                    .unwrap();
-                }
-            }
+            emit_ctor(&mut gen.out, &module_var, ctor_name, args.len());
         }
     }
     gen.out.push_str("\n// HTML HELPERS (generated from the builtin tables)\n");
@@ -159,7 +135,7 @@ pub fn generate_project(modules: &[can::Module]) -> String {
 
     let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
     for module in modules {
-        gen.module_name = module.name.clone();
+        gen.module_name = Some(module.name.clone());
         gen.out.push_str("\n// MODULE ");
         gen.out.push_str(module.name.as_str());
         gen.out.push_str("\n\n");
@@ -246,13 +222,21 @@ fn sanitize(name: &str) -> String {
 
 struct Generator {
     out: String,
-    module_name: Name,
+    /// The module whose declarations are being emitted; set before any
+    /// definition is generated.
+    module_name: Option<Name>,
     temp_counter: usize,
 }
 
 impl Generator {
+    fn module_name(&self) -> &Name {
+        self.module_name
+            .as_ref()
+            .expect("module context is set before emitting declarations")
+    }
+
     fn global(&self, name: &Name) -> String {
-        format!("{}${}", mangle_module(&self.module_name), sanitize(name))
+        format!("{}${}", mangle_module(self.module_name()), sanitize(name))
     }
 
     fn fresh_temp(&mut self) -> String {
@@ -263,29 +247,9 @@ impl Generator {
     // UNIONS
 
     fn union(&mut self, union: &can::Union) {
+        let module_var = mangle_module(self.module_name());
         for ctor in &union.ctors {
-            let var = self.global(&ctor.name);
-            let arity = ctor.args.len();
-            if arity == 0 {
-                writeln!(self.out, "var {} = {{ $: '{}' }};", var, ctor.name).unwrap();
-            } else {
-                let params: Vec<String> = (0..arity).map(field_name).collect();
-                let fields: Vec<String> = params
-                    .iter()
-                    .map(|p| format!("{}: {}", p, p))
-                    .collect();
-                let body = format!(
-                    "function ({}) {{ return {{ $: '{}', {} }}; }}",
-                    params.join(", "),
-                    ctor.name,
-                    fields.join(", ")
-                );
-                if arity == 1 {
-                    writeln!(self.out, "var {} = {};", var, body).unwrap();
-                } else {
-                    writeln!(self.out, "var {} = F{}({});", var, arity, body).unwrap();
-                }
-            }
+            emit_ctor(&mut self.out, &module_var, ctor.name.as_str(), ctor.args.len());
         }
         self.out.push('\n');
     }
@@ -622,7 +586,7 @@ impl Generator {
         match (home.as_str(), ctor.name.as_str()) {
             ("Basics", "True") => "true".to_string(),
             ("Basics", "False") => "false".to_string(),
-            _ if *home == self.module_name => self.global(&ctor.name),
+            _ if home == self.module_name() => self.global(&ctor.name),
             _ => foreign(home, &ctor.name),
         }
     }
@@ -727,6 +691,29 @@ fn callable(js: String) -> String {
 
 fn foreign(module: &Name, name: &Name) -> String {
     format!("${}${}", module.as_str().replace('.', "$"), sanitize(name))
+}
+
+/// Emit one union constructor: a value for arity 0, otherwise a curried
+/// function building the tagged object.
+fn emit_ctor(out: &mut String, module_var: &str, ctor_name: &str, arity: usize) {
+    let var = format!("{}${}", module_var, sanitize(ctor_name));
+    if arity == 0 {
+        writeln!(out, "var {} = {{ $: '{}' }};", var, ctor_name).unwrap();
+        return;
+    }
+    let params: Vec<String> = (0..arity).map(field_name).collect();
+    let fields: Vec<String> = params.iter().map(|p| format!("{}: {}", p, p)).collect();
+    let body = format!(
+        "function ({}) {{ return {{ $: '{}', {} }}; }}",
+        params.join(", "),
+        ctor_name,
+        fields.join(", ")
+    );
+    if arity == 1 {
+        writeln!(out, "var {} = {};", var, body).unwrap();
+    } else {
+        writeln!(out, "var {} = F{}({});", var, arity, body).unwrap();
+    }
 }
 
 fn field_name(index: usize) -> String {

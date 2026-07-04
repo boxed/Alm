@@ -227,7 +227,7 @@ impl Checker<'_> {
         match group {
             can::DeclGroup::Value(def) => {
                 let name = def.name.value.clone();
-                match self.check_def(def, None) {
+                match self.check_def(def) {
                     Ok(scheme) => {
                         self.globals.insert(name, Binding::Scheme(scheme));
                     }
@@ -315,7 +315,7 @@ impl Checker<'_> {
 
     /// Infer (and, when annotated, check) the type of one definition.
     /// Returns the generalizable scheme for non-recursive bindings.
-    fn check_def(&mut self, def: &can::Def, _hint: Option<()>) -> Infer<Scheme> {
+    fn check_def(&mut self, def: &can::Def) -> Infer<Scheme> {
         let def_type = self.infer_def_type(def)?;
         match &def.annotation {
             Some(annotation) => Ok(Scheme::closed(annotation.clone())),
@@ -505,7 +505,7 @@ impl Checker<'_> {
                 ),
                 FlatType::EmptyRecord => can::Type::Record(vec![], None),
                 FlatType::Record(..) => {
-                    let (fields, ext) = self.pool.gather_fields_public(root);
+                    let (fields, ext) = self.pool.gather_fields(root);
                     let fields = fields
                         .into_iter()
                         .map(|(name, v)| (name, self.variable_to_type(v, env_free, state)))
@@ -884,7 +884,7 @@ impl Checker<'_> {
                     for decl in decls {
                         match decl {
                             can::LetDecl::Def(def) => {
-                                let scheme = self.check_def(def, None)?;
+                                let scheme = self.check_def(def)?;
                                 self.bind_local(
                                     def.name.value.clone(),
                                     Binding::Scheme(scheme),

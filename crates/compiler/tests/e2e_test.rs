@@ -2,48 +2,19 @@
 //! node. Every fixture module is named `Test` and defines `main : String`;
 //! the harness prints it and asserts on the output.
 
-use std::process::Command;
+mod common;
 
 fn run(body: &str) -> String {
     let source = format!("module Test exposing (..)\n\n{}", body);
-    let javascript = match alm_compiler::compile(&source) {
-        Ok(js) => js,
-        Err(reports) => panic!(
-            "compilation failed:\n{}",
-            reports
-                .iter()
-                .map(|r| r.render("Test.elm", &source))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-    };
-
-    let dir = std::env::temp_dir().join(format!(
-        "alm-e2e-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let js_path = dir.join("test.js");
-    std::fs::write(&js_path, &javascript).unwrap();
-
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(format!(
+    let javascript = common::compile_single("Test.elm", &source);
+    let js_path = common::write_js("e2e", &javascript);
+    common::run_node(
+        &format!(
             "console.log(require({:?})['Test']['main']);",
             js_path.to_str().unwrap()
-        ))
-        .output()
-        .expect("failed to run node");
-
-    if !output.status.success() {
-        panic!(
-            "node failed:\n{}\n\ngenerated JS:\n{}",
-            String::from_utf8_lossy(&output.stderr),
-            javascript
-        );
-    }
-    String::from_utf8_lossy(&output.stdout).trim_end().to_string()
+        ),
+        &javascript,
+    )
 }
 
 #[test]

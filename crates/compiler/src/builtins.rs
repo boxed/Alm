@@ -840,18 +840,20 @@ pub fn is_builtin_module(name: &str) -> bool {
 }
 
 /// Look up a builtin union by module and type name.
-pub fn lookup_ctor_by_union(
-    module: &str,
-    union_name: &str,
-) -> Option<(&'static BuiltinUnion, u32)> {
+pub fn lookup_ctor_by_union(module: &str, union_name: &str) -> Option<&'static BuiltinUnion> {
     UNIONS
         .iter()
         .find(|u| u.module == module && u.name == union_name)
-        .map(|u| (u, 0))
 }
 
 pub fn lookup_value(module: &str, name: &str) -> Option<&'static BuiltinValue> {
-    values().iter().find(|v| v.module == module && v.name == name)
+    static INDEX: std::sync::OnceLock<
+        std::collections::HashMap<(&'static str, &'static str), &'static BuiltinValue>,
+    > = std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| values().iter().map(|v| ((v.module, v.name), v)).collect())
+        .get(&(module, name))
+        .copied()
 }
 
 /// Values exposed unqualified by the default imports (`Basics exposing (..)`).
@@ -897,11 +899,28 @@ fn find_ctor(union: &'static BuiltinUnion, name: &str) -> Option<(&'static Built
 /// Parse a built-in type signature into a canonical type. Panics on
 /// malformed signatures — they are compiled into the binary, so a failure
 /// is an alm bug, not a user error.
+///
+/// Results are cached: the type checker resolves the same signatures at
+/// every use site of every builtin. (Thread-local because `Name` is
+/// `Rc`-backed; the compiler is single-threaded.)
 pub fn parse_signature(signature: &str) -> Type {
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<String, Type>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    if let Some(cached) = CACHE.with(|c| c.borrow().get(signature).cloned()) {
+        return cached;
+    }
     let mut p = Parser::new(signature);
     let tipe = crate::parse::type_::expression(&mut p)
         .unwrap_or_else(|e| panic!("bad builtin signature {:?}: {}", signature, e.message));
-    canonicalize_signature_type(&tipe)
+    // NOTE: alias expansion recurses into parse_signature; the cache borrow
+    // is released before this call.
+    let result = canonicalize_signature_type(&tipe);
+    CACHE.with(|c| {
+        c.borrow_mut().insert(signature.to_string(), result.clone());
+    });
+    result
 }
 
 fn canonicalize_signature_type(tipe: &source::Type) -> Type {
@@ -957,13 +976,3 @@ fn expand_signature_alias(vars: &[&str], body: &str, args: Vec<Type>) -> Type {
     crate::canonicalize::subst_can_type(&expanded, &map)
 }
 
-/// The arity of a builtin value, derived from its signature.
-pub fn arity(signature: &str) -> u32 {
-    let mut tipe = parse_signature(signature);
-    let mut n = 0;
-    while let Type::Lambda(_, result) = tipe {
-        n += 1;
-        tipe = *result;
-    }
-    n
-}

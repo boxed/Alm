@@ -1560,8 +1560,8 @@ var $Http$post = function (config) {
     });
 };
 var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
-var $Http$track = F2(function (_tracker, _toMsg) { return { $: 'SubNone' }; });
-var $Http$cancel = function (_tracker) { return { $: 'CmdNone' }; };
+var $Http$track = F2(function (_tracker, _toMsg) { return $Platform$Sub$none; });
+var $Http$cancel = function (_tracker) { return $Platform$Cmd$none; };
 var $Http$fractionSent = function (p) {
     return p.size > 0 ? p.sent / p.size : 1;
 };

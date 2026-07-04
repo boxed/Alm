@@ -2,7 +2,7 @@
 //! them under node with a minimal DOM shim — clicking buttons, typing into
 //! inputs, and asserting on the rendered tree.
 
-use std::process::Command;
+mod common;
 
 /// A tiny DOM implementation with just enough surface for the alm virtual
 /// DOM: createElement/createTextNode, appendChild/replaceChild/removeChild,
@@ -99,48 +99,15 @@ function byText(root, text) {
 /// Compile an Elm program (module `Main`), boot it with the DOM shim, run
 /// the given driver script, and return its stdout lines.
 fn run_app(elm: &str, driver: &str) -> Vec<String> {
-    let javascript = match alm_compiler::compile(elm) {
-        Ok(js) => js,
-        Err(reports) => panic!(
-            "compilation failed:\n{}",
-            reports
-                .iter()
-                .map(|r| r.render("Main.elm", elm))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-    };
-
-    let dir = std::env::temp_dir().join(format!(
-        "alm-tea-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let js_path = dir.join("app.js");
-    std::fs::write(&js_path, &javascript).unwrap();
-
+    let javascript = common::compile_single("Main.elm", elm);
+    let js_path = common::write_js("tea", &javascript);
     let harness = format!(
         "{shim}\nvar Elm = require({path:?});\nvar host = document.createElement('div');\nvar mount = document.createElement('div');\nhost.appendChild(mount);\nvar app = Elm.Main.main.init({{ node: mount }});\nvar root = host.childNodes[0];\n{driver}\n",
         shim = DOM_SHIM,
         path = js_path.to_str().unwrap(),
         driver = driver
     );
-
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(&harness)
-        .output()
-        .expect("failed to run node");
-    if !output.status.success() {
-        panic!(
-            "node failed:\n{}\n\ngenerated JS:\n{}",
-            String::from_utf8_lossy(&output.stderr),
-            javascript
-        );
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim_end()
+    common::run_node(&harness, &javascript)
         .lines()
         .map(str::to_string)
         .collect()

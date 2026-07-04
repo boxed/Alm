@@ -252,11 +252,7 @@ impl Pool {
 
     /// Collect all fields reachable through nested record extensions,
     /// returning them with the final (non-record) extension variable.
-    pub fn gather_fields_public(&mut self, var: Variable) -> (BTreeMap<Name, Variable>, Variable) {
-        self.gather_fields(var)
-    }
-
-    fn gather_fields(&mut self, var: Variable) -> (BTreeMap<Name, Variable>, Variable) {
+    pub(crate) fn gather_fields(&mut self, var: Variable) -> (BTreeMap<Name, Variable>, Variable) {
         let mut fields = BTreeMap::new();
         let mut current = var;
         loop {
