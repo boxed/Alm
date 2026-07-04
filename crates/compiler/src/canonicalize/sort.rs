@@ -42,14 +42,26 @@ pub(super) fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Erro
     // references; recursion delayed behind lambdas is fine.
     let directly_cyclic = cyclic_nodes(defs.len(), &direct_dependencies);
     for (i, def) in defs.iter().enumerate() {
-        if directly_cyclic[i] {
-            return Err(Error::new(
-                format!(
-                    "The value `{}` is defined in terms of itself, and it is not a function, so it would run forever.",
-                    def.name.value
-                ),
-                def.name.region,
-            ));
+        match directly_cyclic[i] {
+            0 => {}
+            1 => {
+                return Err(Error::new(
+                    format!(
+                        "The value `{}` is defined in terms of itself, and it is not a function, so it would run forever.",
+                        def.name.value
+                    ),
+                    def.name.region,
+                ));
+            }
+            _ => {
+                return Err(Error::new(
+                    format!(
+                        "The value `{}` is part of a definition cycle, and it is not a function, so it cannot be evaluated.",
+                        def.name.value
+                    ),
+                    def.name.region,
+                ));
+            }
         }
     }
 
@@ -76,23 +88,25 @@ pub(super) fn sort_defs(defs: Vec<can::Def>) -> Result<Vec<can::DeclGroup>, Erro
     Ok(result)
 }
 
-/// Which nodes sit on a cycle (including self-loops) in the given graph?
-fn cyclic_nodes(count: usize, edges: &[Vec<usize>]) -> Vec<bool> {
+/// For each node, the size of its cycle in the given graph: 0 when the
+/// node is not on a cycle, 1 for a self-loop, otherwise the strongly
+/// connected component size.
+fn cyclic_nodes(count: usize, edges: &[Vec<usize>]) -> Vec<usize> {
     let components = graph::strongly_connected_components(count, edges);
-    let mut cyclic = vec![false; count];
+    let mut cycle_size = vec![0; count];
     for component in components {
         if component.len() > 1 {
-            for i in component {
-                cyclic[i] = true;
+            for &i in &component {
+                cycle_size[i] = component.len();
             }
         } else {
             let i = component[0];
             if edges[i].contains(&i) {
-                cyclic[i] = true;
+                cycle_size[i] = 1;
             }
         }
     }
-    cyclic
+    cycle_size
 }
 
 /// Collect names of local/top-level variables referenced in an expression.
@@ -254,13 +268,20 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
 
     let directly_cyclic = cyclic_nodes(decls.len(), &direct_dependencies);
     for (i, decl) in decls.iter().enumerate() {
-        if directly_cyclic[i] {
+        if directly_cyclic[i] > 0 {
             let (message, region) = match decl {
                 can::LetDecl::Def(def) => (
-                    format!(
-                        "The value `{}` is defined in terms of itself, and it is not a function.",
-                        def.name.value
-                    ),
+                    if directly_cyclic[i] == 1 {
+                        format!(
+                            "The value `{}` is defined in terms of itself, and it is not a function.",
+                            def.name.value
+                        )
+                    } else {
+                        format!(
+                            "The value `{}` is part of a definition cycle, and it is not a function.",
+                            def.name.value
+                        )
+                    },
                     def.name.region,
                 ),
                 can::LetDecl::Recursive(defs) => (
@@ -271,7 +292,11 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
                     defs[0].name.region,
                 ),
                 can::LetDecl::Destruct(pattern, _) => (
-                    "This destructuring is part of a definition cycle.".to_string(),
+                    if directly_cyclic[i] == 1 {
+                        "This destructuring refers to a name it binds.".to_string()
+                    } else {
+                        "This destructuring is part of a definition cycle.".to_string()
+                    },
                     pattern.region,
                 ),
             };
