@@ -674,6 +674,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "foldl") => self.kernel_list_foldl(whole, args),
             ("List", "foldr") => self.kernel_list_foldr(whole, args),
             ("List", "map") => self.kernel_list_map(whole, args),
+            ("List", "map2") => self.kernel_list_map2(whole, args),
+            ("List", "indexedMap") => self.kernel_list_indexed_map(whole, args),
             ("List", "reverse") => self.kernel_list_reverse(whole, args),
             ("List", "filter") => self.kernel_list_filter(whole, args),
             ("List", "member") => self.kernel_list_member(args),
@@ -1214,6 +1216,129 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let f: BasicValueEnum = self.ctx.bool_type().const_int(0, false).into();
         phi.add_incoming(&[(&t as &dyn BasicValue, found_bb), (&f as &dyn BasicValue, none_bb)]);
         Ok(phi.as_basic_value())
+    }
+
+    /// `List.map2 : (a -> b -> c) -> List a -> List b -> List c` — walk both
+    /// lists in lockstep, stopping at the shorter, applying the function.
+    fn kernel_list_map2(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let a_elem = self.elem_layout(&args[1].tipe)?;
+        let b_elem = self.elem_layout(&args[2].tipe)?;
+        let c_elem = self.elem_layout(&whole.tipe)?;
+        let xs = self.gen(&args[1])?.into_pointer_value();
+        let ys = self.gen(&args[2])?.into_pointer_value();
+        let a_cell = self.cons_cell(&a_elem);
+        let b_cell = self.cons_cell(&b_elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("map2.loop");
+        let body_bb = self.new_block("map2.body");
+        let done_bb = self.new_block("map2.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cx = self.builder.build_phi(ptr_t, "cx").unwrap();
+        let cy = self.builder.build_phi(ptr_t, "cy").unwrap();
+        cx.add_incoming(&[(&xs as &dyn BasicValue, entry)]);
+        cy.add_incoming(&[(&ys as &dyn BasicValue, entry)]);
+        let cxp = cx.as_basic_value().into_pointer_value();
+        let cyp = cy.as_basic_value().into_pointer_value();
+        let xnull = self.builder.build_is_null(cxp, "xn").unwrap();
+        let ynull = self.builder.build_is_null(cyp, "yn").unwrap();
+        let either = self.builder.build_or(xnull, ynull, "either").unwrap();
+        self.builder.build_conditional_branch(either, done_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hxp = self.builder.build_struct_gep(a_cell, cxp, 0, "hxp").unwrap();
+        let hx = self.builder.build_load(self.llvm_type(&a_elem), hxp, "hx").unwrap();
+        let hyp = self.builder.build_struct_gep(b_cell, cyp, 0, "hyp").unwrap();
+        let hy = self.builder.build_load(self.llvm_type(&b_elem), hyp, "hy").unwrap();
+        let mapped = self.apply_fn_expr(&args[0], &[hx, hy])?;
+        let newcell = self.cons(&c_elem, mapped, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nf = self.builder.build_struct_gep(self.cons_cell(&c_elem), newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nf).unwrap();
+        let nxp = self.builder.build_struct_gep(a_cell, cxp, 1, "nxp").unwrap();
+        let nx = self.builder.build_load(ptr_t, nxp, "nx").unwrap();
+        let nyp = self.builder.build_struct_gep(b_cell, cyp, 1, "nyp").unwrap();
+        let ny = self.builder.build_load(ptr_t, nyp, "ny").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cx.add_incoming(&[(&nx as &dyn BasicValue, body_end)]);
+        cy.add_incoming(&[(&ny as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "map2").unwrap())
+    }
+
+    /// `List.indexedMap : (Int -> a -> b) -> List a -> List b` — map with a
+    /// running index passed as the first argument.
+    fn kernel_list_indexed_map(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let a_elem = self.elem_layout(&args[1].tipe)?;
+        let b_elem = self.elem_layout(&whole.tipe)?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let a_cell = self.cons_cell(&a_elem);
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("imap.loop");
+        let body_bb = self.new_block("imap.body");
+        let done_bb = self.new_block("imap.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let idx = self.builder.build_phi(i64_t, "i").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let zero: BasicValueEnum = i64_t.const_zero().into();
+        idx.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder.build_conditional_branch(is_null, done_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(a_cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(self.llvm_type(&a_elem), hp, "head").unwrap();
+        let mapped = self.apply_fn_expr(&args[0], &[idx.as_basic_value(), head])?;
+        let newcell = self.cons(&b_elem, mapped, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nf = self.builder.build_struct_gep(self.cons_cell(&b_elem), newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nf).unwrap();
+        let tp = self.builder.build_struct_gep(a_cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let idx2: BasicValueEnum = self
+            .builder
+            .build_int_add(idx.as_basic_value().into_int_value(), i64_t.const_int(1, false), "i2")
+            .unwrap()
+            .into();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        idx.add_incoming(&[(&idx2 as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "imap").unwrap())
     }
 
     /// `List.reverse : List a -> List a` — cons each element onto an

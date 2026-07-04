@@ -582,6 +582,22 @@ fn list_head_tail_maybe() {
 }
 
 #[test]
+fn map2_and_indexed_map() {
+    assert_same(
+        "map2_indexed",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       dots = List.map2 (\\a b -> a * b) [ 1, 2, 3 ] [ 10, 20, 30, 40 ]\n\
+         \x20       weighted = List.indexedMap (\\i x -> i * x) [ 5, 6, 7 ]\n\
+         \x20   in\n\
+         \x20   List.sum dots * 1000 + List.sum weighted\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
