@@ -119,6 +119,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Bool => self.ctx.bool_type().into(),
             Layout::Char => self.ctx.i32_type().into(),
             Layout::Unit => self.ctx.i64_type().into(),
+            // An enumeration is a bare constructor tag.
+            Layout::Enum(_) => self.ctx.i32_type().into(),
             Layout::Tuple(elems) => {
                 let fields: Vec<BasicTypeEnum> =
                     elems.iter().map(|l| self.llvm_type(l)).collect();
@@ -262,6 +264,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Record(fields) => self.gen_record(expr, fields),
             TypedKind::Access(record, field) => self.gen_access(record, field.as_str()),
             TypedKind::Update(record, fields) => self.gen_update(record, fields),
+            TypedKind::Ctor(_, _, ctor) => self.gen_ctor(expr, ctor),
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
                 std::mem::discriminant(other)
@@ -470,6 +473,31 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
     }
 
+    /// Construct a nullary constructor value: a `Bool` bit or an enum tag.
+    /// (Data-carrying constructors are handled where they are applied.)
+    fn gen_ctor(
+        &mut self,
+        whole: &TypedExpr,
+        ctor: &crate::ast::canonical::Ctor,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match self.layouts.layout_of(&whole.tipe) {
+            Layout::Bool => Ok(self
+                .ctx
+                .bool_type()
+                .const_int((ctor.name.as_str() == "True") as u64, false)
+                .into()),
+            Layout::Enum(_) => Ok(self
+                .ctx
+                .i32_type()
+                .const_int(ctor.index as u64, false)
+                .into()),
+            other => Err(format!(
+                "typed backend: constructing `{}` (layout {:?}) is not supported yet",
+                ctor.name, other
+            )),
+        }
+    }
+
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
         let v = self.gen(inner)?;
         Ok(match self.layouts.layout_of(&inner.tipe) {
@@ -614,6 +642,33 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                         )
                         .unwrap(),
                 ),
+                Ctor(_, _, ctor, args) if args.is_empty() => {
+                    let expected = match self.layouts.layout_of(&scrutinee.tipe) {
+                        Layout::Bool => self
+                            .ctx
+                            .bool_type()
+                            .const_int((ctor.name.as_str() == "True") as u64, false),
+                        Layout::Enum(_) => {
+                            self.ctx.i32_type().const_int(ctor.index as u64, false)
+                        }
+                        other => {
+                            return Err(format!(
+                                "typed backend: case on layout {:?} is not supported yet",
+                                other
+                            ))
+                        }
+                    };
+                    Some(
+                        self.builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                subject.into_int_value(),
+                                expected,
+                                "casetag",
+                            )
+                            .unwrap(),
+                    )
+                }
                 _ => {
                     return Err(
                         "typed backend: only scalar/wildcard case patterns are supported yet"

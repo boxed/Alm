@@ -207,6 +207,46 @@ fn record_field_destructure() {
 }
 
 #[test]
+fn custom_enum_and_case() {
+    assert_same(
+        "enum",
+        "module Test exposing (..)\n\
+         \n\
+         type Color = Red | Green | Blue\n\
+         \n\
+         toInt : Color -> Int\n\
+         toInt c =\n\
+         \x20   case c of\n\
+         \x20       Red -> 1\n\
+         \x20       Green -> 2\n\
+         \x20       Blue -> 3\n\
+         \n\
+         main : Int\n\
+         main = toInt Red * 100 + toInt Green * 10 + toInt Blue\n",
+    );
+}
+
+#[test]
+fn bool_case_and_construction() {
+    assert_same(
+        "bool_case",
+        "module Test exposing (..)\n\
+         \n\
+         isEven : Int -> Bool\n\
+         isEven n = n - (n // 2) * 2 == 0\n\
+         \n\
+         describe : Bool -> Int\n\
+         describe b =\n\
+         \x20   case b of\n\
+         \x20       True -> 1\n\
+         \x20       False -> 0\n\
+         \n\
+         main : Int\n\
+         main = describe (isEven 4) * 10 + describe (isEven 7)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
