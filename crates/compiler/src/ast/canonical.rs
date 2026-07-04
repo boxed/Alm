@@ -100,27 +100,6 @@ pub enum Type {
     Tuple(Box<Type>, Box<Type>, Option<Box<Type>>),
 }
 
-impl Type {
-    pub fn int() -> Type {
-        Type::Type(Name::from("Basics"), Name::from("Int"), vec![])
-    }
-    pub fn float() -> Type {
-        Type::Type(Name::from("Basics"), Name::from("Float"), vec![])
-    }
-    pub fn string() -> Type {
-        Type::Type(Name::from("String"), Name::from("String"), vec![])
-    }
-    pub fn char() -> Type {
-        Type::Type(Name::from("Char"), Name::from("Char"), vec![])
-    }
-    pub fn bool() -> Type {
-        Type::Type(Name::from("Basics"), Name::from("Bool"), vec![])
-    }
-    pub fn list(item: Type) -> Type {
-        Type::Type(Name::from("List"), Name::from("List"), vec![item])
-    }
-}
-
 // MODULE
 
 #[derive(Debug, Clone)]
