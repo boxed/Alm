@@ -332,6 +332,26 @@ fn generated_list_kernels() {
 }
 
 #[test]
+fn higher_order_kernels_with_named_functions() {
+    assert_same(
+        "hof_kernels",
+        "module Test exposing (..)\n\
+         \n\
+         square : Int -> Int\n\
+         square n = n * n\n\
+         \n\
+         add : Int -> Int -> Int\n\
+         add x acc = x + acc\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   List.range 1 10\n\
+         \x20       |> List.map square\n\
+         \x20       |> List.foldl add 0\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows

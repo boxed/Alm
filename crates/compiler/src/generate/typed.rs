@@ -293,6 +293,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             TypedKind::Call(func, args) => self.gen_call(expr, func, args),
             TypedKind::List(items) => self.gen_list(expr, items),
+            TypedKind::Binop(op, _, _, l, r)
+                if op.as_str() == "|>" || op.as_str() == "<|" =>
+            {
+                self.gen_pipe(expr, op.as_str(), l, r)
+            }
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "::" => self.gen_cons(expr, l, r),
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
@@ -611,6 +616,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "sum") => self.kernel_list_sum(args),
             ("List", "length") => self.kernel_list_length(args),
             ("List", "range") => self.kernel_list_range(whole, args),
+            ("List", "foldl") => self.kernel_list_foldl(whole, args),
+            ("List", "map") => self.kernel_list_map(whole, args),
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
@@ -620,6 +627,144 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 module, name
             )),
         }
+    }
+
+    /// Resolve a function-valued argument to a concrete LLVM function. Only
+    /// named (already-specialized) functions are supported; lambda arguments
+    /// need closure conversion.
+    fn global_fn(&self, arg: &TypedExpr) -> Result<FunctionValue<'ctx>, String> {
+        match &arg.kind {
+            TypedKind::Global(name) => self
+                .functions
+                .get(&name.to_string())
+                .copied()
+                .ok_or_else(|| format!("typed backend: unknown function `{}`", name)),
+            _ => Err(
+                "typed backend: higher-order kernels need a named function argument \
+                 (lambdas require closures, not yet supported)"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn call_fn(
+        &self,
+        f: FunctionValue<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+    ) -> BasicValueEnum<'ctx> {
+        let argv: Vec<_> = args.iter().map(|a| (*a).into()).collect();
+        self.builder
+            .build_call(f, &argv, "hof")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+    }
+
+    /// `List.foldl : (a -> b -> b) -> b -> List a -> b` — fold left, calling
+    /// the specialized element function with no boxing.
+    fn kernel_list_foldl(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let f = self.global_fn(&args[0])?;
+        let elem = self.elem_layout(&args[2].tipe)?;
+        let init = self.gen(&args[1])?;
+        let list = self.gen(&args[2])?.into_pointer_value();
+        let acc_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
+        let elem_ty = self.llvm_type(&elem);
+        let cell = self.cons_cell(&elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("foldl.loop");
+        let body_bb = self.new_block("foldl.body");
+        let done_bb = self.new_block("foldl.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let acc = self.builder.build_phi(acc_ty, "acc").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&init as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let new_acc = self.call_fn(f, &[head, acc.as_basic_value()]);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&new_acc as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
+    }
+
+    /// `List.map : (a -> b) -> List a -> List b` — map, building the result
+    /// in order via a moving tail slot, calling the specialized function.
+    fn kernel_list_map(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let f = self.global_fn(&args[0])?;
+        let src_elem = self.elem_layout(&args[1].tipe)?;
+        let dst_elem = self.elem_layout(&whole.tipe)?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let src_cell = self.cons_cell(&src_elem);
+        let dst_cell = self.cons_cell(&dst_elem);
+        let src_elem_ty = self.llvm_type(&src_elem);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        // `result` holds the head; `slot` holds the address of the next-field
+        // to write into (initially the address of `result`).
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("map.loop");
+        let body_bb = self.new_block("map.body");
+        let done_bb = self.new_block("map.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(src_cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(src_elem_ty, hp, "head").unwrap();
+        let mapped = self.call_fn(f, &[head]);
+        let newcell = self.cons(&dst_elem, mapped, ptr_t.const_null());
+        // *slot = newcell
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        // slot = &newcell.next
+        let nextfield = self.builder.build_struct_gep(dst_cell, newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nextfield).unwrap();
+        let tp = self.builder.build_struct_gep(src_cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "mapped").unwrap())
     }
 
     /// `List.sum : List number -> number` — walk the cons list accumulating.
@@ -800,6 +945,28 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let tp = self.builder.build_struct_gep(cell, raw, 1, "tp").unwrap();
         self.builder.build_store(tp, tail).unwrap();
         raw
+    }
+
+    /// `x |> f` and `f <| x` are application. Normalize to a flattened call —
+    /// appending the piped value as the callee's final argument — and reuse
+    /// the ordinary call path (so pipes into kernels/constructors just work).
+    fn gen_pipe(
+        &mut self,
+        whole: &TypedExpr,
+        op: &str,
+        l: &TypedExpr,
+        r: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (callee, extra) = if op == "|>" { (r, l) } else { (l, r) };
+        let (func, args): (TypedExpr, Vec<TypedExpr>) = match &callee.kind {
+            TypedKind::Call(f, existing) => {
+                let mut args = existing.clone();
+                args.push(extra.clone());
+                ((**f).clone(), args)
+            }
+            _ => (callee.clone(), vec![extra.clone()]),
+        };
+        self.gen_call(whole, &func, &args)
     }
 
     fn gen_cons(
@@ -1138,6 +1305,22 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             _ => Err("typed backend: unsupported case pattern".to_string()),
         }
+    }
+
+    /// An alloca placed at the top of the current function's entry block, so
+    /// it is executed once even when the using code runs inside a loop.
+    fn entry_alloca(
+        &self,
+        ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let entry = self.cur_fn.unwrap().get_first_basic_block().unwrap();
+        let b = self.ctx.create_builder();
+        match entry.get_first_instruction() {
+            Some(inst) => b.position_before(&inst),
+            None => b.position_at_end(entry),
+        }
+        b.build_alloca(ty, name).unwrap()
     }
 
     fn new_block(&mut self, base: &str) -> inkwell::basic_block::BasicBlock<'ctx> {

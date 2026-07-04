@@ -280,7 +280,7 @@ pub struct MonoProgram {
 
 /// A specialized function: its mangled name, the source name and concrete
 /// type it came from, its typed parameters, and its typed body.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypedFn {
     pub mangled: Name,
     pub original: Name,
@@ -290,13 +290,13 @@ pub struct TypedFn {
 }
 
 /// An expression annotated with its concrete type.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypedExpr {
     pub tipe: can::Type,
     pub kind: TypedKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypedKind {
     Int(i64),
     Float(f64),
@@ -326,7 +326,7 @@ pub enum TypedKind {
     Tuple(Box<TypedExpr>, Box<TypedExpr>, Option<Box<TypedExpr>>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypedLetDecl {
     /// A local definition, specialized with the enclosing substitution.
     /// (Polymorphic-in-context local helpers are not yet split per type.)
