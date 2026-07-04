@@ -102,6 +102,22 @@ fn float_arithmetic() {
 }
 
 #[test]
+fn let_bindings() {
+    assert_same(
+        "let_bindings",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       x = 6 * 7\n\
+         \x20       y = x - 2\n\
+         \x20   in\n\
+         \x20   x + y\n",
+    );
+}
+
+#[test]
 fn polymorphic_identity_specialized_to_int() {
     assert_same(
         "poly_identity",

@@ -236,6 +236,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Call(func, args) => self.gen_call(func, args),
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
+            TypedKind::Let(decls, body) => self.gen_let(decls, body),
             TypedKind::Negate(inner) => self.gen_negate(inner),
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
@@ -267,6 +268,43 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .try_as_basic_value()
             .left()
             .unwrap())
+    }
+
+    fn gen_let(
+        &mut self,
+        decls: &[crate::ir::mono::TypedLetDecl],
+        body: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ir::mono::TypedLetDecl::*;
+        for decl in decls {
+            match decl {
+                Def { name, params, body } if params.is_empty() => {
+                    let v = self.gen(body)?;
+                    self.locals.insert(name.to_string(), v);
+                }
+                Destruct(pattern, value) => {
+                    let v = self.gen(value)?;
+                    match simple_param_name(pattern) {
+                        Some(name) => {
+                            self.locals.insert(name, v);
+                        }
+                        None => {
+                            return Err(
+                                "typed backend: only simple `let` destructures are supported"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                }
+                _ => {
+                    return Err(
+                        "typed backend: local function definitions are not supported yet"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+        self.gen(body)
     }
 
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
