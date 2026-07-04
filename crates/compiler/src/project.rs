@@ -57,6 +57,10 @@ pub struct CheckedProject {
     /// region (regions are only unique within a module). Monomorphization
     /// consumes this; other backends ignore it.
     pub node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    /// Per-module, the inferred type of every top-level definition.
+    pub types: HashMap<Name, HashMap<Name, can::Type>>,
+    /// The entry module's name.
+    pub entry: Name,
 }
 
 pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
@@ -78,6 +82,42 @@ pub fn compile_project_native(
             entry.to_path_buf(),
             String::new(),
             "NATIVE BACKEND",
+            Region::ZERO,
+            message,
+        )]
+    })
+}
+
+/// Compile a project to a native binary via the *typed* (monomorphized)
+/// backend, which emits unboxed code. Single entry module for now (no user
+/// imports); a program that references other user modules will fail at
+/// codegen with an unknown-target error.
+pub fn compile_project_typed(
+    entry: &Path,
+    output: &Path,
+    target: generate::native::Target,
+) -> Result<(), Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    let entry_module = checked
+        .modules
+        .iter()
+        .find(|m| m.name == checked.entry)
+        .expect("entry module present");
+    let types = checked
+        .types
+        .get(&checked.entry)
+        .expect("entry module types present");
+    let node_types = checked
+        .node_types
+        .get(&checked.entry)
+        .expect("entry module node types present");
+    let program = crate::ir::mono::specialize_program(entry_module, types, node_types);
+    let layouts = crate::ir::layout::LayoutCtx::new(entry_module);
+    generate::typed::build(&program, &layouts, output, target).map_err(|message| {
+        vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "TYPED BACKEND",
             Region::ZERO,
             message,
         )]
@@ -113,6 +153,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     let mut interfaces = Interfaces::new();
     let mut canonical_modules = Vec::new();
     let mut all_node_types: HashMap<Name, HashMap<Region, can::Type>> = HashMap::new();
+    let mut all_types: HashMap<Name, HashMap<Name, can::Type>> = HashMap::new();
     for name in &order {
         let source_module = &modules[name];
         let (canonical, mut interface) =
@@ -174,6 +215,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
             def.tipe = types.get(&def.function).cloned();
         }
         interfaces.insert(name.clone(), interface);
+        all_types.insert(name.clone(), types);
         canonical_modules.push(canonical);
     }
 
@@ -181,6 +223,8 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         modules: canonical_modules,
         interfaces,
         node_types: all_node_types,
+        types: all_types,
+        entry: entry_name,
     })
 }
 

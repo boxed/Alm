@@ -21,7 +21,7 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|native-typed]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -35,6 +35,8 @@ fn make(args: &[String]) -> ExitCode {
     enum Backend {
         Js,
         Native(Target),
+        /// The typed, monomorphized backend (unboxed native code).
+        Typed(Target),
     }
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
@@ -47,8 +49,12 @@ fn make(args: &[String]) -> ExitCode {
                 "js" => backend = Backend::Js,
                 "native" => backend = Backend::Native(Target::Native),
                 "wasm" => backend = Backend::Native(Target::Wasm),
+                "native-typed" => backend = Backend::Typed(Target::Native),
                 other => {
-                    eprintln!("Unknown target `{}`. I know js, native and wasm.", other);
+                    eprintln!(
+                        "Unknown target `{}`. I know js, native, wasm and native-typed.",
+                        other
+                    );
                     return ExitCode::FAILURE;
                 }
             }
@@ -73,6 +79,10 @@ fn make(args: &[String]) -> ExitCode {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
             alm_compiler::project::compile_project_native(&input, &output, target).map(|()| output)
+        }
+        Backend::Typed(target) => {
+            let output = output.unwrap_or_else(|| input.with_extension(""));
+            alm_compiler::project::compile_project_typed(&input, &output, target).map(|()| output)
         }
         Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));
