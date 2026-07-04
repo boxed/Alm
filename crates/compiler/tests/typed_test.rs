@@ -632,3 +632,14 @@ fn deep_tail_recursion() {
          main = sum 1000000 0\n",
     );
 }
+
+#[test]
+fn clamp_kernel() {
+    assert_same(
+        "clamp",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main = clamp 0 10 -5 + clamp 0 10 15 * 10 + clamp 0 10 7 * 100\n",
+    );
+}

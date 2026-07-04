@@ -751,6 +751,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             ("Basics", "min") => self.kernel_min_max(args, true),
             ("Basics", "max") => self.kernel_min_max(args, false),
+            ("Basics", "clamp") => self.kernel_clamp(args),
             ("Basics", "truncate") => {
                 let x = self.gen(&args[0])?.into_float_value();
                 Ok(self.f_to_int(x))
@@ -1083,6 +1084,35 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(done_bb);
         Ok(result.as_basic_value())
+    }
+
+    /// `clamp lo hi x` = `if x < lo then lo else if x > hi then hi else x`.
+    fn kernel_clamp(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let lo = self.gen(&args[0])?;
+        let hi = self.gen(&args[1])?;
+        let x = self.gen(&args[2])?;
+        let is_float = matches!(self.layouts.layout_of(&args[2].tipe), Layout::Float);
+        let (below, above) = if is_float {
+            (
+                self.builder
+                    .build_float_compare(FloatPredicate::OLT, x.into_float_value(), lo.into_float_value(), "below")
+                    .unwrap(),
+                self.builder
+                    .build_float_compare(FloatPredicate::OGT, x.into_float_value(), hi.into_float_value(), "above")
+                    .unwrap(),
+            )
+        } else {
+            (
+                self.builder
+                    .build_int_compare(IntPredicate::SLT, x.into_int_value(), lo.into_int_value(), "below")
+                    .unwrap(),
+                self.builder
+                    .build_int_compare(IntPredicate::SGT, x.into_int_value(), hi.into_int_value(), "above")
+                    .unwrap(),
+            )
+        };
+        let low_clamped = self.builder.build_select(below, lo, x, "loclamp").unwrap();
+        Ok(self.builder.build_select(above, hi, low_clamped, "clamp").unwrap())
     }
 
     /// `min`/`max` on Int or Float — a comparison and select.
