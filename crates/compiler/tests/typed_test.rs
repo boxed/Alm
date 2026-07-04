@@ -136,6 +136,24 @@ fn case_on_integers() {
 }
 
 #[test]
+fn tuples_construct_and_destructure() {
+    assert_same(
+        "tuples",
+        "module Test exposing (..)\n\
+         \n\
+         divmod : Int -> Int -> ( Int, Int )\n\
+         divmod a b = ( a // b, a - (a // b) * b )\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       ( q, r ) = divmod 17 5\n\
+         \x20   in\n\
+         \x20   q * 100 + r\n",
+    );
+}
+
+#[test]
 fn polymorphic_identity_specialized_to_int() {
     assert_same(
         "poly_identity",

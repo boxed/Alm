@@ -119,6 +119,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Bool => self.ctx.bool_type().into(),
             Layout::Char => self.ctx.i32_type().into(),
             Layout::Unit => self.ctx.i64_type().into(),
+            Layout::Tuple(elems) => {
+                let fields: Vec<BasicTypeEnum> =
+                    elems.iter().map(|l| self.llvm_type(l)).collect();
+                self.ctx.struct_type(&fields, false).into()
+            }
             _ => self.ctx.i64_type().into(),
         }
     }
@@ -239,6 +244,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
             TypedKind::Case(scrutinee, branches) => self.gen_case(scrutinee, branches, expr),
             TypedKind::Negate(inner) => self.gen_negate(inner),
+            TypedKind::Tuple(a, b, c) => self.gen_tuple(expr, a, b, c.as_deref()),
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
                 std::mem::discriminant(other)
@@ -285,17 +291,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 }
                 Destruct(pattern, value) => {
                     let v = self.gen(value)?;
-                    match simple_param_name(pattern) {
-                        Some(name) => {
-                            self.locals.insert(name, v);
-                        }
-                        None => {
-                            return Err(
-                                "typed backend: only simple `let` destructures are supported"
-                                    .to_string(),
-                            )
-                        }
-                    }
+                    self.bind_pattern(pattern, v)?;
                 }
                 _ => {
                     return Err(
@@ -306,6 +302,66 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
         }
         self.gen(body)
+    }
+
+    fn gen_tuple(
+        &mut self,
+        whole: &TypedExpr,
+        a: &TypedExpr,
+        b: &TypedExpr,
+        c: Option<&TypedExpr>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let struct_ty = self
+            .llvm_type(&self.layouts.layout_of(&whole.tipe))
+            .into_struct_type();
+        let mut agg = struct_ty.get_undef();
+        let mut vals = vec![self.gen(a)?, self.gen(b)?];
+        if let Some(c) = c {
+            vals.push(self.gen(c)?);
+        }
+        for (i, v) in vals.into_iter().enumerate() {
+            agg = self
+                .builder
+                .build_insert_value(agg, v, i as u32, "tup")
+                .unwrap()
+                .into_struct_value();
+        }
+        Ok(agg.into())
+    }
+
+    /// Bind a pattern's variables to (parts of) a value. Supports variables,
+    /// wildcards, aliases, and tuple destructuring of unboxed structs.
+    fn bind_pattern(
+        &mut self,
+        pattern: &crate::ast::canonical::Pattern,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        use crate::ast::canonical::Pattern_::*;
+        match &pattern.value {
+            Var(name) => {
+                self.locals.insert(name.to_string(), value);
+                Ok(())
+            }
+            Anything => Ok(()),
+            Alias(inner, name) => {
+                self.locals.insert(name.value.to_string(), value);
+                self.bind_pattern(inner, value)
+            }
+            Tuple(a, b, rest) => {
+                let sv = value.into_struct_value();
+                let parts: Vec<&crate::ast::canonical::Pattern> =
+                    std::iter::once(a.as_ref()).chain(std::iter::once(b.as_ref())).chain(rest.iter()).collect();
+                for (i, p) in parts.into_iter().enumerate() {
+                    let elem = self
+                        .builder
+                        .build_extract_value(sv, i as u32, "elt")
+                        .unwrap();
+                    self.bind_pattern(p, elem)?;
+                }
+                Ok(())
+            }
+            _ => Err("typed backend: unsupported destructuring pattern".to_string()),
+        }
     }
 
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
