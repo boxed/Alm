@@ -321,6 +321,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let TypedKind::Ctor(_, _, ctor) = &func.kind {
             return self.gen_ctor_apply(whole, ctor, args);
         }
+        // A built-in call becomes a generated, type-specialized kernel.
+        if let TypedKind::Foreign(module, name) = &func.kind {
+            return self.gen_kernel(whole, module.as_str(), name.as_str(), args);
+        }
         let TypedKind::Global(name) = &func.kind else {
             return Err("typed backend: only direct calls are supported yet".to_string());
         };
@@ -591,6 +595,187 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 ctor.name, other
             )),
         }
+    }
+
+    /// Emit a generated, type-specialized kernel for a built-in call. Each is
+    /// an inline loop over the unboxed representation — no boxing, no call
+    /// into the uniform runtime kernels.
+    fn gen_kernel(
+        &mut self,
+        whole: &TypedExpr,
+        module: &str,
+        name: &str,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match (module, name) {
+            ("List", "sum") => self.kernel_list_sum(args),
+            ("List", "length") => self.kernel_list_length(args),
+            ("List", "range") => self.kernel_list_range(whole, args),
+            ("List", "isEmpty") => {
+                let list = self.gen(&args[0])?.into_pointer_value();
+                Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
+            }
+            _ => Err(format!(
+                "typed backend: built-in `{}.{}` has no generated kernel yet",
+                module, name
+            )),
+        }
+    }
+
+    /// `List.sum : List number -> number` — walk the cons list accumulating.
+    fn kernel_list_sum(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[0].tipe)?;
+        let is_float = matches!(elem, Layout::Float);
+        let list = self.gen(&args[0])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let acc_ty = self.llvm_type(&elem);
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("sum.loop");
+        let body_bb = self.new_block("sum.body");
+        let done_bb = self.new_block("sum.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let acc = self.builder.build_phi(acc_ty, "acc").unwrap();
+        let zero: BasicValueEnum = if is_float {
+            self.ctx.f64_type().const_zero().into()
+        } else {
+            self.ctx.i64_type().const_zero().into()
+        };
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(acc_ty, hp, "head").unwrap();
+        let new_acc: BasicValueEnum = if is_float {
+            self.builder
+                .build_float_add(
+                    acc.as_basic_value().into_float_value(),
+                    head.into_float_value(),
+                    "acc2",
+                )
+                .unwrap()
+                .into()
+        } else {
+            self.builder
+                .build_int_add(
+                    acc.as_basic_value().into_int_value(),
+                    head.into_int_value(),
+                    "acc2",
+                )
+                .unwrap()
+                .into()
+        };
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&new_acc as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
+    }
+
+    /// `List.length : List a -> Int` — walk counting elements.
+    fn kernel_list_length(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[0].tipe)?;
+        let list = self.gen(&args[0])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("len.loop");
+        let body_bb = self.new_block("len.body");
+        let done_bb = self.new_block("len.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let acc = self.builder.build_phi(i64_t, "n").unwrap();
+        let zero: BasicValueEnum = i64_t.const_zero().into();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, body_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let new_acc: BasicValueEnum = self
+            .builder
+            .build_int_add(acc.as_basic_value().into_int_value(), i64_t.const_int(1, false), "n2")
+            .unwrap()
+            .into();
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&new_acc as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
+    }
+
+    /// `List.range : Int -> Int -> List Int` — build [lo..hi] ascending by
+    /// consing from hi down to lo.
+    fn kernel_list_range(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let lo = self.gen(&args[0])?.into_int_value();
+        let hi = self.gen(&args[1])?.into_int_value();
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("range.loop");
+        let body_bb = self.new_block("range.body");
+        let done_bb = self.new_block("range.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let i = self.builder.build_phi(i64_t, "i").unwrap();
+        let acc = self.builder.build_phi(ptr_t, "acc").unwrap();
+        let null = ptr_t.const_null();
+        i.add_incoming(&[(&hi as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&null as &dyn BasicValue, entry)]);
+        let iv = i.as_basic_value().into_int_value();
+        let cond = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, iv, lo, "cmp")
+            .unwrap();
+        self.builder
+            .build_conditional_branch(cond, body_bb, done_bb)
+            .unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let acc_ptr = acc.as_basic_value().into_pointer_value();
+        let cell = self.cons(&elem, iv.into(), acc_ptr);
+        let i2: BasicValueEnum = self
+            .builder
+            .build_int_sub(iv, i64_t.const_int(1, false), "i2")
+            .unwrap()
+            .into();
+        let cell_val: BasicValueEnum = cell.into();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        i.add_incoming(&[(&i2 as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&cell_val as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
     }
 
     /// Allocate a cons cell `{elem, tail}` and return the pointer.

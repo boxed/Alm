@@ -320,6 +320,18 @@ fn list_cons_and_length() {
 }
 
 #[test]
+fn generated_list_kernels() {
+    assert_same(
+        "list_kernels",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   List.sum (List.range 1 100) + List.length (List.range 1 50)\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
