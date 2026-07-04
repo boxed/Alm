@@ -73,23 +73,24 @@ One 8,357-line entry point and its 13-module graph:
 
 | | median | best |
 |---|---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 741 ms | 734 ms |
-| elm 0.19.1, incremental (entry file touched) | 335 ms | 181 ms |
-| elm 0.19.1, no-op (nothing changed at all) | 119 ms | 115 ms |
-| **alm, full rebuild, no cache** | **155 ms** | **141 ms** |
+| elm 0.19.1, project-cold (elm-stuff wiped) | 738 ms | 727 ms |
+| elm 0.19.1, incremental (entry file touched) | 293 ms | 208 ms |
+| elm 0.19.1, no-op (nothing changed at all) | 108 ms | 105 ms |
+| **alm, full rebuild, no cache** | **131 ms** | **129 ms** |
 
 All 19 entry points of the same codebase (~40k lines):
 
 | | median |
 |---|---|
-| elm 0.19.1, project-cold | 2.90 s |
-| elm 0.19.1, all sources touched (warm elm-stuff) | 2.64 s |
-| **alm, full rebuild every time, no cache** | **0.89 s** |
+| elm 0.19.1, project-cold | 2.81 s |
+| elm 0.19.1, all sources touched (warm elm-stuff) | 2.22 s |
+| **alm, full rebuild every time, no cache** | **0.84 s** |
 
 A full alm rebuild is 2.2x faster than an incremental official rebuild
-and about as fast as the official compiler doing *nothing* (its no-op
-check alone costs ~119 ms). Across the whole suite alm is 3x faster
-while redoing all work every run. (The official compiler reuses
+and takes barely longer than the official compiler doing *nothing*
+(its no-op check alone costs ~108 ms; alm compiles everything in
+131 ms). Across the whole suite alm is 2.7-3.4x faster while redoing
+all work every run. (The official compiler reuses
 per-package artifacts from `~/.elm` even when project-cold; alm
 recompiles package sources every run.)
 
