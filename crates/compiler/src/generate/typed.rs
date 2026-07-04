@@ -90,6 +90,25 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ptr_t.fn_type(&[i64_t.into()], false),
             Some(Linkage::External),
         );
+        // String helpers — strings stay boxed as the uniform word (i64) and
+        // interoperate with the runtime.
+        self.module.add_function(
+            "rt_str",
+            i64_t.fn_type(&[ptr_t.into(), i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_append",
+            i64_t.fn_type(&[i64_t.into(), i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["rtb$String$fromInt", "rtb$String$fromFloat"] {
+            self.module.add_function(
+                name,
+                i64_t.fn_type(&[i64_t.into()], false),
+                Some(Linkage::External),
+            );
+        }
 
         // Forward-declare every specialization so calls resolve.
         for f in &mono.functions {
@@ -242,6 +261,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let boxed = match self.layouts.layout_of(&main.body.tipe) {
             Layout::Int => self.call_box("rt_int", raw),
             Layout::Float => self.call_box("rt_float", raw),
+            // A string is already a uniform word; hand it straight to print.
+            Layout::Str => raw,
             other => {
                 return Err(format!(
                     "typed backend: main has layout {:?}, which the skeleton cannot box yet",
@@ -254,9 +275,14 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     }
 
     fn call_box(&self, name: &str, arg: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        self.call_named(name, &[arg])
+    }
+
+    fn call_named(&self, name: &str, args: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
         let f = self.module.get_function(name).unwrap();
+        let argv: Vec<_> = args.iter().map(|a| (*a).into()).collect();
         self.builder
-            .build_call(f, &[arg.into()], "box")
+            .build_call(f, &argv, "rt")
             .unwrap()
             .try_as_basic_value()
             .left()
@@ -271,6 +297,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .const_int(*n as u64, true)
                 .into()),
             TypedKind::Float(f) => Ok(self.ctx.f64_type().const_float(*f).into()),
+            TypedKind::Str(s) => self.gen_string(s),
             TypedKind::Unit => Ok(self.ctx.i64_type().const_zero().into()),
             TypedKind::Local(name) => self
                 .locals
@@ -299,6 +326,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 self.gen_pipe(expr, op.as_str(), l, r)
             }
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "::" => self.gen_cons(expr, l, r),
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "++" => self.gen_append(l, r),
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
@@ -621,6 +649,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
+            }
+            ("String", "fromInt") => {
+                let n = self.gen(&args[0])?;
+                let boxed = self.call_box("rt_int", n);
+                Ok(self.call_named("rtb$String$fromInt", &[boxed]))
+            }
+            ("String", "fromFloat") => {
+                let f = self.gen(&args[0])?;
+                let boxed = self.call_box("rt_float", f);
+                Ok(self.call_named("rtb$String$fromFloat", &[boxed]))
             }
             _ => Err(format!(
                 "typed backend: built-in `{}.{}` has no generated kernel yet",
@@ -945,6 +983,48 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let tp = self.builder.build_struct_gep(cell, raw, 1, "tp").unwrap();
         self.builder.build_store(tp, tail).unwrap();
         raw
+    }
+
+    /// A string literal: an interned byte constant handed to `rt_str`, which
+    /// yields a uniform string word.
+    fn gen_string(&mut self, s: &str) -> Result<BasicValueEnum<'ctx>, String> {
+        let bytes = s.as_bytes();
+        let data = self.ctx.const_string(bytes, false);
+        let g = self.module.add_global(data.get_type(), None, "str");
+        g.set_initializer(&data);
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        let rt_str = self.module.get_function("rt_str").unwrap();
+        let len = self.ctx.i64_type().const_int(bytes.len() as u64, false);
+        Ok(self
+            .builder
+            .build_call(rt_str, &[g.as_pointer_value().into(), len.into()], "s")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap())
+    }
+
+    /// `++` on strings: the operands are uniform string words, appended by the
+    /// runtime. (List append is not handled by this path.)
+    fn gen_append(
+        &mut self,
+        l: &TypedExpr,
+        r: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        if !matches!(self.layouts.layout_of(&l.tipe), Layout::Str) {
+            return Err("typed backend: ++ is only supported on strings yet".to_string());
+        }
+        let lv = self.gen(l)?;
+        let rv = self.gen(r)?;
+        let rt_append = self.module.get_function("rt_append").unwrap();
+        Ok(self
+            .builder
+            .build_call(rt_append, &[lv.into(), rv.into()], "app")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap())
     }
 
     /// `x |> f` and `f <| x` are application. Normalize to a flattened call —

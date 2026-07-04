@@ -352,6 +352,20 @@ fn higher_order_kernels_with_named_functions() {
 }
 
 #[test]
+fn strings_and_fromint() {
+    assert_same(
+        "strings",
+        "module Test exposing (..)\n\
+         \n\
+         greet : Int -> String\n\
+         greet n = \"tick \" ++ String.fromInt n\n\
+         \n\
+         main : String\n\
+         main = greet 42 ++ \"!\"\n",
+    );
+}
+
+#[test]
 fn deep_tail_recursion() {
     // 1,000,000-deep self-recursion in tail position. If LLVM's tail-call
     // elimination turns it into a loop we're fine; otherwise this overflows
