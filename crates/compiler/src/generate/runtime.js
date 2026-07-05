@@ -487,6 +487,17 @@ var $Debug$todo = function (message) {
     throw new Error('TODO: ' + message);
 };
 
+// KERNEL SHIMS — compiler-internal `Elm.Kernel.*` values referenced by
+// source-compiled packages (elm/core, elm-explorations/test). Mapped to alm's
+// own implementations where possible; HtmlAsJson (test introspection) stubbed.
+var $Elm$Kernel$Debug$toString = _Debug_toString;
+var $Elm$Kernel$Debug$log = $Debug$log;
+var $Elm$Kernel$Test$runThunk = function (thunk) { return thunk(_Utils_Tuple0); };
+var $Elm$Kernel$HtmlAsJson$toJson = function (_html) { return null; };
+var $Elm$Kernel$HtmlAsJson$attributeToJson = function (_attr) { return null; };
+var $Elm$Kernel$HtmlAsJson$eventHandler = function (_h) { return null; };
+var $Elm$Kernel$HtmlAsJson$taggerFunction = function (_t) { return null; };
+
 // BASICS — extras
 
 var $Basics$isNaN = function (n) { return isNaN(n); };
@@ -1538,6 +1549,9 @@ var $Http$expectWhatever = function (toMsg) {
         return _Http_defaultHandle(response, function (_body) { return $Result$Ok(_Utils_Tuple0); });
     } };
 };
+var $Http$expectStringResponse = F2(function (toMsg, toResult) {
+    return { toMsg: toMsg, handle: function (response) { return toResult(response); } };
+});
 var $Http$expectJson = F2(function (toMsg, decoder) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (body) {
@@ -1607,6 +1621,7 @@ function _Http_makeTask(config, handle) {
 var $Http$request = function (config) {
     return { $: 'CmdHttp', config: config };
 };
+var $Http$riskyRequest = $Http$request;
 var $Http$get = function (config) {
     return $Http$request({
         method: 'GET', headers: [], url: config.url, body: $Http$emptyBody,
@@ -1641,6 +1656,7 @@ var $Http$task = function (config) {
         return r.$ === 'Ok' ? $Task$succeed(r.a) : $Task$fail(r.a);
     }, _Http_makeTask(cfg, null));
 };
+var $Http$riskyTask = $Http$task;
 
 // FILE
 

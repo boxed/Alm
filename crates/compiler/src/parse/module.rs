@@ -233,6 +233,11 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
         }
         _ if p.starts_upper() => {
             let name = p.located(|p| p.upper_name("a type name"))?;
+            // Elm allows whitespace between the type name and `(..)`, e.g.
+            // `exposing ( Key (..) )`. Skip it, but only commit if `(..)`
+            // actually follows; otherwise this is an opaque exposure.
+            let snapshot = p.save();
+            let _ = p.chomp_space();
             if p.src_from_here().starts_with(b"(..)") {
                 let priv_start = p.position();
                 p.bump(4);
@@ -242,6 +247,7 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
                     Privacy::Public(Region::new(priv_start, end)),
                 ))
             } else {
+                p.restore(snapshot);
                 Ok(Exposed::Upper(name, Privacy::Private))
             }
         }

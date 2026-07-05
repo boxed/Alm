@@ -500,6 +500,12 @@ fn find_qualified_var(
     qualifier: &Name,
     name: &Name,
 ) -> CResult<can::Expr_> {
+    // Kernel modules are compiler-internal trusted JavaScript and may be
+    // referenced fully-qualified without an explicit import (as elm/core and
+    // elm-explorations/test do), so resolve them directly.
+    if qualifier.as_str().starts_with("Elm.Kernel.") {
+        return Ok(can::Expr_::VarForeign(qualifier.clone(), name.clone()));
+    }
     let candidates = env.resolve_modules(qualifier);
     if candidates.is_empty() {
         return Err(Error::new(
