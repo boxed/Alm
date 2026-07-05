@@ -1998,7 +1998,8 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
     }
 }
 
-unsafe extern "C" fn debug_to_string(v: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn debug_to_string(v: u64) -> u64 {
     let mut out = String::new();
     debug_fmt(&mut out, v);
     mkstr(out.into_bytes())

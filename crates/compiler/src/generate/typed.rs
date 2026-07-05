@@ -140,6 +140,56 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Some(Linkage::External),
         );
 
+        // Boxing helpers: build uniform values from unboxed ones (for
+        // Debug.toString and non-scalar main printing).
+        self.module.add_function(
+            "rt_chr",
+            i64_t.fn_type(&[self.ctx.i32_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_cons",
+            i64_t.fn_type(&[i64_t.into(), i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["rt_tuple", "rt_list"] {
+            self.module.add_function(
+                name,
+                i64_t.fn_type(&[self.ctx.i32_type().into(), ptr_t.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "rt_record_new",
+            i64_t.fn_type(&[self.ctx.i32_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_record_set",
+            self.ctx.void_type().fn_type(
+                &[i64_t.into(), self.ctx.i32_type().into(), ptr_t.into(), i64_t.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_ctor",
+            i64_t.fn_type(
+                &[ptr_t.into(), self.ctx.i32_type().into(), self.ctx.i32_type().into(), ptr_t.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "debug_to_string",
+            i64_t.fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["rt_true_v", "rt_false_v", "rt_unit_v"] {
+            let g = self.module.add_global(i64_t, None, name);
+            g.set_linkage(Linkage::External);
+        }
+
         // Forward-declare every specialization so calls resolve.
         for f in &mono.functions {
             let ret = self.llvm_type(&self.layouts.layout_of(&f.body.tipe));
@@ -308,6 +358,175 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     fn call_box(&self, name: &str, arg: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         self.call_named(name, &[arg])
+    }
+
+    fn load_global(&self, name: &str) -> BasicValueEnum<'ctx> {
+        let g = self.module.get_global(name).unwrap();
+        self.builder
+            .build_load(self.ctx.i64_type(), g.as_pointer_value(), name)
+            .unwrap()
+    }
+
+    /// A private, null-terminated C string constant, returning a pointer to it.
+    fn cstr(&mut self, text: &str) -> inkwell::values::PointerValue<'ctx> {
+        let data = self.ctx.const_string(text.as_bytes(), true);
+        let g = self.module.add_global(data.get_type(), None, "cstr");
+        g.set_initializer(&data);
+        g.set_constant(true);
+        g.set_linkage(Linkage::Private);
+        g.as_pointer_value()
+    }
+
+    /// Convert an unboxed value to the uniform runtime word, recursively, so
+    /// the runtime's Debug renderer can format it. Custom unions are not
+    /// handled yet.
+    fn box_value(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match self.layouts.layout_of(tipe) {
+            Layout::Int => Ok(self.call_named("rt_int", &[val])),
+            Layout::Float => Ok(self.call_named("rt_float", &[val])),
+            Layout::Char => Ok(self.call_named("rt_chr", &[val])),
+            Layout::Str => Ok(val),
+            Layout::Unit => Ok(self.load_global("rt_unit_v")),
+            Layout::Bool => {
+                let t = self.load_global("rt_true_v");
+                let f = self.load_global("rt_false_v");
+                Ok(self.builder.build_select(val.into_int_value(), t, f, "boolbox").unwrap())
+            }
+            Layout::Tuple(_) => self.box_tuple(val, tipe),
+            Layout::Record(_) => self.box_record(val, tipe),
+            Layout::List(_) => self.box_list(val, tipe),
+            other => Err(format!(
+                "typed backend: Debug.toString on layout {:?} is not supported yet",
+                other
+            )),
+        }
+    }
+
+    fn box_tuple(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let subs: Vec<&Type> = match tipe {
+            Type::Tuple(a, b, c) => {
+                let mut v = vec![a.as_ref(), b.as_ref()];
+                if let Some(c) = c {
+                    v.push(c);
+                }
+                v
+            }
+            _ => return Err("typed backend: box_tuple on non-tuple".to_string()),
+        };
+        let i64_t = self.ctx.i64_type();
+        let sv = val.into_struct_value();
+        let arr = self.entry_alloca(i64_t.array_type(subs.len() as u32).into(), "tup");
+        for (i, sub) in subs.iter().enumerate() {
+            let fv = self.builder.build_extract_value(sv, i as u32, "e").unwrap();
+            let boxed = self.box_value(fv, sub)?;
+            let ep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i64_t, arr, &[i64_t.const_int(i as u64, false)], "ep")
+                    .unwrap()
+            };
+            self.builder.build_store(ep, boxed).unwrap();
+        }
+        let n = self.ctx.i32_type().const_int(subs.len() as u64, false).into();
+        Ok(self.call_named("rt_tuple", &[n, arr.into()]))
+    }
+
+    fn box_record(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let field_types = match tipe {
+            Type::Record(fields, _) => fields.clone(),
+            _ => return Err("typed backend: box_record on non-record".to_string()),
+        };
+        let sorted = match self.layouts.layout_of(tipe) {
+            Layout::Record(fs) => fs,
+            _ => unreachable!(),
+        };
+        let sv = val.into_struct_value();
+        let n = self.ctx.i32_type().const_int(sorted.len() as u64, false).into();
+        let rec = self.call_named("rt_record_new", &[n]);
+        let set = self.module.get_function("rt_record_set").unwrap();
+        for (i, (fname, _)) in sorted.iter().enumerate() {
+            let field_ty = field_types
+                .iter()
+                .find(|(n, _)| n == fname)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| format!("typed backend: missing field `{}`", fname))?;
+            let fv = self.builder.build_extract_value(sv, i as u32, "f").unwrap();
+            let boxed = self.box_value(fv, &field_ty)?;
+            let nameptr = self.cstr(fname.as_str());
+            let idx = self.ctx.i32_type().const_int(i as u64, false);
+            self.builder
+                .build_call(
+                    set,
+                    &[rec.into(), idx.into(), nameptr.into(), boxed.into()],
+                    "",
+                )
+                .unwrap();
+        }
+        Ok(rec)
+    }
+
+    fn box_list(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let elem_ty = match tipe {
+            Type::Type(_, _, args) if args.len() == 1 => args[0].clone(),
+            _ => return Err("typed backend: box_list on non-list".to_string()),
+        };
+        let elem_layout = self.elem_layout(tipe)?;
+        let elem_llvm = self.llvm_type(&elem_layout);
+        let cell = self.cons_cell(&elem_layout);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // Reverse first so consing front-to-back yields the original order.
+        let reversed = self.emit_reverse(val.into_pointer_value(), &elem_layout);
+        let nil = self.call_named(
+            "rt_list",
+            &[self.ctx.i32_type().const_zero().into(), ptr_t.const_null().into()],
+        );
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("box.loop");
+        let body_bb = self.new_block("box.body");
+        let done_bb = self.new_block("box.done");
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let acc = self.builder.build_phi(self.ctx.i64_type(), "acc").unwrap();
+        cur.add_incoming(&[(&reversed as &dyn BasicValue, entry)]);
+        acc.add_incoming(&[(&nil as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder.build_conditional_branch(is_null, done_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_llvm, hp, "head").unwrap();
+        let boxed = self.box_value(head, &elem_ty)?;
+        let acc2 = self.call_named("rt_cons", &[boxed, acc.as_basic_value()]);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+        acc.add_incoming(&[(&acc2 as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(acc.as_basic_value())
     }
 
     fn call_named(&self, name: &str, args: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
@@ -794,6 +1013,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Ok(self.call_named("rt_unint", &[boxed_len]))
             }
             ("String", "join") => self.kernel_string_join(args),
+            ("Debug", "toString") => {
+                let v = self.gen(&args[0])?;
+                let boxed = self.box_value(v, &args[0].tipe)?;
+                Ok(self.call_named("debug_to_string", &[boxed]))
+            }
             ("Basics", "modBy") => self.kernel_mod_by(args),
             ("Basics", "remainderBy") => {
                 let m = self.gen(&args[0])?.into_int_value();

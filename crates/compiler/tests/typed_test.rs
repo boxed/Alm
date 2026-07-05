@@ -899,3 +899,20 @@ fn cross_module_specialization() {
 
     assert_eq!(native_out, js_out, "cross-module typed vs JS");
 }
+
+#[test]
+fn debug_tostring_values() {
+    assert_same(
+        "debug",
+        "module Test exposing (..)\n\
+         \n\
+         type alias P = { x : Int, y : Int }\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString ( 1, 2.5, True )\n\
+         \x20       ++ \" \" ++ Debug.toString [ 1, 2, 3 ]\n\
+         \x20       ++ \" \" ++ Debug.toString { x = 7, y = 8 }\n\
+         \x20       ++ \" \" ++ Debug.toString \"hi\"\n",
+    );
+}
