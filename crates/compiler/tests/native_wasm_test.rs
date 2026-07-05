@@ -6,7 +6,31 @@ use std::process::Command;
 
 use alm_compiler::{generate, ir, project};
 
-fn run_both(test_name: &str, source: &str) -> (String, String) {
+/// Build a `.wasm` file and run it under node's WASI, returning stdout.
+fn run_wasm(dir: &std::path::Path, wasm: &std::path::Path) -> String {
+    let runner = dir.join(format!(
+        "run-{}.cjs",
+        wasm.file_stem().unwrap().to_str().unwrap()
+    ));
+    std::fs::write(
+        &runner,
+        format!(
+            "const {{WASI}}=require('node:wasi');const fs=require('fs');(async()=>{{\
+             const wasi=new WASI({{version:'preview1',args:['p'],env:{{}},returnOnExit:true}});\
+             const m=await WebAssembly.compile(fs.readFileSync({:?}));\
+             const i=await WebAssembly.instantiate(m,wasi.getImportObject());\
+             wasi.start(i);}})();",
+            wasm.display()
+        ),
+    )
+    .expect("write runner");
+    run(Command::new("node").arg("--no-warnings").arg(&runner))
+}
+
+/// Returns (js, uniform-wasm, typed-wasm) stdout. `--target=wasm` now uses the
+/// typed backend; the uniform backend is still the fallback/substrate, so both
+/// are exercised here.
+fn run_both(test_name: &str, source: &str) -> (String, String, String) {
     let dir = std::env::temp_dir()
         .join("alm-wasm-tests")
         .join(format!("{}-{}", test_name, std::process::id()));
@@ -30,27 +54,25 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
         bundle.display()
     )));
 
-    // Wasm backend, via node's WASI.
+    // Uniform wasm backend, via node's WASI.
     let program = ir::lower::lower_project(&checked.modules);
-    let wasm = dir.join("test.wasm");
-    generate::native::build(&program, &wasm, generate::native::Target::Wasm)
-        .unwrap_or_else(|e| panic!("wasm build failed: {}", e));
-    let runner = dir.join("run.cjs");
-    std::fs::write(
-        &runner,
-        format!(
-            "const {{WASI}}=require('node:wasi');const fs=require('fs');(async()=>{{\
-             const wasi=new WASI({{version:'preview1',args:['p'],env:{{}},returnOnExit:true}});\
-             const m=await WebAssembly.compile(fs.readFileSync({:?}));\
-             const i=await WebAssembly.instantiate(m,wasi.getImportObject());\
-             wasi.start(i);}})();",
-            wasm.display()
-        ),
-    )
-    .expect("write runner");
-    let wasm_out = run(Command::new("node").arg("--no-warnings").arg(&runner));
+    let uniform_wasm = dir.join("uniform.wasm");
+    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| panic!("uniform wasm build failed: {}", e));
+    let uniform_out = run_wasm(&dir, &uniform_wasm);
 
-    (js_out, wasm_out)
+    // Typed wasm backend (what `--target=wasm` produces).
+    let typed_wasm = dir.join("typed.wasm");
+    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| {
+            panic!(
+                "typed wasm build failed:\n{}",
+                e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let typed_out = run_wasm(&dir, &typed_wasm);
+
+    (js_out, uniform_out, typed_out)
 }
 
 fn run(command: &mut Command) -> String {
@@ -78,24 +100,24 @@ fn run_worker_wasm(test_name: &str, source: &str) -> String {
     let checked = project::check_project(&entry).unwrap_or_else(|errors| {
         panic!("check failed:\n{}", errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
+    // Uniform wasm.
     let program = ir::lower::lower_project(&checked.modules);
-    let wasm = dir.join("test.wasm");
-    generate::native::build(&program, &wasm, generate::native::Target::Wasm)
-        .unwrap_or_else(|e| panic!("wasm build failed: {}", e));
-    let runner = dir.join("run.cjs");
-    std::fs::write(
-        &runner,
-        format!(
-            "const {{WASI}}=require('node:wasi');const fs=require('fs');(async()=>{{\
-             const wasi=new WASI({{version:'preview1',args:['p'],env:{{}},returnOnExit:true}});\
-             const m=await WebAssembly.compile(fs.readFileSync({:?}));\
-             const i=await WebAssembly.instantiate(m,wasi.getImportObject());\
-             wasi.start(i);}})();",
-            wasm.display()
-        ),
-    )
-    .expect("write runner");
-    run(Command::new("node").arg("--no-warnings").arg(&runner))
+    let uniform_wasm = dir.join("uniform.wasm");
+    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| panic!("uniform wasm build failed: {}", e));
+    let uniform_out = run_wasm(&dir, &uniform_wasm);
+    // Typed wasm (the `--target=wasm` default) must agree.
+    let typed_wasm = dir.join("typed.wasm");
+    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| {
+            panic!(
+                "typed wasm build failed:\n{}",
+                e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let typed_out = run_wasm(&dir, &typed_wasm);
+    assert_eq!(typed_out, uniform_out, "typed and uniform wasm workers disagree");
+    uniform_out
 }
 
 #[test]
@@ -124,9 +146,10 @@ fn tea_worker_and_timers() {
 }
 
 fn assert_same(test_name: &str, source: &str) {
-    let (js, wasm) = run_both(test_name, source);
+    let (js, uniform, typed) = run_both(test_name, source);
     assert!(!js.is_empty(), "JS output is empty");
-    assert_eq!(wasm, js, "wasm and JS backends disagree");
+    assert_eq!(uniform, js, "uniform wasm and JS backends disagree");
+    assert_eq!(typed, js, "typed wasm and JS backends disagree");
 }
 
 #[test]

@@ -21,7 +21,7 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|native-typed|wasm-typed]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -48,12 +48,15 @@ fn make(args: &[String]) -> ExitCode {
             match target {
                 "js" => backend = Backend::Js,
                 "native" => backend = Backend::Native(Target::Native),
-                "wasm" => backend = Backend::Native(Target::Wasm),
+                // `wasm` uses the monomorphized (typed) backend — unboxed, so
+                // allocation-heavy code is fast. `wasm-uniform` is the boxed
+                // fallback (broader coverage, the correctness substrate).
+                "wasm" | "wasm-typed" => backend = Backend::Typed(Target::Wasm),
+                "wasm-uniform" => backend = Backend::Native(Target::Wasm),
                 "native-typed" => backend = Backend::Typed(Target::Native),
-                "wasm-typed" => backend = Backend::Typed(Target::Wasm),
                 other => {
                     eprintln!(
-                        "Unknown target `{}`. I know js, native, wasm, native-typed and wasm-typed.",
+                        "Unknown target `{}`. I know js, native, wasm, wasm-uniform, and native-typed.",
                         other
                     );
                     return ExitCode::FAILURE;
