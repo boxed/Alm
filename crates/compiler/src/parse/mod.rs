@@ -149,6 +149,14 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the upcoming source is exactly `kw` as a keyword — matching the
+    /// text and not followed by an identifier character, so `type_` and
+    /// `typeToString` are not mistaken for the `type` keyword. Does not consume.
+    pub(crate) fn peek_keyword(&self, kw: &str) -> bool {
+        self.src[self.pos..].starts_with(kw.as_bytes())
+            && !self.peek_at(kw.len()).is_some_and(is_inner_char)
+    }
+
     /// Port of `Parse.Keyword`: the keyword must not be followed by an
     /// identifier character (`letting` is not `let`).
     pub fn keyword(&mut self, kw: &str) -> PResult<()> {

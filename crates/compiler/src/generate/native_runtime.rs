@@ -2316,6 +2316,82 @@ unsafe fn ap4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     let args = [a, b, c, d];
     rt_apply(f, 4, args.as_ptr())
 }
+unsafe fn ap5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    let args = [a, b, c, d, e];
+    rt_apply(f, 5, args.as_ptr())
+}
+#[no_mangle]
+pub unsafe extern "C" fn list_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    let (a, b, c, d) = (to_vec(a), to_vec(b), to_vec(c), to_vec(d));
+    let n = a.len().min(b.len()).min(c.len()).min(d.len());
+    let out: Vec<u64> = (0..n).map(|i| ap4(f, a[i], b[i], c[i], d[i])).collect();
+    list_from_slice(&out)
+}
+#[no_mangle]
+pub unsafe extern "C" fn list_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    let (a, b, c, d, e) = (to_vec(a), to_vec(b), to_vec(c), to_vec(d), to_vec(e));
+    let n = a.len().min(b.len()).min(c.len()).min(d.len()).min(e.len());
+    let out: Vec<u64> = (0..n).map(|i| ap5(f, a[i], b[i], c[i], d[i], e[i])).collect();
+    list_from_slice(&out)
+}
+#[no_mangle]
+pub unsafe extern "C" fn maybe_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) && is_ctor0(d) && is_ctor0(e) {
+        just(ap5(
+            f,
+            rt_ctor_arg(a, 0),
+            rt_ctor_arg(b, 0),
+            rt_ctor_arg(c, 0),
+            rt_ctor_arg(d, 0),
+            rt_ctor_arg(e, 0),
+        ))
+    } else {
+        nothing()
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn result_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
+    if !is_ctor0(a) {
+        a
+    } else if !is_ctor0(b) {
+        b
+    } else if !is_ctor0(c) {
+        c
+    } else {
+        res_ok(ap3(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0), rt_ctor_arg(c, 0)))
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn result_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    for r in [a, b, c, d] {
+        if !is_ctor0(r) {
+            return r;
+        }
+    }
+    res_ok(ap4(
+        f,
+        rt_ctor_arg(a, 0),
+        rt_ctor_arg(b, 0),
+        rt_ctor_arg(c, 0),
+        rt_ctor_arg(d, 0),
+    ))
+}
+#[no_mangle]
+pub unsafe extern "C" fn result_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    for r in [a, b, c, d, e] {
+        if !is_ctor0(r) {
+            return r;
+        }
+    }
+    res_ok(ap5(
+        f,
+        rt_ctor_arg(a, 0),
+        rt_ctor_arg(b, 0),
+        rt_ctor_arg(c, 0),
+        rt_ctor_arg(d, 0),
+        rt_ctor_arg(e, 0),
+    ))
+}
 unsafe fn tuple_xy(v: u64) -> (f64, f64) {
     if let Value::Tuple(t) = deref(v) {
         (num(t[0]), num(t[1]))
@@ -3130,9 +3206,15 @@ kernel_fns! {
     G_CHAR_ISALPHANUM "$Char$isAlphaNum" char_is_alpha_num, 1;
     G_CHAR_ISHEXDIGIT "$Char$isHexDigit" char_is_hex_digit, 1;
     G_LIST_MAP3 "$List$map3" list_map3, 4;
+    G_LIST_MAP4 "$List$map4" list_map4, 5;
+    G_LIST_MAP5 "$List$map5" list_map5, 6;
     G_MAYBE_MAP3 "$Maybe$map3" maybe_map3, 4;
     G_MAYBE_MAP4 "$Maybe$map4" maybe_map4, 5;
+    G_MAYBE_MAP5 "$Maybe$map5" maybe_map5, 6;
     G_RESULT_MAP2 "$Result$map2" result_map2, 3;
+    G_RESULT_MAP3 "$Result$map3" result_map3, 4;
+    G_RESULT_MAP4 "$Result$map4" result_map4, 5;
+    G_RESULT_MAP5 "$Result$map5" result_map5, 6;
     G_STRING_FOLDL "$String$foldl" string_foldl, 3;
     G_STRING_FOLDR "$String$foldr" string_foldr, 3;
     G_SET_PARTITION "$Set$partition" set_partition, 2;

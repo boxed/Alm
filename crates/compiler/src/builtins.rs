@@ -212,6 +212,12 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Maybe", "map4", "(a -> b -> c -> d -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe value"),
             // Result — extras
             V("Result", "map2", "(a -> b -> value) -> Result x a -> Result x b -> Result x value"),
+            V("Result", "map3", "(a -> b -> c -> value) -> Result x a -> Result x b -> Result x c -> Result x value"),
+            V("Result", "map4", "(a -> b -> c -> d -> value) -> Result x a -> Result x b -> Result x c -> Result x d -> Result x value"),
+            V("Result", "map5", "(a -> b -> c -> d -> e -> value) -> Result x a -> Result x b -> Result x c -> Result x d -> Result x e -> Result x value"),
+            V("Maybe", "map5", "(a -> b -> c -> d -> e -> value) -> Maybe a -> Maybe b -> Maybe c -> Maybe d -> Maybe e -> Maybe value"),
+            V("List", "map4", "(a -> b -> c -> d -> result) -> List a -> List b -> List c -> List d -> List result"),
+            V("List", "map5", "(a -> b -> c -> d -> e -> result) -> List a -> List b -> List c -> List d -> List e -> List result"),
             // Dict
             V("Dict", "empty", "Dict k v"),
             V("Dict", "singleton", "comparable -> v -> Dict comparable v"),

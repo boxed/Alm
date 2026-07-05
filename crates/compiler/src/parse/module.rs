@@ -40,7 +40,7 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
 
     // IMPORTS
     let mut imports = Vec::new();
-    while p.col == 1 && p.src_from_here().starts_with(b"import") {
+    while p.col == 1 && p.peek_keyword("import") {
         imports.push(chomp_import(p)?);
         p.chomp_space()?;
     }
@@ -56,7 +56,7 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
         p.check_fresh_line(
             "I was expecting a new top-level definition here, starting at the beginning of the line.",
         )?;
-        if p.src_from_here().starts_with(b"type") {
+        if p.peek_keyword("type") {
             let start = p.position();
             p.keyword("type")?;
             p.chomp_and_check_indent("I was expecting a type name after `type`")?;
@@ -71,7 +71,7 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
                 let end = p.position();
                 unions.push(Located::at(start, end, union));
             }
-        } else if p.src_from_here().starts_with(b"infix") {
+        } else if p.peek_keyword("infix") {
             let start = p.position();
             let infix = chomp_infix(p)?;
             let end = p.position();

@@ -380,3 +380,21 @@ y = """tab\there"""
     assert_eq!(m.values[0].value.body.value, Expr_::Str("a\"".into()));
     assert_eq!(m.values[1].value.body.value, Expr_::Str("tab\there".into()));
 }
+
+#[test]
+fn identifiers_starting_with_keywords() {
+    // `type_`, `typeToString`, `port_` etc. are valid identifiers, not the
+    // `type`/`port` keywords. (Regression: registry packages use `type_`.)
+    parse_ok(
+        "module Test exposing (..)\n\
+         \n\
+         type_ : Int\n\
+         type_ = 1\n\
+         \n\
+         typeToString : Int -> Int\n\
+         typeToString n = n\n\
+         \n\
+         port_ : Int\n\
+         port_ = 2\n",
+    );
+}
