@@ -1,4 +1,5 @@
 target/
+.registry/
 examples/*.js
 tests/mutation/covered-lines.txt
 tests/mutation/__pycache__/

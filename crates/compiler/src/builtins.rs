@@ -601,7 +601,7 @@ pub fn values() -> &'static [BuiltinValue] {
 /// Int-valued HTML attribute helpers in Html.Attributes.
 pub const HTML_INT_ATTRS: &[&str] = &[
     "rows", "cols", "colspan", "rowspan", "tabindex", "size", "maxlength", "minlength",
-    "height", "width",
+    "height", "width", "start",
 ];
 
 /// SVG element helpers.
@@ -666,6 +666,19 @@ pub const SVG_ATTRS: &[(&str, &str)] = &[
     ("preserveAspectRatio", "preserveAspectRatio"),
     ("xlinkHref", "xlink:href"),
     ("pointerEvents", "pointer-events"),
+    ("shapeRendering", "shape-rendering"),
+    ("colorInterpolation", "color-interpolation"),
+    ("colorInterpolationFilters", "color-interpolation-filters"),
+    ("colorRendering", "color-rendering"),
+    ("imageRendering", "image-rendering"),
+    ("xmlBase", "xml:base"),
+    ("xmlnsXlink", "xmlns:xlink"),
+    ("xlinkActuate", "xlink:actuate"),
+    ("xlinkArcrole", "xlink:arcrole"),
+    ("xlinkRole", "xlink:role"),
+    ("xlinkShow", "xlink:show"),
+    ("xlinkTitle", "xlink:title"),
+    ("xlinkType", "xlink:type"),
     ("visibility", "visibility"),
     ("version", "version"),
     ("attributeName", "attributeName"),
