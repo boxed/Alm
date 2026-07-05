@@ -2310,6 +2310,221 @@ pub unsafe extern "C" fn terminal_write_line(s: u64) -> u64 {
     ctor(b"CmdWrite\0".as_ptr(), CT_WRITE, vec![s])
 }
 
+// ADDITIONAL PURE KERNELS (audit gap-fillers)
+
+unsafe fn ap4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    let args = [a, b, c, d];
+    rt_apply(f, 4, args.as_ptr())
+}
+unsafe fn tuple_xy(v: u64) -> (f64, f64) {
+    if let Value::Tuple(t) = deref(v) {
+        (num(t[0]), num(t[1]))
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+// -- Basics: trigonometry and float predicates --
+#[no_mangle]
+pub unsafe extern "C" fn basics_cos(x: u64) -> u64 {
+    rt_float(num(x).cos())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_sin(x: u64) -> u64 {
+    rt_float(num(x).sin())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_tan(x: u64) -> u64 {
+    rt_float(num(x).tan())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_acos(x: u64) -> u64 {
+    rt_float(num(x).acos())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_asin(x: u64) -> u64 {
+    rt_float(num(x).asin())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_atan(x: u64) -> u64 {
+    rt_float(num(x).atan())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_atan2(y: u64, x: u64) -> u64 {
+    rt_float(num(y).atan2(num(x)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_degrees(d: u64) -> u64 {
+    rt_float(num(d) * std::f64::consts::PI / 180.0)
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_radians(r: u64) -> u64 {
+    rt_float(num(r))
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_turns(t: u64) -> u64 {
+    rt_float(num(t) * 2.0 * std::f64::consts::PI)
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_from_polar(p: u64) -> u64 {
+    let (r, theta) = tuple_xy(p);
+    pair(rt_float(r * theta.cos()), rt_float(r * theta.sin()))
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_to_polar(p: u64) -> u64 {
+    let (x, y) = tuple_xy(p);
+    pair(rt_float((x * x + y * y).sqrt()), rt_float(y.atan2(x)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_is_nan(x: u64) -> u64 {
+    rt_bool(num(x).is_nan())
+}
+#[no_mangle]
+pub unsafe extern "C" fn basics_is_infinite(x: u64) -> u64 {
+    rt_bool(num(x).is_infinite())
+}
+
+// -- Bitwise: 32-bit, matching JS semantics --
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_and(a: u64, b: u64) -> u64 {
+    mk_int(((int_val(a) as i32) & (int_val(b) as i32)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_or(a: u64, b: u64) -> u64 {
+    mk_int(((int_val(a) as i32) | (int_val(b) as i32)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_xor(a: u64, b: u64) -> u64 {
+    mk_int(((int_val(a) as i32) ^ (int_val(b) as i32)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_complement(a: u64) -> u64 {
+    mk_int((!(int_val(a) as i32)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_shift_left_by(offset: u64, a: u64) -> u64 {
+    mk_int(((int_val(a) as i32) << (int_val(offset) as u32 & 31)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_shift_right_by(offset: u64, a: u64) -> u64 {
+    mk_int(((int_val(a) as i32) >> (int_val(offset) as u32 & 31)) as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn bitwise_shift_right_zf_by(offset: u64, a: u64) -> u64 {
+    mk_int(((int_val(a) as u32) >> (int_val(offset) as u32 & 31)) as i64)
+}
+
+// -- Char --
+#[no_mangle]
+pub unsafe extern "C" fn char_is_alpha_num(c: u64) -> u64 {
+    let n = as_int(c);
+    rt_bool(
+        (b'a' as i64..=b'z' as i64).contains(&n)
+            || (b'A' as i64..=b'Z' as i64).contains(&n)
+            || (b'0' as i64..=b'9' as i64).contains(&n),
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn char_is_hex_digit(c: u64) -> u64 {
+    let n = as_int(c);
+    rt_bool(
+        (b'0' as i64..=b'9' as i64).contains(&n)
+            || (b'a' as i64..=b'f' as i64).contains(&n)
+            || (b'A' as i64..=b'F' as i64).contains(&n),
+    )
+}
+
+// -- List/Maybe/Result combinators --
+#[no_mangle]
+pub unsafe extern "C" fn list_map3(f: u64, xs: u64, ys: u64, zs: u64) -> u64 {
+    let (xs, ys, zs) = (to_vec(xs), to_vec(ys), to_vec(zs));
+    let n = xs.len().min(ys.len()).min(zs.len());
+    let out: Vec<u64> = (0..n).map(|i| ap3(f, xs[i], ys[i], zs[i])).collect();
+    list_from_slice(&out)
+}
+#[no_mangle]
+pub unsafe extern "C" fn maybe_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
+    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) {
+        just(ap3(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0), rt_ctor_arg(c, 0)))
+    } else {
+        nothing()
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn maybe_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) && is_ctor0(d) {
+        just(ap4(
+            f,
+            rt_ctor_arg(a, 0),
+            rt_ctor_arg(b, 0),
+            rt_ctor_arg(c, 0),
+            rt_ctor_arg(d, 0),
+        ))
+    } else {
+        nothing()
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn result_map2(f: u64, a: u64, b: u64) -> u64 {
+    if !is_ctor0(a) {
+        a
+    } else if !is_ctor0(b) {
+        b
+    } else {
+        res_ok(ap2(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0)))
+    }
+}
+
+// -- String folds --
+#[no_mangle]
+pub unsafe extern "C" fn string_foldl(f: u64, init: u64, s: u64) -> u64 {
+    let text: String = String::from_utf8_lossy(sbytes(s)).into_owned();
+    let mut acc = init;
+    for ch in text.chars() {
+        acc = ap2(f, rt_chr(ch as i32), acc);
+    }
+    acc
+}
+#[no_mangle]
+pub unsafe extern "C" fn string_foldr(f: u64, init: u64, s: u64) -> u64 {
+    let text: String = String::from_utf8_lossy(sbytes(s)).into_owned();
+    let mut acc = init;
+    for ch in text.chars().rev() {
+        acc = ap2(f, rt_chr(ch as i32), acc);
+    }
+    acc
+}
+
+// -- Set/Array extras --
+#[no_mangle]
+pub unsafe extern "C" fn set_partition(f: u64, s: u64) -> u64 {
+    let mut yes = Vec::new();
+    let mut no = Vec::new();
+    for &x in as_set(s) {
+        if truthy(ap1(f, x)) {
+            yes.push(x);
+        } else {
+            no.push(x);
+        }
+    }
+    pair(alloc(Value::Set(yes)), alloc(Value::Set(no)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn array_append(a: u64, b: u64) -> u64 {
+    let mut els = as_array(a).to_vec();
+    els.extend_from_slice(as_array(b));
+    alloc(Value::Array(els))
+}
+#[no_mangle]
+pub unsafe extern "C" fn array_to_indexed_list(a: u64) -> u64 {
+    let items: Vec<u64> = as_array(a)
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| pair(mk_int(i as i64), x))
+        .collect();
+    list_from_slice(&items)
+}
+
 // DICT / SET / ARRAY
 //
 // Immutable collections over uniform value words. Dict and Set keep their
@@ -2891,6 +3106,38 @@ kernel_fns! {
     G_PLATFORM_SUB_MAP "$Platform$Sub$map" sub_map, 2;
 
     G_TERMINAL_WRITELINE "$Terminal$writeLine" terminal_write_line, 1;
+    G_BASICS_COS "$Basics$cos" basics_cos, 1;
+    G_BASICS_SIN "$Basics$sin" basics_sin, 1;
+    G_BASICS_TAN "$Basics$tan" basics_tan, 1;
+    G_BASICS_ACOS "$Basics$acos" basics_acos, 1;
+    G_BASICS_ASIN "$Basics$asin" basics_asin, 1;
+    G_BASICS_ATAN "$Basics$atan" basics_atan, 1;
+    G_BASICS_ATAN2 "$Basics$atan2" basics_atan2, 2;
+    G_BASICS_DEGREES "$Basics$degrees" basics_degrees, 1;
+    G_BASICS_RADIANS "$Basics$radians" basics_radians, 1;
+    G_BASICS_TURNS "$Basics$turns" basics_turns, 1;
+    G_BASICS_FROMPOLAR "$Basics$fromPolar" basics_from_polar, 1;
+    G_BASICS_TOPOLAR "$Basics$toPolar" basics_to_polar, 1;
+    G_BASICS_ISNAN "$Basics$isNaN" basics_is_nan, 1;
+    G_BASICS_ISINF "$Basics$isInfinite" basics_is_infinite, 1;
+    G_BITWISE_AND "$Bitwise$and" bitwise_and, 2;
+    G_BITWISE_OR "$Bitwise$or" bitwise_or, 2;
+    G_BITWISE_XOR "$Bitwise$xor" bitwise_xor, 2;
+    G_BITWISE_COMPLEMENT "$Bitwise$complement" bitwise_complement, 1;
+    G_BITWISE_SHL "$Bitwise$shiftLeftBy" bitwise_shift_left_by, 2;
+    G_BITWISE_SHR "$Bitwise$shiftRightBy" bitwise_shift_right_by, 2;
+    G_BITWISE_SHRZF "$Bitwise$shiftRightZfBy" bitwise_shift_right_zf_by, 2;
+    G_CHAR_ISALPHANUM "$Char$isAlphaNum" char_is_alpha_num, 1;
+    G_CHAR_ISHEXDIGIT "$Char$isHexDigit" char_is_hex_digit, 1;
+    G_LIST_MAP3 "$List$map3" list_map3, 4;
+    G_MAYBE_MAP3 "$Maybe$map3" maybe_map3, 4;
+    G_MAYBE_MAP4 "$Maybe$map4" maybe_map4, 5;
+    G_RESULT_MAP2 "$Result$map2" result_map2, 3;
+    G_STRING_FOLDL "$String$foldl" string_foldl, 3;
+    G_STRING_FOLDR "$String$foldr" string_foldr, 3;
+    G_SET_PARTITION "$Set$partition" set_partition, 2;
+    G_ARRAY_APPEND "$Array$append" array_append, 2;
+    G_ARRAY_TOINDEXEDLIST "$Array$toIndexedList" array_to_indexed_list, 1;
     G_DICT_SINGLETON "$Dict$singleton" dict_singleton, 2;
     G_DICT_INSERT "$Dict$insert" dict_insert, 3;
     G_DICT_GET "$Dict$get" dict_get, 2;

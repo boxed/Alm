@@ -1118,3 +1118,20 @@ fn array_operations() {
          \x20       + Array.foldl (\\x acc -> acc + x) 0 (Array.map (\\x -> x * 2) a)\n",
     );
 }
+
+#[test]
+fn bitwise_and_trig_via_generic_foreign() {
+    assert_same(
+        "generic_foreign",
+        "module Test exposing (..)\n\
+         \n\
+         import Bitwise\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   Bitwise.and 12 10\n\
+         \x20       + Bitwise.or 12 10 * 100\n\
+         \x20       + Bitwise.shiftLeftBy 4 1 * 10000\n\
+         \x20       + round (cos 0.0) * 1000000\n",
+    );
+}

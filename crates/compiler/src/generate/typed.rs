@@ -227,6 +227,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             i64_t.fn_type(&[i64_t.into()], false),
             Some(Linkage::External),
         );
+        // rt_apply(closure, argc, args) applies a uniform closure.
+        self.module.add_function(
+            "rt_apply",
+            i64_t.fn_type(&[i64_t.into(), self.ctx.i32_type().into(), ptr_t.into()], false),
+            Some(Linkage::External),
+        );
         // rt_closure(fn_ptr, arity, applied, args) builds a uniform closure.
         self.module.add_function(
             "rt_closure",
@@ -1830,12 +1836,62 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("Array", "empty") => Ok(self.load_uniform_global("$Array$empty")),
             _ => match collection_symbol(module, name) {
                 Some(symbol) => self.marshal_call(symbol, args, &whole.tipe),
-                None => Err(format!(
-                    "typed backend: built-in `{}.{}` has no generated kernel yet",
-                    module, name
-                )),
+                // Any other built-in: go through the uniform runtime's
+                // `$Module$name` closure (box args, apply, unbox result).
+                None => self.generic_foreign(module, name, args, &whole.tipe),
             },
         }
+    }
+
+    /// Fallback for built-ins without a specialized typed kernel: box the
+    /// arguments, apply the uniform runtime closure `$Module$name`, and unbox
+    /// the result. Hot paths (List/arithmetic/records) are handled before
+    /// this; everything else works correctly through the runtime, boxed.
+    fn generic_foreign(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[TypedExpr],
+        result_tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let sym = format!("${}${}", module.replace('.', "$"), name);
+        let clos = self.load_uniform_global(&sym);
+        if args.is_empty() {
+            // A value global (e.g. Basics.pi); unbox to the result type.
+            return self.unbox_value(clos, result_tipe);
+        }
+        let i64_t = self.ctx.i64_type();
+        let mut boxed = Vec::with_capacity(args.len());
+        for arg in args {
+            let v = self.gen(arg)?;
+            boxed.push(self.box_value(v, &arg.tipe)?);
+        }
+        let args_arr = self.entry_alloca(i64_t.array_type(boxed.len() as u32).into(), "aargs");
+        for (i, b) in boxed.iter().enumerate() {
+            let ep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i64_t, args_arr, &[i64_t.const_int(i as u64, false)], "ep")
+                    .unwrap()
+            };
+            self.builder.build_store(ep, *b).unwrap();
+        }
+        let rt_apply = self.module.get_function("rt_apply").unwrap();
+        let uniform = self
+            .builder
+            .build_call(
+                rt_apply,
+                &[
+                    clos.into(),
+                    self.ctx.i32_type().const_int(boxed.len() as u64, false).into(),
+                    args_arr.into(),
+                ],
+                "gf",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        self.unbox_value(uniform, result_tipe)
     }
 
     fn call_fn(
