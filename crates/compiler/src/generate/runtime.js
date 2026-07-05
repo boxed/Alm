@@ -429,6 +429,8 @@ var $Char$isUpper = function (c) { return c >= 'A' && c <= 'Z'; };
 var $Char$isLower = function (c) { return c >= 'a' && c <= 'z'; };
 var $Char$toUpper = function (c) { return c.toUpperCase(); };
 var $Char$toLower = function (c) { return c.toLowerCase(); };
+var $Char$toLocaleUpper = function (c) { return c.toLocaleUpperCase(); };
+var $Char$toLocaleLower = function (c) { return c.toLocaleLowerCase(); };
 
 // TUPLE
 

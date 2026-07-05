@@ -163,6 +163,8 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Char", "isLower", "Char -> Bool"),
             V("Char", "toUpper", "Char -> Char"),
             V("Char", "toLower", "Char -> Char"),
+            V("Char", "toLocaleUpper", "Char -> Char"),
+            V("Char", "toLocaleLower", "Char -> Char"),
             // Maybe
             V("Maybe", "withDefault", "a -> Maybe a -> a"),
             V("Maybe", "map", "(a -> b) -> Maybe a -> Maybe b"),
