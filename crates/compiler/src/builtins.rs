@@ -751,7 +751,7 @@ pub const HTML_STRING_ATTRS: &[&str] = &[
 pub const HTML_BOOL_ATTRS: &[&str] = &[
     "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus", "contenteditable",
     "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck", "autocomplete",
-    "ismap",
+    "ismap", "default",
 ];
 
 // INFIX OPERATORS — the table from elm/core's Basics.elm and List.elm.
