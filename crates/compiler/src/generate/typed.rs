@@ -399,6 +399,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Tuple(_) => self.box_tuple(val, tipe),
             Layout::Record(_) => self.box_record(val, tipe),
             Layout::List(_) => self.box_list(val, tipe),
+            Layout::Enum(_) => self.box_enum(val, tipe),
+            Layout::Tagged(_) => self.box_tagged(val, tipe),
+            // An unresolved phantom (e.g. the element type of `Nothing`): this
+            // boxing code is generated but never executed. A unit placeholder
+            // keeps it well-typed.
+            Layout::Ref => Ok(self.load_global("rt_unit_v")),
             other => Err(format!(
                 "typed backend: Debug.toString on layout {:?} is not supported yet",
                 other
@@ -476,6 +482,131 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .unwrap();
         }
         Ok(rec)
+    }
+
+    /// Box an enum value (i32 tag) into a uniform nullary constructor,
+    /// switching on the tag to pick the constructor name.
+    fn box_enum(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let ctors = self
+            .layouts
+            .union_ctors(tipe)
+            .ok_or_else(|| "typed backend: unknown enum for Debug.toString".to_string())?;
+        let i32_t = self.ctx.i32_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let tag = val.into_int_value();
+        let default_bb = self.new_block("boxe.def");
+        let merge = self.new_block("boxe.end");
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("boxe.{}", k))).collect();
+        let cases: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+            .collect();
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+
+        for (k, bb) in blocks.iter().enumerate() {
+            self.builder.position_at_end(*bb);
+            let nameptr = self.cstr(ctors[k].0.as_str());
+            let ctor = self.call_named(
+                "rt_ctor",
+                &[
+                    nameptr.into(),
+                    i32_t.const_int(k as u64, false).into(),
+                    i32_t.const_zero().into(),
+                    ptr_t.const_null().into(),
+                ],
+            );
+            self.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((ctor, *bb));
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(self.ctx.i64_type(), "enum").unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
+    /// Box a tagged-union value into a uniform constructor: switch on the tag,
+    /// box each field of the matched constructor, call rt_ctor.
+    fn box_tagged(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let ctors = self
+            .layouts
+            .union_ctors(tipe)
+            .ok_or_else(|| "typed backend: unknown union for Debug.toString".to_string())?;
+        let i32_t = self.ctx.i32_type();
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let ptr = val.into_pointer_value();
+        let tag = self.builder.build_load(i32_t, ptr, "tag").unwrap().into_int_value();
+        let default_bb = self.new_block("boxt.def");
+        let merge = self.new_block("boxt.end");
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("boxt.{}", k))).collect();
+        let cases: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+            .collect();
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+
+        for (k, bb) in blocks.iter().enumerate() {
+            self.builder.position_at_end(*bb);
+            let (name, field_types) = &ctors[k];
+            let field_layouts: Vec<Layout> =
+                field_types.iter().map(|t| self.layouts.layout_of(t)).collect();
+            let sty = self.ctor_struct(&field_layouts);
+            let argc = field_types.len();
+            let args_arr =
+                self.entry_alloca(i64_t.array_type(argc.max(1) as u32).into(), "args");
+            for (i, fty) in field_types.iter().enumerate() {
+                let fp = self.builder.build_struct_gep(sty, ptr, (i + 1) as u32, "fp").unwrap();
+                let fv = self.builder.build_load(self.llvm_type(&field_layouts[i]), fp, "fv").unwrap();
+                let boxed = self.box_value(fv, fty)?;
+                let ep = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(i64_t, args_arr, &[i64_t.const_int(i as u64, false)], "ep")
+                        .unwrap()
+                };
+                self.builder.build_store(ep, boxed).unwrap();
+            }
+            let nameptr = self.cstr(name.as_str());
+            let ctor = self.call_named(
+                "rt_ctor",
+                &[
+                    nameptr.into(),
+                    i32_t.const_int(k as u64, false).into(),
+                    i32_t.const_int(argc as u64, false).into(),
+                    args_arr.into(),
+                ],
+            );
+            let end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((ctor, end));
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(i64_t, "union").unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value())
     }
 
     fn box_list(

@@ -63,8 +63,8 @@ impl Layout {
 
 struct UnionDef {
     vars: Vec<Name>,
-    /// Constructor field types, in constructor order.
-    ctors: Vec<Vec<can::Type>>,
+    /// Each constructor's name and field types, in constructor order.
+    ctors: Vec<(Name, Vec<can::Type>)>,
 }
 
 /// Resolves concrete types to layouts. Knows the module's own unions plus the
@@ -88,7 +88,11 @@ impl LayoutCtx {
                     (module.name.clone(), union.name.clone()),
                     UnionDef {
                         vars: union.vars.clone(),
-                        ctors: union.ctors.iter().map(|c| c.args.clone()).collect(),
+                        ctors: union
+                            .ctors
+                            .iter()
+                            .map(|c| (c.name.clone(), c.args.clone()))
+                            .collect(),
                     },
                 );
             }
@@ -101,8 +105,11 @@ impl LayoutCtx {
                     ctors: union
                         .ctors
                         .iter()
-                        .map(|(_, args)| {
-                            args.iter().map(|a| builtins::parse_signature(a)).collect()
+                        .map(|(name, args)| {
+                            (
+                                Name::from(*name),
+                                args.iter().map(|a| builtins::parse_signature(a)).collect(),
+                            )
                         })
                         .collect(),
                 },
@@ -178,7 +185,7 @@ impl LayoutCtx {
         };
 
         // Enumeration: all constructors nullary.
-        if def.ctors.iter().all(|args| args.is_empty()) {
+        if def.ctors.iter().all(|(_, args)| args.is_empty()) {
             return Layout::Enum(def.ctors.len() as u32);
         }
 
@@ -194,7 +201,7 @@ impl LayoutCtx {
         let variants = def
             .ctors
             .iter()
-            .map(|fields| {
+            .map(|(_, fields)| {
                 fields
                     .iter()
                     .map(|t| self.go(&substitute(&subst, t), visiting))
@@ -203,6 +210,33 @@ impl LayoutCtx {
             .collect();
         visiting.pop();
         Layout::Tagged(variants)
+    }
+
+    /// The constructors of a union type: each constructor's name and its field
+    /// types with the type arguments substituted in. `None` if the type is not
+    /// a known union.
+    pub fn union_ctors(&self, tipe: &can::Type) -> Option<Vec<(Name, Vec<can::Type>)>> {
+        let can::Type::Type(home, name, args) = tipe else {
+            return None;
+        };
+        let def = self.unions.get(&(home.clone(), name.clone()))?;
+        let subst: HashMap<Name, can::Type> = def
+            .vars
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        Some(
+            def.ctors
+                .iter()
+                .map(|(cname, fields)| {
+                    (
+                        cname.clone(),
+                        fields.iter().map(|t| substitute(&subst, t)).collect(),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 

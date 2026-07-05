@@ -916,3 +916,21 @@ fn debug_tostring_values() {
          \x20       ++ \" \" ++ Debug.toString \"hi\"\n",
     );
 }
+
+#[test]
+fn debug_tostring_unions() {
+    assert_same(
+        "debug_unions",
+        "module Test exposing (..)\n\
+         \n\
+         type Shape = Circle Int | Rect Int Int | Dot\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString (Circle 5)\n\
+         \x20       ++ \" \" ++ Debug.toString (Rect 3 4)\n\
+         \x20       ++ \" \" ++ Debug.toString Dot\n\
+         \x20       ++ \" \" ++ Debug.toString (Just [ 1, 2 ])\n\
+         \x20       ++ \" \" ++ Debug.toString Nothing\n",
+    );
+}
