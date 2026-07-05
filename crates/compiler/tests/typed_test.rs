@@ -806,3 +806,20 @@ fn function_composition() {
          \x20   f 10 + 100 * g 10\n",
     );
 }
+
+#[test]
+fn record_accessor_as_function() {
+    // `.field` used as a first-class function (passed to List.map).
+    assert_same(
+        "accessor",
+        "module Test exposing (..)\n\
+         \n\
+         type alias P = { x : Int, y : Int }\n\
+         \n\
+         points : List P\n\
+         points = [ { x = 1, y = 10 }, { x = 2, y = 20 }, { x = 3, y = 30 } ]\n\
+         \n\
+         main : Int\n\
+         main = List.sum (List.map .x points) * 100 + List.sum (List.map .y points)\n",
+    );
+}

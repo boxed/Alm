@@ -390,6 +390,35 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let result_layout = self.layouts.layout_of(&body.tipe);
                 self.gen_closure(params, body, &result_layout)
             }
+            // A record accessor `.field` is the function `\r -> r.field`.
+            TypedKind::Accessor(field) => {
+                use crate::ast::canonical::Type;
+                let (rec_ty, field_ty) = match &expr.tipe {
+                    Type::Lambda(a, b) => ((**a).clone(), (**b).clone()),
+                    other => {
+                        return Err(format!(
+                            "typed backend: accessor has non-function type {:?}",
+                            other
+                        ))
+                    }
+                };
+                let rname = format!("$acc{}", self.lam_id);
+                let r_local = TypedExpr {
+                    tipe: rec_ty.clone(),
+                    kind: TypedKind::Local(crate::data::Name::from(rname.clone())),
+                };
+                let body = TypedExpr {
+                    tipe: field_ty.clone(),
+                    kind: TypedKind::Access(Box::new(r_local), field.clone()),
+                };
+                let pat = crate::reporting::Located {
+                    region: crate::reporting::Region::ZERO,
+                    value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(rname)),
+                };
+                let params = vec![(pat, rec_ty)];
+                let result_layout = self.layouts.layout_of(&field_ty);
+                self.gen_closure(&params, &body, &result_layout)
+            }
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
                 std::mem::discriminant(other)
