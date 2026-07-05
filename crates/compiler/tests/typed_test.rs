@@ -689,3 +689,19 @@ fn closure_returned_from_function() {
          \x20   add5 100 + add5 200\n",
     );
 }
+
+#[test]
+fn closure_argument_into_kernel() {
+    // A function-typed parameter passed through to List.map — the kernel must
+    // apply the closure value, not require a named function or lambda.
+    assert_same(
+        "closure_kernel",
+        "module Test exposing (..)\n\
+         \n\
+         mapAll : (Int -> Int) -> List Int -> List Int\n\
+         mapAll f xs = List.map f xs\n\
+         \n\
+         main : Int\n\
+         main = List.sum (mapAll (\\x -> x * 2) [ 1, 2, 3, 4 ])\n",
+    );
+}
