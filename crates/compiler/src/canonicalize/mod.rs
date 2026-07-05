@@ -309,22 +309,14 @@ pub fn canonicalize_module(
                                     if let Some(union) = interface.unions.get(&name.value) {
                                         exposed_types
                                             .insert(name.value.clone(), import_name.clone());
-                                        if open {
-                                            if interface.open_unions.contains(&name.value) {
-                                                expose_union_ctors(
-                                                    &mut ctors,
-                                                    import_name,
-                                                    union,
-                                                );
-                                            } else {
-                                                errors.push(Error::new(
-                                                    format!(
-                                                        "The `{}` module exposes the `{}` type opaquely; its constructors are private.",
-                                                        import_name, name.value
-                                                    ),
-                                                    name.region,
-                                                ));
-                                            }
+                                        // Importing `T(..)` when the module
+                                        // exposes `T` opaquely is not an error
+                                        // in Elm — it just imports the type
+                                        // with whatever constructors are public
+                                        // (none, here). Only expose ctors when
+                                        // they are actually public.
+                                        if open && interface.open_unions.contains(&name.value) {
+                                            expose_union_ctors(&mut ctors, import_name, union);
                                         }
                                     } else if interface.aliases.contains_key(&name.value) {
                                         exposed_types

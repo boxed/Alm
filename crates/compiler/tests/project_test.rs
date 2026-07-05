@@ -471,11 +471,27 @@ fn svg_alias_types_in_annotations() {
 // COVERAGE: project discovery and dependency-order paths
 
 #[test]
-fn opaque_ctor_exposing_import_is_rejected() {
+fn opaque_ctor_exposing_import_is_lenient() {
+    // Elm does not reject `import M exposing (T(..))` when M exposes T
+    // opaquely; it imports the type with no (private) constructors. So the
+    // import compiles as long as the private constructor is not used.
+    let ok = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Counter exposing (Counter(..))\n\nmain : String\nmain = \"x\"\n",
+        ),
+        (
+            "Counter.elm",
+            "module Counter exposing (Counter)\n\ntype Counter\n    = Counter Int\n",
+        ),
+    ]);
+    assert_eq!(ok.unwrap(), "x");
+
+    // But the private constructor is still not in scope, so using it fails.
     let err = project(&[
         (
             "Main.elm",
-            "module Main exposing (main)\n\nimport Counter exposing (Counter(..))\n\nmain = \"x\"\n",
+            "module Main exposing (main)\n\nimport Counter exposing (Counter(..))\n\nmain = Counter 5\n",
         ),
         (
             "Counter.elm",
@@ -483,7 +499,7 @@ fn opaque_ctor_exposing_import_is_rejected() {
         ),
     ])
     .unwrap_err();
-    assert!(err.contains("exposes the `Counter` type opaquely"), "got: {}", err);
+    assert!(err.contains("Counter"), "got: {}", err);
 }
 
 #[test]
