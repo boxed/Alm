@@ -1651,6 +1651,7 @@ var $Http$post = function (config) {
     });
 };
 var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
+var $Http$bytesResolver = function (toResult) { return { toResult: toResult }; };
 var $Http$track = F2(function (_tracker, _toMsg) { return $Platform$Sub$none; });
 var $Http$cancel = function (_tracker) { return $Platform$Cmd$none; };
 var $Http$fractionSent = function (p) {
@@ -1807,6 +1808,7 @@ var $Browser$Events$onAnimationFrame = function (toMsg) {
 
 var $Browser$Navigation$load = function (url) { return { $: 'CmdLoad', url: url }; };
 var $Browser$Navigation$reload = { $: 'CmdReload' };
+var $Browser$Navigation$reloadAndSkipCache = { $: 'CmdReload' };
 
 // RANDOM — generators as seed -> [value, seed] functions.
 

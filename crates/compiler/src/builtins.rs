@@ -501,6 +501,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Http", "bytesPart", "String -> String -> Bytes.Bytes -> Http.Part"),
             V("Http", "task", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, resolver : Http.Resolver x a, timeout : Maybe Float } -> Task x a"),
             V("Http", "stringResolver", "(Http.Response String -> Result x a) -> Http.Resolver x a"),
+            V("Http", "bytesResolver", "(Http.Response Bytes.Bytes -> Result x a) -> Http.Resolver x a"),
             V("Http", "track", "String -> (Http.Progress -> msg) -> Sub msg"),
             V("Http", "fractionSent", "{ sent : Int, size : Int } -> Float"),
             V("Http", "fractionReceived", "{ received : Int, size : Maybe Int } -> Float"),
@@ -537,6 +538,7 @@ pub fn values() -> &'static [BuiltinValue] {
             // Browser.Navigation
             V("Browser.Navigation", "load", "String -> Cmd msg"),
             V("Browser.Navigation", "reload", "Cmd msg"),
+            V("Browser.Navigation", "reloadAndSkipCache", "Cmd msg"),
             V("Browser.Navigation", "pushUrl", "Browser.Navigation.Key -> String -> Cmd msg"),
             V("Browser.Navigation", "replaceUrl", "Browser.Navigation.Key -> String -> Cmd msg"),
             V("Browser.Navigation", "back", "Browser.Navigation.Key -> Int -> Cmd msg"),
