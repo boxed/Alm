@@ -53,6 +53,12 @@ struct TypedCodegen<'ctx, 'l> {
     /// Closure wrappers for named functions used as first-class values,
     /// keyed by the function's mangled name.
     wrappers: HashMap<String, FunctionValue<'ctx>>,
+    /// Memoized box/unbox helper functions for tagged unions, keyed by the
+    /// type. Recursive unions need a real recursive function (rather than
+    /// inline structural expansion) so codegen terminates; a self-referential
+    /// field reuses the same helper.
+    box_fns: HashMap<String, FunctionValue<'ctx>>,
+    unbox_fns: HashMap<String, FunctionValue<'ctx>>,
     locals: HashMap<String, BasicValueEnum<'ctx>>,
     cur_fn: Option<FunctionValue<'ctx>>,
     blk: usize,
@@ -68,6 +74,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             layouts,
             functions: HashMap::new(),
             wrappers: HashMap::new(),
+            box_fns: HashMap::new(),
+            unbox_fns: HashMap::new(),
             locals: HashMap::new(),
             cur_fn: None,
             blk: 0,
@@ -683,7 +691,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Record(_) => self.box_record(val, tipe),
             Layout::List(_) => self.box_list(val, tipe),
             Layout::Enum(_) => self.box_enum(val, tipe),
-            Layout::Tagged(_) => self.box_tagged(val, tipe),
+            // Route through a memoized recursive helper so recursive unions
+            // (whose fields refer back to themselves) terminate at codegen.
+            Layout::Tagged(_) => {
+                let f = self.get_box_fn(tipe)?;
+                Ok(self
+                    .builder
+                    .build_call(f, &[val.into()], "boxu")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap())
+            }
             Layout::Closure => self.box_closure(val, tipe),
             // Opaque values are already the uniform word.
             Layout::Opaque => Ok(val),
@@ -820,6 +839,80 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     /// Box a tagged-union value into a uniform constructor: switch on the tag,
     /// box each field of the matched constructor, call rt_ctor.
+    /// Get (or generate) a recursive helper `box_T(ptr) -> uniform` for a
+    /// tagged union. Registered in the cache *before* its body is emitted so a
+    /// self-referential field reuses the same function instead of expanding
+    /// the type forever.
+    fn get_box_fn(
+        &mut self,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let key = format!("{:?}", tipe);
+        if let Some(f) = self.box_fns.get(&key) {
+            return Ok(*f);
+        }
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let fname = format!("box.{}", self.lam_id);
+        self.lam_id += 1;
+        let fty = i64_t.fn_type(&[ptr_t.into()], false);
+        let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
+        self.box_fns.insert(key, f);
+
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        self.cur_fn = Some(f);
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let param = f.get_nth_param(0).unwrap();
+        let result = self.box_tagged(param, tipe);
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        let boxed = result?;
+        self.builder.build_return(Some(&boxed)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        Ok(f)
+    }
+
+    /// Symmetric to [`get_box_fn`]: a recursive helper `unbox_T(uniform) ->
+    /// ptr` for a tagged union.
+    fn get_unbox_fn(
+        &mut self,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let key = format!("{:?}", tipe);
+        if let Some(f) = self.unbox_fns.get(&key) {
+            return Ok(*f);
+        }
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let fname = format!("unbox.{}", self.lam_id);
+        self.lam_id += 1;
+        let fty = ptr_t.fn_type(&[i64_t.into()], false);
+        let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
+        self.unbox_fns.insert(key, f);
+
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        self.cur_fn = Some(f);
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let param = f.get_nth_param(0).unwrap();
+        let result = self.unbox_tagged(param, tipe);
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        let unboxed = result?;
+        self.builder.build_return(Some(&unboxed)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        Ok(f)
+    }
+
     fn box_tagged(
         &mut self,
         val: BasicValueEnum<'ctx>,
@@ -1014,7 +1107,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Tuple(_) => self.unbox_tuple(w, tipe),
             Layout::Record(_) => self.unbox_record(w, tipe),
             Layout::List(_) => self.unbox_list(w, tipe),
-            Layout::Tagged(_) => self.unbox_tagged(w, tipe),
+            // Route through a memoized recursive helper so recursive unions
+            // terminate at codegen (mirrors `box_value`).
+            Layout::Tagged(_) => {
+                let f = self.get_unbox_fn(tipe)?;
+                Ok(self
+                    .builder
+                    .build_call(f, &[w.into()], "unbu")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap())
+            }
             // Opaque values are the uniform word already.
             Layout::Opaque => Ok(w),
             Layout::Ref => Ok(self
@@ -1261,9 +1365,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Access(record, field) => self.gen_access(record, field.as_str()),
             TypedKind::Update(record, fields) => self.gen_update(record, fields),
             TypedKind::Ctor(home, union, ctor) => self.gen_ctor(expr, home, union, ctor),
-            // A built-in used as a bare value (e.g. Cmd.none): a nullary kernel.
+            // A built-in used as a bare value. If its type is a function
+            // (e.g. `String.fromInt` passed to `List.map`), eta-expand it into
+            // a closure `\x.. -> f x..` so the closure machinery can pass it
+            // around; otherwise it is a nullary kernel (e.g. `Cmd.none`).
             TypedKind::Foreign(module, name) => {
-                self.gen_kernel(expr, module.as_str(), name.as_str(), &[])
+                if matches!(expr.tipe, crate::ast::canonical::Type::Lambda(..)) {
+                    self.eta_expand_foreign(module, name, &expr.tipe, &[])
+                } else {
+                    self.gen_kernel(expr, module.as_str(), name.as_str(), &[])
+                }
             }
             TypedKind::Lambda(params, body) => {
                 let result_layout = self.layouts.layout_of(&body.tipe);
@@ -1315,8 +1426,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let TypedKind::Ctor(_, _, ctor) = &func.kind {
             return self.gen_ctor_apply(whole, ctor, args);
         }
-        // A built-in call becomes a generated, type-specialized kernel.
+        // A built-in call becomes a generated, type-specialized kernel — but
+        // only when saturated. A builtin applied to fewer than its arity of
+        // arguments (e.g. `modBy 2` passed to `List.map`) is eta-expanded into
+        // a closure that takes the remaining arguments.
         if let TypedKind::Foreign(module, name) = &func.kind {
+            let arity = foreign_arity(&func.tipe);
+            if args.len() < arity {
+                return self.eta_expand_foreign(module, name, &func.tipe, args);
+            }
             return self.gen_kernel(whole, module.as_str(), name.as_str(), args);
         }
         // A direct call to a named function, when the argument count matches
@@ -1669,6 +1787,58 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let body = TypedExpr {
             tipe: result_ty.clone(),
             kind: TypedKind::Call(Box::new(ctor_fn), arg_exprs),
+        };
+        let result_layout = self.layouts.layout_of(&result_ty);
+        self.gen_closure(&params, &body, &result_layout)
+    }
+
+    /// A built-in used as a first-class value or applied to fewer than its
+    /// arity of arguments: eta-expand into `\p.. -> f applied.. p..` and
+    /// closure-convert it. `full_type` is the built-in's full function type;
+    /// `applied` are the arguments already supplied (possibly none).
+    fn eta_expand_foreign(
+        &mut self,
+        module: &crate::data::Name,
+        name: &crate::data::Name,
+        full_type: &crate::ast::canonical::Type,
+        applied: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::{Pattern_, Type};
+        // Peel the function type into argument types and the final result type.
+        let mut arg_types = Vec::new();
+        let mut t = full_type.clone();
+        while let Type::Lambda(a, b) = t {
+            arg_types.push(*a);
+            t = *b;
+        }
+        let result_ty = t;
+        let id = self.lam_id;
+        self.lam_id += 1;
+        // Fresh parameters for the not-yet-supplied arguments.
+        let mut params = Vec::new();
+        let mut call_args: Vec<TypedExpr> = applied.to_vec();
+        for i in applied.len()..arg_types.len() {
+            let at = arg_types[i].clone();
+            let pname = crate::data::Name::from(format!("$eta{}_{}", id, i));
+            params.push((
+                crate::reporting::Located {
+                    region: crate::reporting::Region::ZERO,
+                    value: Pattern_::Var(pname.clone()),
+                },
+                at.clone(),
+            ));
+            call_args.push(TypedExpr {
+                tipe: at,
+                kind: TypedKind::Local(pname),
+            });
+        }
+        let foreign = TypedExpr {
+            tipe: full_type.clone(),
+            kind: TypedKind::Foreign(module.clone(), name.clone()),
+        };
+        let body = TypedExpr {
+            tipe: result_ty.clone(),
+            kind: TypedKind::Call(Box::new(foreign), call_args),
         };
         let result_layout = self.layouts.layout_of(&result_ty);
         self.gen_closure(&params, &body, &result_layout)
@@ -3763,6 +3933,19 @@ fn collection_symbol(module: &str, name: &str) -> Option<&'static str> {
 }
 
 /// The name a simple `Var` parameter binds, if that is all this pattern is.
+/// The arity of a built-in from its function type: the number of leading
+/// `->` arrows.
+fn foreign_arity(tipe: &crate::ast::canonical::Type) -> usize {
+    use crate::ast::canonical::Type;
+    let mut n = 0;
+    let mut t = tipe;
+    while let Type::Lambda(_, b) = t {
+        n += 1;
+        t = b;
+    }
+    n
+}
+
 fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String> {
     use crate::ast::canonical::Pattern_::*;
     match &pattern.value {

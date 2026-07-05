@@ -1164,3 +1164,71 @@ fn bitwise_and_trig_via_generic_foreign() {
          \x20       + round (cos 0.0) * 1000000\n",
     );
 }
+
+#[test]
+fn builtin_as_first_class_value() {
+    // A kernel function passed as a value (not applied) must be eta-expanded
+    // into a closure `List.map` can call, not routed into the saturated
+    // kernel-call path with no arguments.
+    assert_same(
+        "builtin_value",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main = String.join \",\" (List.map String.fromInt [ 1, 2, 3 ])\n",
+    );
+}
+
+#[test]
+fn builtin_partial_application() {
+    // A kernel applied to fewer than its arity of arguments (`modBy 3`) must
+    // eta-expand into a closure taking the remaining argument.
+    assert_same(
+        "builtin_partial",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \",\"\n\
+         \x20       (List.map String.fromInt (List.map (modBy 3) [ 1, 4, 5, 7 ]))\n",
+    );
+}
+
+#[test]
+fn debug_recursive_union() {
+    // Debug.toString of a recursive union must terminate at codegen (the box
+    // helper follows the recursive Ref field via a real recursive call).
+    assert_same(
+        "debug_recursive",
+        "module Test exposing (..)\n\
+         \n\
+         type Tree = Leaf Int | Node Tree Tree\n\
+         \n\
+         main : String\n\
+         main = Debug.toString (Node (Node (Leaf 1) (Leaf 2)) (Leaf 3))\n",
+    );
+}
+
+#[test]
+fn debug_tuple_with_recursive_union() {
+    // A tuple containing a recursive union boxes each component correctly.
+    assert_same(
+        "debug_tuple_recursive",
+        "module Test exposing (..)\n\
+         \n\
+         type Tree = Leaf Int | Node Tree Tree\n\
+         \n\
+         sum : Tree -> Int\n\
+         sum t =\n\
+         \x20   case t of\n\
+         \x20       Leaf n -> n\n\
+         \x20       Node a b -> sum a + sum b\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       t = Node (Leaf 1) (Leaf 2)\n\
+         \x20   in\n\
+         \x20   Debug.toString ( sum t, Just t )\n",
+    );
+}
