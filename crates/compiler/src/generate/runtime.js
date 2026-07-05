@@ -965,6 +965,8 @@ var $Html$Events$onMouseDown = function (msg) { return _VDom_on('mousedown', _Js
 var $Html$Events$onMouseUp = function (msg) { return _VDom_on('mouseup', _Json_succeedDecoder(msg)); };
 var $Html$Events$onMouseEnter = function (msg) { return _VDom_on('mouseenter', _Json_succeedDecoder(msg)); };
 var $Html$Events$onMouseLeave = function (msg) { return _VDom_on('mouseleave', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseOver = function (msg) { return _VDom_on('mouseover', _Json_succeedDecoder(msg)); };
+var $Html$Events$onMouseOut = function (msg) { return _VDom_on('mouseout', _Json_succeedDecoder(msg)); };
 var $Html$Events$custom = F2(function (name, decoder) {
     return _VDom_on(name, decoder, { custom: true });
 });
@@ -1950,6 +1952,7 @@ var $UUID$generator = _Random_gen(function (seed) {
     return [{ $: 'UUID', s: uuid }, { $: 'Seed', state: s.state }];
 });
 var $UUID$toString = function (uuid) { return uuid.s; };
+var $UUID$compare = F2(function (a, b) { return A2($Basics$compare, a.s, b.s); });
 var $UUID$toRepresentation = F2(function (representation, uuid) {
     switch (representation.$) {
         case 'Compact': return uuid.s.replace(/-/g, '');
