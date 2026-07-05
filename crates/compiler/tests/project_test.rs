@@ -108,6 +108,26 @@ fn type_aliases_across_modules() {
 }
 
 #[test]
+fn import_alias_shadows_builtin_module() {
+    // `import Widget as Html` must make `Html.text` refer to Widget.text, not
+    // the builtin elm/html `Html.text` (which also exists). Regression: with
+    // builtin modules registered before explicit imports, the alias `Html`
+    // resolved to the builtin first, so `import Html.Styled as Html` picked up
+    // elm/html's values (breaking Chadtech/elm-css-grid, Confidenceman02/elm-select).
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Widget as Html\n\nmain : String\nmain = Html.text \"hi\"\n",
+        ),
+        (
+            "Widget.elm",
+            "module Widget exposing (text)\n\ntext : String -> String\ntext s = \"widget:\" ++ s\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "widget:hi");
+}
+
+#[test]
 fn opaque_types_stay_opaque() {
     let result = project(&[
         (

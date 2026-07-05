@@ -200,13 +200,6 @@ pub fn canonicalize_module(
     };
     let mut exposed_values: HashMap<Name, Name> = HashMap::new();
     let mut exposed_types: HashMap<Name, Name> = HashMap::new();
-    for module_name in builtins::MODULES {
-        add_import_name(&mut import_names, Name::from(*module_name), Name::from(*module_name));
-    }
-    // Elm's default imports include `import Platform.Cmd as Cmd` and
-    // `import Platform.Sub as Sub`.
-    add_import_name(&mut import_names, Name::from("Cmd"), Name::from("Platform.Cmd"));
-    add_import_name(&mut import_names, Name::from("Sub"), Name::from("Platform.Sub"));
     for import in &module.imports {
         let import_name = &import.name.value;
         // Kernel modules are trusted JavaScript: importable, values untyped.
@@ -392,6 +385,17 @@ pub fn canonicalize_module(
             }
         }
     }
+
+    // Builtin modules are usable unqualified without an explicit import, and
+    // Elm's default imports include `Platform.Cmd as Cmd` / `Platform.Sub as
+    // Sub`. Register these AFTER explicit imports so an explicit alias (e.g.
+    // `import Html.Styled as Html`) takes precedence over a same-named builtin
+    // module — the builtin stays available only as a fallback candidate.
+    for module_name in builtins::MODULES {
+        add_import_name(&mut import_names, Name::from(*module_name), Name::from(*module_name));
+    }
+    add_import_name(&mut import_names, Name::from("Cmd"), Name::from("Platform.Cmd"));
+    add_import_name(&mut import_names, Name::from("Sub"), Name::from("Platform.Sub"));
 
     // Top-level names, with duplicate detection.
     let mut top_level: HashSet<Name> = HashSet::new();
