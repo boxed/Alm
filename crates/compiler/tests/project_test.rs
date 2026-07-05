@@ -2,8 +2,14 @@
 //! directory, compile it with `compile_project`, and run it with node.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 mod common;
+
+/// ELM_HOME is process-global; serialize the tests that mutate it so they do
+/// not race under the parallel test runner. Poisoning is ignored (a panic in
+/// one test must not wedge the others).
+static ELM_HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn project(files: &[(&str, &str)]) -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!(
@@ -605,13 +611,88 @@ fn packages_resolve_from_elm_home() {
     )
     .unwrap();
 
-    // ELM_HOME is process-global: serialize with a lock file convention is
-    // overkill here; tests in this binary run in parallel but no other
-    // test reads ELM_HOME.
+    let _guard = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ELM_HOME", dir.join("elm-home"));
     let result = compile_and_run(&src.join("Main.elm"));
     std::env::remove_var("ELM_HOME");
     assert_eq!(result.unwrap(), "PKG!");
+}
+
+#[test]
+fn duplicate_module_names_resolve_per_package() {
+    // Two different packages each define a module named `Bar`. Elm scopes each
+    // module's imports to its OWN package's dependencies, so `Foo` (in pp/one)
+    // must see pp/one's `Bar`, never qq/two's. A flat namespace would pick
+    // qq/two's `Bar` (whose transitive imports reach back to `Foo`), inventing
+    // a false import cycle Foo -> Bar -> Baz -> Foo. Regression: e.g. both
+    // elm-community/html-extra and arowM/html-extra expose `Html.Extra`.
+    let dir = std::env::temp_dir().join(format!(
+        "alm-dupmod-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let pkgs = dir.join("elm-home/0.19.1/packages");
+    let one = pkgs.join("pp/one/1.0.0");
+    let two = pkgs.join("qq/two/1.0.0");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(one.join("src")).unwrap();
+    std::fs::create_dir_all(two.join("src")).unwrap();
+
+    // pp/one: Foo imports its own Bar; Bar imports nothing.
+    std::fs::write(
+        one.join("elm.json"),
+        r#"{ "type": "package", "name": "pp/one", "version": "1.0.0", "exposed-modules": ["Foo", "Bar"], "dependencies": {} }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        one.join("src/Foo.elm"),
+        "module Foo exposing (foo)\n\nimport Bar\n\nfoo : String\nfoo = \"foo+\" ++ Bar.bar\n",
+    )
+    .unwrap();
+    std::fs::write(
+        one.join("src/Bar.elm"),
+        "module Bar exposing (bar)\n\nbar : String\nbar = \"one-bar\"\n",
+    )
+    .unwrap();
+
+    // qq/two depends on pp/one: its Bar imports Baz, and Baz imports pp/one's Foo.
+    std::fs::write(
+        two.join("elm.json"),
+        r#"{ "type": "package", "name": "qq/two", "version": "1.0.0", "exposed-modules": ["Bar", "Baz"], "dependencies": { "pp/one": "1.0.0 <= v < 2.0.0" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        two.join("src/Bar.elm"),
+        "module Bar exposing (bar)\n\nimport Baz\n\nbar : String\nbar = \"two-bar+\" ++ Baz.baz\n",
+    )
+    .unwrap();
+    std::fs::write(
+        two.join("src/Baz.elm"),
+        "module Baz exposing (baz)\n\nimport Foo\n\nbaz : String\nbaz = \"baz+\" ++ Foo.foo\n",
+    )
+    .unwrap();
+
+    // App depends on both. `qq/two` is listed first so a flat resolver would
+    // find its `Bar` first when resolving Foo's import.
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"], "dependencies": { "direct": { "qq/two": "1.0.0", "pp/one": "1.0.0" }, "indirect": {} }, "test-dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("Main.elm"),
+        "module Main exposing (main)\n\nimport Foo\n\nmain = Foo.foo\n",
+    )
+    .unwrap();
+
+    let _guard = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ELM_HOME", dir.join("elm-home"));
+    let result = compile_and_run(&src.join("Main.elm"));
+    std::env::remove_var("ELM_HOME");
+    // pp/one's Bar ("one-bar"), and no false import cycle.
+    assert_eq!(result.unwrap(), "foo+one-bar");
 }
 
 #[test]

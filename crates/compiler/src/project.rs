@@ -1,15 +1,23 @@
 //! Port of the `builder/` half of the Elm compiler (much simplified):
 //! find the project, resolve imports to files, and compile every module
 //! in dependency order into one JavaScript file.
+//!
+//! Resolution is *per package*: each module's imports are resolved against
+//! that module's own package's dependency list, not a single flat namespace.
+//! This mirrors Elm, where two different packages may each define a module
+//! with the same name (e.g. both `elm-community/html-extra` and
+//! `arowM/html-extra` expose `Html.Extra`). A flat namespace would merge them
+//! or pick one arbitrarily, producing wrong resolutions and false import
+//! cycles. See `resolve_scopes`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::canonical as can;
 use crate::ast::source as src;
 use crate::data::Name;
 use crate::interface::Interfaces;
-use crate::reporting::{Region, Report};
+use crate::reporting::{Located, Region, Report};
 use crate::{builtins, canonicalize, generate, nitpick, parse, typecheck};
 
 pub struct BuildError {
@@ -40,11 +48,24 @@ impl BuildError {
     }
 }
 
-struct SourceModule {
+/// A parsed module on disk, keyed in the loader by its (unique) file path so
+/// that two same-named modules from different packages stay distinct.
+struct LoadedModule {
     path: PathBuf,
     source: String,
     module: src::Module,
-    imports: Vec<Name>,
+    /// The name declared in `module <Name> exposing ...`.
+    declared_name: Name,
+    /// Resolved user imports: the name as written plus the file it resolved
+    /// to, within this module's package scope. Builtin/kernel imports are not
+    /// listed here.
+    imports: Vec<(Name, PathBuf)>,
+}
+
+impl LoadedModule {
+    fn import_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.imports.iter().map(|(_, path)| path)
+    }
 }
 
 /// Everything the front half of the compiler produces: the canonical
@@ -126,15 +147,17 @@ pub fn compile_project_typed(
 /// Run the whole front end — load, parse, canonicalize, type check, and
 /// exhaustiveness check every module — without generating any code.
 pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
-    let source_dirs = find_source_directories(entry);
+    let scopes = resolve_scopes(entry);
 
-    // Load the entry module and, transitively, everything it imports.
-    let mut modules: HashMap<Name, SourceModule> = HashMap::new();
-    let entry_name = load_module_file(entry, &source_dirs, &mut modules)
+    // Load the entry module and, transitively, everything it imports. Modules
+    // are keyed by file path so two same-named modules from different packages
+    // do not clobber each other.
+    let mut modules: HashMap<PathBuf, LoadedModule> = HashMap::new();
+    let entry_key = load_module_file(entry, &scopes.app_search, &scopes, &mut modules)
         .map_err(|e| vec![e])?;
 
     // Topologically sort (dependencies first), detecting import cycles.
-    let order = sort_modules(&modules, &entry_name).map_err(|cycle| {
+    let order = sort_modules(&modules, &entry_key).map_err(|cycle| {
         let module = &modules[&cycle];
         vec![BuildError::new(
             module.path.clone(),
@@ -143,35 +166,44 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
             Region::ZERO,
             format!(
                 "The module `{}` is part of an import cycle. Elm does not allow cyclic imports.",
-                cycle
+                module.declared_name
             ),
         )]
     })?;
+
+    // Give every loaded file a unique module name. When a name is declared by
+    // just one file (the overwhelmingly common case) that file keeps it. When
+    // several files share a name they are disambiguated so every downstream
+    // map (interfaces, canonical modules, types) can stay keyed by `Name`.
+    let unique_names = assign_unique_names(&modules, &order);
 
     // Compile each module against the interfaces of its dependencies.
     let mut interfaces = Interfaces::new();
     let mut canonical_modules = Vec::new();
     let mut all_node_types: HashMap<Name, HashMap<Region, can::Type>> = HashMap::new();
     let mut all_types: HashMap<Name, HashMap<Name, can::Type>> = HashMap::new();
-    for name in &order {
-        let source_module = &modules[name];
+    for path in &order {
+        let source_module = &modules[path];
+        let name = unique_names[path].clone();
+        // Rewrite the parsed module so its declared name and its imports point
+        // at the resolved, unique names. Downstream code is unchanged.
+        let rewritten = rewrite_module(source_module, &unique_names);
+
         let (canonical, mut interface) =
-            canonicalize::canonicalize_module(&source_module.module, &interfaces).map_err(
-                |errors| {
-                    errors
-                        .into_iter()
-                        .map(|e| {
-                            BuildError::new(
-                                source_module.path.clone(),
-                                source_module.source.clone(),
-                                "NAMING PROBLEM",
-                                e.region,
-                                e.message,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )?;
+            canonicalize::canonicalize_module(&rewritten, &interfaces).map_err(|errors| {
+                errors
+                    .into_iter()
+                    .map(|e| {
+                        BuildError::new(
+                            source_module.path.clone(),
+                            source_module.source.clone(),
+                            "NAMING PROBLEM",
+                            e.region,
+                            e.message,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })?;
 
         let checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
             errors
@@ -223,15 +255,39 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         interfaces,
         node_types: all_node_types,
         types: all_types,
-        entry: entry_name,
+        entry: unique_names[&entry_key].clone(),
     })
+}
+
+/// The per-package search scopes for a project.
+struct Scopes {
+    /// Where to look for imports appearing in the app's own modules: the app's
+    /// source directories plus the source dirs of its direct dependencies.
+    app_search: Vec<PathBuf>,
+    /// For every source directory we know about (each app source dir and each
+    /// package `src`), the directories to search when resolving imports found
+    /// in a module located there. This is what makes resolution per-package:
+    /// a package's imports see only its own `src` plus its declared
+    /// dependencies' `src` dirs.
+    dir_search: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl Scopes {
+    /// Search dirs for imports appearing in a module found in `dir`.
+    fn search_for(&self, dir: &Path) -> &[PathBuf] {
+        self.dir_search
+            .get(dir)
+            .map(Vec::as_slice)
+            .unwrap_or(&self.app_search)
+    }
 }
 
 /// Walk up from the entry file looking for elm.json; fall back to treating
 /// the entry file's directory as the only source directory. Package
-/// dependencies listed in elm.json are added from the ELM_HOME cache so
-/// pure Elm packages compile from their real sources.
-fn find_source_directories(entry: &Path) -> Vec<PathBuf> {
+/// dependencies listed in elm.json are resolved from the ELM_HOME cache so
+/// pure Elm packages compile from their real sources, each scoped to its own
+/// declared dependencies.
+fn resolve_scopes(entry: &Path) -> Scopes {
     let entry_dir = entry
         .parent()
         .map(Path::to_path_buf)
@@ -240,51 +296,194 @@ fn find_source_directories(entry: &Path) -> Vec<PathBuf> {
     loop {
         let elm_json = dir.join("elm.json");
         if elm_json.is_file() {
-            let mut dirs = Vec::new();
             if let Ok(contents) = std::fs::read_to_string(&elm_json) {
-                let sources = parse_source_directories(&contents);
-                if sources.is_empty() {
-                    dirs.push(dir.join("src"));
-                } else {
-                    dirs.extend(sources.iter().map(|d| dir.join(d)));
-                }
-                dirs.extend(package_directories(&contents));
-            } else {
-                dirs.push(dir.join("src"));
+                return build_scopes(&dir, &contents);
             }
-            return dirs;
+            return single_dir_scope(dir.join("src"));
         }
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
-            None => return vec![entry_dir],
+            None => return single_dir_scope(entry_dir),
         }
     }
 }
 
-/// Source directories of every package mentioned in elm.json, from the
-/// ELM_HOME cache (~/.elm/0.19.1/packages/<author>/<name>/<version>/src).
-fn package_directories(elm_json: &str) -> Vec<PathBuf> {
+/// A project with no (readable) elm.json: one source directory, no packages.
+fn single_dir_scope(source: PathBuf) -> Scopes {
+    let app_search = vec![source.clone()];
+    let mut dir_search = HashMap::new();
+    dir_search.insert(source, app_search.clone());
+    Scopes {
+        app_search,
+        dir_search,
+    }
+}
+
+/// Build the per-package search scopes from a project's elm.json.
+fn build_scopes(project_dir: &Path, elm_json: &str) -> Scopes {
+    // The app's own source directories.
+    let source_names = parse_source_directories(elm_json);
+    let app_source_dirs: Vec<PathBuf> = if source_names.is_empty() {
+        vec![project_dir.join("src")]
+    } else {
+        source_names.iter().map(|d| project_dir.join(d)).collect()
+    };
+
+    // Every installed package and its `src` dir, keyed by "author/name". The
+    // exact versions come from the pinned application elm.json.
+    let installed = installed_packages(elm_json);
+
+    // The app resolves imports against its *direct* dependencies (like Elm).
+    // If we cannot identify the direct set, fall back to every installed
+    // package so we never regress a project that used to compile.
+    let direct = direct_dependency_names(elm_json)
+        .unwrap_or_else(|| installed.keys().cloned().collect());
+
+    let mut app_search = app_source_dirs.clone();
+    for name in &direct {
+        if let Some(src) = installed.get(name) {
+            app_search.push(src.clone());
+        }
+    }
+
+    let mut dir_search: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for dir in &app_source_dirs {
+        dir_search.insert(dir.clone(), app_search.clone());
+    }
+    // Each package's imports see its own src plus its declared dependencies'.
+    for (_, src) in &installed {
+        let mut search = vec![src.clone()];
+        for dep in package_dependency_names(src) {
+            if let Some(dep_src) = installed.get(&dep) {
+                search.push(dep_src.clone());
+            }
+        }
+        dir_search.insert(src.clone(), search);
+    }
+
+    Scopes {
+        app_search,
+        dir_search,
+    }
+}
+
+/// The ELM_HOME packages directory (~/.elm/0.19.1/packages).
+fn packages_root() -> PathBuf {
     let home = std::env::var("ELM_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let user = std::env::var("HOME").unwrap_or_default();
             PathBuf::from(user).join(".elm")
         });
-    let packages = home.join("0.19.1").join("packages");
+    home.join("0.19.1").join("packages")
+}
 
-    let mut dirs = Vec::new();
-    // Scan for `"author/name": "1.2.3"` pairs anywhere in elm.json.
-    let bytes = elm_json.as_bytes();
-    let mut i = 0;
-    while let Some(quote) = elm_json[i..].find('"') {
-        let start = i + quote + 1;
-        let Some(end_rel) = elm_json[start..].find('"') else { break };
-        let key = &elm_json[start..start + end_rel];
-        i = start + end_rel + 1;
+/// Map every `"author/name": "1.2.3"` pinned in elm.json to its `src` dir on
+/// disk. Version *ranges* (as used in a package elm.json) are ignored — we
+/// only pin exact versions.
+fn installed_packages(elm_json: &str) -> HashMap<String, PathBuf> {
+    let packages = packages_root();
+    let mut installed = HashMap::new();
+    for (key, version) in quoted_pairs(elm_json) {
         if !key.contains('/') {
             continue;
         }
-        // Value: skip whitespace and colon, expect a quoted version.
+        if !version.chars().all(|c| c.is_ascii_digit() || c == '.') || version.is_empty() {
+            continue;
+        }
+        let (author, name) = key.split_once('/').unwrap();
+        let src = packages.join(author).join(name).join(version).join("src");
+        if src.is_dir() {
+            installed.insert(key.to_string(), src);
+        }
+    }
+    installed
+}
+
+/// The `"author/name"` keys listed under `dependencies.direct` of an
+/// application elm.json. Returns `None` if there is no such block (e.g. a
+/// package elm.json, or a minimal test elm.json).
+fn direct_dependency_names(elm_json: &str) -> Option<Vec<String>> {
+    let deps = object_block(elm_json, "dependencies")?;
+    let direct = object_block(deps, "direct")?;
+    Some(
+        quoted_strings(direct)
+            .filter(|s| s.contains('/'))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The dependency package names of the package whose sources live in `src`
+/// (read from `<pkg>/elm.json`). A package elm.json lists dependencies as
+/// `"author/name": "<version range>"`.
+fn package_dependency_names(src: &Path) -> Vec<String> {
+    let Some(pkg_dir) = src.parent() else {
+        return Vec::new();
+    };
+    let Ok(contents) = std::fs::read_to_string(pkg_dir.join("elm.json")) else {
+        return Vec::new();
+    };
+    match object_block(&contents, "dependencies") {
+        Some(deps) => quoted_strings(deps)
+            .filter(|s| s.contains('/'))
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Slice out the `{ ... }` object that follows `"key"` in `json`, matching
+/// braces so nested objects are included.
+fn object_block<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{}\"", key);
+    let key_pos = json.find(&needle)?;
+    let rest = &json[key_pos..];
+    let open = rest.find('{')?;
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[open..=i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every double-quoted string in `json`, in order.
+fn quoted_strings(json: &str) -> impl Iterator<Item = &str> {
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        let quote = json[i..].find('"')?;
+        let start = i + quote + 1;
+        let end_rel = json[start..].find('"')?;
+        i = start + end_rel + 1;
+        Some(&json[start..start + end_rel])
+    })
+}
+
+/// Every `"a": "b"` string→string pair in `json`, as (a, b).
+fn quoted_pairs(json: &str) -> Vec<(&str, &str)> {
+    let bytes = json.as_bytes();
+    let mut pairs = Vec::new();
+    let mut i = 0;
+    while let Some(quote) = json[i..].find('"') {
+        let start = i + quote + 1;
+        let Some(end_rel) = json[start..].find('"') else {
+            break;
+        };
+        let key = &json[start..start + end_rel];
+        i = start + end_rel + 1;
+        // Value: skip whitespace and a colon, then expect a quoted string.
         let mut j = i;
         while j < bytes.len() && (bytes[j] == b':' || bytes[j].is_ascii_whitespace()) {
             j += 1;
@@ -293,28 +492,27 @@ fn package_directories(elm_json: &str) -> Vec<PathBuf> {
             continue;
         }
         let vstart = j + 1;
-        let Some(vend_rel) = elm_json[vstart..].find('"') else { break };
-        let version = &elm_json[vstart..vstart + vend_rel];
-        if version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            let (author, name) = key.split_once('/').unwrap();
-            let src = packages.join(author).join(name).join(version).join("src");
-            if src.is_dir() {
-                dirs.push(src);
-            }
-        }
+        let Some(vend_rel) = json[vstart..].find('"') else {
+            break;
+        };
+        let value = &json[vstart..vstart + vend_rel];
+        pairs.push((key, value));
+        i = vstart + vend_rel + 1;
     }
-    dirs
+    pairs
 }
 
 /// Extract `"source-directories": [ ... ]` from elm.json without a JSON
-/// dependency. (The rest of elm.json — package versions — is not used.)
+/// dependency.
 fn parse_source_directories(json: &str) -> Vec<String> {
     let Some(key_pos) = json.find("\"source-directories\"") else {
         return vec![];
     };
     let rest = &json[key_pos..];
     let Some(open) = rest.find('[') else { return vec![] };
-    let Some(close) = rest[open..].find(']') else { return vec![] };
+    let Some(close) = rest[open..].find(']') else {
+        return vec![];
+    };
     let array = &rest[open + 1..open + close];
     array
         .split(',')
@@ -337,13 +535,20 @@ fn user_imports(module: &src::Module) -> Vec<Name> {
         .collect()
 }
 
-/// Parse a module file and recursively load everything it imports.
-/// Returns the module's name.
+/// Parse a module file and recursively load everything it imports, resolving
+/// each import within `search_dirs` (this module's package scope). Returns the
+/// module's canonical file-path key.
 fn load_module_file(
     path: &Path,
-    source_dirs: &[PathBuf],
-    modules: &mut HashMap<Name, SourceModule>,
-) -> Result<Name, BuildError> {
+    search_dirs: &[PathBuf],
+    scopes: &Scopes,
+    modules: &mut HashMap<PathBuf, LoadedModule>,
+) -> Result<PathBuf, BuildError> {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if modules.contains_key(&key) {
+        return Ok(key);
+    }
+
     let source = std::fs::read_to_string(path).map_err(|err| {
         BuildError::new(
             path.to_path_buf(),
@@ -364,47 +569,51 @@ fn load_module_file(
         )
     })?;
 
-    let name = module.get_name();
-    let imports = user_imports(&module);
+    let declared_name = module.get_name();
+    let import_names = user_imports(&module);
+
+    // Insert a placeholder before recursing so an import cycle terminates
+    // (a module already present is not reloaded).
     modules.insert(
-        name.clone(),
-        SourceModule {
-            path: path.to_path_buf(),
+        key.clone(),
+        LoadedModule {
+            path: key.clone(),
             source: source.clone(),
             module,
-            imports: imports.clone(),
+            declared_name: declared_name.clone(),
+            imports: Vec::new(),
         },
     );
 
-    for import in imports {
-        if modules.contains_key(&import) {
-            continue;
-        }
-        let import_path = find_module_file(&import, source_dirs).ok_or_else(|| {
-            BuildError::new(
-                path.to_path_buf(),
-                source.clone(),
-                "MODULE NOT FOUND",
-                Region::ZERO,
-                format!(
-                    "The `{}` module imports `{}`, but I cannot find it. I looked for {} in: {}",
-                    name,
-                    import,
-                    module_file_name(&import),
-                    source_dirs
-                        .iter()
-                        .map(|d| d.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )
-        })?;
-        let found_name = load_module_file(&import_path, source_dirs, modules)?;
+    let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
+    for import in import_names {
+        let (import_path, matched_dir) =
+            find_module_file(&import, search_dirs).ok_or_else(|| {
+                BuildError::new(
+                    path.to_path_buf(),
+                    source.clone(),
+                    "MODULE NOT FOUND",
+                    Region::ZERO,
+                    format!(
+                        "The `{}` module imports `{}`, but I cannot find it. I looked for {} in: {}",
+                        declared_name,
+                        import,
+                        module_file_name(&import),
+                        search_dirs
+                            .iter()
+                            .map(|d| d.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+            })?;
+        let child_search = scopes.search_for(&matched_dir);
+        let child_key = load_module_file(&import_path, child_search, scopes, modules)?;
+        let found_name = modules[&child_key].declared_name.clone();
         if found_name != import {
-            let found = &modules[&found_name];
             return Err(BuildError::new(
-                found.path.clone(),
-                found.source.clone(),
+                import_path.clone(),
+                modules[&child_key].source.clone(),
                 "MODULE NAME MISMATCH",
                 Region::ZERO,
                 format!(
@@ -415,53 +624,141 @@ fn load_module_file(
                 ),
             ));
         }
+        resolved.push((import, child_key));
     }
-    Ok(name)
+
+    modules.get_mut(&key).unwrap().imports = resolved;
+    Ok(key)
 }
 
 fn module_file_name(name: &Name) -> String {
     format!("{}.elm", name.as_str().replace('.', "/"))
 }
 
-fn find_module_file(name: &Name, source_dirs: &[PathBuf]) -> Option<PathBuf> {
+/// Find `name` among `search_dirs`, returning the file and the source dir it
+/// was found in (so the caller can recurse with that dir's package scope).
+fn find_module_file(name: &Name, search_dirs: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     let relative = module_file_name(name);
-    source_dirs
-        .iter()
-        .map(|dir| dir.join(&relative))
-        .find(|path| path.is_file())
+    for dir in search_dirs {
+        let path = dir.join(&relative);
+        if path.is_file() {
+            return Some((path, dir.clone()));
+        }
+    }
+    None
 }
 
-/// Depth-first topological sort; returns Err(name) on a cycle.
+/// Assign each loaded file a unique module name. Files whose declared name is
+/// unique keep it; genuine duplicates (same name, different package) are given
+/// a distinct internal name so downstream `Name`-keyed maps do not collide.
+fn assign_unique_names(
+    modules: &HashMap<PathBuf, LoadedModule>,
+    order: &[PathBuf],
+) -> HashMap<PathBuf, Name> {
+    // Group paths by declared name (only `order` — the reachable modules).
+    let mut by_name: HashMap<Name, Vec<PathBuf>> = HashMap::new();
+    for path in order {
+        by_name
+            .entry(modules[path].declared_name.clone())
+            .or_default()
+            .push(path.clone());
+    }
+
+    let mut used: HashSet<Name> = by_name.keys().cloned().collect();
+    let mut names: HashMap<PathBuf, Name> = HashMap::new();
+    for (declared, mut paths) in by_name {
+        if paths.len() == 1 {
+            names.insert(paths.pop().unwrap(), declared);
+            continue;
+        }
+        // Deterministic: the lexicographically first file keeps the bare name.
+        paths.sort();
+        let mut counter = 0;
+        for (i, path) in paths.into_iter().enumerate() {
+            if i == 0 {
+                names.insert(path, declared.clone());
+                continue;
+            }
+            let name = loop {
+                counter += 1;
+                let candidate = Name::from(format!("{}_alm{}", declared, counter));
+                if !used.contains(&candidate) {
+                    break candidate;
+                }
+            };
+            used.insert(name.clone());
+            names.insert(path, name);
+        }
+    }
+    names
+}
+
+/// Produce a parsed module whose declared name and imports refer to the
+/// resolved, unique names, ready to hand to the (name-keyed) canonicalizer.
+/// In the common, no-duplicate case this changes nothing.
+fn rewrite_module(loaded: &LoadedModule, unique_names: &HashMap<PathBuf, Name>) -> src::Module {
+    let mut module = loaded.module.clone();
+    let my_name = unique_names[&loaded.path].clone();
+
+    match &mut module.name {
+        Some(located) => located.value = my_name.clone(),
+        None => module.name = Some(Located::new(Region::ZERO, my_name.clone())),
+    }
+
+    // Written import name -> resolved unique name.
+    let targets: HashMap<Name, Name> = loaded
+        .imports
+        .iter()
+        .map(|(written, path)| (written.clone(), unique_names[path].clone()))
+        .collect();
+
+    for import in &mut module.imports {
+        if let Some(target) = targets.get(&import.name.value) {
+            let original = import.name.value.clone();
+            if *target != original {
+                import.name.value = target.clone();
+                // Keep the qualifier the user wrote. `import Foo` (no alias)
+                // becomes, in effect, `import <unique> as Foo`, so `Foo.bar`
+                // still resolves. An existing alias already fixes the
+                // qualifier, so leave it.
+                if import.alias.is_none() {
+                    import.alias = Some(original);
+                }
+            }
+        }
+    }
+    module
+}
+
+/// Depth-first topological sort over file paths; returns Err(path) on a cycle.
 fn sort_modules(
-    modules: &HashMap<Name, SourceModule>,
-    entry: &Name,
-) -> Result<Vec<Name>, Name> {
-    // Every module in the map was reached from the entry, so one DFS
-    // covers them all.
+    modules: &HashMap<PathBuf, LoadedModule>,
+    entry: &Path,
+) -> Result<Vec<PathBuf>, PathBuf> {
     let mut order = Vec::new();
-    let mut state: HashMap<Name, u8> = HashMap::new(); // 1 = visiting, 2 = done
-    visit(modules, entry, &mut state, &mut order)?;
+    let mut state: HashMap<PathBuf, u8> = HashMap::new(); // 1 = visiting, 2 = done
+    visit(modules, &entry.to_path_buf(), &mut state, &mut order)?;
     Ok(order)
 }
 
 fn visit(
-    modules: &HashMap<Name, SourceModule>,
-    name: &Name,
-    state: &mut HashMap<Name, u8>,
-    order: &mut Vec<Name>,
-) -> Result<(), Name> {
-    match state.get(name) {
+    modules: &HashMap<PathBuf, LoadedModule>,
+    path: &PathBuf,
+    state: &mut HashMap<PathBuf, u8>,
+    order: &mut Vec<PathBuf>,
+) -> Result<(), PathBuf> {
+    match state.get(path) {
         Some(2) => return Ok(()),
-        Some(_) => return Err(name.clone()),
+        Some(_) => return Err(path.clone()),
         None => {}
     }
-    state.insert(name.clone(), 1);
-    if let Some(module) = modules.get(name) {
-        for import in &module.imports {
+    state.insert(path.clone(), 1);
+    if let Some(module) = modules.get(path) {
+        for import in module.import_paths() {
             visit(modules, import, state, order)?;
         }
     }
-    state.insert(name.clone(), 2);
-    order.push(name.clone());
+    state.insert(path.clone(), 2);
+    order.push(path.clone());
     Ok(())
 }
