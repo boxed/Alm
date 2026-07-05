@@ -129,7 +129,11 @@ fn alloc(value: Value) -> u64 {
 /// objects (tagged constructors, boxed recursive fields). Bump-allocated,
 /// never freed — like everything else here.
 #[no_mangle]
-pub unsafe extern "C" fn alm_alloc(size: usize) -> *mut u8 {
+pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
+    // Fixed-width u64 (not usize) so the ABI matches the typed backend's i64
+    // declaration on every target — usize is 32-bit on wasm32, which would
+    // otherwise make the linked call invalid.
+    let size = size as usize;
     let layout = Layout::from_size_align(size.max(1), 8).unwrap();
     std::alloc::alloc(layout)
 }
@@ -149,7 +153,7 @@ pub unsafe extern "C" fn alm_alloc(size: usize) -> *mut u8 {
 pub unsafe extern "C" fn alm_list_alloc(count: i64, esize: i64) -> *mut u8 {
     let count = count.max(0) as usize;
     let esize = esize.max(1) as usize;
-    let p = alm_alloc((16 + count * esize).max(16));
+    let p = alm_alloc((16 + count * esize).max(16) as u64);
     let hdr = p as *mut i64;
     *hdr = count as i64;
     *hdr.add(1) = count as i64;
@@ -185,7 +189,7 @@ pub unsafe extern "C" fn alm_list_cons(
         *(backing as *const i64) as usize
     };
     let new_cap = ((len + 1) * 2).max(4).max(old_cap * 2);
-    let np = alm_alloc(16 + new_cap * esize);
+    let np = alm_alloc((16 + new_cap * esize) as u64);
     let nhdr = np as *mut i64;
     *nhdr = new_cap as i64;
     *nhdr.add(1) = (len + 1) as i64;

@@ -21,7 +21,7 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|native-typed]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|native-typed|wasm-typed]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -50,9 +50,10 @@ fn make(args: &[String]) -> ExitCode {
                 "native" => backend = Backend::Native(Target::Native),
                 "wasm" => backend = Backend::Native(Target::Wasm),
                 "native-typed" => backend = Backend::Typed(Target::Native),
+                "wasm-typed" => backend = Backend::Typed(Target::Wasm),
                 other => {
                     eprintln!(
-                        "Unknown target `{}`. I know js, native, wasm and native-typed.",
+                        "Unknown target `{}`. I know js, native, wasm, native-typed and wasm-typed.",
                         other
                     );
                     return ExitCode::FAILURE;
@@ -81,7 +82,8 @@ fn make(args: &[String]) -> ExitCode {
             alm_compiler::project::compile_project_native(&input, &output, target).map(|()| output)
         }
         Backend::Typed(target) => {
-            let output = output.unwrap_or_else(|| input.with_extension(""));
+            let ext = if target == Target::Wasm { "wasm" } else { "" };
+            let output = output.unwrap_or_else(|| input.with_extension(ext));
             alm_compiler::project::compile_project_typed(&input, &output, target).map(|()| output)
         }
         Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
