@@ -217,6 +217,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             i64_t.fn_type(&[i64_t.into()], false),
             Some(Linkage::External),
         );
+        // rt_closure(fn_ptr, arity, applied, args) builds a uniform closure.
+        self.module.add_function(
+            "rt_closure",
+            i64_t.fn_type(
+                &[ptr_t.into(), self.ctx.i32_type().into(), self.ctx.i32_type().into(), ptr_t.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
         for name in ["rt_true_v", "rt_false_v", "rt_unit_v"] {
             let g = self.module.add_global(i64_t, None, name);
             g.set_linkage(Linkage::External);
@@ -435,6 +444,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::List(_) => self.box_list(val, tipe),
             Layout::Enum(_) => self.box_enum(val, tipe),
             Layout::Tagged(_) => self.box_tagged(val, tipe),
+            Layout::Closure => self.box_closure(val, tipe),
             // Opaque values are already the uniform word.
             Layout::Opaque => Ok(val),
             // An unresolved phantom (e.g. the element type of `Nothing`): this
@@ -642,6 +652,76 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
         }
         Ok(phi.as_basic_value())
+    }
+
+    /// Box a typed closure into a uniform runtime closure: generate a
+    /// trampoline that the runtime can call with uniform arguments, which
+    /// unboxes them, applies the typed closure, and boxes the result.
+    fn box_closure(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let mut arg_types = Vec::new();
+        let mut t = tipe.clone();
+        while let Type::Lambda(a, b) = t {
+            arg_types.push(*a);
+            t = *b;
+        }
+        let ret_type = t;
+        let n = arg_types.len();
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        // Trampoline: (captured typed closure, arg0.., arg_{n-1}) -> result,
+        // all uniform words.
+        let tramp_params: Vec<BasicMetadataTypeEnum> = vec![i64_t.into(); n + 1];
+        let tramp_ty = i64_t.fn_type(&tramp_params, false);
+        let name = format!("clos.{}", self.lam_id);
+        self.lam_id += 1;
+        let tramp = self.module.add_function(&name, tramp_ty, Some(Linkage::Internal));
+
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        self.cur_fn = Some(tramp);
+        let entry = self.ctx.append_basic_block(tramp, "entry");
+        self.builder.position_at_end(entry);
+        let cap = tramp.get_nth_param(0).unwrap().into_int_value();
+        let clos = self.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
+        let mut typed_args = Vec::new();
+        for (i, at) in arg_types.iter().enumerate() {
+            let uni = tramp.get_nth_param((i + 1) as u32).unwrap();
+            typed_args.push(self.unbox_value(uni, at)?);
+        }
+        let ret_layout = self.layouts.layout_of(&ret_type);
+        let result = self.apply_closure(clos, &typed_args, &ret_layout);
+        let body_result = self.box_value(result, &ret_type);
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        let boxed = body_result?;
+        self.builder.build_return(Some(&boxed)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+
+        // Build the uniform closure capturing the typed closure pointer.
+        let closure_word = self
+            .builder
+            .build_ptr_to_int(val.into_pointer_value(), i64_t, "cw")
+            .unwrap();
+        let args_arr = self.entry_alloca(i64_t.array_type(1).into(), "capargs");
+        self.builder.build_store(args_arr, closure_word).unwrap();
+        Ok(self.call_named(
+            "rt_closure",
+            &[
+                tramp.as_global_value().as_pointer_value().into(),
+                self.ctx.i32_type().const_int((n + 1) as u64, false).into(),
+                self.ctx.i32_type().const_int(1, false).into(),
+                args_arr.into(),
+            ],
+        ))
     }
 
     fn box_list(
