@@ -127,6 +127,69 @@ pub unsafe extern "C" fn alm_alloc(size: usize) -> *mut u8 {
     std::alloc::alloc(layout)
 }
 
+// Typed list backing for the monomorphized backend: a header
+// `[cap: i64][used: i64]` followed by `cap` unboxed elements of `esize`
+// bytes each. Elements are stored REVERSED (the list head is last), so a
+// list value `{backing, len}` has its head at element `len - 1`; `tail` is
+// the same backing with `len - 1` (O(1)), and `cons` appends at the back
+// (O(1) amortized). Appends never disturb other views' visible range, so
+// sharing is sound without refcounting — the uniform backend's scheme with
+// unboxed elements.
+
+/// Allocate a list backing with `count` elements (cap = used = count); the
+/// caller fills the data. `esize` is the element size in bytes.
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_alloc(count: i64, esize: i64) -> *mut u8 {
+    let count = count.max(0) as usize;
+    let esize = esize.max(1) as usize;
+    let p = alm_alloc((16 + count * esize).max(16));
+    let hdr = p as *mut i64;
+    *hdr = count as i64;
+    *hdr.add(1) = count as i64;
+    p
+}
+
+/// Prepend `elem` (esize bytes) to the list `{backing, len}`, returning the
+/// backing to use (the same one grown in place, or a fresh copy). The new
+/// length is always `len + 1`.
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_cons(
+    backing: *mut u8,
+    len: i64,
+    elem: *const u8,
+    esize: i64,
+) -> *mut u8 {
+    let esize = esize.max(1) as usize;
+    let len = len.max(0) as usize;
+    if !backing.is_null() {
+        let hdr = backing as *mut i64;
+        let cap = *hdr as usize;
+        let used = *hdr.add(1) as usize;
+        if len == used && used < cap {
+            let data = backing.add(16);
+            std::ptr::copy_nonoverlapping(elem, data.add(used * esize), esize);
+            *hdr.add(1) = (used + 1) as i64;
+            return backing;
+        }
+    }
+    let old_cap = if backing.is_null() {
+        0
+    } else {
+        *(backing as *const i64) as usize
+    };
+    let new_cap = ((len + 1) * 2).max(4).max(old_cap * 2);
+    let np = alm_alloc(16 + new_cap * esize);
+    let nhdr = np as *mut i64;
+    *nhdr = new_cap as i64;
+    *nhdr.add(1) = (len + 1) as i64;
+    let ndata = np.add(16);
+    if !backing.is_null() && len > 0 {
+        std::ptr::copy_nonoverlapping(backing.add(16), ndata, len * esize);
+    }
+    std::ptr::copy_nonoverlapping(elem, ndata.add(len * esize), esize);
+    np
+}
+
 /// Unbox a uniform int/float value word into a raw machine value — the
 /// typed backend's boundary conversion when a uniform runtime kernel
 /// returns a value it wants unboxed. The inverses of `rt_int`/`rt_float`.
