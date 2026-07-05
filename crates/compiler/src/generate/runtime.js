@@ -1451,6 +1451,21 @@ var $Task$map2 = F3(function (f, ta, tb) {
         return A2($Task$map, function (b) { return A2(f, a, b); }, tb);
     }, ta);
 });
+var $Task$map3 = F4(function (f, ta, tb, tc) {
+    return A2($Task$andThen, function (a) {
+        return A3($Task$map2, function (b, c) { return A3(f, a, b, c); }, tb, tc);
+    }, ta);
+});
+var $Task$map4 = F5(function (f, ta, tb, tc, td) {
+    return A2($Task$andThen, function (a) {
+        return A4($Task$map3, function (b, c, d) { return A4(f, a, b, c, d); }, tb, tc, td);
+    }, ta);
+});
+var $Task$map5 = F6(function (f, ta, tb, tc, td, te) {
+    return A2($Task$andThen, function (a) {
+        return A5($Task$map4, function (b, c, d, e) { return A5(f, a, b, c, d, e); }, tb, tc, td, te);
+    }, ta);
+});
 var $Task$mapError = F2(function (f, task) {
     return _Task(function (ok, err) {
         task.fork(ok, function (x) { err(f(x)); });
