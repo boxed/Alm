@@ -331,3 +331,13 @@ fn extensible_record_alias_applied_with_concrete_record() {
         make : WithK { v : String }\n\
         make =\n    { k = 1, v = \"x\" }\n");
 }
+
+#[test]
+fn wildcard_import_exposes_builtin_types_and_ctors() {
+    // `exposing (..)` on a builtin module must bring its type aliases
+    // (Svg.Svg) and its union constructors (Time.Weekday) into scope, not
+    // just its values. (Regression: EdutainmentLIVE/elm-dropdown, which
+    // does `import Svg exposing (..)` and annotates with `Svg msg`.)
+    ok("import Svg exposing (..)\n\nthing : Svg msg\nthing =\n    Svg.text \"x\"\n");
+    ok("import Time exposing (..)\n\nday : Weekday\nday =\n    Mon\n");
+}

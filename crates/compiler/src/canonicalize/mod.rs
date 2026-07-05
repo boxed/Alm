@@ -266,6 +266,16 @@ pub fn canonicalize_module(
                     for union in builtins::UNIONS {
                         if union.module == import_name.as_str() {
                             exposed_types.insert(Name::from(union.name), import_name.clone());
+                            // `exposing (..)` also exposes each union's constructors.
+                            for (index, _) in union.ctors.iter().enumerate() {
+                                let info = builtin_ctor_info(union, index as u32);
+                                ctors.insert(info.ctor.name.clone(), info);
+                            }
+                        }
+                    }
+                    for (module, name, _, _) in builtins::ALIASES {
+                        if *module == import_name.as_str() {
+                            exposed_types.insert(Name::from(*name), import_name.clone());
                         }
                     }
                 }
