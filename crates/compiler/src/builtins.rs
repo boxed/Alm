@@ -801,6 +801,8 @@ pub const ALIASES: &[(&str, &str, &[&str], &str)] = &[
     ("VirtualDom", "Node", &["msg"], "Html msg"),
     ("VirtualDom", "Attribute", &["msg"], "Attribute msg"),
     ("Browser", "Document", &["msg"], "{ title : String, body : List (Html msg) }"),
+    // `Platform` re-exposes the Task type (`import Platform exposing (Task)`).
+    ("Platform", "Task", &["err", "ok"], "Task err ok"),
 ];
 
 pub fn lookup_alias(module: &str, name: &str) -> Option<(&'static [&'static str], &'static str)> {
