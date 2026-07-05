@@ -2160,6 +2160,14 @@ function _Browser_currentUrl() {
     };
 }
 
+// Run `fn` after the current synchronous frame. Elm defers a program's
+// initial Cmd this way so that ports subscribed right after `init()` returns
+// (the `app.ports.x.subscribe(...)` line) are registered before the Cmd fires.
+function _Platform_defer(fn) {
+    if (typeof queueMicrotask === 'function') { queueMicrotask(fn); }
+    else { Promise.resolve().then(fn); }
+}
+
 function _Platform_wrap(value) {
     if (!value || value.$ !== 'Program') { return value; }
     return {
@@ -2425,7 +2433,11 @@ function _Platform_initialize(program, opts) {
     }
 
     updateSubs();
-    if (initialCmd) { runCmd(initialCmd, function (m) { return m; }); }
+    // Defer the initial Cmd so a port subscriber attached synchronously after
+    // `init()` returns receives values the Cmd sends (matching Elm).
+    if (initialCmd) {
+        _Platform_defer(function () { runCmd(initialCmd, function (m) { return m; }); });
+    }
 
     // The app.ports API.
     var ports = {};
