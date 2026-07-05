@@ -1803,6 +1803,12 @@ var $Browser$Events$onAnimationFrameDelta = function (toMsg) {
 var $Browser$Events$onAnimationFrame = function (toMsg) {
     return { $: 'SubAnimation', toMsg: toMsg, delta: false };
 };
+var $Browser$Events$onVisibilityChange = function (toMsg) {
+    return _Browser_on('visibilitychange', _Json_decoder(function (_e) {
+        var hidden = typeof document !== 'undefined' && document.hidden;
+        return _Json_ok(toMsg(hidden ? $Browser$Events$Hidden : $Browser$Events$Visible));
+    }));
+};
 
 // BROWSER.NAVIGATION
 

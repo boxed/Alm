@@ -535,6 +535,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Browser.Events", "onResize", "(Int -> Int -> msg) -> Sub msg"),
             V("Browser.Events", "onAnimationFrameDelta", "(Float -> msg) -> Sub msg"),
             V("Browser.Events", "onAnimationFrame", "(Time.Posix -> msg) -> Sub msg"),
+            V("Browser.Events", "onVisibilityChange", "(Browser.Events.Visibility -> msg) -> Sub msg"),
             // Browser.Navigation
             V("Browser.Navigation", "load", "String -> Cmd msg"),
             V("Browser.Navigation", "reload", "Cmd msg"),
@@ -850,6 +851,7 @@ pub const UNIONS: &[BuiltinUnion] = &[
         ("Mon", &[]), ("Tue", &[]), ("Wed", &[]), ("Thu", &[]), ("Fri", &[]), ("Sat", &[]), ("Sun", &[]),
     ] },
     BuiltinUnion { module: "Browser.Dom", name: "Error", vars: &[], ctors: &[("NotFound", &["String"])] },
+    BuiltinUnion { module: "Browser.Events", name: "Visibility", vars: &[], ctors: &[("Visible", &[]), ("Hidden", &[])] },
     BuiltinUnion { module: "Url", name: "Protocol", vars: &[], ctors: &[("Http", &[]), ("Https", &[])] },
     BuiltinUnion { module: "Browser", name: "UrlRequest", vars: &[], ctors: &[
         ("Internal", &["Url.Url"]), ("External", &["String"]),
