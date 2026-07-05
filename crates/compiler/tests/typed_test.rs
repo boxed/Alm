@@ -725,3 +725,21 @@ fn structural_equality_tuples_records() {
          \x20       + 1000 * boolInt ({ x = 1, y = 2 } /= { x = 9, y = 2 })\n",
     );
 }
+
+#[test]
+fn structural_equality_lists() {
+    assert_same(
+        "list_eq",
+        "module Test exposing (..)\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   boolInt ([ 1, 2, 3 ] == [ 1, 2, 3 ])\n\
+         \x20       + 10 * boolInt ([ 1, 2 ] == [ 1, 2, 3 ])\n\
+         \x20       + 100 * boolInt ([ 1, 2, 3 ] == [ 1, 9, 3 ])\n\
+         \x20       + 1000 * boolInt ([] == [])\n",
+    );
+}

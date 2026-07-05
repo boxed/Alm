@@ -1921,11 +1921,97 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 }
                 Ok(acc)
             }
+            Layout::List(elem) => self.equals_lists(a, b, elem),
+            // An opaque boxed reference (e.g. the phantom element type of an
+            // empty list): fall back to pointer identity. This code is only
+            // reached for values that are genuinely opaque; for `[] == []` the
+            // element comparison is generated but never executed.
+            Layout::Ref => {
+                let i64_t = self.ctx.i64_type();
+                let ai = self
+                    .builder
+                    .build_ptr_to_int(a.into_pointer_value(), i64_t, "ai")
+                    .unwrap();
+                let bi = self
+                    .builder
+                    .build_ptr_to_int(b.into_pointer_value(), i64_t, "bi")
+                    .unwrap();
+                Ok(self.builder.build_int_compare(IntPredicate::EQ, ai, bi, "refeq").unwrap())
+            }
             other => Err(format!(
                 "typed backend: == on layout {:?} is not supported yet",
                 other
             )),
         }
+    }
+
+    /// List equality: walk both lists in lockstep — equal iff same length and
+    /// all elements equal.
+    fn equals_lists(
+        &mut self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        elem: &Layout,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let i1_t = self.ctx.bool_type();
+        let cell = self.cons_cell(elem);
+        let elem_ty = self.llvm_type(elem);
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("eql.loop");
+        let body_bb = self.new_block("eql.body");
+        let adv_bb = self.new_block("eql.adv");
+        let null_bb = self.new_block("eql.null");
+        let false_bb = self.new_block("eql.false");
+        let done_bb = self.new_block("eql.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let ca = self.builder.build_phi(ptr_t, "ca").unwrap();
+        let cb = self.builder.build_phi(ptr_t, "cb").unwrap();
+        ca.add_incoming(&[(&a as &dyn BasicValue, entry)]);
+        cb.add_incoming(&[(&b as &dyn BasicValue, entry)]);
+        let cap = ca.as_basic_value().into_pointer_value();
+        let cbp = cb.as_basic_value().into_pointer_value();
+        let anull = self.builder.build_is_null(cap, "an").unwrap();
+        let bnull = self.builder.build_is_null(cbp, "bn").unwrap();
+        let anyn = self.builder.build_or(anull, bnull, "anyn").unwrap();
+        self.builder.build_conditional_branch(anyn, null_bb, body_bb).unwrap();
+
+        // One or both ended: equal iff both ended together.
+        self.builder.position_at_end(null_bb);
+        let both = self.builder.build_and(anull, bnull, "both").unwrap();
+        self.builder.build_unconditional_branch(done_bb).unwrap();
+
+        // Compare heads.
+        self.builder.position_at_end(body_bb);
+        let hap = self.builder.build_struct_gep(cell, cap, 0, "hap").unwrap();
+        let ha = self.builder.build_load(elem_ty, hap, "ha").unwrap();
+        let hbp = self.builder.build_struct_gep(cell, cbp, 0, "hbp").unwrap();
+        let hb = self.builder.build_load(elem_ty, hbp, "hb").unwrap();
+        let heq = self.equals_vals(ha, hb, elem)?;
+        let after_head = self.builder.get_insert_block().unwrap();
+        self.builder.build_conditional_branch(heq, adv_bb, false_bb).unwrap();
+        let _ = after_head;
+
+        self.builder.position_at_end(adv_bb);
+        let nap = self.builder.build_struct_gep(cell, cap, 1, "nap").unwrap();
+        let na = self.builder.build_load(ptr_t, nap, "na").unwrap();
+        let nbp = self.builder.build_struct_gep(cell, cbp, 1, "nbp").unwrap();
+        let nb = self.builder.build_load(ptr_t, nbp, "nb").unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        ca.add_incoming(&[(&na as &dyn BasicValue, adv_bb)]);
+        cb.add_incoming(&[(&nb as &dyn BasicValue, adv_bb)]);
+
+        self.builder.position_at_end(false_bb);
+        self.builder.build_unconditional_branch(done_bb).unwrap();
+
+        self.builder.position_at_end(done_bb);
+        let phi = self.builder.build_phi(i1_t, "listeq").unwrap();
+        let fals: BasicValueEnum = i1_t.const_zero().into();
+        let both_v: BasicValueEnum = both.into();
+        phi.add_incoming(&[(&both_v as &dyn BasicValue, null_bb), (&fals as &dyn BasicValue, false_bb)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// Short-circuiting `&&` / `||`: the right operand is only evaluated when
