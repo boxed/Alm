@@ -769,6 +769,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("List", "member") => self.kernel_list_member(args),
             ("List", "head") => self.kernel_list_head_tail(whole, args, true),
             ("List", "tail") => self.kernel_list_head_tail(whole, args, false),
+            ("List", "drop") => self.kernel_list_drop(args),
+            ("List", "take") => self.kernel_list_take(whole, args),
+            ("List", "all") => self.kernel_list_all_any(args, true),
+            ("List", "any") => self.kernel_list_all_any(args, false),
             ("List", "isEmpty") => {
                 let list = self.gen(&args[0])?.into_pointer_value();
                 Ok(self.builder.build_is_null(list, "isempty").unwrap().into())
@@ -1281,6 +1285,177 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.position_at_end(merge);
         let phi = self.builder.build_phi(ptr_t, "maybe").unwrap();
         phi.add_incoming(&[(&just as &dyn BasicValue, just_bb), (&nothing as &dyn BasicValue, nothing_bb)]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// `List.drop n xs` — skip the first `n` cells and return the rest.
+    fn kernel_list_drop(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[1].tipe)?;
+        let n = self.gen(&args[0])?.into_int_value();
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("drop.loop");
+        let body_bb = self.new_block("drop.body");
+        let done_bb = self.new_block("drop.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let i = self.builder.build_phi(i64_t, "i").unwrap();
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let zero: BasicValueEnum = i64_t.const_zero().into();
+        i.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let notnull = self.builder.build_is_not_null(cur_ptr, "nn").unwrap();
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i.as_basic_value().into_int_value(), n, "more")
+            .unwrap();
+        let go = self.builder.build_and(more, notnull, "go").unwrap();
+        self.builder.build_conditional_branch(go, body_bb, done_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let i2: BasicValueEnum = self
+            .builder
+            .build_int_add(i.as_basic_value().into_int_value(), i64_t.const_int(1, false), "i2")
+            .unwrap()
+            .into();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        i.add_incoming(&[(&i2 as &dyn BasicValue, body_end)]);
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(cur.as_basic_value())
+    }
+
+    /// `List.take n xs` — copy the first `n` cells.
+    fn kernel_list_take(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&whole.tipe)?;
+        let n = self.gen(&args[0])?.into_int_value();
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let elem_ty = self.llvm_type(&elem);
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("take.loop");
+        let body_bb = self.new_block("take.body");
+        let done_bb = self.new_block("take.done");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let i = self.builder.build_phi(i64_t, "i").unwrap();
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        let zero: BasicValueEnum = i64_t.const_zero().into();
+        i.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let notnull = self.builder.build_is_not_null(cur_ptr, "nn").unwrap();
+        let more = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, i.as_basic_value().into_int_value(), n, "more")
+            .unwrap();
+        let go = self.builder.build_and(more, notnull, "go").unwrap();
+        self.builder.build_conditional_branch(go, body_bb, done_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let newcell = self.cons(&elem, head, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nf = self.builder.build_struct_gep(cell, newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nf).unwrap();
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let i2: BasicValueEnum = self
+            .builder
+            .build_int_add(i.as_basic_value().into_int_value(), i64_t.const_int(1, false), "i2")
+            .unwrap()
+            .into();
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        i.add_incoming(&[(&i2 as &dyn BasicValue, body_end)]);
+        cur.add_incoming(&[(&next as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "taken").unwrap())
+    }
+
+    /// `List.all`/`List.any pred xs : Bool` — short-circuiting predicate fold.
+    fn kernel_list_all_any(
+        &mut self,
+        args: &[TypedExpr],
+        is_all: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[1].tipe)?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        let cell = self.cons_cell(&elem);
+        let elem_ty = self.llvm_type(&elem);
+        let i1_t = self.ctx.bool_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("aa.loop");
+        let body_bb = self.new_block("aa.body");
+        let cont_bb = self.new_block("aa.cont");
+        let short_bb = self.new_block("aa.short");
+        let end_bb = self.new_block("aa.end");
+        let merge = self.new_block("aa.merge");
+
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(ptr_t, "cur").unwrap();
+        cur.add_incoming(&[(&list as &dyn BasicValue, entry)]);
+        let cur_ptr = cur.as_basic_value().into_pointer_value();
+        let is_null = self.builder.build_is_null(cur_ptr, "end").unwrap();
+        self.builder.build_conditional_branch(is_null, end_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let hp = self.builder.build_struct_gep(cell, cur_ptr, 0, "hp").unwrap();
+        let head = self.builder.build_load(elem_ty, hp, "head").unwrap();
+        let p = self.apply_fn_expr(&args[0], &[head])?.into_int_value();
+        // all: continue while p true, short-circuit on false. any: opposite.
+        if is_all {
+            self.builder.build_conditional_branch(p, cont_bb, short_bb).unwrap();
+        } else {
+            self.builder.build_conditional_branch(p, short_bb, cont_bb).unwrap();
+        }
+
+        self.builder.position_at_end(cont_bb);
+        let tp = self.builder.build_struct_gep(cell, cur_ptr, 1, "tp").unwrap();
+        let next = self.builder.build_load(ptr_t, tp, "next").unwrap();
+        let cont_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&next as &dyn BasicValue, cont_end)]);
+
+        // Reached the end without short-circuiting: all=true, any=false.
+        self.builder.position_at_end(end_bb);
+        self.builder.build_unconditional_branch(merge).unwrap();
+        // Short-circuited: all=false, any=true.
+        self.builder.position_at_end(short_bb);
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(i1_t, "aa").unwrap();
+        let end_val: BasicValueEnum = i1_t.const_int(is_all as u64, false).into();
+        let short_val: BasicValueEnum = i1_t.const_int(!is_all as u64, false).into();
+        phi.add_incoming(&[(&end_val as &dyn BasicValue, end_bb), (&short_val as &dyn BasicValue, short_bb)]);
         Ok(phi.as_basic_value())
     }
 

@@ -823,3 +823,24 @@ fn record_accessor_as_function() {
          main = List.sum (List.map .x points) * 100 + List.sum (List.map .y points)\n",
     );
 }
+
+#[test]
+fn take_drop_all_any() {
+    assert_same(
+        "take_drop",
+        "module Test exposing (..)\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       xs = List.range 1 10\n\
+         \x20   in\n\
+         \x20   List.sum (List.take 3 xs) * 1000\n\
+         \x20       + List.sum (List.drop 7 xs) * 10\n\
+         \x20       + boolInt (List.all (\\n -> n > 0) xs)\n\
+         \x20       + 2 * boolInt (List.any (\\n -> n > 100) xs)\n",
+    );
+}
