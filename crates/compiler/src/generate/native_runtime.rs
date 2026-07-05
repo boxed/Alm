@@ -2794,6 +2794,49 @@ pub unsafe extern "C" fn dict_partition(f: u64, d: u64) -> u64 {
     }
     pair(alloc(Value::Dict(yes)), alloc(Value::Dict(no)))
 }
+#[no_mangle]
+pub unsafe extern "C" fn dict_merge(
+    left_step: u64,
+    both_step: u64,
+    right_step: u64,
+    left: u64,
+    right: u64,
+    initial: u64,
+) -> u64 {
+    // Copy first: the step closures allocate, which may move the arena.
+    let la = as_pairs(left).to_vec();
+    let ra = as_pairs(right).to_vec();
+    let mut acc = initial;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < la.len() && j < ra.len() {
+        let (lk, lv) = la[i];
+        let (rk, rv) = ra[j];
+        match value_cmp(lk, rk) {
+            c if c < 0 => {
+                acc = ap3(left_step, lk, lv, acc);
+                i += 1;
+            }
+            c if c > 0 => {
+                acc = ap3(right_step, rk, rv, acc);
+                j += 1;
+            }
+            _ => {
+                acc = ap4(both_step, lk, lv, rv, acc);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    while i < la.len() {
+        acc = ap3(left_step, la[i].0, la[i].1, acc);
+        i += 1;
+    }
+    while j < ra.len() {
+        acc = ap3(right_step, ra[j].0, ra[j].1, acc);
+        j += 1;
+    }
+    acc
+}
 
 // -- Set --
 
@@ -3240,6 +3283,7 @@ kernel_fns! {
     G_DICT_INTERSECT "$Dict$intersect" dict_intersect, 2;
     G_DICT_DIFF "$Dict$diff" dict_diff, 2;
     G_DICT_PARTITION "$Dict$partition" dict_partition, 2;
+    G_DICT_MERGE "$Dict$merge" dict_merge, 6;
     G_SET_SINGLETON "$Set$singleton" set_singleton, 1;
     G_SET_INSERT "$Set$insert" set_insert, 2;
     G_SET_REMOVE "$Set$remove" set_remove, 2;

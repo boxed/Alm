@@ -240,6 +240,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Dict", "union", "Dict comparable v -> Dict comparable v -> Dict comparable v"),
             V("Dict", "intersect", "Dict comparable v -> Dict comparable v -> Dict comparable v"),
             V("Dict", "diff", "Dict comparable a -> Dict comparable b -> Dict comparable a"),
+            V("Dict", "merge", "(comparable -> a -> result -> result) -> (comparable -> a -> b -> result -> result) -> (comparable -> b -> result -> result) -> Dict comparable a -> Dict comparable b -> result -> result"),
             // Set
             V("Set", "empty", "Set a"),
             V("Set", "singleton", "comparable -> Set comparable"),
@@ -366,6 +367,10 @@ pub fn values() -> &'static [BuiltinValue] {
             table.push(V("Svg.Attributes", attr, "String -> Attribute msg"));
         }
         table.extend([
+            // Svg — non-tag helpers
+            V("Svg", "text", "String -> Html msg"),
+            V("Svg", "map", "(a -> msg) -> Html a -> Html msg"),
+            V("Svg.Attributes", "clipPath", "String -> Attribute msg"),
             // Html — extras
             V("Html.Attributes", "classList", "List ( String, Bool ) -> Attribute msg"),
             V("Html.Attributes", "property", "String -> Value -> Attribute msg"),
@@ -499,6 +504,8 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Browser.Dom", "getViewport", "Task x Browser.Dom.Viewport"),
             V("Browser.Dom", "setViewport", "Float -> Float -> Task x ()"),
             V("Browser.Dom", "getElement", "String -> Task Browser.Dom.Error Browser.Dom.Element"),
+            V("Browser.Dom", "getViewportOf", "String -> Task Browser.Dom.Error Browser.Dom.Viewport"),
+            V("Browser.Dom", "setViewportOf", "String -> Float -> Float -> Task Browser.Dom.Error ()"),
             // Browser.Events
             V("Browser.Events", "onKeyDown", "Decoder msg -> Sub msg"),
             V("Browser.Events", "onKeyUp", "Decoder msg -> Sub msg"),
@@ -544,6 +551,8 @@ pub fn values() -> &'static [BuiltinValue] {
             V("VirtualDom", "property", "String -> Value -> Attribute msg"),
             V("VirtualDom", "style", "String -> String -> Attribute msg"),
             V("VirtualDom", "map", "(a -> msg) -> Html a -> Html msg"),
+            V("VirtualDom", "mapAttribute", "(a -> b) -> Attribute a -> Attribute b"),
+            V("VirtualDom", "keyedNode", "String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
         ]);
         table
     })

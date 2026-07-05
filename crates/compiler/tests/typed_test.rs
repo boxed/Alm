@@ -1072,6 +1072,35 @@ fn dict_operations() {
 }
 
 #[test]
+fn dict_merge() {
+    assert_same(
+        "dict_merge",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         a : Dict.Dict Int String\n\
+         a = Dict.fromList [ ( 1, \"a1\" ), ( 2, \"a2\" ), ( 4, \"a4\" ) ]\n\
+         \n\
+         b : Dict.Dict Int String\n\
+         b = Dict.fromList [ ( 2, \"b2\" ), ( 3, \"b3\" ), ( 4, \"b4\" ) ]\n\
+         \n\
+         left : Int -> String -> List String -> List String\n\
+         left k v acc = acc ++ [ String.fromInt k ++ \"L\" ++ v ]\n\
+         \n\
+         both : Int -> String -> String -> List String -> List String\n\
+         both k v1 v2 acc = acc ++ [ String.fromInt k ++ \"B\" ++ v1 ++ v2 ]\n\
+         \n\
+         right : Int -> String -> List String -> List String\n\
+         right k v acc = acc ++ [ String.fromInt k ++ \"R\" ++ v ]\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \",\" (Dict.merge left both right a b [])\n",
+    );
+}
+
+#[test]
 fn set_operations() {
     assert_same(
         "set",

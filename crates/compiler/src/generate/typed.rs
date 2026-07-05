@@ -3727,6 +3727,7 @@ fn collection_symbol(module: &str, name: &str) -> Option<&'static str> {
         ("Dict", "intersect") => "dict_intersect",
         ("Dict", "diff") => "dict_diff",
         ("Dict", "partition") => "dict_partition",
+        ("Dict", "merge") => "dict_merge",
         ("Set", "singleton") => "set_singleton",
         ("Set", "insert") => "set_insert",
         ("Set", "remove") => "set_remove",

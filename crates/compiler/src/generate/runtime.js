@@ -696,6 +696,20 @@ var $Dict$intersect = F2(function (left, right) {
 var $Dict$diff = F2(function (left, right) {
     return A2($Dict$filter, F2(function (k, _v) { return !A2($Dict$member, k, right); }), left);
 });
+var $Dict$merge = F6(function (leftStep, bothStep, rightStep, left, right, initial) {
+    var acc = initial;
+    var i = 0, j = 0;
+    while (i < left.keys.length && j < right.keys.length) {
+        var lk = left.keys[i], rk = right.keys[j];
+        var c = _Utils_cmp(lk, rk);
+        if (c < 0) { acc = A3(leftStep, lk, left.vals[i], acc); i++; }
+        else if (c > 0) { acc = A3(rightStep, rk, right.vals[j], acc); j++; }
+        else { acc = A4(bothStep, lk, left.vals[i], right.vals[j], acc); i++; j++; }
+    }
+    for (; i < left.keys.length; i++) { acc = A3(leftStep, left.keys[i], left.vals[i], acc); }
+    for (; j < right.keys.length; j++) { acc = A3(rightStep, right.keys[j], right.vals[j], acc); }
+    return acc;
+});
 
 // SET — a Dict with unit values.
 
@@ -827,6 +841,8 @@ var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key,
 var $VirtualDom$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
+var $Svg$map = $Html$map;
+var $Svg$text = _VDom_text;
 
 var $Html$Keyed$node = function (tag) {
     return F2(function (attrs, keyedKids) {
@@ -838,6 +854,7 @@ var $Html$Keyed$node = function (tag) {
 };
 var $Html$Keyed$ul = $Html$Keyed$node('ul');
 var $Html$Keyed$ol = $Html$Keyed$node('ol');
+var $VirtualDom$keyedNode = $Html$Keyed$node;
 
 var $Html$Lazy$lazy = F2(function (f, a) { return { $: 'VLazy', f: f, args: [a] }; });
 var $Html$Lazy$lazy2 = F3(function (f, a, b) { return { $: 'VLazy', f: f, args: [a, b] }; });
@@ -867,6 +884,7 @@ var $Html$Attributes$attribute = F2(function (key, val) { return { $: 'AAttr', k
 var $Html$Attributes$map = F2(function (f, attr) {
     return attr.$ === 'AEvent' ? { $: 'AEvent', name: attr.name, toMsg: function (e) { return f(attr.toMsg(e)); }, opts: attr.opts } : attr;
 });
+var $VirtualDom$mapAttribute = $Html$Attributes$map;
 function _VDom_prop(key) {
     return function (val) { return { $: 'AProp', key: key, val: val }; };
 }
@@ -1655,6 +1673,24 @@ var $Browser$Dom$setViewport = F2(function (x, y) {
     return _Task(function (ok, _err) {
         if (typeof window !== 'undefined' && window.scroll) { window.scroll(x, y); }
         ok(_Utils_Tuple0);
+    });
+});
+var $Browser$Dom$getViewportOf = function (id) {
+    return _Dom_byId(id, function (node) {
+        return {
+            scene: { width: node.scrollWidth || 0, height: node.scrollHeight || 0 },
+            viewport: {
+                x: node.scrollLeft || 0, y: node.scrollTop || 0,
+                width: node.clientWidth || 0, height: node.clientHeight || 0
+            }
+        };
+    });
+};
+var $Browser$Dom$setViewportOf = F3(function (id, x, y) {
+    return _Dom_byId(id, function (node) {
+        node.scrollLeft = x;
+        node.scrollTop = y;
+        return _Utils_Tuple0;
     });
 });
 var $Browser$Dom$getElement = function (id) {
