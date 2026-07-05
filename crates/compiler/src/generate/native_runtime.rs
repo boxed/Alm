@@ -135,6 +135,24 @@ pub unsafe extern "C" fn rt_unint(w: u64) -> i64 {
     int_val(w)
 }
 
+/// Unbox a uniform Char value word to its raw codepoint.
+#[no_mangle]
+pub unsafe extern "C" fn rt_unchr(w: u64) -> i32 {
+    match deref(w) {
+        Value::Char(c) => *c as i32,
+        _ => 0,
+    }
+}
+
+/// The constructor index (tag) of a uniform Ctor value.
+#[no_mangle]
+pub unsafe extern "C" fn rt_ctor_tag(w: u64) -> i32 {
+    match deref(w) {
+        Value::Ctor { index, .. } => *index as i32,
+        _ => 0,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_unfloat(w: u64) -> f64 {
     match deref(w) {
@@ -1648,7 +1666,8 @@ unsafe extern "C" fn string_indexes(sub: u64, s: u64) -> u64 {
         .collect();
     list_from_slice(&out)
 }
-unsafe extern "C" fn string_to_int(s: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn string_to_int(s: u64) -> u64 {
     let bytes = sbytes(s);
     let (mut i, negative) = match bytes.first() {
         Some(b'+') => (1, false),
@@ -1674,7 +1693,8 @@ unsafe extern "C" fn string_to_int(s: u64) -> u64 {
     }
     just(rt_int(if negative { -n } else { n }))
 }
-unsafe extern "C" fn string_to_float(s: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn string_to_float(s: u64) -> u64 {
     let text = sstr(s);
     if text.is_empty()
         || !text

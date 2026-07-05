@@ -139,6 +139,38 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             f64_t.fn_type(&[i64_t.into()], false),
             Some(Linkage::External),
         );
+        // Unboxing accessors: read parts of a uniform value (for unbox_value).
+        for name in ["rt_unchr", "rt_ctor_tag"] {
+            self.module.add_function(
+                name,
+                self.ctx.i32_type().fn_type(&[i64_t.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["rt_list_head", "rt_list_tail", "string_to_int", "string_to_float"] {
+            self.module.add_function(
+                name,
+                i64_t.fn_type(&[i64_t.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["rt_tuple_item", "rt_ctor_arg"] {
+            self.module.add_function(
+                name,
+                i64_t.fn_type(&[i64_t.into(), self.ctx.i32_type().into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "rt_access",
+            i64_t.fn_type(&[i64_t.into(), ptr_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "rt_is_nil",
+            self.ctx.bool_type().fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
 
         // Boxing helpers: build uniform values from unboxed ones (for
         // Debug.toString and non-scalar main printing).
@@ -660,6 +692,191 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(acc.as_basic_value())
     }
 
+    /// Convert a uniform runtime word to an unboxed value of the given type —
+    /// the inverse of `box_value`. Used at boundaries where a runtime kernel
+    /// returns a uniform value the typed code consumes.
+    fn unbox_value(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        match self.layouts.layout_of(tipe) {
+            Layout::Int => Ok(self.call_named("rt_unint", &[w])),
+            Layout::Float => Ok(self.call_named("rt_unfloat", &[w])),
+            Layout::Bool => Ok(self.call_named("rt_is_true", &[w])),
+            Layout::Char => Ok(self.call_named("rt_unchr", &[w])),
+            Layout::Str => Ok(w),
+            Layout::Unit => Ok(self.ctx.i64_type().const_zero().into()),
+            Layout::Enum(_) => Ok(self.call_named("rt_ctor_tag", &[w])),
+            Layout::Tuple(_) => self.unbox_tuple(w, tipe),
+            Layout::Record(_) => self.unbox_record(w, tipe),
+            Layout::List(_) => self.unbox_list(w, tipe),
+            Layout::Tagged(_) => self.unbox_tagged(w, tipe),
+            Layout::Ref => Ok(self
+                .builder
+                .build_int_to_ptr(w.into_int_value(), self.ctx.ptr_type(inkwell::AddressSpace::default()), "ref")
+                .unwrap()
+                .into()),
+            other => Err(format!("typed backend: cannot unbox layout {:?}", other)),
+        }
+    }
+
+    fn unbox_tuple(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let subs: Vec<Type> = match tipe {
+            Type::Tuple(a, b, c) => {
+                let mut v = vec![(**a).clone(), (**b).clone()];
+                if let Some(c) = c {
+                    v.push((**c).clone());
+                }
+                v
+            }
+            _ => return Err("typed backend: unbox_tuple on non-tuple".to_string()),
+        };
+        let struct_ty = self.llvm_type(&self.layouts.layout_of(tipe)).into_struct_type();
+        let mut agg = struct_ty.get_undef();
+        for (i, sub) in subs.iter().enumerate() {
+            let idx = self.ctx.i32_type().const_int(i as u64, false).into();
+            let item = self.call_named("rt_tuple_item", &[w, idx]);
+            let tv = self.unbox_value(item, sub)?;
+            agg = self.builder.build_insert_value(agg, tv, i as u32, "t").unwrap().into_struct_value();
+        }
+        Ok(agg.into())
+    }
+
+    fn unbox_record(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let field_types = match tipe {
+            Type::Record(fields, _) => fields.clone(),
+            _ => return Err("typed backend: unbox_record on non-record".to_string()),
+        };
+        let sorted = match self.layouts.layout_of(tipe) {
+            Layout::Record(fs) => fs,
+            _ => unreachable!(),
+        };
+        let struct_ty = self.llvm_type(&self.layouts.layout_of(tipe)).into_struct_type();
+        let mut agg = struct_ty.get_undef();
+        for (i, (fname, _)) in sorted.iter().enumerate() {
+            let field_ty = field_types
+                .iter()
+                .find(|(n, _)| n == fname)
+                .map(|(_, t)| t.clone())
+                .ok_or_else(|| format!("typed backend: missing field `{}`", fname))?;
+            let nameptr = self.cstr(fname.as_str());
+            let fv_u = self.call_named("rt_access", &[w, nameptr.into()]);
+            let tv = self.unbox_value(fv_u, &field_ty)?;
+            agg = self.builder.build_insert_value(agg, tv, i as u32, "f").unwrap().into_struct_value();
+        }
+        Ok(agg.into())
+    }
+
+    fn unbox_list(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let elem_ty = match tipe {
+            Type::Type(_, _, args) if args.len() == 1 => args[0].clone(),
+            _ => return Err("typed backend: unbox_list on non-list".to_string()),
+        };
+        let elem_layout = self.elem_layout(tipe)?;
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let i64_t = self.ctx.i64_type();
+
+        let result = self.entry_alloca(ptr_t.into(), "result");
+        self.builder.build_store(result, ptr_t.const_null()).unwrap();
+        let slot = self.entry_alloca(ptr_t.into(), "slot");
+        self.builder.build_store(slot, result).unwrap();
+
+        let entry = self.builder.get_insert_block().unwrap();
+        let loop_bb = self.new_block("unbl.loop");
+        let body_bb = self.new_block("unbl.body");
+        let done_bb = self.new_block("unbl.done");
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        self.builder.position_at_end(loop_bb);
+        let cur = self.builder.build_phi(i64_t, "cur").unwrap();
+        cur.add_incoming(&[(&w as &dyn BasicValue, entry)]);
+        let cur_v = cur.as_basic_value();
+        let is_nil = self.call_named("rt_is_nil", &[cur_v]).into_int_value();
+        self.builder.build_conditional_branch(is_nil, done_bb, body_bb).unwrap();
+
+        self.builder.position_at_end(body_bb);
+        let head_u = self.call_named("rt_list_head", &[cur_v]);
+        let tv = self.unbox_value(head_u, &elem_ty)?;
+        let newcell = self.cons(&elem_layout, tv, ptr_t.const_null());
+        let dest = self.builder.build_load(ptr_t, slot, "dest").unwrap().into_pointer_value();
+        self.builder.build_store(dest, newcell).unwrap();
+        let nf = self.builder.build_struct_gep(self.cons_cell(&elem_layout), newcell, 1, "nf").unwrap();
+        self.builder.build_store(slot, nf).unwrap();
+        let tail = self.call_named("rt_list_tail", &[cur_v]);
+        let body_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(loop_bb).unwrap();
+        cur.add_incoming(&[(&tail as &dyn BasicValue, body_end)]);
+
+        self.builder.position_at_end(done_bb);
+        Ok(self.builder.build_load(ptr_t, result, "unboxed").unwrap())
+    }
+
+    fn unbox_tagged(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let ctors = self
+            .layouts
+            .union_ctors(tipe)
+            .ok_or_else(|| "typed backend: unknown union to unbox".to_string())?;
+        let i32_t = self.ctx.i32_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let tag = self.call_named("rt_ctor_tag", &[w]).into_int_value();
+        let default_bb = self.new_block("unbt.def");
+        let merge = self.new_block("unbt.end");
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("unbt.{}", k))).collect();
+        let cases: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+            .collect();
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+
+        for (k, bb) in blocks.iter().enumerate() {
+            self.builder.position_at_end(*bb);
+            let (_, field_types) = &ctors[k];
+            let field_layouts: Vec<Layout> =
+                field_types.iter().map(|t| self.layouts.layout_of(t)).collect();
+            let mut fields = Vec::new();
+            for (i, fty) in field_types.iter().enumerate() {
+                let idx = i32_t.const_int(i as u64, false).into();
+                let arg_u = self.call_named("rt_ctor_arg", &[w, idx]);
+                fields.push(self.unbox_value(arg_u, fty)?);
+            }
+            let raw: BasicValueEnum = self.alloc_tagged(&field_layouts, k as u32, &fields).into();
+            let end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((raw, end));
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(ptr_t, "union").unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
     fn call_named(&self, name: &str, args: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
         let f = self.module.get_function(name).unwrap();
         let argv: Vec<_> = args.iter().map(|a| (*a).into()).collect();
@@ -1136,6 +1353,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let f = self.gen(&args[0])?;
                 let boxed = self.call_box("rt_float", f);
                 Ok(self.call_named("rtb$String$fromFloat", &[boxed]))
+            }
+            ("String", "toInt") => {
+                let s = self.gen(&args[0])?;
+                let uniform = self.call_named("string_to_int", &[s]);
+                self.unbox_value(uniform, &whole.tipe)
+            }
+            ("String", "toFloat") => {
+                let s = self.gen(&args[0])?;
+                let uniform = self.call_named("string_to_float", &[s]);
+                self.unbox_value(uniform, &whole.tipe)
             }
             ("String", "length") => {
                 let s = self.gen(&args[0])?;

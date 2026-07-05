@@ -934,3 +934,25 @@ fn debug_tostring_unions() {
          \x20       ++ \" \" ++ Debug.toString Nothing\n",
     );
 }
+
+#[test]
+fn string_toint_tofloat_unbox() {
+    // String.toInt/toFloat return Maybe from the runtime, unboxed back to the
+    // typed representation and matched.
+    assert_same(
+        "toint",
+        "module Test exposing (..)\n\
+         \n\
+         parse : String -> Int\n\
+         parse s =\n\
+         \x20   case String.toInt s of\n\
+         \x20       Just n -> n\n\
+         \x20       Nothing -> -1\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (parse \"42\")\n\
+         \x20       ++ \" \" ++ String.fromInt (parse \"oops\")\n\
+         \x20       ++ \" \" ++ Debug.toString (String.toFloat \"3.5\")\n",
+    );
+}
