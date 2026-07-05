@@ -849,6 +849,7 @@ var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 var $Svg$map = $Html$map;
 var $Svg$text = _VDom_text;
+var $Svg$node = function (tag) { return _VDom_nodeNS(tag); };
 
 var $Html$Keyed$node = function (tag) {
     return F2(function (attrs, keyedKids) {

@@ -371,6 +371,7 @@ pub fn values() -> &'static [BuiltinValue] {
             // Svg — non-tag helpers
             V("Svg", "text", "String -> Html msg"),
             V("Svg", "map", "(a -> msg) -> Html a -> Html msg"),
+            V("Svg", "node", "String -> List (Attribute msg) -> List (Svg msg) -> Svg msg"),
             V("Svg.Attributes", "clipPath", "String -> Attribute msg"),
             // Html — extras
             V("Html.Attributes", "classList", "List ( String, Bool ) -> Attribute msg"),
