@@ -1556,6 +1556,16 @@ var $Http$expectWhatever = function (toMsg) {
 var $Http$expectStringResponse = F2(function (toMsg, toResult) {
     return { toMsg: toMsg, handle: function (response) { return toResult(response); } };
 });
+var $Http$expectBytes = F2(function (toMsg, _decoder) {
+    return { toMsg: toMsg, handle: function (response) {
+        return _Http_defaultHandle(response, function (body) { return $Result$Ok(body); });
+    } };
+});
+var $Http$expectBytesResponse = F2(function (toMsg, toResult) {
+    return { toMsg: toMsg, handle: function (response) { return toResult(response); } };
+});
+var $Http$bytesBody = F2(function (mime, bytes) { return { $: 'StringBody', mime: mime, body: bytes }; });
+var $Http$bytesPart = F3(function (name, mime, bytes) { return { $: 'Part', name: name, mime: mime, body: bytes }; });
 var $Http$expectJson = F2(function (toMsg, decoder) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (body) {
