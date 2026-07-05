@@ -643,3 +643,49 @@ fn clamp_kernel() {
          main = clamp 0 10 -5 + clamp 0 10 15 * 10 + clamp 0 10 7 * 100\n",
     );
 }
+
+#[test]
+fn first_class_closures() {
+    // A lambda bound to a variable and applied; a user function taking a
+    // function parameter; a named function passed as a value; a captured
+    // free variable.
+    assert_same(
+        "closures",
+        "module Test exposing (..)\n\
+         \n\
+         applyTwice : (Int -> Int) -> Int -> Int\n\
+         applyTwice f x = f (f x)\n\
+         \n\
+         increment : Int -> Int\n\
+         increment n = n + 1\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       k = 10\n\
+         \x20       addK = \\x -> x + k\n\
+         \x20   in\n\
+         \x20   applyTwice addK 5\n\
+         \x20       + 100 * applyTwice increment 5\n\
+         \x20       + 10000 * addK 0\n",
+    );
+}
+
+#[test]
+fn closure_returned_from_function() {
+    // A function that returns a closure capturing its argument.
+    assert_same(
+        "closure_return",
+        "module Test exposing (..)\n\
+         \n\
+         adder : Int -> (Int -> Int)\n\
+         adder n = \\x -> x + n\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       add5 = adder 5\n\
+         \x20   in\n\
+         \x20   add5 100 + add5 200\n",
+    );
+}

@@ -25,7 +25,7 @@ use inkwell::{FloatPredicate, IntPredicate};
 
 use super::native::{self, Target};
 use crate::ir::layout::{Layout, LayoutCtx};
-use crate::ir::mono::{MonoProgram, TypedExpr, TypedFn, TypedKind};
+use crate::ir::mono::{MonoProgram, TypedExpr, TypedFn, TypedKind, TypedLetDecl};
 
 /// Compile a monomorphized program to a native/wasm binary at `output`.
 pub fn build(
@@ -50,9 +50,13 @@ struct TypedCodegen<'ctx, 'l> {
     layouts: &'l LayoutCtx,
 
     functions: HashMap<String, FunctionValue<'ctx>>,
+    /// Closure wrappers for named functions used as first-class values,
+    /// keyed by the function's mangled name.
+    wrappers: HashMap<String, FunctionValue<'ctx>>,
     locals: HashMap<String, BasicValueEnum<'ctx>>,
     cur_fn: Option<FunctionValue<'ctx>>,
     blk: usize,
+    lam_id: usize,
 }
 
 impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
@@ -63,9 +67,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             builder: ctx.create_builder(),
             layouts,
             functions: HashMap::new(),
+            wrappers: HashMap::new(),
             locals: HashMap::new(),
             cur_fn: None,
             blk: 0,
+            lam_id: 0,
         }
     }
 
@@ -188,6 +194,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             // A list is a pointer to a cons cell (or null for empty).
             Layout::List(_) => self.ctx.ptr_type(inkwell::AddressSpace::default()).into(),
+            // A function value is a pointer to a closure {fn_ptr, captures}.
+            Layout::Closure => self.ctx.ptr_type(inkwell::AddressSpace::default()).into(),
             _ => self.ctx.i64_type().into(),
         }
     }
@@ -329,18 +337,23 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .copied()
                 .ok_or_else(|| format!("typed backend: unbound local `{}`", name)),
             TypedKind::Global(name) => {
-                // A zero-argument value: call it.
                 let f = *self
                     .functions
                     .get(&name.to_string())
                     .ok_or_else(|| format!("typed backend: unknown global `{}`", name))?;
-                Ok(self
-                    .builder
-                    .build_call(f, &[], "v")
-                    .unwrap()
-                    .try_as_basic_value()
-                    .left()
-                    .unwrap())
+                // A function used as a first-class value becomes a closure;
+                // a zero-argument value is called to produce its value.
+                if matches!(expr.tipe, crate::ast::canonical::Type::Lambda(..)) {
+                    Ok(self.wrap_global(&name.to_string()).into())
+                } else {
+                    Ok(self
+                        .builder
+                        .build_call(f, &[], "v")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap())
+                }
             }
             TypedKind::Call(func, args) => self.gen_call(expr, func, args),
             TypedKind::List(items) => self.gen_list(expr, items),
@@ -364,6 +377,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Access(record, field) => self.gen_access(record, field.as_str()),
             TypedKind::Update(record, fields) => self.gen_update(record, fields),
             TypedKind::Ctor(_, _, ctor) => self.gen_ctor(expr, ctor),
+            TypedKind::Lambda(params, body) => {
+                let result_layout = self.layouts.layout_of(&body.tipe);
+                self.gen_closure(params, body, &result_layout)
+            }
             other => Err(format!(
                 "typed backend: unsupported expression {:?}",
                 std::mem::discriminant(other)
@@ -385,24 +402,44 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let TypedKind::Foreign(module, name) = &func.kind {
             return self.gen_kernel(whole, module.as_str(), name.as_str(), args);
         }
-        let TypedKind::Global(name) = &func.kind else {
-            return Err("typed backend: only direct calls are supported yet".to_string());
-        };
-        let f = *self
-            .functions
-            .get(&name.to_string())
-            .ok_or_else(|| format!("typed backend: unknown call target `{}`", name))?;
+        // A direct call to a named function, when the argument count matches
+        // the function's arity.
+        if let TypedKind::Global(name) = &func.kind {
+            let f = *self
+                .functions
+                .get(&name.to_string())
+                .ok_or_else(|| format!("typed backend: unknown call target `{}`", name))?;
+            if f.count_params() as usize == args.len() {
+                let mut argv = Vec::with_capacity(args.len());
+                for arg in args {
+                    argv.push(self.gen(arg)?.into());
+                }
+                return Ok(self
+                    .builder
+                    .build_call(f, &argv, "call")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap());
+            }
+            return Err(format!(
+                "typed backend: partial application of `{}` ({} of {} args) is not \
+                 supported yet",
+                name,
+                args.len(),
+                f.count_params()
+            ));
+        }
+
+        // Otherwise the callee is a closure value (a function-typed local,
+        // the result of another call, a field, …): apply it indirectly.
+        let closure = self.gen(func)?.into_pointer_value();
         let mut argv = Vec::with_capacity(args.len());
         for arg in args {
-            argv.push(self.gen(arg)?.into());
+            argv.push(self.gen(arg)?);
         }
-        Ok(self
-            .builder
-            .build_call(f, &argv, "call")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap())
+        let ret_layout = self.layouts.layout_of(&whole.tipe);
+        Ok(self.apply_closure(closure, &argv, &ret_layout))
     }
 
     /// Build a data-carrying constructor: allocate `{tag, fields}` on the
@@ -853,10 +890,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 }
                 Ok(v)
             }
-            _ => Err(
-                "typed backend: higher-order kernels need a named function or lambda argument"
-                    .to_string(),
-            ),
+            _ => {
+                // A closure value (e.g. a function-typed parameter): peel the
+                // function type by the number of arguments to get the result
+                // layout, then apply indirectly.
+                let closure = self.gen(func)?.into_pointer_value();
+                let mut t = func.tipe.clone();
+                for _ in 0..args.len() {
+                    match t {
+                        crate::ast::canonical::Type::Lambda(_, r) => t = *r,
+                        _ => break,
+                    }
+                }
+                let ret_layout = self.layouts.layout_of(&t);
+                Ok(self.apply_closure(closure, args, &ret_layout))
+            }
         }
     }
 
@@ -1869,6 +1917,199 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(acc.into())
     }
 
+    /// Closure-convert a lambda: capture the free variables in scope, lift the
+    /// body to a top-level function taking the captured environment as its
+    /// first parameter, and allocate a closure `{fn_ptr, captures...}`.
+    fn gen_closure(
+        &mut self,
+        params: &[(crate::ast::canonical::Pattern, crate::ast::canonical::Type)],
+        body: &TypedExpr,
+        result_layout: &Layout,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        // Parameter names (simple variables only for now).
+        let mut param_names = Vec::with_capacity(params.len());
+        for (p, _) in params {
+            match simple_param_name(p) {
+                Some(n) => param_names.push(n),
+                None => {
+                    return Err(
+                        "typed backend: destructuring closure parameters are not supported"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+
+        // Free variables = referenced locals not bound within the lambda.
+        let mut bound: std::collections::HashSet<String> =
+            param_names.iter().cloned().collect();
+        let mut refs = Vec::new();
+        free_vars(body, &mut bound, &mut refs);
+        let captures: Vec<(String, BasicValueEnum<'ctx>)> = refs
+            .iter()
+            .filter_map(|n| self.locals.get(n).map(|v| (n.clone(), *v)))
+            .collect();
+
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // Closure struct: {fn_ptr, capture types...}.
+        let mut struct_fields: Vec<BasicTypeEnum> = vec![ptr_t.into()];
+        for (_, v) in &captures {
+            struct_fields.push(v.get_type());
+        }
+        let clos_ty = self.ctx.struct_type(&struct_fields, false);
+
+        // Lifted function type: (env, params...) -> result.
+        let ret_ty = self.llvm_type(result_layout);
+        let mut fn_params: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        for (_, t) in params {
+            fn_params.push(self.llvm_type(&self.layouts.layout_of(t)).into());
+        }
+        let fn_ty = ret_ty.fn_type(&fn_params, false);
+        let name = format!("lam.{}", self.lam_id);
+        self.lam_id += 1;
+        let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
+
+        // Emit the lifted body with fresh codegen state.
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        self.cur_fn = Some(lifted);
+        let entry = self.ctx.append_basic_block(lifted, "entry");
+        self.builder.position_at_end(entry);
+        let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
+        for (i, (n, _)) in captures.iter().enumerate() {
+            let fp = self
+                .builder
+                .build_struct_gep(clos_ty, env, (i + 1) as u32, "capp")
+                .unwrap();
+            let v = self.builder.build_load(struct_fields[i + 1], fp, n).unwrap();
+            self.locals.insert(n.clone(), v);
+        }
+        for (idx, pn) in param_names.iter().enumerate() {
+            let val = lifted.get_nth_param((idx + 1) as u32).unwrap();
+            self.locals.insert(pn.clone(), val);
+        }
+        let body_result = self.gen(body);
+        // Restore state regardless of outcome.
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        let ret = body_result?;
+        self.builder.build_return(Some(&ret)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+
+        let capture_vals: Vec<BasicValueEnum> = captures.iter().map(|(_, v)| *v).collect();
+        Ok(self
+            .build_closure_value(lifted.as_global_value().as_pointer_value(), &capture_vals)
+            .into())
+    }
+
+    /// Allocate a closure `{fn_ptr, captures...}` on the heap.
+    fn build_closure_value(
+        &self,
+        fn_ptr: inkwell::values::PointerValue<'ctx>,
+        captures: &[BasicValueEnum<'ctx>],
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let mut fields: Vec<BasicTypeEnum> = vec![ptr_t.into()];
+        for c in captures {
+            fields.push(c.get_type());
+        }
+        let sty = self.ctx.struct_type(&fields, false);
+        let alloc = self.module.get_function("alm_alloc").unwrap();
+        let raw = self
+            .builder
+            .build_call(alloc, &[sty.size_of().unwrap().into()], "clos")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+        let f0 = self.builder.build_struct_gep(sty, raw, 0, "fnp").unwrap();
+        self.builder.build_store(f0, fn_ptr).unwrap();
+        for (i, c) in captures.iter().enumerate() {
+            let fp = self.builder.build_struct_gep(sty, raw, (i + 1) as u32, "cap").unwrap();
+            self.builder.build_store(fp, *c).unwrap();
+        }
+        raw
+    }
+
+    /// Apply a closure value to already-evaluated arguments (saturated).
+    fn apply_closure(
+        &self,
+        closure: inkwell::values::PointerValue<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+        result_layout: &Layout,
+    ) -> BasicValueEnum<'ctx> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // The function pointer is field 0, at offset 0.
+        let fn_ptr = self
+            .builder
+            .build_load(ptr_t, closure, "fnptr")
+            .unwrap()
+            .into_pointer_value();
+        let ret_ty = self.llvm_type(result_layout);
+        let mut ptypes: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        ptypes.extend(
+            args.iter()
+                .map(|a| Into::<BasicMetadataTypeEnum>::into(a.get_type())),
+        );
+        let fn_ty = ret_ty.fn_type(&ptypes, false);
+        let mut argv: Vec<inkwell::values::BasicMetadataValueEnum> = vec![closure.into()];
+        argv.extend(
+            args.iter()
+                .map(|a| Into::<inkwell::values::BasicMetadataValueEnum>::into(*a)),
+        );
+        self.builder
+            .build_indirect_call(fn_ty, fn_ptr, &argv, "clcall")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+    }
+
+    /// A closure wrapping a named function used as a first-class value: an
+    /// env-ignoring trampoline `wrap(env, args...) = f(args...)`, cached.
+    fn wrap_global(&mut self, mangled: &str) -> inkwell::values::PointerValue<'ctx> {
+        if let Some(w) = self.wrappers.get(mangled) {
+            return self.build_closure_value(w.as_global_value().as_pointer_value(), &[]);
+        }
+        let target = self.functions[mangled];
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let target_ty = target.get_type();
+        let param_types = target_ty.get_param_types();
+        let mut wrap_params: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        wrap_params.extend(
+            param_types
+                .iter()
+                .map(|t| Into::<BasicMetadataTypeEnum>::into(*t)),
+        );
+        let wrap_ty = match target_ty.get_return_type() {
+            Some(ret) => ret.fn_type(&wrap_params, false),
+            None => self.ctx.void_type().fn_type(&wrap_params, false),
+        };
+        let wname = format!("{}$clos", mangled);
+        let wrapper = self.module.add_function(&wname, wrap_ty, Some(Linkage::Internal));
+
+        let saved_block = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+        let fwd: Vec<inkwell::values::BasicMetadataValueEnum> = (0..param_types.len())
+            .map(|i| wrapper.get_nth_param((i + 1) as u32).unwrap().into())
+            .collect();
+        let call = self.builder.build_call(target, &fwd, "fwd").unwrap();
+        match call.try_as_basic_value().left() {
+            Some(v) => self.builder.build_return(Some(&v)).unwrap(),
+            None => self.builder.build_return(None).unwrap(),
+        };
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        self.wrappers.insert(mangled.to_string(), wrapper);
+        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
+    }
+
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
         let v = self.gen(inner)?;
         Ok(match self.layouts.layout_of(&inner.tipe) {
@@ -2243,4 +2484,155 @@ fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String>
         Anything => Some("_".to_string()),
         _ => None,
     }
+}
+
+/// Collect the free variables of an expression: `Local` references not bound
+/// by a binder within it. `bound` starts with the enclosing lambda's
+/// parameters. Order-preserving and de-duplicated.
+fn free_vars(expr: &TypedExpr, bound: &mut std::collections::HashSet<String>, out: &mut Vec<String>) {
+    match &expr.kind {
+        TypedKind::Local(name) => {
+            let n = name.to_string();
+            if !bound.contains(&n) && !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        TypedKind::List(items) => items.iter().for_each(|e| free_vars(e, bound, out)),
+        TypedKind::Negate(inner) => free_vars(inner, bound, out),
+        TypedKind::Binop(_, _, _, l, r) => {
+            free_vars(l, bound, out);
+            free_vars(r, bound, out)
+        }
+        TypedKind::Lambda(params, body) => {
+            let names: Vec<String> = params.iter().flat_map(|(p, _)| pattern_names(p)).collect();
+            let added = bind_names(names.into_iter(), bound);
+            free_vars(body, bound, out);
+            for n in added {
+                bound.remove(&n);
+            }
+        }
+        TypedKind::Call(f, args) => {
+            free_vars(f, bound, out);
+            args.iter().for_each(|e| free_vars(e, bound, out))
+        }
+        TypedKind::If(branches, otherwise) => {
+            for (c, b) in branches {
+                free_vars(c, bound, out);
+                free_vars(b, bound, out)
+            }
+            free_vars(otherwise, bound, out)
+        }
+        TypedKind::Let(decls, body) => {
+            // Bind let-def names and destructure names for the whole block.
+            let mut added = Vec::new();
+            for decl in decls {
+                match decl {
+                    TypedLetDecl::Def { name, .. } => {
+                        if bound.insert(name.to_string()) {
+                            added.push(name.to_string());
+                        }
+                    }
+                    TypedLetDecl::Recursive(defs) => {
+                        for d in defs {
+                            if let TypedLetDecl::Def { name, .. } = d {
+                                if bound.insert(name.to_string()) {
+                                    added.push(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                    TypedLetDecl::Destruct(p, _) => {
+                        added.extend(bind_names(pattern_names(p).into_iter(), bound))
+                    }
+                }
+            }
+            for decl in decls {
+                match decl {
+                    TypedLetDecl::Def { body, .. } => free_vars(body, bound, out),
+                    TypedLetDecl::Recursive(defs) => {
+                        for d in defs {
+                            if let TypedLetDecl::Def { body, .. } = d {
+                                free_vars(body, bound, out)
+                            }
+                        }
+                    }
+                    TypedLetDecl::Destruct(_, value) => free_vars(value, bound, out),
+                }
+            }
+            free_vars(body, bound, out);
+            for n in added {
+                bound.remove(&n);
+            }
+        }
+        TypedKind::Case(scrutinee, branches) => {
+            free_vars(scrutinee, bound, out);
+            for (pat, body) in branches {
+                let added = bind_names(pattern_names(pat).into_iter(), bound);
+                free_vars(body, bound, out);
+                for n in added {
+                    bound.remove(&n);
+                }
+            }
+        }
+        TypedKind::Access(record, _) => free_vars(record, bound, out),
+        TypedKind::Update(record, fields) => {
+            free_vars(record, bound, out);
+            fields.iter().for_each(|(_, v)| free_vars(v, bound, out))
+        }
+        TypedKind::Record(fields) => fields.iter().for_each(|(_, v)| free_vars(v, bound, out)),
+        TypedKind::Tuple(a, b, c) => {
+            free_vars(a, bound, out);
+            free_vars(b, bound, out);
+            if let Some(c) = c {
+                free_vars(c, bound, out)
+            }
+        }
+        // Literals, globals, foreigns, constructors reference no locals.
+        _ => {}
+    }
+}
+
+/// Insert names into `bound`, returning those that were newly added (so the
+/// caller can remove exactly those when the scope closes).
+fn bind_names(
+    names: impl Iterator<Item = String>,
+    bound: &mut std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut added = Vec::new();
+    for n in names {
+        if bound.insert(n.clone()) {
+            added.push(n);
+        }
+    }
+    added
+}
+
+/// Every variable name a pattern binds.
+fn pattern_names(pattern: &crate::ast::canonical::Pattern) -> Vec<String> {
+    let mut names = Vec::new();
+    fn go(p: &crate::ast::canonical::Pattern, out: &mut Vec<String>) {
+        use crate::ast::canonical::Pattern_::*;
+        match &p.value {
+            Var(n) => out.push(n.to_string()),
+            Alias(inner, n) => {
+                out.push(n.value.to_string());
+                go(inner, out)
+            }
+            Tuple(a, b, rest) => {
+                go(a, out);
+                go(b, out);
+                rest.iter().for_each(|p| go(p, out))
+            }
+            Record(fields) => fields.iter().for_each(|f| out.push(f.value.to_string())),
+            Ctor(_, _, _, args) => args.iter().for_each(|p| go(p, out)),
+            List(items) => items.iter().for_each(|p| go(p, out)),
+            Cons(h, t) => {
+                go(h, out);
+                go(t, out)
+            }
+            Anything | Unit | Chr(_) | Str(_) | Int(_) => {}
+        }
+    }
+    go(pattern, &mut names);
+    names
 }
