@@ -836,6 +836,11 @@ function _VDom_nodeNS(tag) {
 var $Html$text = _VDom_text;
 var $VirtualDom$text = _VDom_text;
 var $VirtualDom$node = function (tag) { return _VDom_node(tag); };
+var $VirtualDom$nodeNS = F2(function (ns, tag) {
+    return F2(function (attrs, kids) {
+        return { $: 'VNode', tag: tag, ns: ns, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
+    });
+});
 var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
 var $VirtualDom$property = F2(function (key, val) { return { $: 'AProp', key: key, val: val }; });
 var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
@@ -856,11 +861,42 @@ var $Html$Keyed$node = function (tag) {
 var $Html$Keyed$ul = $Html$Keyed$node('ul');
 var $Html$Keyed$ol = $Html$Keyed$node('ol');
 var $VirtualDom$keyedNode = $Html$Keyed$node;
+var $VirtualDom$keyedNodeNS = F2(function (ns, tag) {
+    return F2(function (attrs, keyedKids) {
+        return {
+            $: 'VKeyed', tag: tag, ns: ns, attrs: _List_toArray(attrs),
+            kids: _List_toArray(keyedKids)
+        };
+    });
+});
+var $VirtualDom$attributeNS = F3(function (ns, key, val) {
+    return { $: 'AAttr', key: key, val: val, ns: ns };
+});
+var $VirtualDom$on = F2(function (name, handler) {
+    switch (handler.$) {
+        case 'MayStopPropagation': return _VDom_on(name, handler.a, { pair: true, stopField: true });
+        case 'MayPreventDefault': return _VDom_on(name, handler.a, { pair: true, preventField: true });
+        case 'Custom': return _VDom_on(name, handler.a, { custom: true });
+        default: return _VDom_on(name, handler.a);
+    }
+});
 
 var $Html$Lazy$lazy = F2(function (f, a) { return { $: 'VLazy', f: f, args: [a] }; });
 var $Html$Lazy$lazy2 = F3(function (f, a, b) { return { $: 'VLazy', f: f, args: [a, b] }; });
 var $Html$Lazy$lazy3 = F4(function (f, a, b, c) { return { $: 'VLazy', f: f, args: [a, b, c] }; });
 var $Html$Lazy$lazy4 = F5(function (f, a, b, c, d) { return { $: 'VLazy', f: f, args: [a, b, c, d] }; });
+var $Html$Lazy$lazy5 = _Fn(6, function (f, a, b, c, d, e) { return { $: 'VLazy', f: f, args: [a, b, c, d, e] }; });
+var $Html$Lazy$lazy6 = _Fn(7, function (f, a, b, c, d, e, g) { return { $: 'VLazy', f: f, args: [a, b, c, d, e, g] }; });
+var $Html$Lazy$lazy7 = _Fn(8, function (f, a, b, c, d, e, g, h) { return { $: 'VLazy', f: f, args: [a, b, c, d, e, g, h] }; });
+var $Html$Lazy$lazy8 = _Fn(9, function (f, a, b, c, d, e, g, h, i) { return { $: 'VLazy', f: f, args: [a, b, c, d, e, g, h, i] }; });
+var $VirtualDom$lazy = $Html$Lazy$lazy;
+var $VirtualDom$lazy2 = $Html$Lazy$lazy2;
+var $VirtualDom$lazy3 = $Html$Lazy$lazy3;
+var $VirtualDom$lazy4 = $Html$Lazy$lazy4;
+var $VirtualDom$lazy5 = $Html$Lazy$lazy5;
+var $VirtualDom$lazy6 = $Html$Lazy$lazy6;
+var $VirtualDom$lazy7 = $Html$Lazy$lazy7;
+var $VirtualDom$lazy8 = $Html$Lazy$lazy8;
 
 function _VDom_forceLazy(vnode) {
     if (!vnode.forced) {
@@ -983,7 +1019,8 @@ function _VDom_applyAttr(dom, attr, dispatch) {
             dom.style[attr.key] = attr.val;
             return;
         case 'AAttr':
-            dom.setAttribute(attr.key, attr.val);
+            if (attr.ns && dom.setAttributeNS) { dom.setAttributeNS(attr.ns, attr.key, attr.val); }
+            else { dom.setAttribute(attr.key, attr.val); }
             return;
         case 'AProp':
             dom[attr.key] = attr.val;

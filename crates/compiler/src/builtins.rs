@@ -388,6 +388,10 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Html.Lazy", "lazy2", "(a -> b -> Html msg) -> a -> b -> Html msg"),
             V("Html.Lazy", "lazy3", "(a -> b -> c -> Html msg) -> a -> b -> c -> Html msg"),
             V("Html.Lazy", "lazy4", "(a -> b -> c -> d -> Html msg) -> a -> b -> c -> d -> Html msg"),
+            V("Html.Lazy", "lazy5", "(a -> b -> c -> d -> e -> Html msg) -> a -> b -> c -> d -> e -> Html msg"),
+            V("Html.Lazy", "lazy6", "(a -> b -> c -> d -> e -> f -> Html msg) -> a -> b -> c -> d -> e -> f -> Html msg"),
+            V("Html.Lazy", "lazy7", "(a -> b -> c -> d -> e -> f -> g -> Html msg) -> a -> b -> c -> d -> e -> f -> g -> Html msg"),
+            V("Html.Lazy", "lazy8", "(a -> b -> c -> d -> e -> f -> g -> h -> Html msg) -> a -> b -> c -> d -> e -> f -> g -> h -> Html msg"),
             V("Html.Keyed", "node", "String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
             V("Html.Keyed", "ul", "List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
             V("Html.Keyed", "ol", "List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
@@ -548,12 +552,24 @@ pub fn values() -> &'static [BuiltinValue] {
             // VirtualDom (the parts packages use directly)
             V("VirtualDom", "text", "String -> Html msg"),
             V("VirtualDom", "node", "String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
+            V("VirtualDom", "nodeNS", "String -> String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
             V("VirtualDom", "attribute", "String -> String -> Attribute msg"),
             V("VirtualDom", "property", "String -> Value -> Attribute msg"),
             V("VirtualDom", "style", "String -> String -> Attribute msg"),
             V("VirtualDom", "map", "(a -> msg) -> Html a -> Html msg"),
             V("VirtualDom", "mapAttribute", "(a -> b) -> Attribute a -> Attribute b"),
             V("VirtualDom", "keyedNode", "String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
+            V("VirtualDom", "keyedNodeNS", "String -> String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg"),
+            V("VirtualDom", "attributeNS", "String -> String -> String -> Attribute msg"),
+            V("VirtualDom", "on", "String -> Handler msg -> Attribute msg"),
+            V("VirtualDom", "lazy", "(a -> Html msg) -> a -> Html msg"),
+            V("VirtualDom", "lazy2", "(a -> b -> Html msg) -> a -> b -> Html msg"),
+            V("VirtualDom", "lazy3", "(a -> b -> c -> Html msg) -> a -> b -> c -> Html msg"),
+            V("VirtualDom", "lazy4", "(a -> b -> c -> d -> Html msg) -> a -> b -> c -> d -> Html msg"),
+            V("VirtualDom", "lazy5", "(a -> b -> c -> d -> e -> Html msg) -> a -> b -> c -> d -> e -> Html msg"),
+            V("VirtualDom", "lazy6", "(a -> b -> c -> d -> e -> f -> Html msg) -> a -> b -> c -> d -> e -> f -> Html msg"),
+            V("VirtualDom", "lazy7", "(a -> b -> c -> d -> e -> f -> g -> Html msg) -> a -> b -> c -> d -> e -> f -> g -> Html msg"),
+            V("VirtualDom", "lazy8", "(a -> b -> c -> d -> e -> f -> g -> h -> Html msg) -> a -> b -> c -> d -> e -> f -> g -> h -> Html msg"),
         ]);
         table
     })
@@ -758,6 +774,12 @@ pub const UNIONS: &[BuiltinUnion] = &[
     BuiltinUnion { module: "UUID", name: "Representation", vars: &[], ctors: &[
         ("Canonical", &[]), ("Compact", &[]), ("Guid", &[]), ("Urn", &[]),
     ] },
+    BuiltinUnion { module: "VirtualDom", name: "Handler", vars: &["msg"], ctors: &[
+        ("Normal", &["Decoder msg"]),
+        ("MayStopPropagation", &["Decoder ( msg, Bool )"]),
+        ("MayPreventDefault", &["Decoder ( msg, Bool )"]),
+        ("Custom", &["Decoder { message : msg, stopPropagation : Bool, preventDefault : Bool }"]),
+    ] },
     BuiltinUnion { module: "Json.Decode", name: "Error", vars: &[], ctors: &[
         ("Field", &["String", "Json.Decode.Error"]),
         ("Index", &["Int", "Json.Decode.Error"]),
@@ -837,6 +859,7 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "Set" => Some("Set"),
         "Array" => Some("Array"),
         "Html" | "Attribute" => Some("Html"),
+        "Handler" => Some("VirtualDom"),
         "Program" => Some("Platform"),
         "Cmd" => Some("Platform.Cmd"),
         "Sub" => Some("Platform.Sub"),

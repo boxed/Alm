@@ -74,7 +74,19 @@ fn canonicalize_type_help(
                     ))
                 })
                 .collect::<CResult<Vec<_>>>()?;
-            Ok(can::Type::Record(fields, ext.as_ref().map(|e| e.value.clone())))
+            let ext_name = ext.as_ref().map(|e| e.value.clone());
+            // If the extension variable is being substituted (e.g. an alias
+            // `{ base | ... }` applied with a concrete record for `base`),
+            // merge the substituted record's fields in, mirroring subst_can_type.
+            match ext_name.as_ref().and_then(|e| substitutions.get(e)) {
+                Some(can::Type::Record(more_fields, ext2)) => {
+                    let mut merged = fields;
+                    merged.extend(more_fields.iter().cloned());
+                    Ok(can::Type::Record(merged, ext2.clone()))
+                }
+                Some(can::Type::Var(n)) => Ok(can::Type::Record(fields, Some(n.clone()))),
+                _ => Ok(can::Type::Record(fields, ext_name)),
+            }
         }
         src::Type_::Unit => Ok(can::Type::Unit),
         src::Type_::Tuple(a, b, rest) => {

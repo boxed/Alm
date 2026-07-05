@@ -312,3 +312,22 @@ fn list_pattern_element_mismatch() {
     err("f xs =\n    case xs of\n        [ a, b ] ->\n            a + b\n\n        _ ->\n            0\n\ng = f [ \"x\" ]\n");
     err("f v =\n    case v of\n        x :: _ ->\n            x + 1\n\n        [] ->\n            0\n\ng = f [ \"s\" ]\n");
 }
+
+#[test]
+fn extensible_record_alias_applied_with_concrete_record() {
+    // Applying an extensible-record alias `{ base | ... }` with a concrete
+    // record for `base` must flatten it: `Keyframes {}` becomes the closed
+    // record `{ keyframes : (), value : String }`, so a body producing that
+    // closed record type-checks. (Regression: rtfeldman/elm-css keyframes.)
+    ok("type alias Keyframes compatible =\n\
+        \x20   { compatible | keyframes : (), value : String }\n\
+        \n\
+        make : Keyframes {}\n\
+        make =\n    { keyframes = (), value = \"x\" }\n");
+    // Applying it with another record extends the field set.
+    ok("type alias WithK base =\n\
+        \x20   { base | k : Int }\n\
+        \n\
+        make : WithK { v : String }\n\
+        make =\n    { k = 1, v = \"x\" }\n");
+}
