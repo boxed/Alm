@@ -226,6 +226,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ),
             Some(Linkage::External),
         );
+        // Effect kernels (TEA): all take/return uniform words.
+        for (name, arity) in [
+            ("platform_worker", 1),
+            ("terminal_write_line", 1),
+            ("time_every", 2),
+            ("cmd_batch", 1),
+            ("sub_batch", 1),
+            ("cmd_map", 2),
+            ("sub_map", 2),
+        ] {
+            let params = vec![i64_t.into(); arity];
+            self.module
+                .add_function(name, i64_t.fn_type(&params, false), Some(Linkage::External));
+        }
         for name in ["rt_true_v", "rt_false_v", "rt_unit_v"] {
             let g = self.module.add_global(i64_t, None, name);
             g.set_linkage(Linkage::External);
@@ -375,6 +389,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             return Ok(());
         };
         let main_fn = self.functions[&main.mangled.to_string()];
+        let main_ty = main.body.tipe.clone();
         let raw = self
             .builder
             .build_call(main_fn, &[], "main")
@@ -383,24 +398,44 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .left()
             .unwrap();
 
-        let boxed = match self.layouts.layout_of(&main.body.tipe) {
-            Layout::Int => self.call_box("rt_int", raw),
-            Layout::Float => self.call_box("rt_float", raw),
-            // A string is already a uniform word; hand it straight to print.
-            Layout::Str => raw,
-            other => {
-                return Err(format!(
-                    "typed backend: main has layout {:?}, which the skeleton cannot box yet",
-                    other
-                ))
-            }
-        };
+        // Box the result into the uniform word. For a Program this is the
+        // Program value the runtime's TEA loop consumes; for Int/Float/String
+        // it is what the print path handles.
+        let boxed = self.box_value(raw, &main_ty)?;
         self.builder.build_return(Some(&boxed)).unwrap();
         Ok(())
     }
 
     fn call_box(&self, name: &str, arg: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         self.call_named(name, &[arg])
+    }
+
+    /// Call a runtime effect function: box each argument into a uniform value
+    /// and invoke it, yielding the uniform result word.
+    fn effect_call(
+        &mut self,
+        symbol: &str,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut boxed = Vec::with_capacity(args.len());
+        for arg in args {
+            let v = self.gen(arg)?;
+            boxed.push(self.box_value(v, &arg.tipe)?);
+        }
+        Ok(self.call_named(symbol, &boxed))
+    }
+
+    /// Load a runtime value global (e.g. `$Platform$Cmd$none`) as a uniform
+    /// word, declaring it on first use.
+    fn load_uniform_global(&mut self, sym: &str) -> BasicValueEnum<'ctx> {
+        let g = self.module.get_global(sym).unwrap_or_else(|| {
+            let g = self.module.add_global(self.ctx.i64_type(), None, sym);
+            g.set_linkage(Linkage::External);
+            g
+        });
+        self.builder
+            .build_load(self.ctx.i64_type(), g.as_pointer_value(), "gv")
+            .unwrap()
     }
 
     fn load_global(&self, name: &str) -> BasicValueEnum<'ctx> {
@@ -451,10 +486,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // boxing code is generated but never executed. A unit placeholder
             // keeps it well-typed.
             Layout::Ref => Ok(self.load_global("rt_unit_v")),
-            other => Err(format!(
-                "typed backend: Debug.toString on layout {:?} is not supported yet",
-                other
-            )),
         }
     }
 
@@ -975,11 +1006,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     fn gen(&mut self, expr: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
         match &expr.kind {
-            TypedKind::Int(n) => Ok(self
-                .ctx
-                .i64_type()
-                .const_int(*n as u64, true)
-                .into()),
+            TypedKind::Int(n) => {
+                // A number literal used at Float type must be an f64 constant
+                // (Elm number literals are polymorphic).
+                if matches!(self.layouts.layout_of(&expr.tipe), Layout::Float) {
+                    Ok(self.ctx.f64_type().const_float(*n as f64).into())
+                } else {
+                    Ok(self.ctx.i64_type().const_int(*n as u64, true).into())
+                }
+            }
             TypedKind::Float(f) => Ok(self.ctx.f64_type().const_float(*f).into()),
             TypedKind::Str(s) => self.gen_string(s),
             TypedKind::Unit => Ok(self.ctx.i64_type().const_zero().into()),
@@ -1037,7 +1072,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Record(fields) => self.gen_record(expr, fields),
             TypedKind::Access(record, field) => self.gen_access(record, field.as_str()),
             TypedKind::Update(record, fields) => self.gen_update(record, fields),
-            TypedKind::Ctor(_, _, ctor) => self.gen_ctor(expr, ctor),
+            TypedKind::Ctor(home, union, ctor) => self.gen_ctor(expr, home, union, ctor),
+            // A built-in used as a bare value (e.g. Cmd.none): a nullary kernel.
+            TypedKind::Foreign(module, name) => {
+                self.gen_kernel(expr, module.as_str(), name.as_str(), &[])
+            }
             TypedKind::Lambda(params, body) => {
                 let result_layout = self.layouts.layout_of(&body.tipe);
                 self.gen_closure(params, body, &result_layout)
@@ -1374,6 +1413,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     fn gen_ctor(
         &mut self,
         whole: &TypedExpr,
+        home: &crate::data::Name,
+        union: &crate::data::Name,
         ctor: &crate::ast::canonical::Ctor,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match self.layouts.layout_of(&whole.tipe) {
@@ -1390,11 +1431,59 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // A nullary constructor of a data-carrying union (e.g. Nothing in
             // Maybe): a heap {tag} block with no fields.
             Layout::Tagged(_) => self.gen_ctor_apply(whole, ctor, &[]),
+            // A constructor used as a function value (e.g. `Tick` passed to
+            // Time.every): desugar to `\a.. -> Ctor a..` and closure-convert.
+            Layout::Closure => self.gen_ctor_as_function(whole, home, union, ctor),
             other => Err(format!(
                 "typed backend: constructing `{}` (layout {:?}) is not supported yet",
                 ctor.name, other
             )),
         }
+    }
+
+    /// A constructor used as a first-class function: build `\a0..an -> Ctor
+    /// a0..an` and closure-convert it.
+    fn gen_ctor_as_function(
+        &mut self,
+        whole: &TypedExpr,
+        home: &crate::data::Name,
+        union: &crate::data::Name,
+        ctor: &crate::ast::canonical::Ctor,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::{Pattern_, Type};
+        let mut arg_types = Vec::new();
+        let mut t = whole.tipe.clone();
+        while let Type::Lambda(a, b) = t {
+            arg_types.push(*a);
+            t = *b;
+        }
+        let result_ty = t;
+        let mut params = Vec::new();
+        let mut arg_exprs = Vec::new();
+        for (i, at) in arg_types.iter().enumerate() {
+            let pname = crate::data::Name::from(format!("$ctor{}_{}", self.lam_id, i));
+            params.push((
+                crate::reporting::Located {
+                    region: crate::reporting::Region::ZERO,
+                    value: Pattern_::Var(pname.clone()),
+                },
+                at.clone(),
+            ));
+            arg_exprs.push(TypedExpr {
+                tipe: at.clone(),
+                kind: TypedKind::Local(pname),
+            });
+        }
+        let ctor_fn = TypedExpr {
+            tipe: whole.tipe.clone(),
+            kind: TypedKind::Ctor(home.clone(), union.clone(), ctor.clone()),
+        };
+        let body = TypedExpr {
+            tipe: result_ty.clone(),
+            kind: TypedKind::Call(Box::new(ctor_fn), arg_exprs),
+        };
+        let result_layout = self.layouts.layout_of(&result_ty);
+        self.gen_closure(&params, &body, &result_layout)
     }
 
     /// Emit a generated, type-specialized kernel for a built-in call. Each is
@@ -1461,6 +1550,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let boxed = self.box_value(v, &args[0].tipe)?;
                 Ok(self.call_named("debug_to_string", &[boxed]))
             }
+            // TEA effects: box the arguments into uniform values and call the
+            // runtime. Results (Cmd/Sub/Program) are opaque uniform words.
+            ("Platform", "worker") => self.effect_call("platform_worker", args),
+            ("Terminal", "writeLine") => self.effect_call("terminal_write_line", args),
+            ("Time", "every") => self.effect_call("time_every", args),
+            ("Platform.Cmd", "batch") => self.effect_call("cmd_batch", args),
+            ("Platform.Cmd", "map") => self.effect_call("cmd_map", args),
+            ("Platform.Sub", "batch") => self.effect_call("sub_batch", args),
+            ("Platform.Sub", "map") => self.effect_call("sub_map", args),
+            ("Platform.Cmd", "none") => Ok(self.load_uniform_global("$Platform$Cmd$none")),
+            ("Platform.Sub", "none") => Ok(self.load_uniform_global("$Platform$Sub$none")),
             ("Basics", "modBy") => self.kernel_mod_by(args),
             ("Basics", "remainderBy") => {
                 let m = self.gen(&args[0])?.into_int_value();

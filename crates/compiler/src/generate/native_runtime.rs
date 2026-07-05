@@ -2150,7 +2150,8 @@ unsafe extern "C" fn process_sleep(ms: u64) -> u64 {
     ctor(b"TaskSleep\0".as_ptr(), TT_SLEEP, vec![ms])
 }
 
-unsafe extern "C" fn time_every(interval: u64, to_msg: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn time_every(interval: u64, to_msg: u64) -> u64 {
     ctor(b"SubTime\0".as_ptr(), ST_TIME, vec![interval, to_msg])
 }
 unsafe extern "C" fn time_millis_to_posix(n: u64) -> u64 {
@@ -2160,22 +2161,28 @@ unsafe extern "C" fn time_posix_to_millis(p: u64) -> u64 {
     rt_ctor_arg(p, 0)
 }
 
-unsafe extern "C" fn cmd_batch(cmds: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn cmd_batch(cmds: u64) -> u64 {
     ctor(b"CmdBatch\0".as_ptr(), CT_BATCH, vec![cmds])
 }
-unsafe extern "C" fn cmd_map(f: u64, cmd: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn cmd_map(f: u64, cmd: u64) -> u64 {
     ctor(b"CmdMap\0".as_ptr(), CT_MAP, vec![f, cmd])
 }
-unsafe extern "C" fn sub_batch(subs: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn sub_batch(subs: u64) -> u64 {
     ctor(b"SubBatch\0".as_ptr(), ST_BATCH, vec![subs])
 }
-unsafe extern "C" fn sub_map(f: u64, sub: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn sub_map(f: u64, sub: u64) -> u64 {
     ctor(b"SubMap\0".as_ptr(), ST_MAP, vec![f, sub])
 }
-unsafe extern "C" fn platform_worker(impl_: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn platform_worker(impl_: u64) -> u64 {
     ctor(b"Program\0".as_ptr(), 0, vec![impl_])
 }
-unsafe extern "C" fn terminal_write_line(s: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn terminal_write_line(s: u64) -> u64 {
     ctor(b"CmdWrite\0".as_ptr(), CT_WRITE, vec![s])
 }
 

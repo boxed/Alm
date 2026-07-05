@@ -956,3 +956,45 @@ fn string_toint_tofloat_unbox() {
          \x20       ++ \" \" ++ Debug.toString (String.toFloat \"3.5\")\n",
     );
 }
+
+#[test]
+fn tea_worker_ticks() {
+    // A Platform.worker program with a timer subscription and Terminal
+    // output, compiled through the typed backend and driven by the runtime's
+    // TEA loop.
+    let dir = std::env::temp_dir()
+        .join("alm-typed-tea")
+        .join(format!("tea-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (..)\n\
+         \n\
+         import Time\n\
+         \n\
+         type Msg = Tick Time.Posix\n\
+         \n\
+         main =\n\
+         \x20   Platform.worker { init = \\_ -> ( 0, Cmd.none ), update = update, subscriptions = subs }\n\
+         \n\
+         update msg model =\n\
+         \x20   case msg of\n\
+         \x20       Tick _ -> ( model + 1, Terminal.writeLine (\"tick \" ++ String.fromInt (model + 1)) )\n\
+         \n\
+         subs model =\n\
+         \x20   if model < 3 then Time.every 10 Tick else Sub.none\n",
+    )
+    .unwrap();
+
+    let binary = dir.join("test");
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+        .unwrap_or_else(|errs| {
+            panic!(
+                "typed compile failed:\n{}",
+                errs.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let out = run(&mut Command::new(&binary));
+    assert_eq!(out, "tick 1\ntick 2\ntick 3");
+}
