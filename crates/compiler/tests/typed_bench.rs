@@ -89,7 +89,9 @@ fn bench_one(label: &str, src: &str) {
     let checked = typecheck::check_module(&canonical, &Interfaces::new()).unwrap();
 
     // JS
-    let js = generate::generate_project(std::slice::from_ref(&canonical));
+    let mut nt = std::collections::HashMap::new();
+    nt.insert(canonical.name.clone(), checked.node_types.clone());
+    let js = generate::generate_project_typed(std::slice::from_ref(&canonical), nt);
     let bundle = dir.join("b.js");
     std::fs::write(&bundle, js).unwrap();
     let mut node = Command::new("node");

@@ -7,10 +7,12 @@
 pub mod native;
 pub mod typed;
 
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use crate::ast::canonical as can;
 use crate::data::Name;
+use crate::reporting::Region;
 
 pub const RUNTIME: &str = include_str!("runtime.js");
 
@@ -31,10 +33,20 @@ pub fn generate(module: &can::Module) -> String {
 /// Generate a single JavaScript file from all the modules of a project,
 /// given in dependency order (dependencies first).
 pub fn generate_project(modules: &[can::Module]) -> String {
+    generate_project_typed(modules, HashMap::new())
+}
+
+/// Like `generate_project`, but with per-module expression types so comparison
+/// operators can inline to native JS operators on scalar comparables.
+pub fn generate_project_typed(
+    modules: &[can::Module],
+    mut node_types: HashMap<Name, HashMap<Region, can::Type>>,
+) -> String {
     let mut gen = Generator {
         out: String::new(),
         module_name: None,
         temp_counter: 0,
+        node_types: HashMap::new(),
     };
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
@@ -154,6 +166,7 @@ pub fn generate_project(modules: &[can::Module]) -> String {
     let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
     for module in modules {
         gen.module_name = Some(module.name.clone());
+        gen.node_types = node_types.remove(&module.name).unwrap_or_default();
         gen.out.push_str("\n// MODULE ");
         gen.out.push_str(module.name.as_str());
         gen.out.push_str("\n\n");
@@ -244,6 +257,11 @@ struct Generator {
     /// definition is generated.
     module_name: Option<Name>,
     temp_counter: usize,
+    /// Inferred type of every expression in the current module, keyed by
+    /// region. Lets comparison operators inline to native JS `<` etc. when
+    /// the operands are scalar comparables (the common, hot case). Empty when
+    /// types are unavailable — then comparisons fall back to `_Utils_cmp`.
+    node_types: HashMap<Region, can::Type>,
 }
 
 impl Generator {
@@ -609,6 +627,26 @@ impl Generator {
         }
     }
 
+    /// Whether a comparison whose left operand is `left` can use native JS
+    /// comparison operators. True only when the operand's inferred type is a
+    /// scalar comparable (Int/Float/Char/String); native `<` on those matches
+    /// `_Utils_cmp`, but on lists/tuples it does not, so those must stay on the
+    /// kernel. Conservative: unknown/absent type => false.
+    fn is_scalar_comparison(&self, left: &can::Expr) -> bool {
+        matches!(
+            self.node_types.get(&left.region),
+            Some(can::Type::Type(module, name, args))
+                if args.is_empty()
+                    && matches!(
+                        (module.as_str(), name.as_str()),
+                        ("Basics", "Int")
+                            | ("Basics", "Float")
+                            | ("Char", "Char")
+                            | ("String", "String")
+                    )
+        )
+    }
+
     /// Inline the hot-path operators exactly like Generate/JavaScript does;
     /// fall back to the kernel functions otherwise.
     fn binop(
@@ -621,6 +659,11 @@ impl Generator {
     ) -> String {
         let l = self.expr(left);
         let r = self.expr(right);
+        // Inline `<`, `<=`, `>`, `>=` to native JS operators when the operands
+        // are scalar comparables (Int/Float/Char/String) — the hot case. For
+        // lists/tuples (or unknown types) fall back to `_Utils_cmp`, which is
+        // the only correct choice there. Matches Elm's --optimize codegen.
+        let scalar = self.is_scalar_comparison(left);
         match op.as_str() {
             "+" => format!("({} + {})", l, r),
             "-" => format!("({} - {})", l, r),
@@ -630,6 +673,10 @@ impl Generator {
             "^" => format!("Math.pow({}, {})", l, r),
             "==" => format!("_Utils_eq({}, {})", l, r),
             "/=" => format!("(!_Utils_eq({}, {}))", l, r),
+            "<" if scalar => format!("({} < {})", l, r),
+            ">" if scalar => format!("({} > {})", l, r),
+            "<=" if scalar => format!("({} <= {})", l, r),
+            ">=" if scalar => format!("({} >= {})", l, r),
             "<" => format!("(_Utils_cmp({}, {}) < 0)", l, r),
             ">" => format!("(_Utils_cmp({}, {}) > 0)", l, r),
             "<=" => format!("(_Utils_cmp({}, {}) < 1)", l, r),

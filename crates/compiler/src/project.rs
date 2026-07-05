@@ -86,7 +86,10 @@ pub struct CheckedProject {
 
 pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    Ok(generate::generate_project(&checked.modules))
+    Ok(generate::generate_project_typed(
+        &checked.modules,
+        checked.node_types,
+    ))
 }
 
 /// Compile a project to a native binary or wasm module at `output` via the
