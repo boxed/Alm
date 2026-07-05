@@ -532,6 +532,7 @@ var $String$indexes = F2(function (sub, s) {
     while (i > -1) { out.push(i); i = s.indexOf(sub, i + sub.length); }
     return _List_fromArray(out);
 });
+var $String$indices = $String$indexes;
 var $String$any = F2(function (isGood, s) {
     return Array.from(s).some(function (c) { return isGood(c); });
 });

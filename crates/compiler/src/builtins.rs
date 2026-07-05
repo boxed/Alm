@@ -200,6 +200,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("String", "uncons", "String -> Maybe ( Char, String )"),
             V("String", "cons", "Char -> String -> String"),
             V("String", "indexes", "String -> String -> List Int"),
+            V("String", "indices", "String -> String -> List Int"),
             V("String", "any", "(Char -> Bool) -> String -> Bool"),
             V("String", "all", "(Char -> Bool) -> String -> Bool"),
             V("String", "foldl", "(Char -> b -> b) -> b -> String -> b"),
@@ -648,6 +649,9 @@ pub const HTML_TAGS: &[&str] = &[
     "footer", "nav", "article", "aside", "main_", "figure", "figcaption", "blockquote",
     "iframe", "canvas", "audio", "video", "source", "small", "cite", "details", "summary",
     "abbr", "address", "mark", "meter", "progress", "output", "datalist", "optgroup",
+    "s", "q", "del", "ins", "col", "colgroup", "track", "embed", "object", "param",
+    "math", "dfn", "time", "var", "samp", "kbd", "ruby", "rt", "rp", "bdi", "bdo",
+    "wbr", "menu", "menuitem",
 ];
 
 /// String-valued HTML attribute helpers in Html.Attributes.
@@ -655,6 +659,9 @@ pub const HTML_STRING_ATTRS: &[&str] = &[
     "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_", "draggable",
     "for", "action", "method", "target", "rel", "wrap", "accept", "autocomplete", "list",
     "max", "min", "step", "pattern", "lang", "dir",
+    "download", "hreflang", "media", "ping", "usemap", "shape", "coords", "enctype",
+    "datetime", "charset", "content", "httpEquiv", "poster", "kind", "srclang", "sandbox",
+    "srcdoc", "manifest", "headers", "scope", "accesskey", "cite", "align", "acceptCharset",
 ];
 
 /// Bool-valued HTML attribute helpers in Html.Attributes.

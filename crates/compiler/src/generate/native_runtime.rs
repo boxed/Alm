@@ -3150,6 +3150,7 @@ kernel_fns! {
     G_STRING_STARTSWITH "$String$startsWith" string_starts_with, 2;
     G_STRING_ENDSWITH "$String$endsWith" string_ends_with, 2;
     G_STRING_INDEXES "$String$indexes" string_indexes, 2;
+    G_STRING_INDICES "$String$indices" string_indexes, 2;
     G_STRING_TOINT "$String$toInt" string_to_int, 1;
     G_STRING_TOFLOAT "$String$toFloat" string_to_float, 1;
     G_STRING_FROMCHAR "$String$fromChar" string_from_char, 1;

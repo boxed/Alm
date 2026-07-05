@@ -84,11 +84,16 @@ pub fn generate_project(modules: &[can::Module]) -> String {
         if *attr == "value" {
             writeln!(gen.out, "var $Html$Attributes$value = _VDom_prop('value');").unwrap();
         } else {
+            let key = match *attr {
+                "httpEquiv" => "http-equiv",
+                "acceptCharset" => "accept-charset",
+                other => other.trim_end_matches('_'),
+            };
             writeln!(
                 gen.out,
                 "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
                 sanitize(attr),
-                attr.trim_end_matches('_')
+                key
             )
             .unwrap();
         }
