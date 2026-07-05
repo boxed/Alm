@@ -653,6 +653,21 @@ pub const SVG_ATTRS: &[(&str, &str)] = &[
     ("maskUnits", "maskUnits"),
     ("patternUnits", "patternUnits"),
     ("vectorEffect", "vector-effect"),
+    // Animation (<animate>, <animateTransform>) attributes.
+    ("keyTimes", "keyTimes"),
+    ("keySplines", "keySplines"),
+    ("calcMode", "calcMode"),
+    ("begin", "begin"),
+    ("end", "end"),
+    ("from", "from"),
+    ("to", "to"),
+    ("by", "by"),
+    ("repeatDur", "repeatDur"),
+    ("additive", "additive"),
+    ("accumulate", "accumulate"),
+    ("restart", "restart"),
+    ("attributeType", "attributeType"),
+    ("type_", "type"),
 ];
 
 /// The standard HTML element helpers, all `List (Attribute msg) ->
@@ -674,7 +689,7 @@ pub const HTML_TAGS: &[&str] = &[
 /// String-valued HTML attribute helpers in Html.Attributes.
 pub const HTML_STRING_ATTRS: &[&str] = &[
     "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_", "draggable",
-    "for", "action", "method", "target", "rel", "wrap", "accept", "autocomplete", "list",
+    "for", "action", "method", "target", "rel", "wrap", "accept", "list",
     "max", "min", "step", "pattern", "lang", "dir",
     "download", "hreflang", "media", "ping", "usemap", "shape", "coords", "enctype",
     "datetime", "charset", "content", "httpEquiv", "poster", "kind", "srclang", "sandbox",
@@ -684,7 +699,8 @@ pub const HTML_STRING_ATTRS: &[&str] = &[
 /// Bool-valued HTML attribute helpers in Html.Attributes.
 pub const HTML_BOOL_ATTRS: &[&str] = &[
     "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus", "contenteditable",
-    "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck",
+    "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck", "autocomplete",
+    "ismap",
 ];
 
 // INFIX OPERATORS — the table from elm/core's Basics.elm and List.elm.
