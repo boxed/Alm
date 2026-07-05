@@ -554,6 +554,7 @@ var $String$foldr = F3(function (f, acc, s) {
 
 var $Char$isAlphaNum = function (c) { return /^[a-zA-Z0-9]$/.test(c); };
 var $Char$isHexDigit = function (c) { return /^[0-9a-fA-F]$/.test(c); };
+var $Char$isOctDigit = function (c) { return c >= '0' && c <= '7'; };
 
 // MAYBE — extras
 
@@ -1817,11 +1818,67 @@ var $Random$map2 = F3(function (f, ga, gb) {
         return [A2(f, ra[0], rb[0]), rb[1]];
     });
 });
+var $Random$map3 = F4(function (f, ga, gb, gc) {
+    return _Random_gen(function (seed) {
+        var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]);
+        return [A3(f, ra[0], rb[0], rc[0]), rc[1]];
+    });
+});
+var $Random$map4 = F5(function (f, ga, gb, gc, gd) {
+    return _Random_gen(function (seed) {
+        var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]), rd = gd.gen(rc[1]);
+        return [A4(f, ra[0], rb[0], rc[0], rd[0]), rd[1]];
+    });
+});
+var $Random$map5 = F6(function (f, ga, gb, gc, gd, ge) {
+    return _Random_gen(function (seed) {
+        var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]), rd = gd.gen(rc[1]), re = ge.gen(rd[1]);
+        return [A5(f, ra[0], rb[0], rc[0], rd[0], re[0]), re[1]];
+    });
+});
 var $Random$andThen = F2(function (f, g) {
     return _Random_gen(function (seed) {
         var r = g.gen(seed);
         return f(r[0]).gen(r[1]);
     });
+});
+var $Random$lazy = function (thunk) {
+    return _Random_gen(function (seed) { return thunk(_Utils_Tuple0).gen(seed); });
+};
+var $Random$pair = F2(function (ga, gb) {
+    return _Random_gen(function (seed) {
+        var ra = ga.gen(seed), rb = gb.gen(ra[1]);
+        return [{ $: '#2', a: ra[0], b: rb[0] }, rb[1]];
+    });
+});
+var $Random$uniform = F2(function (head, tail) {
+    var arr = [head].concat(_List_toArray(tail));
+    return _Random_gen(function (seed) {
+        var next = _Random_next(seed.state);
+        var i = Math.floor(next.value * arr.length);
+        if (i >= arr.length) { i = arr.length - 1; }
+        return [arr[i], { $: 'Seed', state: next.state }];
+    });
+});
+var $Random$weighted = F2(function (headPair, tailPairs) {
+    var pairs = [headPair].concat(_List_toArray(tailPairs));
+    var total = 0;
+    for (var i = 0; i < pairs.length; i++) { total += Math.abs(pairs[i].a); }
+    return _Random_gen(function (seed) {
+        var next = _Random_next(seed.state);
+        var target = next.value * total;
+        var acc = 0;
+        for (var j = 0; j < pairs.length; j++) {
+            acc += Math.abs(pairs[j].a);
+            if (target <= acc) { return [pairs[j].b, { $: 'Seed', state: next.state }]; }
+        }
+        return [pairs[pairs.length - 1].b, { $: 'Seed', state: next.state }];
+    });
+});
+var $Random$independentSeed = _Random_gen(function (seed) {
+    var a = _Random_next(seed.state);
+    var b = _Random_next(a.state);
+    return [{ $: 'Seed', state: a.state }, { $: 'Seed', state: b.state }];
 });
 var $Random$list = F2(function (n, g) {
     return _Random_gen(function (seed) {
