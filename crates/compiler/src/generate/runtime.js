@@ -1263,6 +1263,15 @@ var $Json$Decode$list = function (decoder) {
         return _Json_ok(_List_fromArray(out));
     });
 };
+var $Json$Decode$oneOrMore = F2(function (toValue, decoder) {
+    return _Json_decoder(function (v) {
+        var r = $Json$Decode$list(decoder).run(v);
+        if (!r.ok) { return r; }
+        var arr = _List_toArray(r.value);
+        if (arr.length === 0) { return _Json_expecting('a JSON ARRAY with at least ONE element', v); }
+        return _Json_ok(A2(toValue, arr[0], _List_fromArray(arr.slice(1))));
+    });
+});
 var $Json$Decode$array = function (decoder) {
     return _Json_decoder(function (v) {
         var r = $Json$Decode$list(decoder).run(v);

@@ -420,6 +420,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Json.Decode", "index", "Int -> Decoder a -> Decoder a"),
             V("Json.Decode", "maybe", "Decoder a -> Decoder (Maybe a)"),
             V("Json.Decode", "oneOf", "List (Decoder a) -> Decoder a"),
+            V("Json.Decode", "oneOrMore", "(a -> List a -> value) -> Decoder a -> Decoder value"),
             V("Json.Decode", "lazy", "(() -> Decoder a) -> Decoder a"),
             V("Json.Decode", "map", "(a -> value) -> Decoder a -> Decoder value"),
             V("Json.Decode", "map2", "(a -> b -> value) -> Decoder a -> Decoder b -> Decoder value"),
