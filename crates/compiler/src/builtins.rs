@@ -612,11 +612,14 @@ pub const HTML_INT_ATTRS: &[&str] = &[
 
 /// SVG element helpers.
 pub const SVG_TAGS: &[&str] = &[
-    "svg", "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "defs",
-    "text_", "tspan", "use", "mask", "clipPath", "linearGradient", "radialGradient", "stop",
-    "pattern", "marker", "symbol", "title", "desc", "foreignObject", "animate", "a",
-    "animateTransform", "image", "switch", "view", "filter", "feGaussianBlur", "feColorMatrix",
-    "feOffset", "feMerge", "feMergeNode", "feBlend", "feFlood", "textPath", "style", "metadata",
+    "svg", "foreignObject", "animate", "animateColor", "animateMotion", "animateTransform", "mpath", "set", "a", "defs",
+    "g", "marker", "mask", "pattern", "switch", "symbol", "desc", "metadata", "title", "feBlend",
+    "feColorMatrix", "feComponentTransfer", "feComposite", "feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap", "feFlood", "feFuncA", "feFuncB", "feFuncG",
+    "feFuncR", "feGaussianBlur", "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset", "feSpecularLighting", "feTile", "feTurbulence",
+    "font", "linearGradient", "radialGradient", "stop", "circle", "ellipse", "image", "line", "path", "polygon",
+    "polyline", "rect", "use", "feDistantLight", "fePointLight", "feSpotLight", "altGlyph", "altGlyphDef", "altGlyphItem", "glyph",
+    "glyphRef", "textPath", "text_", "tref", "tspan", "clipPath", "colorProfile", "cursor", "filter", "style",
+    "view",
 ];
 
 /// SVG attribute helpers: (Elm name, DOM attribute name).
