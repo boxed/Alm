@@ -1922,6 +1922,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Ok(acc)
             }
             Layout::List(elem) => self.equals_lists(a, b, elem),
+            Layout::Tagged(variants) => {
+                let variants = variants.clone();
+                self.equals_tagged(a, b, &variants)
+            }
             // An opaque boxed reference (e.g. the phantom element type of an
             // empty list): fall back to pointer identity. This code is only
             // reached for values that are genuinely opaque; for `[] == []` the
@@ -1943,6 +1947,73 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 other
             )),
         }
+    }
+
+    /// Tagged-union equality: equal iff same constructor tag and, for that
+    /// constructor, all fields equal (recursively). A switch dispatches on the
+    /// tag to a per-constructor field comparison.
+    fn equals_tagged(
+        &mut self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        variants: &[Vec<Layout>],
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let ptr_a = a.into_pointer_value();
+        let ptr_b = b.into_pointer_value();
+        let i32_t = self.ctx.i32_type();
+        let i1_t = self.ctx.bool_type();
+        let tag_a = self.builder.build_load(i32_t, ptr_a, "taga").unwrap().into_int_value();
+        let tag_b = self.builder.build_load(i32_t, ptr_b, "tagb").unwrap().into_int_value();
+        let teq = self.builder.build_int_compare(IntPredicate::EQ, tag_a, tag_b, "teq").unwrap();
+
+        let sw_bb = self.new_block("teq.sw");
+        let false_bb = self.new_block("teq.false");
+        let merge = self.new_block("teq.end");
+        self.builder.build_conditional_branch(teq, sw_bb, false_bb).unwrap();
+
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        self.builder.position_at_end(false_bb);
+        self.builder.build_unconditional_branch(merge).unwrap();
+        let false_v: BasicValueEnum = i1_t.const_zero().into();
+        incoming.push((false_v, false_bb));
+
+        // Build the switch and a block per constructor.
+        self.builder.position_at_end(sw_bb);
+        let var_blocks: Vec<_> = (0..variants.len())
+            .map(|k| self.new_block(&format!("teq.v{}", k)))
+            .collect();
+        let cases: Vec<_> = var_blocks
+            .iter()
+            .enumerate()
+            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+            .collect();
+        self.builder.build_switch(tag_a, false_bb, &cases).unwrap();
+
+        for (k, bb) in var_blocks.iter().enumerate() {
+            self.builder.position_at_end(*bb);
+            let fields = &variants[k];
+            let sty = self.ctor_struct(fields);
+            let mut acc = i1_t.const_int(1, false);
+            for (i, fl) in fields.iter().enumerate() {
+                let fap = self.builder.build_struct_gep(sty, ptr_a, (i + 1) as u32, "fa").unwrap();
+                let fa = self.builder.build_load(self.llvm_type(fl), fap, "fav").unwrap();
+                let fbp = self.builder.build_struct_gep(sty, ptr_b, (i + 1) as u32, "fb").unwrap();
+                let fb = self.builder.build_load(self.llvm_type(fl), fbp, "fbv").unwrap();
+                let e = self.equals_vals(fa, fb, fl)?;
+                acc = self.builder.build_and(acc, e, "and").unwrap();
+            }
+            let end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((acc.into(), end));
+        }
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(i1_t, "tageq").unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     /// List equality: walk both lists in lockstep — equal iff same length and

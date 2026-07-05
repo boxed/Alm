@@ -743,3 +743,24 @@ fn structural_equality_lists() {
          \x20       + 1000 * boolInt ([] == [])\n",
     );
 }
+
+#[test]
+fn structural_equality_unions() {
+    assert_same(
+        "union_eq",
+        "module Test exposing (..)\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         mk : Int -> Maybe Int\n\
+         mk n = if n < 0 then Nothing else Just n\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   boolInt (mk 5 == Just 5)\n\
+         \x20       + 10 * boolInt (mk 5 == Just 6)\n\
+         \x20       + 100 * boolInt (mk -1 == Nothing)\n\
+         \x20       + 1000 * boolInt (mk 5 == Nothing)\n",
+    );
+}
