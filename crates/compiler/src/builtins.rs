@@ -608,7 +608,7 @@ pub const SVG_TAGS: &[&str] = &[
     "text_", "tspan", "use", "mask", "clipPath", "linearGradient", "radialGradient", "stop",
     "pattern", "marker", "symbol", "title", "desc", "foreignObject", "animate", "a",
     "animateTransform", "image", "switch", "view", "filter", "feGaussianBlur", "feColorMatrix",
-    "feOffset", "feMerge", "feMergeNode", "feBlend", "feFlood", "textPath",
+    "feOffset", "feMerge", "feMergeNode", "feBlend", "feFlood", "textPath", "style", "metadata",
 ];
 
 /// SVG attribute helpers: (Elm name, DOM attribute name).
@@ -624,7 +624,10 @@ pub const SVG_ATTRS: &[(&str, &str)] = &[
     ("y2", "y2"),
     ("cx", "cx"),
     ("cy", "cy"),
+    ("fx", "fx"),
+    ("fy", "fy"),
     ("r", "r"),
+    ("fr", "fr"),
     ("rx", "rx"),
     ("ry", "ry"),
     ("d", "d"),
