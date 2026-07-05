@@ -381,6 +381,30 @@ impl Checker<'_> {
             for arg in &def.args {
                 arg_vars.push(self.infer_pattern(arg)?);
             }
+            // When there is an annotation, constrain each parameter to its
+            // annotated type *before* inferring the body. Elm checks
+            // arguments against the annotation up front; without this, a
+            // `let` binding that generalizes mid-body (e.g. `x = config.add`)
+            // would capture an under-constrained parameter type and be
+            // generalized too eagerly, producing spurious mismatches later.
+            if let Some(expected) = expected {
+                let mut remaining = expected;
+                for &arg_var in &arg_vars {
+                    let root = self.pool.find(remaining);
+                    match self.pool.content(root) {
+                        Content::Structure(FlatType::Fun(arg_type, result_type)) => {
+                            self.unify(arg_type, arg_var, def.name.region, || {
+                                format!(
+                                    "An argument to `{}` does not match its annotation",
+                                    def.name.value
+                                )
+                            })?;
+                            remaining = result_type;
+                        }
+                        _ => break,
+                    }
+                }
+            }
             let body_var = self.infer_expr(&def.body)?;
             let mut def_type = body_var;
             for arg in arg_vars.into_iter().rev() {
@@ -541,6 +565,26 @@ impl Checker<'_> {
             free: HashMap::new(),
             counter: 0,
         };
+        // Reserve the names of already-named free variables (rigids and
+        // named flexes) up front. `instantiate` keys its substitution map by
+        // name, so a *quantified* variable must never be given the same name
+        // as a free variable — otherwise instantiation would conflate them.
+        // Named free vars keep a fixed name regardless of traversal order, so
+        // seeding them here forces the anonymous name generator to skip those
+        // names. (Seeding `free` too, since `variable_to_type` returns early
+        // on an already-named var and would otherwise not record it as free.)
+        for &root in &env_free {
+            let name = match self.pool.content(root) {
+                Content::RigidVar(name)
+                | Content::FlexVar(Some(name))
+                | Content::RigidSuper(_, name) => Some(name),
+                _ => None,
+            };
+            if let Some(name) = name {
+                state.names.insert(root, name.clone());
+                state.free.insert(name, root);
+            }
+        }
         let tipe = self.variable_to_type(var, &env_free, &mut state);
         self.zonk_nodes(start, end, &mut state, &env_free);
         Scheme {

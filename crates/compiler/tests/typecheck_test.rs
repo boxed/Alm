@@ -355,3 +355,83 @@ fn record_alias_constructor_follows_alias_chain() {
         p : Point\n\
         p =\n    Point 1.0 2.0\n");
 }
+
+#[test]
+fn annotated_param_field_read_in_generalizing_let() {
+    // Regression: a record parameter whose field returns a function
+    // (`add : a -> Interpolator a`, i.e. `a -> Float -> a`) is read inside a
+    // `let` binding that generalizes mid-body. The parameter must be
+    // constrained by the annotation *before* the body is inferred; otherwise
+    // the field type is still an unconstrained flex when the `let`
+    // generalizes, so the element type collapses — `add` was inferred as
+    // `List a` instead of `List (Float -> a)`, yielding a spurious mismatch
+    // at `interpolator :: add`. Distilled from gampleman/elm-visualization
+    // `Interpolation.list`.
+    ok(r#"import Dict exposing (Dict)
+
+
+type alias Interpolator a =
+    Float -> a
+
+
+list :
+    { add : a -> Interpolator a
+    , change : a -> a -> Interpolator a
+    , id : a -> comparable
+    }
+    -> List a
+    -> List (Interpolator a)
+list config from =
+    let
+        fromIds =
+            Dict.fromList (List.indexedMap (\idx a -> ( config.id a, ( idx, a ) )) from)
+
+        removals : Dict comparable ( Int, a )
+        removals =
+            fromIds
+
+        folder : comparable -> ( Int, a ) -> List (Interpolator a) -> List (Interpolator a)
+        folder id ( idx, a ) result =
+            let
+                add =
+                    Dict.get idx removals
+                        |> Maybe.map (\( _, x ) -> config.add x)
+                        |> Maybe.map List.singleton
+                        |> Maybe.withDefault []
+
+                interpolator =
+                    config.change a a
+            in
+            result ++ (interpolator :: add)
+    in
+    Dict.foldl folder [] fromIds
+"#);
+}
+
+#[test]
+fn let_helper_flex_var_not_conflated_with_free_rigid() {
+    // Regression: `consIndexIf`'s `index` parameter is a flexible variable
+    // that gets generalized while the enclosing annotation's rigid `a` is a
+    // free variable. Generalization must not hand the quantified variable
+    // the same *name* as the free rigid variable — `instantiate` keys its
+    // substitution map by name, so a collision would conflate the two and
+    // pin `index` to the rigid `a` (rejecting this valid code). Distilled
+    // from elm-community/list-extra `findIndices`.
+    ok(r#"indexedFoldr : (Int -> a -> b -> b) -> b -> List a -> b
+indexedFoldr _ acc _ =
+    acc
+
+
+findIndices : (a -> Bool) -> List a -> List Int
+findIndices predicate =
+    let
+        consIndexIf index x acc =
+            if predicate x then
+                index :: acc
+
+            else
+                acc
+    in
+    indexedFoldr consIndexIf []
+"#);
+}
