@@ -362,6 +362,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             {
                 self.gen_pipe(expr, op.as_str(), l, r)
             }
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "<<" || op.as_str() == ">>" => {
+                self.gen_compose(l, r, expr, op.as_str() == "<<")
+            }
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "::" => self.gen_cons(expr, l, r),
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "++" => self.gen_append(l, r),
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "&&" || op.as_str() == "||" => {
@@ -1833,6 +1836,60 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let dest = self.builder.build_load(ptr_t, slot, "dest2").unwrap().into_pointer_value();
         self.builder.build_store(dest, right).unwrap();
         Ok(self.builder.build_load(ptr_t, result, "appended").unwrap())
+    }
+
+    /// Function composition `f << g` (= `\x -> f (g x)`) and `f >> g`
+    /// (= `\x -> g (f x)`). Desugared to a synthetic lambda and run through
+    /// the closure machinery, so the composed functions are captured.
+    fn gen_compose(
+        &mut self,
+        l: &TypedExpr,
+        r: &TypedExpr,
+        whole: &TypedExpr,
+        is_left: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let (a_ty, c_ty) = match &whole.tipe {
+            Type::Lambda(a, c) => ((**a).clone(), (**c).clone()),
+            other => {
+                return Err(format!(
+                    "typed backend: composition result is not a function: {:?}",
+                    other
+                ))
+            }
+        };
+        // `<<`: apply g (right) then f (left); `>>`: apply f (left) then g.
+        let (first, second) = if is_left { (r, l) } else { (l, r) };
+        let b_ty = match &first.tipe {
+            Type::Lambda(_, b) => (**b).clone(),
+            other => {
+                return Err(format!(
+                    "typed backend: composition operand is not a function: {:?}",
+                    other
+                ))
+            }
+        };
+
+        let xname = format!("$compose{}", self.lam_id);
+        let x_local = TypedExpr {
+            tipe: a_ty.clone(),
+            kind: TypedKind::Local(crate::data::Name::from(xname.clone())),
+        };
+        let inner = TypedExpr {
+            tipe: b_ty,
+            kind: TypedKind::Call(Box::new(first.clone()), vec![x_local]),
+        };
+        let outer = TypedExpr {
+            tipe: c_ty.clone(),
+            kind: TypedKind::Call(Box::new(second.clone()), vec![inner]),
+        };
+        let pat = crate::reporting::Located {
+            region: crate::reporting::Region::ZERO,
+            value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(xname)),
+        };
+        let params = vec![(pat, a_ty)];
+        let result_layout = self.layouts.layout_of(&c_ty);
+        self.gen_closure(&params, &outer, &result_layout)
     }
 
     /// `x |> f` and `f <| x` are application. Normalize to a flattened call —

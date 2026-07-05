@@ -784,3 +784,25 @@ fn partial_application() {
          \x20   add10 5 + List.sum (List.map (add 100) [ 1, 2, 3 ])\n",
     );
 }
+
+#[test]
+fn function_composition() {
+    assert_same(
+        "compose",
+        "module Test exposing (..)\n\
+         \n\
+         inc : Int -> Int\n\
+         inc n = n + 1\n\
+         \n\
+         double : Int -> Int\n\
+         double n = n * 2\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       f = inc << double\n\
+         \x20       g = inc >> double\n\
+         \x20   in\n\
+         \x20   f 10 + 100 * g 10\n",
+    );
+}
