@@ -1043,3 +1043,78 @@ fn tea_task_chain() {
     let out = run(&mut Command::new(&binary));
     assert_eq!(out, "42");
 }
+
+#[test]
+fn dict_operations() {
+    assert_same(
+        "dict",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         d : Dict.Dict Int String\n\
+         d = Dict.fromList [ ( 3, \"c\" ), ( 1, \"a\" ), ( 2, \"b\" ) ]\n\
+         \n\
+         orDash : Maybe String -> String\n\
+         orDash m = case m of\n\
+         \x20   Just s -> s\n\
+         \x20   Nothing -> \"-\"\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (Dict.size d)\n\
+         \x20       ++ \" \" ++ orDash (Dict.get 2 d)\n\
+         \x20       ++ \" \" ++ orDash (Dict.get 9 d)\n\
+         \x20       ++ \" \" ++ String.join \",\" (Dict.values d)\n\
+         \x20       ++ \" \" ++ Debug.toString (Dict.keys d)\n\
+         \x20       ++ \" \" ++ String.fromInt (Dict.foldl (\\_ _ n -> n + 1) 0 (Dict.insert 5 \"e\" d))\n",
+    );
+}
+
+#[test]
+fn set_operations() {
+    assert_same(
+        "set",
+        "module Test exposing (..)\n\
+         \n\
+         import Set\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       s = Set.fromList [ 3, 1, 2, 1, 3 ]\n\
+         \x20   in\n\
+         \x20   Set.size s * 100\n\
+         \x20       + boolInt (Set.member 2 s) * 10\n\
+         \x20       + boolInt (Set.member 9 s)\n\
+         \x20       + 1000 * List.sum (Set.toList (Set.union s (Set.fromList [ 4, 2 ])))\n",
+    );
+}
+
+#[test]
+fn array_operations() {
+    assert_same(
+        "array",
+        "module Test exposing (..)\n\
+         \n\
+         import Array\n\
+         \n\
+         orZero : Maybe Int -> Int\n\
+         orZero m = case m of\n\
+         \x20   Just n -> n\n\
+         \x20   Nothing -> 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       a = Array.push 99 (Array.fromList [ 10, 20, 30 ])\n\
+         \x20   in\n\
+         \x20   Array.length a * 10000\n\
+         \x20       + orZero (Array.get 1 a) * 100\n\
+         \x20       + orZero (Array.get 3 a)\n\
+         \x20       + Array.foldl (\\x acc -> acc + x) 0 (Array.map (\\x -> x * 2) a)\n",
+    );
+}

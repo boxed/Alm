@@ -572,6 +572,43 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.call_named(name, &[arg])
     }
 
+    /// Get or declare a runtime function of `argc` uniform (i64) parameters
+    /// returning a uniform word.
+    fn runtime_fn(&self, name: &str, argc: usize) -> FunctionValue<'ctx> {
+        self.module.get_function(name).unwrap_or_else(|| {
+            let i64_t = self.ctx.i64_type();
+            let params = vec![i64_t.into(); argc];
+            self.module
+                .add_function(name, i64_t.fn_type(&params, false), Some(Linkage::External))
+        })
+    }
+
+    /// Call a runtime collection function: box each argument to a uniform
+    /// value, invoke the function, and unbox the result to `result_tipe`. Used
+    /// for Dict/Set/Array whose values are opaque uniform words.
+    fn marshal_call(
+        &mut self,
+        symbol: &str,
+        args: &[TypedExpr],
+        result_tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut boxed = Vec::with_capacity(args.len());
+        for arg in args {
+            let v = self.gen(arg)?;
+            boxed.push(self.box_value(v, &arg.tipe)?);
+        }
+        let f = self.runtime_fn(symbol, boxed.len());
+        let argv: Vec<_> = boxed.iter().map(|b| (*b).into()).collect();
+        let uniform = self
+            .builder
+            .build_call(f, &argv, "coll")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap();
+        self.unbox_value(uniform, result_tipe)
+    }
+
     /// Call a runtime effect function: box each argument into a uniform value
     /// and invoke it, yielding the uniform result word.
     fn effect_call(
@@ -1786,10 +1823,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let x = self.gen(&args[0])?.into_float_value();
                 Ok(self.call_f64_intrinsic("llvm.sqrt.f64", x).into())
             }
-            _ => Err(format!(
-                "typed backend: built-in `{}.{}` has no generated kernel yet",
-                module, name
-            )),
+            // Dict/Set/Array: opaque uniform values managed by the runtime.
+            // Empty collections are value globals; the rest marshal.
+            ("Dict", "empty") => Ok(self.load_uniform_global("$Dict$empty")),
+            ("Set", "empty") => Ok(self.load_uniform_global("$Set$empty")),
+            ("Array", "empty") => Ok(self.load_uniform_global("$Array$empty")),
+            _ => match collection_symbol(module, name) {
+                Some(symbol) => self.marshal_call(symbol, args, &whole.tipe),
+                None => Err(format!(
+                    "typed backend: built-in `{}.{}` has no generated kernel yet",
+                    module, name
+                )),
+            },
         }
     }
 
@@ -3601,6 +3646,63 @@ fn cmp_f<'ctx>(
     y: inkwell::values::FloatValue<'ctx>,
 ) -> BasicValueEnum<'ctx> {
     b.build_float_compare(pred, x, y, "cmp").unwrap().into()
+}
+
+/// The runtime symbol for a Dict/Set/Array operation, or None if unknown.
+fn collection_symbol(module: &str, name: &str) -> Option<&'static str> {
+    Some(match (module, name) {
+        ("Dict", "singleton") => "dict_singleton",
+        ("Dict", "insert") => "dict_insert",
+        ("Dict", "get") => "dict_get",
+        ("Dict", "remove") => "dict_remove",
+        ("Dict", "member") => "dict_member",
+        ("Dict", "isEmpty") => "dict_is_empty",
+        ("Dict", "size") => "dict_size",
+        ("Dict", "keys") => "dict_keys",
+        ("Dict", "values") => "dict_values",
+        ("Dict", "toList") => "dict_to_list",
+        ("Dict", "fromList") => "dict_from_list",
+        ("Dict", "foldl") => "dict_foldl",
+        ("Dict", "foldr") => "dict_foldr",
+        ("Dict", "map") => "dict_map",
+        ("Dict", "filter") => "dict_filter",
+        ("Dict", "update") => "dict_update",
+        ("Dict", "union") => "dict_union",
+        ("Dict", "intersect") => "dict_intersect",
+        ("Dict", "diff") => "dict_diff",
+        ("Dict", "partition") => "dict_partition",
+        ("Set", "singleton") => "set_singleton",
+        ("Set", "insert") => "set_insert",
+        ("Set", "remove") => "set_remove",
+        ("Set", "member") => "set_member",
+        ("Set", "isEmpty") => "set_is_empty",
+        ("Set", "size") => "set_size",
+        ("Set", "toList") => "set_to_list",
+        ("Set", "fromList") => "set_from_list",
+        ("Set", "union") => "set_union",
+        ("Set", "intersect") => "set_intersect",
+        ("Set", "diff") => "set_diff",
+        ("Set", "foldl") => "set_foldl",
+        ("Set", "foldr") => "set_foldr",
+        ("Set", "map") => "set_map",
+        ("Set", "filter") => "set_filter",
+        ("Array", "isEmpty") => "array_is_empty",
+        ("Array", "length") => "array_length",
+        ("Array", "initialize") => "array_initialize",
+        ("Array", "repeat") => "array_repeat",
+        ("Array", "fromList") => "array_from_list",
+        ("Array", "toList") => "array_to_list",
+        ("Array", "get") => "array_get",
+        ("Array", "set") => "array_set",
+        ("Array", "push") => "array_push",
+        ("Array", "foldl") => "array_foldl",
+        ("Array", "foldr") => "array_foldr",
+        ("Array", "map") => "array_map",
+        ("Array", "indexedMap") => "array_indexed_map",
+        ("Array", "filter") => "array_filter",
+        ("Array", "slice") => "array_slice",
+        _ => return None,
+    })
 }
 
 /// The name a simple `Var` parameter binds, if that is all this pattern is.
