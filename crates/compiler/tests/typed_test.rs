@@ -844,3 +844,58 @@ fn take_drop_all_any() {
          \x20       + 2 * boolInt (List.any (\\n -> n > 100) xs)\n",
     );
 }
+
+#[test]
+fn cross_module_specialization() {
+    // A helper module imported by the entry: the polymorphic helper must be
+    // specialized in its own module and called across the boundary.
+    let dir = std::env::temp_dir()
+        .join("alm-typed-xmod")
+        .join(format!("xmod-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create dir");
+    std::fs::write(
+        dir.join("Helper.elm"),
+        "module Helper exposing (..)\n\
+         \n\
+         twice : (a -> a) -> a -> a\n\
+         twice f x = f (f x)\n\
+         \n\
+         bump : Int -> Int\n\
+         bump n = n + 1\n",
+    )
+    .unwrap();
+    let entry = dir.join("Main.elm");
+    std::fs::write(
+        &entry,
+        "module Main exposing (..)\n\
+         \n\
+         import Helper\n\
+         \n\
+         main : Int\n\
+         main = Helper.twice Helper.bump 40\n",
+    )
+    .unwrap();
+
+    // JS backend.
+    let js = alm_compiler::project::compile_project(&entry)
+        .unwrap_or_else(|errs| panic!("js compile failed with {} errors", errs.len()));
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, js).unwrap();
+    let js_out = run(Command::new("node").arg("-e").arg(format!(
+        "console.log(require({:?})['Main']['main'])",
+        bundle.display()
+    )));
+
+    // Typed native backend.
+    let binary = dir.join("main");
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+        .unwrap_or_else(|errs| {
+            panic!(
+                "typed compile failed:\n{}",
+                errs.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let native_out = run(&mut Command::new(&binary));
+
+    assert_eq!(native_out, js_out, "cross-module typed vs JS");
+}

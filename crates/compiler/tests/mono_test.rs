@@ -317,8 +317,8 @@ fn every_call_target_is_defined() {
         }
     }
     // Sanity: the two specializations of `identity` both exist.
-    assert!(defined.contains("identity$Fn$String$String"));
-    assert!(defined.contains("identity$Fn$Int$Int"));
+    assert!(defined.contains("Test$identity$Fn$String$String"));
+    assert!(defined.contains("Test$identity$Fn$Int$Int"));
 }
 
 fn mentions_var(tipe: &can::Type) -> bool {

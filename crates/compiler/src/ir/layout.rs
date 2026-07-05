@@ -75,15 +75,23 @@ pub struct LayoutCtx {
 
 impl LayoutCtx {
     pub fn new(module: &can::Module) -> LayoutCtx {
+        Self::for_modules(std::slice::from_ref(&module))
+    }
+
+    /// Build a layout context knowing the unions of every given module (plus
+    /// the built-ins), so cross-module constructors lay out correctly.
+    pub fn for_modules(modules: &[&can::Module]) -> LayoutCtx {
         let mut unions = HashMap::new();
-        for union in &module.unions {
-            unions.insert(
-                (module.name.clone(), union.name.clone()),
-                UnionDef {
-                    vars: union.vars.clone(),
-                    ctors: union.ctors.iter().map(|c| c.args.clone()).collect(),
-                },
-            );
+        for module in modules {
+            for union in &module.unions {
+                unions.insert(
+                    (module.name.clone(), union.name.clone()),
+                    UnionDef {
+                        vars: union.vars.clone(),
+                        ctors: union.ctors.iter().map(|c| c.args.clone()).collect(),
+                    },
+                );
+            }
         }
         for union in builtins::UNIONS {
             unions.insert(

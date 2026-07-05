@@ -89,30 +89,29 @@ pub fn compile_project_native(
 }
 
 /// Compile a project to a native binary via the *typed* (monomorphized)
-/// backend, which emits unboxed code. Single entry module for now (no user
-/// imports); a program that references other user modules will fail at
-/// codegen with an unknown-target error.
+/// backend, which emits unboxed code. Monomorphizes across all project
+/// modules starting from the entry module's `main`.
 pub fn compile_project_typed(
     entry: &Path,
     output: &Path,
     target: generate::native::Target,
 ) -> Result<(), Vec<BuildError>> {
     let checked = check_project(entry)?;
-    let entry_module = checked
+    let empty_types = HashMap::new();
+    let empty_nodes = HashMap::new();
+    let infos: Vec<crate::ir::mono::ModuleInfo> = checked
         .modules
         .iter()
-        .find(|m| m.name == checked.entry)
-        .expect("entry module present");
-    let types = checked
-        .types
-        .get(&checked.entry)
-        .expect("entry module types present");
-    let node_types = checked
-        .node_types
-        .get(&checked.entry)
-        .expect("entry module node types present");
-    let program = crate::ir::mono::specialize_program(entry_module, types, node_types);
-    let layouts = crate::ir::layout::LayoutCtx::new(entry_module);
+        .map(|module| crate::ir::mono::ModuleInfo {
+            name: module.name.clone(),
+            module,
+            types: checked.types.get(&module.name).unwrap_or(&empty_types),
+            node_types: checked.node_types.get(&module.name).unwrap_or(&empty_nodes),
+        })
+        .collect();
+    let program = crate::ir::mono::specialize_project(&infos, &checked.entry);
+    let module_refs: Vec<&can::Module> = checked.modules.iter().collect();
+    let layouts = crate::ir::layout::LayoutCtx::for_modules(&module_refs);
     generate::typed::build(&program, &layouts, output, target).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),

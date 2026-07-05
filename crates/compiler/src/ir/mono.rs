@@ -23,13 +23,29 @@ use crate::ast::canonical as can;
 use crate::data::Name;
 use crate::reporting::Region;
 
-/// One concrete instance of a top-level function: its name and the concrete
-/// type it is specialized at. Two uses of a polymorphic function at the same
-/// concrete type share an instance.
+/// One concrete instance of a top-level function: the module it lives in, its
+/// name, and the concrete type it is specialized at. Two uses of a polymorphic
+/// function at the same concrete type share an instance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instance {
+    pub module: Name,
     pub name: Name,
     pub tipe: can::Type,
+}
+
+/// One module's checked data, as monomorphization consumes it.
+pub struct ModuleInfo<'a> {
+    pub name: Name,
+    pub module: &'a can::Module,
+    pub types: &'a HashMap<Name, can::Type>,
+    pub node_types: &'a HashMap<Region, can::Type>,
+}
+
+/// A module's definitions plus the type info needed to specialize them.
+struct ModuleCtx<'a> {
+    defs: HashMap<Name, &'a can::Def>,
+    types: &'a HashMap<Name, can::Type>,
+    node_types: &'a HashMap<Region, can::Type>,
 }
 
 /// A use of a built-in/kernel function (`VarForeign`) at a concrete type.
@@ -51,68 +67,96 @@ pub struct MonoSet {
 }
 
 /// Compute the specializations reachable from `main` within a single module.
-///
-/// * `types` — every top-level definition's generalized type.
-/// * `node_types` — every expression's concrete type, keyed by region, with
-///   variable names aligned to the enclosing definition's scheme.
+/// Convenience wrapper over [`analyze_project`].
 pub fn analyze(
     module: &can::Module,
     types: &HashMap<Name, can::Type>,
     node_types: &HashMap<Region, can::Type>,
 ) -> MonoSet {
-    let defs = index_defs(module);
+    let info = ModuleInfo {
+        name: module.name.clone(),
+        module,
+        types,
+        node_types,
+    };
+    analyze_project(std::slice::from_ref(&info), &module.name)
+}
+
+/// Compute the specializations reachable from the entry module's `main`
+/// across the whole project. A reference to another project module's value
+/// (`VarForeign` into a known module) seeds an instance in that module; a
+/// reference to a built-in/kernel is recorded as a foreign use.
+pub fn analyze_project(modules: &[ModuleInfo], entry: &Name) -> MonoSet {
+    let ctxs = build_ctxs(modules);
     let mut set = MonoSet::default();
-    // Instances already discovered, keyed by (name, printed type), so a
-    // recursive or repeatedly-used function specializes once per type.
-    let mut seen: HashMap<(Name, String), ()> = HashMap::new();
+    // Seen instances keyed by (module, name, printed type).
+    let mut seen: HashMap<(Name, Name, String), ()> = HashMap::new();
     let mut queue: Vec<Instance> = Vec::new();
 
-    if let Some(main_ty) = types.get(&Name::from("main")) {
-        enqueue(
-            &mut queue,
-            &mut seen,
-            &mut set,
-            Instance {
-                name: Name::from("main"),
-                tipe: main_ty.clone(),
-            },
-        );
+    if let Some(entry_ctx) = ctxs.get(entry) {
+        if let Some(main_ty) = entry_ctx.types.get(&Name::from("main")) {
+            enqueue(
+                &mut queue,
+                &mut seen,
+                &mut set,
+                Instance {
+                    module: entry.clone(),
+                    name: Name::from("main"),
+                    tipe: main_ty.clone(),
+                },
+            );
+        }
     }
 
     while let Some(instance) = queue.pop() {
-        let Some(def) = defs.get(&instance.name) else {
+        let Some(mctx) = ctxs.get(&instance.module) else {
+            continue;
+        };
+        let Some(def) = mctx.defs.get(&instance.name) else {
             continue; // referenced but not defined here (e.g. a port)
         };
-        // Match the function's generic scheme against this concrete use to
-        // get the substitution for its type variables.
-        let scheme = types
+        let scheme = mctx
+            .types
             .get(&instance.name)
             .cloned()
             .unwrap_or_else(|| instance.tipe.clone());
         let mut subst = HashMap::new();
         match_type(&scheme, &instance.tipe, &mut subst);
 
-        // Walk the body; every reference node's captured type, put through
-        // the substitution, is the concrete type of the referent here.
         let mut refs = Vec::new();
         collect_refs(&def.body, &mut refs);
         for node in refs {
-            let Some(captured) = node_types.get(&node.region) else {
+            let Some(captured) = mctx.node_types.get(&node.region) else {
                 continue;
             };
             let concrete = apply_subst(&subst, captured);
             match &node.value {
-                can::Expr_::VarTopLevel(name) if defs.contains_key(name) => {
+                can::Expr_::VarTopLevel(name) if mctx.defs.contains_key(name) => {
                     enqueue(
                         &mut queue,
                         &mut seen,
                         &mut set,
                         Instance {
+                            module: instance.module.clone(),
                             name: name.clone(),
                             tipe: concrete,
                         },
                     );
                 }
+                // A reference into another project module: specialize it there.
+                can::Expr_::VarForeign(module, name) if ctxs.contains_key(module) => {
+                    enqueue(
+                        &mut queue,
+                        &mut seen,
+                        &mut set,
+                        Instance {
+                            module: module.clone(),
+                            name: name.clone(),
+                            tipe: concrete,
+                        },
+                    );
+                }
+                // A built-in/kernel: recorded for typed-kernel generation.
                 can::Expr_::VarForeign(module, name) => {
                     record_foreign(
                         &mut set,
@@ -131,13 +175,33 @@ pub fn analyze(
     set
 }
 
+fn build_ctxs<'a>(modules: &'a [ModuleInfo<'a>]) -> HashMap<Name, ModuleCtx<'a>> {
+    modules
+        .iter()
+        .map(|m| {
+            (
+                m.name.clone(),
+                ModuleCtx {
+                    defs: index_defs(m.module),
+                    types: m.types,
+                    node_types: m.node_types,
+                },
+            )
+        })
+        .collect()
+}
+
 fn enqueue(
     queue: &mut Vec<Instance>,
-    seen: &mut HashMap<(Name, String), ()>,
+    seen: &mut HashMap<(Name, Name, String), ()>,
     set: &mut MonoSet,
     instance: Instance,
 ) {
-    let key = (instance.name.clone(), format!("{:?}", instance.tipe));
+    let key = (
+        instance.module.clone(),
+        instance.name.clone(),
+        format!("{:?}", instance.tipe),
+    );
     if seen.insert(key, ()).is_some() {
         return;
     }
@@ -340,21 +404,38 @@ pub enum TypedLetDecl {
 }
 
 /// Analyze, then build a typed body for every discovered instance.
+/// Analyze and specialize a single module. Convenience wrapper over
+/// [`specialize_project`].
 pub fn specialize_program(
     module: &can::Module,
     types: &HashMap<Name, can::Type>,
     node_types: &HashMap<Region, can::Type>,
 ) -> MonoProgram {
-    let set = analyze(module, types, node_types);
-    let defs = index_defs(module);
-    let spec = Specializer { defs: &defs, node_types };
+    let info = ModuleInfo {
+        name: module.name.clone(),
+        module,
+        types,
+        node_types,
+    };
+    specialize_project(std::slice::from_ref(&info), &module.name)
+}
+
+/// Analyze and specialize a whole project, emitting one typed function per
+/// reachable specialization across all modules.
+pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
+    let set = analyze_project(modules, entry);
+    let ctxs = build_ctxs(modules);
 
     let mut functions = Vec::new();
     for instance in &set.instances {
-        let Some(def) = defs.get(&instance.name) else {
+        let Some(mctx) = ctxs.get(&instance.module) else {
             continue;
         };
-        let scheme = types
+        let Some(def) = mctx.defs.get(&instance.name) else {
+            continue;
+        };
+        let scheme = mctx
+            .types
             .get(&instance.name)
             .cloned()
             .unwrap_or_else(|| instance.tipe.clone());
@@ -371,15 +452,19 @@ pub fn specialize_program(
                     remaining = *b;
                 }
                 other => {
-                    // Fewer arrows than args: leave the rest untyped-ish.
                     params.push((arg.clone(), other.clone()));
                     remaining = other;
                 }
             }
         }
 
+        let spec = Specializer {
+            module: &instance.module,
+            ctx: mctx,
+            project: &ctxs,
+        };
         functions.push(TypedFn {
-            mangled: mangle(&instance.name, &instance.tipe),
+            mangled: mangle(&instance.module, &instance.name, &instance.tipe),
             original: instance.name.clone(),
             tipe: instance.tipe.clone(),
             params,
@@ -391,14 +476,18 @@ pub fn specialize_program(
 }
 
 struct Specializer<'a> {
-    defs: &'a HashMap<Name, &'a can::Def>,
-    node_types: &'a HashMap<Region, can::Type>,
+    /// The module whose definition is being specialized (for resolving local
+    /// top-level references).
+    module: &'a Name,
+    ctx: &'a ModuleCtx<'a>,
+    project: &'a HashMap<Name, ModuleCtx<'a>>,
 }
 
 impl Specializer<'_> {
     /// The concrete type of a node under a substitution.
     fn node_ty(&self, expr: &can::Expr, subst: &HashMap<Name, can::Type>) -> can::Type {
         let captured = self
+            .ctx
             .node_types
             .get(&expr.region)
             .cloned()
@@ -417,15 +506,23 @@ impl Specializer<'_> {
             Unit => TypedKind::Unit,
             VarLocal(name) => TypedKind::Local(name.clone()),
             VarTopLevel(name) => {
-                if self.defs.contains_key(name) {
-                    // Resolve to the callee's specialization at this node's
-                    // concrete type.
-                    TypedKind::Global(mangle(name, &tipe))
+                if self.ctx.defs.contains_key(name) {
+                    // Resolve to the callee's specialization (this module) at
+                    // this node's concrete type.
+                    TypedKind::Global(mangle(self.module, name, &tipe))
                 } else {
                     TypedKind::Local(name.clone())
                 }
             }
-            VarForeign(module, name) => TypedKind::Foreign(module.clone(), name.clone()),
+            VarForeign(module, name) => {
+                // A value from another project module resolves to its
+                // specialization; a built-in stays a kernel reference.
+                if self.project.contains_key(module) {
+                    TypedKind::Global(mangle(module, name, &tipe))
+                } else {
+                    TypedKind::Foreign(module.clone(), name.clone())
+                }
+            }
             VarCtor(home, union, ctor) => {
                 TypedKind::Ctor(home.clone(), union.clone(), ctor.clone())
             }
@@ -542,11 +639,12 @@ impl Specializer<'_> {
     }
 }
 
-/// Mangle a `(name, concrete type)` pair into a unique symbol. Provisional
-/// scheme — readable and injective enough for the types we see; codegen only
-/// needs distinct names per instance.
-pub fn mangle(name: &Name, tipe: &can::Type) -> Name {
-    Name::from(format!("{}${}", name, mangle_type(tipe)))
+/// Mangle a `(module, name, concrete type)` triple into a unique symbol.
+/// Provisional scheme — readable and injective enough for the types we see;
+/// codegen only needs distinct names per instance. The module qualifier keeps
+/// specializations from different modules distinct.
+pub fn mangle(module: &Name, name: &Name, tipe: &can::Type) -> Name {
+    Name::from(format!("{}${}${}", module, name, mangle_type(tipe)))
 }
 
 fn mangle_type(tipe: &can::Type) -> String {
