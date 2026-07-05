@@ -363,27 +363,7 @@ fn record_alias_ctor(
     qualifier: Option<&Name>,
     name: &Name,
 ) -> Option<can::Expr_> {
-    let field_names: Vec<Name> = match qualifier {
-        None => {
-            if let Some((_, body)) = env.aliases.get(name) {
-                record_field_names_src(body)?
-            } else if let Some(module) = env.exposed_types.get(name) {
-                record_alias_fields_foreign(env, module, name)?
-            } else {
-                return None;
-            }
-        }
-        Some(qualifier) => {
-            let candidates = env.resolve_modules(qualifier);
-            candidates.iter().find_map(|module| {
-                if *module == env.module_name {
-                    record_field_names_src(&env.aliases.get(name)?.1)
-                } else {
-                    record_alias_fields_foreign(env, module, name)
-                }
-            })?
-        }
-    };
+    let field_names: Vec<Name> = resolve_alias_record_fields(env, qualifier, name, 0)?;
 
     if field_names.is_empty() {
         return Some(can::Expr_::Record(vec![]));
@@ -414,27 +394,85 @@ fn record_alias_ctor(
     ))
 }
 
-fn record_field_names_src(tipe: &src::Type) -> Option<Vec<Name>> {
+/// Field names of the record an alias resolves to, following alias chains
+/// (`type alias Point = Draw.Point`, whose body is itself an alias for a
+/// record). Returns None if the chain does not bottom out in a closed record.
+fn resolve_alias_record_fields(
+    env: &Env,
+    qualifier: Option<&Name>,
+    name: &Name,
+    depth: u32,
+) -> Option<Vec<Name>> {
+    if depth > 20 {
+        return None;
+    }
+    match qualifier {
+        None => {
+            if let Some((_, body)) = env.aliases.get(name) {
+                record_field_names_src(env, body, depth)
+            } else if let Some(module) = env.exposed_types.get(name) {
+                record_field_names_can_alias(env, module, name, depth)
+            } else {
+                None
+            }
+        }
+        Some(qualifier) => {
+            let candidates = env.resolve_modules(qualifier);
+            candidates.iter().find_map(|module| {
+                if *module == env.module_name {
+                    record_field_names_src(env, &env.aliases.get(name)?.1, depth)
+                } else {
+                    record_field_names_can_alias(env, module, name, depth)
+                }
+            })
+        }
+    }
+}
+
+/// Field names from a source-level alias body, chasing references to other
+/// aliases (local or foreign) until a closed record is reached.
+fn record_field_names_src(env: &Env, tipe: &src::Type, depth: u32) -> Option<Vec<Name>> {
     match &tipe.value {
         src::Type_::Record(fields, None) => {
             Some(fields.iter().map(|(n, _)| n.value.clone()).collect())
+        }
+        src::Type_::Type(_, name, _) => resolve_alias_record_fields(env, None, name, depth + 1),
+        src::Type_::TypeQual(_, qualifier, name, _) => {
+            resolve_alias_record_fields(env, Some(qualifier), name, depth + 1)
         }
         _ => None,
     }
 }
 
-fn record_alias_fields_foreign(env: &Env, module: &Name, name: &Name) -> Option<Vec<Name>> {
-    if let Some(interface) = env.interfaces.get(module) {
-        if let Some((_, can::Type::Record(fields, None))) = interface.aliases.get(name) {
-            return Some(fields.iter().map(|(n, _)| n.clone()).collect());
-        }
+/// Look up a foreign (interface or builtin) alias and resolve its record
+/// fields, following further alias references in its canonical body.
+fn record_field_names_can_alias(
+    env: &Env,
+    module: &Name,
+    name: &Name,
+    depth: u32,
+) -> Option<Vec<Name>> {
+    let body: can::Type = if let Some(interface) = env.interfaces.get(module) {
+        interface.aliases.get(name).map(|(_, t)| t.clone())?
+    } else if let Some((_, sig)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
+        builtins::parse_signature(sig)
+    } else {
+        return None;
+    };
+    record_field_names_can(env, &body, depth)
+}
+
+fn record_field_names_can(env: &Env, tipe: &can::Type, depth: u32) -> Option<Vec<Name>> {
+    if depth > 20 {
+        return None;
     }
-    if let Some((_, body)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
-        if let can::Type::Record(fields, None) = builtins::parse_signature(body) {
-            return Some(fields.iter().map(|(n, _)| n.clone()).collect());
+    match tipe {
+        can::Type::Record(fields, None) => Some(fields.iter().map(|(n, _)| n.clone()).collect()),
+        can::Type::Type(module, name, _) => {
+            record_field_names_can_alias(env, module, name, depth + 1)
         }
+        _ => None,
     }
-    None
 }
 
 fn find_var(env: &Env, region: Region, name: &Name) -> CResult<can::Expr_> {

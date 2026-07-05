@@ -341,3 +341,17 @@ fn wildcard_import_exposes_builtin_types_and_ctors() {
     ok("import Svg exposing (..)\n\nthing : Svg msg\nthing =\n    Svg.text \"x\"\n");
     ok("import Time exposing (..)\n\nday : Weekday\nday =\n    Mon\n");
 }
+
+#[test]
+fn record_alias_constructor_follows_alias_chain() {
+    // `type alias Point = Coord` where `Coord` is a record alias: using
+    // `Point x y` as a constructor must chase the chain to the record and
+    // build a two-argument constructor. (Regression: Bractlet/elm-plot's
+    // `type alias Point = Draw.Point`.)
+    ok("type alias Coord =\n    { x : Float, y : Float }\n\
+        \n\
+        type alias Point =\n    Coord\n\
+        \n\
+        p : Point\n\
+        p =\n    Point 1.0 2.0\n");
+}
