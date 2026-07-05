@@ -367,6 +367,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             TypedKind::Binop(op, _, _, l, r) if op.as_str() == "&&" || op.as_str() == "||" => {
                 self.gen_and_or(op.as_str(), l, r)
             }
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "==" => {
+                self.gen_equals(l, r, false)
+            }
+            TypedKind::Binop(op, _, _, l, r) if op.as_str() == "/=" => {
+                self.gen_equals(l, r, true)
+            }
             TypedKind::Binop(op, _, _, l, r) => self.gen_binop(op.as_str(), l, r),
             TypedKind::If(branches, otherwise) => self.gen_if(branches, otherwise, expr),
             TypedKind::Let(decls, body) => self.gen_let(decls, body),
@@ -1849,6 +1855,77 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             _ => (callee.clone(), vec![extra.clone()]),
         };
         self.gen_call(whole, &func, &args)
+    }
+
+    /// `==` / `/=` — structural equality. Scalars compare directly, strings
+    /// via the runtime, tuples and records field-by-field (recursively).
+    fn gen_equals(
+        &mut self,
+        l: &TypedExpr,
+        r: &TypedExpr,
+        negate: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let layout = self.layouts.layout_of(&l.tipe);
+        let lv = self.gen(l)?;
+        let rv = self.gen(r)?;
+        let eq = self.equals_vals(lv, rv, &layout)?;
+        Ok(if negate {
+            self.builder.build_not(eq, "neq").unwrap().into()
+        } else {
+            eq.into()
+        })
+    }
+
+    /// Recursively test two values of a given layout for equality, yielding an
+    /// i1.
+    fn equals_vals(
+        &mut self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        layout: &Layout,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        match layout {
+            Layout::Int | Layout::Char | Layout::Bool | Layout::Enum(_) => Ok(self
+                .builder
+                .build_int_compare(IntPredicate::EQ, a.into_int_value(), b.into_int_value(), "eq")
+                .unwrap()),
+            Layout::Float => Ok(self
+                .builder
+                .build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "eq")
+                .unwrap()),
+            Layout::Str => {
+                let cmp = self.call_named("rt_eq", &[a, b]);
+                Ok(self.call_named("rt_is_true", &[cmp]).into_int_value())
+            }
+            Layout::Tuple(elems) => {
+                let sa = a.into_struct_value();
+                let sb = b.into_struct_value();
+                let mut acc = self.ctx.bool_type().const_int(1, false);
+                for (i, el) in elems.iter().enumerate() {
+                    let fa = self.builder.build_extract_value(sa, i as u32, "a").unwrap();
+                    let fb = self.builder.build_extract_value(sb, i as u32, "b").unwrap();
+                    let e = self.equals_vals(fa, fb, el)?;
+                    acc = self.builder.build_and(acc, e, "and").unwrap();
+                }
+                Ok(acc)
+            }
+            Layout::Record(fields) => {
+                let sa = a.into_struct_value();
+                let sb = b.into_struct_value();
+                let mut acc = self.ctx.bool_type().const_int(1, false);
+                for (i, (_, fl)) in fields.iter().enumerate() {
+                    let fa = self.builder.build_extract_value(sa, i as u32, "a").unwrap();
+                    let fb = self.builder.build_extract_value(sb, i as u32, "b").unwrap();
+                    let e = self.equals_vals(fa, fb, fl)?;
+                    acc = self.builder.build_and(acc, e, "and").unwrap();
+                }
+                Ok(acc)
+            }
+            other => Err(format!(
+                "typed backend: == on layout {:?} is not supported yet",
+                other
+            )),
+        }
     }
 
     /// Short-circuiting `&&` / `||`: the right operand is only evaluated when

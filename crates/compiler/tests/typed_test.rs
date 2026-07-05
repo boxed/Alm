@@ -705,3 +705,23 @@ fn closure_argument_into_kernel() {
          main = List.sum (mapAll (\\x -> x * 2) [ 1, 2, 3, 4 ])\n",
     );
 }
+
+#[test]
+fn structural_equality_tuples_records() {
+    assert_same(
+        "struct_eq",
+        "module Test exposing (..)\n\
+         \n\
+         type alias P = { x : Int, y : Int }\n\
+         \n\
+         boolInt : Bool -> Int\n\
+         boolInt b = if b then 1 else 0\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   boolInt (( 1, 2 ) == ( 1, 2 ))\n\
+         \x20       + 10 * boolInt (( 1, 2 ) == ( 1, 3 ))\n\
+         \x20       + 100 * boolInt ({ x = 1, y = 2 } == { x = 1, y = 2 })\n\
+         \x20       + 1000 * boolInt ({ x = 1, y = 2 } /= { x = 9, y = 2 })\n",
+    );
+}
