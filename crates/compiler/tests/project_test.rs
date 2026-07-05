@@ -108,6 +108,30 @@ fn type_aliases_across_modules() {
 }
 
 #[test]
+fn import_alias_replaces_module_name() {
+    // `import Dict as UnorderedDict` binds only `UnorderedDict`, freeing the
+    // `Dict` qualifier for `import Sorted as Dict`, so `Dict.tag` is Sorted's.
+    // The builtin Dict is still reachable via its explicit alias. (Regression:
+    // dillonkearns/elm-graphql aliases `Dict as UnorderedDict` + `OrderedDict
+    // as Dict`.)
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\n\
+             import Dict as UnorderedDict\n\
+             import Sorted as Dict\n\n\
+             main : String\n\
+             main =\n    Dict.tag ++ String.fromInt (UnorderedDict.size UnorderedDict.empty)\n",
+        ),
+        (
+            "Sorted.elm",
+            "module Sorted exposing (tag)\n\ntag : String\ntag = \"sorted\"\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "sorted0");
+}
+
+#[test]
 fn unicode_identifiers() {
     // Elm allows Unicode letters in identifiers. `τ` is a lowercase Greek
     // letter (a value name), `σ` a lowercase param. (Regression:

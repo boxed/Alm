@@ -216,9 +216,14 @@ pub fn canonicalize_module(
             ));
             continue;
         }
-        add_import_name(&mut import_names, import_name.clone(), import_name.clone());
+        // `import Foo as Bar` binds only `Bar` as the qualifier, not `Foo`
+        // (Elm replaces the module name with its alias). Without an alias the
+        // module name itself is the qualifier. (A same-named builtin module is
+        // still registered later as a fallback candidate.)
         if let Some(alias) = &import.alias {
             add_import_name(&mut import_names, alias.clone(), import_name.clone());
+        } else {
+            add_import_name(&mut import_names, import_name.clone(), import_name.clone());
         }
         match &import.exposing {
             src::Exposing::Open => {
