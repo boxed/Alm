@@ -149,6 +149,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("String", "trim", "String -> String"),
             V("String", "trimLeft", "String -> String"),
             V("String", "trimRight", "String -> String"),
+            V("String", "pad", "Int -> Char -> String -> String"),
             V("String", "padLeft", "Int -> Char -> String -> String"),
             V("String", "padRight", "Int -> Char -> String -> String"),
             V("String", "filter", "(Char -> Bool) -> String -> String"),
@@ -598,7 +599,9 @@ pub const HTML_INT_ATTRS: &[&str] = &[
 pub const SVG_TAGS: &[&str] = &[
     "svg", "circle", "ellipse", "line", "path", "polygon", "polyline", "rect", "g", "defs",
     "text_", "tspan", "use", "mask", "clipPath", "linearGradient", "radialGradient", "stop",
-    "pattern", "marker", "symbol", "title", "desc", "foreignObject", "animate",
+    "pattern", "marker", "symbol", "title", "desc", "foreignObject", "animate", "a",
+    "animateTransform", "image", "switch", "view", "filter", "feGaussianBlur", "feColorMatrix",
+    "feOffset", "feMerge", "feMergeNode", "feBlend", "feFlood", "textPath",
 ];
 
 /// SVG attribute helpers: (Elm name, DOM attribute name).
@@ -665,6 +668,29 @@ pub const SVG_ATTRS: &[(&str, &str)] = &[
     ("maskUnits", "maskUnits"),
     ("patternUnits", "patternUnits"),
     ("vectorEffect", "vector-effect"),
+    ("mask", "mask"),
+    ("filter", "filter"),
+    ("result", "result"),
+    ("in_", "in"),
+    ("in2", "in2"),
+    ("mode", "mode"),
+    ("stdDeviation", "stdDeviation"),
+    ("floodColor", "flood-color"),
+    ("floodOpacity", "flood-opacity"),
+    ("spreadMethod", "spreadMethod"),
+    ("href", "href"),
+    ("target", "target"),
+    ("cursor", "cursor"),
+    ("display", "display"),
+    ("overflow", "overflow"),
+    ("color", "color"),
+    ("fontWeight", "font-weight"),
+    ("fontStyle", "font-style"),
+    ("letterSpacing", "letter-spacing"),
+    ("wordSpacing", "word-spacing"),
+    ("textDecoration", "text-decoration"),
+    ("alignmentBaseline", "alignment-baseline"),
+    ("baselineShift", "baseline-shift"),
     // Animation (<animate>, <animateTransform>) attributes.
     ("keyTimes", "keyTimes"),
     ("keySplines", "keySplines"),
@@ -850,32 +876,36 @@ pub fn is_builtin_type(module: &str, name: &str) -> bool {
     UNIONS
         .iter()
         .any(|u| u.module == module && u.name == name)
-        || matches!(
-            (module, name),
-            ("Http", "Expect")
-                | ("Http", "Body")
-                | ("Http", "Header")
-                | ("Http", "Part")
-                | ("Http", "Resolver")
-                | ("Time", "Posix")
-                | ("Time", "Zone")
-                | ("Time", "ZoneName")
-                | ("Task", "Task")
-                | ("Json.Decode", "Decoder")
-                | ("Json.Encode", "Value")
-                | ("File", "File")
-                | ("Html", "Html")
-                | ("Html", "Attribute")
-                | ("Platform", "Program")
-                | ("Platform.Cmd", "Cmd")
-                | ("Platform.Sub", "Sub")
-                | ("Random", "Generator")
-                | ("Random", "Seed")
-                | ("Browser.Navigation", "Key")
-                | ("UUID", "UUID")
-                | ("UUID", "Error")
-        )
+        || OPAQUE_TYPES.contains(&(module, name))
 }
+
+/// Opaque built-in types (no exposed constructors or alias body): the ones a
+/// module hands out abstractly. Kept as a table so `exposing (..)` on a
+/// builtin module can bring them into scope alongside its unions and aliases.
+pub const OPAQUE_TYPES: &[(&str, &str)] = &[
+    ("Http", "Expect"),
+    ("Http", "Body"),
+    ("Http", "Header"),
+    ("Http", "Part"),
+    ("Http", "Resolver"),
+    ("Time", "Posix"),
+    ("Time", "Zone"),
+    ("Time", "ZoneName"),
+    ("Task", "Task"),
+    ("Json.Decode", "Decoder"),
+    ("Json.Encode", "Value"),
+    ("File", "File"),
+    ("Html", "Html"),
+    ("Html", "Attribute"),
+    ("Platform", "Program"),
+    ("Platform.Cmd", "Cmd"),
+    ("Platform.Sub", "Sub"),
+    ("Random", "Generator"),
+    ("Random", "Seed"),
+    ("Browser.Navigation", "Key"),
+    ("UUID", "UUID"),
+    ("UUID", "Error"),
+];
 
 /// Where each built-in type constructor lives.
 pub fn lookup_type_home(name: &str) -> Option<&'static str> {

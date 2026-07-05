@@ -402,6 +402,10 @@ var $String$toLower = function (s) { return s.toLowerCase(); };
 var $String$trim = function (s) { return s.trim(); };
 var $String$trimLeft = function (s) { return s.replace(/^\s+/, ''); };
 var $String$trimRight = function (s) { return s.replace(/\s+$/, ''); };
+var $String$pad = F3(function (n, c, s) {
+    var half = Math.max(0, n - s.length) / 2;
+    return c.repeat(Math.ceil(half)) + s + c.repeat(Math.floor(half));
+});
 var $String$padLeft = F3(function (n, c, s) {
     return c.repeat(Math.max(0, n - s.length)) + s;
 });

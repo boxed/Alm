@@ -271,6 +271,11 @@ pub fn canonicalize_module(
                             exposed_types.insert(Name::from(*name), import_name.clone());
                         }
                     }
+                    for (module, name) in builtins::OPAQUE_TYPES {
+                        if *module == import_name.as_str() {
+                            exposed_types.insert(Name::from(*name), import_name.clone());
+                        }
+                    }
                 }
             }
             src::Exposing::Explicit(items) => {
