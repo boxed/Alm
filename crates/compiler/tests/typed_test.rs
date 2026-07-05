@@ -764,3 +764,23 @@ fn structural_equality_unions() {
          \x20       + 1000 * boolInt (mk 5 == Nothing)\n",
     );
 }
+
+#[test]
+fn partial_application() {
+    // A named function applied to fewer args than its arity becomes a
+    // closure; passing that to a kernel and applying it directly both work.
+    assert_same(
+        "partial",
+        "module Test exposing (..)\n\
+         \n\
+         add : Int -> Int -> Int\n\
+         add a b = a + b\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let\n\
+         \x20       add10 = add 10\n\
+         \x20   in\n\
+         \x20   add10 5 + List.sum (List.map (add 100) [ 1, 2, 3 ])\n",
+    );
+}

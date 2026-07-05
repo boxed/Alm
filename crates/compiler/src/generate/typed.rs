@@ -428,13 +428,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .left()
                     .unwrap());
             }
-            return Err(format!(
-                "typed backend: partial application of `{}` ({} of {} args) is not \
-                 supported yet",
-                name,
-                args.len(),
-                f.count_params()
-            ));
+            // Partial application: capture the given arguments in a closure
+            // that takes the rest.
+            let mut applied = Vec::with_capacity(args.len());
+            for arg in args {
+                applied.push(self.gen(arg)?);
+            }
+            return Ok(self.gen_partial_app(f, &applied));
         }
 
         // Otherwise the callee is a closure value (a function-typed local,
@@ -2237,6 +2237,63 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(self
             .build_closure_value(lifted.as_global_value().as_pointer_value(), &capture_vals)
             .into())
+    }
+
+    /// Partially apply a named function: build a closure capturing the given
+    /// arguments, with a wrapper that takes the remaining arguments and calls
+    /// the full function.
+    fn gen_partial_app(
+        &mut self,
+        f: FunctionValue<'ctx>,
+        applied: &[BasicValueEnum<'ctx>],
+    ) -> BasicValueEnum<'ctx> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let all_params = f.get_type().get_param_types();
+        let m = applied.len();
+        let remaining = &all_params[m..];
+
+        // Closure struct: {fn_ptr, applied types...}.
+        let mut clos_fields: Vec<BasicTypeEnum> = vec![ptr_t.into()];
+        for a in applied {
+            clos_fields.push(a.get_type());
+        }
+        let clos_ty = self.ctx.struct_type(&clos_fields, false);
+
+        // Wrapper: (env, remaining...) -> return.
+        let mut wparams: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        wparams.extend(remaining.iter().map(|t| Into::<BasicMetadataTypeEnum>::into(*t)));
+        let wty = match f.get_type().get_return_type() {
+            Some(ret) => ret.fn_type(&wparams, false),
+            None => self.ctx.void_type().fn_type(&wparams, false),
+        };
+        let wname = format!("pap.{}", self.lam_id);
+        self.lam_id += 1;
+        let wrapper = self.module.add_function(&wname, wty, Some(Linkage::Internal));
+
+        let saved_block = self.builder.get_insert_block();
+        let entry = self.ctx.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+        let env = wrapper.get_nth_param(0).unwrap().into_pointer_value();
+        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+        for (i, a) in applied.iter().enumerate() {
+            let fp = self.builder.build_struct_gep(clos_ty, env, (i + 1) as u32, "ap").unwrap();
+            let v = self.builder.build_load(a.get_type(), fp, "apv").unwrap();
+            call_args.push(v.into());
+        }
+        for j in 0..remaining.len() {
+            call_args.push(wrapper.get_nth_param((j + 1) as u32).unwrap().into());
+        }
+        let call = self.builder.build_call(f, &call_args, "full").unwrap();
+        match call.try_as_basic_value().left() {
+            Some(v) => self.builder.build_return(Some(&v)).unwrap(),
+            None => self.builder.build_return(None).unwrap(),
+        };
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+
+        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), applied)
+            .into()
     }
 
     /// Allocate a closure `{fn_ptr, captures...}` on the heap.
