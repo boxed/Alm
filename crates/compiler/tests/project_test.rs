@@ -108,6 +108,24 @@ fn type_aliases_across_modules() {
 }
 
 #[test]
+fn unicode_identifiers() {
+    // Elm allows Unicode letters in identifiers. `τ` is a lowercase Greek
+    // letter (a value name), `σ` a lowercase param. (Regression:
+    // FMFI-UK-1-AIN-412/elm-formula uses `σ`, FranklinChen/elm-tau exposes `τ`.)
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\n\
+         τ : Float\n\
+         τ = 6.28\n\n\
+         double : Float -> Float\n\
+         double σ = σ * 2.0\n\n\
+         main : String\n\
+         main = String.fromFloat (double τ)\n",
+    )]);
+    assert_eq!(result.unwrap(), "12.56");
+}
+
+#[test]
 fn import_alias_shadows_builtin_module() {
     // `import Widget as Html` must make `Html.text` refer to Widget.text, not
     // the builtin elm/html `Html.text` (which also exists). Regression: with

@@ -42,11 +42,11 @@ pub fn term(p: &mut Parser) -> PResult<Pattern> {
                 "I cannot pattern match on floating point numbers. Equality on floats is unreliable.",
             )),
         },
-        Some(b) if b.is_ascii_lowercase() => {
+        _ if p.starts_lower() => {
             let name = p.lower_name("a pattern")?;
             Ok(Located::at(start, p.position(), Pattern_::Var(name)))
         }
-        Some(b) if b.is_ascii_uppercase() => {
+        _ if p.starts_upper() => {
             // A constructor with NO arguments (arguments only in `expression`
             // or inside parens).
             let (qual, name, _) = p.qualified_name("a pattern")?;
@@ -195,7 +195,7 @@ fn cons_end(p: &mut Parser, start: crate::reporting::Position, first: Pattern) -
 /// A constructor applied to argument patterns, or a plain term.
 fn term_with_args(p: &mut Parser) -> PResult<Pattern> {
     let start = p.position();
-    let is_ctor = p.peek().is_some_and(|b| b.is_ascii_uppercase());
+    let is_ctor = p.starts_upper();
     if !is_ctor {
         return term(p);
     }

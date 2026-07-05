@@ -104,6 +104,35 @@ impl<'a> Parser<'a> {
         self.src.get(self.pos + offset).copied()
     }
 
+    /// Decode the (possibly multi-byte) UTF-8 character at the cursor.
+    pub(crate) fn peek_char(&self) -> Option<char> {
+        self.char_at(0)
+    }
+
+    /// Decode the UTF-8 character starting `byte_offset` bytes past the cursor.
+    pub(crate) fn char_at(&self, byte_offset: usize) -> Option<char> {
+        let at = self.pos + byte_offset;
+        let b = *self.src.get(at)?;
+        let n = utf8_len(b);
+        std::str::from_utf8(self.src.get(at..at + n)?)
+            .ok()?
+            .chars()
+            .next()
+    }
+
+    /// True if the cursor is on a character that can start a lower identifier
+    /// (variable/field): any alphabetic char that is not uppercase. Covers
+    /// ASCII `a`-`z` and Unicode letters like `σ`.
+    pub(crate) fn starts_lower(&self) -> bool {
+        self.peek_char().is_some_and(is_lower_start)
+    }
+
+    /// True if the cursor is on a character that can start an upper identifier
+    /// (type/constructor/module): any uppercase alphabetic char.
+    pub(crate) fn starts_upper(&self) -> bool {
+        self.peek_char().is_some_and(is_upper_start)
+    }
+
     pub(crate) fn src_from_here(&self) -> &[u8] {
         &self.src[self.pos..]
     }
@@ -290,29 +319,27 @@ impl<'a> Parser<'a> {
     // VARIABLES — port of Parse.Variable
 
     pub fn lower_name(&mut self, what: &str) -> PResult<Name> {
-        match self.peek() {
-            Some(b) if b.is_ascii_lowercase() => {
-                let name = self.chomp_inner_chars();
-                if is_reserved(&name) {
-                    Err(self.error(format!(
-                        "It looks like you are trying to use `{}` as a variable name, but it is a reserved word.",
-                        name
-                    )))
-                } else {
-                    Ok(Name::from(name))
-                }
+        if self.starts_lower() {
+            let name = self.chomp_inner_chars();
+            if is_reserved(&name) {
+                Err(self.error(format!(
+                    "It looks like you are trying to use `{}` as a variable name, but it is a reserved word.",
+                    name
+                )))
+            } else {
+                Ok(Name::from(name))
             }
-            _ => Err(self.error(format!("Expecting {}", what))),
+        } else {
+            Err(self.error(format!("Expecting {}", what)))
         }
     }
 
     pub fn upper_name(&mut self, what: &str) -> PResult<Name> {
-        match self.peek() {
-            Some(b) if b.is_ascii_uppercase() => {
-                let name = self.chomp_inner_chars();
-                Ok(Name::from(name))
-            }
-            _ => Err(self.error(format!("Expecting {}", what))),
+        if self.starts_upper() {
+            let name = self.chomp_inner_chars();
+            Ok(Name::from(name))
+        } else {
+            Err(self.error(format!("Expecting {}", what)))
         }
     }
 
@@ -328,24 +355,24 @@ impl<'a> Parser<'a> {
     /// dotted name like `List.map`, `Json.Decode.field`, or `Maybe.Just`.
     /// Returns (qualifier, name, name_is_upper).
     pub fn qualified_name(&mut self, what: &str) -> PResult<(Option<Name>, Name, bool)> {
+        if self.starts_lower() {
+            let name = self.lower_name(what)?;
+            return Ok((None, name, false));
+        }
         match self.peek() {
-            Some(b) if b.is_ascii_lowercase() => {
-                let name = self.lower_name(what)?;
-                Ok((None, name, false))
-            }
-            Some(b) if b.is_ascii_uppercase() => {
+            _ if self.starts_upper() => {
                 let mut qualifier = String::new();
                 loop {
                     let part = self.chomp_inner_chars();
                     if self.peek() == Some(b'.')
-                        && self.peek_at(1).is_some_and(|b| b.is_ascii_alphabetic())
+                        && self.char_at(1).is_some_and(|c| c.is_alphabetic())
                     {
                         self.bump(1); // the dot
                         if !qualifier.is_empty() {
                             qualifier.push('.');
                         }
                         qualifier.push_str(&part);
-                        if self.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+                        if self.starts_lower() {
                             let name = self.lower_name(what)?;
                             return Ok((Some(Name::from(qualifier)), name, false));
                         }
@@ -638,7 +665,19 @@ fn utf8_len(first_byte: u8) -> usize {
 }
 
 pub(crate) fn is_inner_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    // Any non-ASCII byte (>= 0x80) is a UTF-8 lead/continuation byte and is
+    // treated as part of an identifier, so Unicode letters/digits are chomped.
+    b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80
+}
+
+/// A character that can start a lower identifier (variable/field name).
+pub(crate) fn is_lower_start(c: char) -> bool {
+    c.is_alphabetic() && !c.is_uppercase()
+}
+
+/// A character that can start an upper identifier (type/ctor/module name).
+pub(crate) fn is_upper_start(c: char) -> bool {
+    c.is_uppercase()
 }
 
 fn is_binop_char(b: u8) -> bool {

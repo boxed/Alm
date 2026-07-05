@@ -36,7 +36,7 @@ pub fn term(p: &mut Parser) -> PResult<Expr> {
             let field = p.lower_name("a field name after this `.`")?;
             Ok(Located::at(start, p.position(), Expr_::Accessor(field)))
         }
-        Some(b) if b.is_ascii_alphabetic() => {
+        _ if p.starts_lower() || p.starts_upper() => {
             let (qual, name, is_upper) = p.qualified_name("an expression")?;
             let var_type = if is_upper {
                 VarType::CapVar
@@ -57,7 +57,7 @@ pub fn term(p: &mut Parser) -> PResult<Expr> {
 /// Port of `accessible`: chomp `.field` chains directly after a term.
 fn accessible(p: &mut Parser, start: Position, expr: Expr) -> PResult<Expr> {
     let mut expr = expr;
-    while p.peek() == Some(b'.') && p.peek_at(1).is_some_and(|b| b.is_ascii_lowercase()) {
+    while p.peek() == Some(b'.') && p.char_at(1).is_some_and(super::is_lower_start) {
         p.bump(1);
         let field_start = p.position();
         let field = p.lower_name("a field name after this `.`")?;

@@ -10,11 +10,11 @@ pub fn term(p: &mut Parser) -> PResult<Type> {
     match p.peek() {
         Some(b'(') => parens_or_tuple(p),
         Some(b'{') => record(p),
-        Some(b) if b.is_ascii_lowercase() => {
+        _ if p.starts_lower() => {
             let name = p.lower_name("a type variable")?;
             Ok(Located::at(start, p.position(), Type_::Var(name)))
         }
-        Some(b) if b.is_ascii_uppercase() => {
+        _ if p.starts_upper() => {
             // No arguments at term level.
             let (qual, name, _) = p.qualified_name("a type")?;
             let region = Region::new(start, p.position());
@@ -31,7 +31,7 @@ pub fn term(p: &mut Parser) -> PResult<Type> {
 /// A type constructor possibly applied to arguments, or a plain term.
 fn app(p: &mut Parser) -> PResult<Type> {
     let start = p.position();
-    if !p.peek().is_some_and(|b| b.is_ascii_uppercase()) {
+    if !p.starts_upper() {
         return term(p);
     }
     let (qual, name, _) = p.qualified_name("a type")?;

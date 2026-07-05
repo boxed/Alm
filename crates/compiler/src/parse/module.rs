@@ -227,11 +227,11 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
             let end = p.position();
             Ok(Exposed::Operator(Region::new(start, end), op))
         }
-        Some(b) if b.is_ascii_lowercase() => {
+        _ if p.starts_lower() => {
             let name = p.located(|p| p.lower_name("a value name"))?;
             Ok(Exposed::Lower(name))
         }
-        Some(b) if b.is_ascii_uppercase() => {
+        _ if p.starts_upper() => {
             let name = p.located(|p| p.upper_name("a type name"))?;
             if p.src_from_here().starts_with(b"(..)") {
                 let priv_start = p.position();
@@ -255,7 +255,7 @@ fn chomp_alias(p: &mut Parser) -> PResult<Alias> {
     let name = p.located(|p| p.upper_name("a type alias name"))?;
     p.chomp_and_check_indent("I was expecting `=` or type variables")?;
     let mut vars = Vec::new();
-    while p.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+    while p.starts_lower() {
         vars.push(p.located(|p| p.lower_name("a type variable"))?);
         p.chomp_and_check_indent("I was expecting `=` or more type variables")?;
     }
@@ -269,7 +269,7 @@ fn chomp_union(p: &mut Parser) -> PResult<Union> {
     let name = p.located(|p| p.upper_name("a type name"))?;
     p.chomp_and_check_indent("I was expecting `=` or type variables")?;
     let mut vars = Vec::new();
-    while p.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+    while p.starts_lower() {
         vars.push(p.located(|p| p.lower_name("a type variable"))?);
         p.chomp_and_check_indent("I was expecting `=` or more type variables")?;
     }
