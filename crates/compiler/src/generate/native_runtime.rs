@@ -2080,23 +2080,28 @@ unsafe fn time_posix(ms: f64) -> u64 {
 }
 
 // Task constructors.
-unsafe extern "C" fn task_succeed(v: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_succeed(v: u64) -> u64 {
     ctor(b"TaskSucceed\0".as_ptr(), TT_SUCCEED, vec![v])
 }
-unsafe extern "C" fn task_fail(e: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_fail(e: u64) -> u64 {
     ctor(b"TaskFail\0".as_ptr(), TT_FAIL, vec![e])
 }
-unsafe extern "C" fn task_and_then(f: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_and_then(f: u64, t: u64) -> u64 {
     ctor(b"TaskAndThen\0".as_ptr(), TT_AND_THEN, vec![f, t])
 }
-unsafe extern "C" fn task_on_error(f: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_on_error(f: u64, t: u64) -> u64 {
     ctor(b"TaskOnError\0".as_ptr(), TT_ON_ERROR, vec![f, t])
 }
 
 unsafe extern "C" fn task_map_step(f: u64, a: u64) -> u64 {
     task_succeed(ap1(f, a))
 }
-unsafe extern "C" fn task_map(f: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_map(f: u64, t: u64) -> u64 {
     task_and_then(closure(task_map_step as *const (), 2, &[f]), t)
 }
 unsafe extern "C" fn task_map2_inner(f: u64, a: u64, b: u64) -> u64 {
@@ -2105,13 +2110,15 @@ unsafe extern "C" fn task_map2_inner(f: u64, a: u64, b: u64) -> u64 {
 unsafe extern "C" fn task_map2_step(f: u64, tb: u64, a: u64) -> u64 {
     task_map(closure(task_map2_inner as *const (), 3, &[f, a]), tb)
 }
-unsafe extern "C" fn task_map2(f: u64, ta: u64, tb: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_map2(f: u64, ta: u64, tb: u64) -> u64 {
     task_and_then(closure(task_map2_step as *const (), 3, &[f, tb]), ta)
 }
 unsafe extern "C" fn task_map_error_step(f: u64, e: u64) -> u64 {
     task_fail(ap1(f, e))
 }
-unsafe extern "C" fn task_map_error(f: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_map_error(f: u64, t: u64) -> u64 {
     task_on_error(closure(task_map_error_step as *const (), 2, &[f]), t)
 }
 unsafe extern "C" fn task_sequence_cons(v: u64, vs: u64) -> u64 {
@@ -2120,7 +2127,8 @@ unsafe extern "C" fn task_sequence_cons(v: u64, vs: u64) -> u64 {
 unsafe extern "C" fn task_sequence_step(rest: u64, v: u64) -> u64 {
     task_map(closure(task_sequence_cons as *const (), 2, &[v]), task_sequence(rest))
 }
-unsafe extern "C" fn task_sequence(tasks: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_sequence(tasks: u64) -> u64 {
     if list_len(tasks) == 0 {
         task_succeed(nil())
     } else {
@@ -2129,7 +2137,8 @@ unsafe extern "C" fn task_sequence(tasks: u64) -> u64 {
         task_and_then(closure(task_sequence_step as *const (), 2, &[tail]), head)
     }
 }
-unsafe extern "C" fn task_perform(to_msg: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_perform(to_msg: u64, t: u64) -> u64 {
     ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_map(to_msg, t)])
 }
 unsafe extern "C" fn task_attempt_ok(v: u64) -> u64 {
@@ -2138,7 +2147,8 @@ unsafe extern "C" fn task_attempt_ok(v: u64) -> u64 {
 unsafe extern "C" fn task_attempt_err(e: u64) -> u64 {
     task_succeed(res_err(e))
 }
-unsafe extern "C" fn task_attempt(to_msg: u64, t: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn task_attempt(to_msg: u64, t: u64) -> u64 {
     let wrapped = task_on_error(
         closure(task_attempt_err as *const (), 1, &[]),
         task_and_then(closure(task_attempt_ok as *const (), 1, &[]), t),
@@ -2146,7 +2156,8 @@ unsafe extern "C" fn task_attempt(to_msg: u64, t: u64) -> u64 {
     ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_map(to_msg, wrapped)])
 }
 
-unsafe extern "C" fn process_sleep(ms: u64) -> u64 {
+#[no_mangle]
+pub unsafe extern "C" fn process_sleep(ms: u64) -> u64 {
     ctor(b"TaskSleep\0".as_ptr(), TT_SLEEP, vec![ms])
 }
 

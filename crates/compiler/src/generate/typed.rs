@@ -235,6 +235,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("sub_batch", 1),
             ("cmd_map", 2),
             ("sub_map", 2),
+            ("task_succeed", 1),
+            ("task_fail", 1),
+            ("task_and_then", 2),
+            ("task_on_error", 2),
+            ("task_map", 2),
+            ("task_map2", 3),
+            ("task_map_error", 2),
+            ("task_sequence", 1),
+            ("task_perform", 2),
+            ("task_attempt", 2),
+            ("process_sleep", 1),
         ] {
             let params = vec![i64_t.into(); arity];
             self.module
@@ -1561,6 +1572,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("Platform.Sub", "map") => self.effect_call("sub_map", args),
             ("Platform.Cmd", "none") => Ok(self.load_uniform_global("$Platform$Cmd$none")),
             ("Platform.Sub", "none") => Ok(self.load_uniform_global("$Platform$Sub$none")),
+            ("Task", "succeed") => self.effect_call("task_succeed", args),
+            ("Task", "fail") => self.effect_call("task_fail", args),
+            ("Task", "andThen") => self.effect_call("task_and_then", args),
+            ("Task", "onError") => self.effect_call("task_on_error", args),
+            ("Task", "map") => self.effect_call("task_map", args),
+            ("Task", "map2") => self.effect_call("task_map2", args),
+            ("Task", "mapError") => self.effect_call("task_map_error", args),
+            ("Task", "sequence") => self.effect_call("task_sequence", args),
+            ("Task", "perform") => self.effect_call("task_perform", args),
+            ("Task", "attempt") => self.effect_call("task_attempt", args),
+            ("Process", "sleep") => self.effect_call("process_sleep", args),
+            ("Time", "now") => Ok(self.load_uniform_global("$Time$now")),
             ("Basics", "modBy") => self.kernel_mod_by(args),
             ("Basics", "remainderBy") => {
                 let m = self.gen(&args[0])?.into_int_value();

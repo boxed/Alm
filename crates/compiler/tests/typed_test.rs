@@ -998,3 +998,48 @@ fn tea_worker_ticks() {
     let out = run(&mut Command::new(&binary));
     assert_eq!(out, "tick 1\ntick 2\ntick 3");
 }
+
+#[test]
+fn tea_task_chain() {
+    // Task.succeed/andThen/map piped through Task.perform, delivered as a Msg
+    // and printed — the task interpreter on the typed backend.
+    let dir = std::env::temp_dir()
+        .join("alm-typed-task")
+        .join(format!("task-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (..)\n\
+         \n\
+         import Task\n\
+         \n\
+         type Msg = Done Int\n\
+         \n\
+         main =\n\
+         \x20   Platform.worker { init = init, update = update, subscriptions = \\_ -> Sub.none }\n\
+         \n\
+         init _ =\n\
+         \x20   ( 0\n\
+         \x20   , Task.succeed 20\n\
+         \x20       |> Task.andThen (\\n -> Task.succeed (n + 1))\n\
+         \x20       |> Task.map (\\n -> n * 2)\n\
+         \x20       |> Task.perform Done\n\
+         \x20   )\n\
+         \n\
+         update msg model =\n\
+         \x20   case msg of\n\
+         \x20       Done n -> ( model, Terminal.writeLine (String.fromInt n) )\n",
+    )
+    .unwrap();
+    let binary = dir.join("test");
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+        .unwrap_or_else(|errs| {
+            panic!(
+                "typed compile failed:\n{}",
+                errs.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+    let out = run(&mut Command::new(&binary));
+    assert_eq!(out, "42");
+}
