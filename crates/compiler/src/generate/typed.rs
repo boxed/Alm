@@ -278,6 +278,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::List(_) => self.ctx.ptr_type(inkwell::AddressSpace::default()).into(),
             // A function value is a pointer to a closure {fn_ptr, captures}.
             Layout::Closure => self.ctx.ptr_type(inkwell::AddressSpace::default()).into(),
+            // Opaque values are the uniform runtime word.
+            Layout::Opaque => self.ctx.i64_type().into(),
             _ => self.ctx.i64_type().into(),
         }
     }
@@ -433,6 +435,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::List(_) => self.box_list(val, tipe),
             Layout::Enum(_) => self.box_enum(val, tipe),
             Layout::Tagged(_) => self.box_tagged(val, tipe),
+            // Opaque values are already the uniform word.
+            Layout::Opaque => Ok(val),
             // An unresolved phantom (e.g. the element type of `Nothing`): this
             // boxing code is generated but never executed. A unit placeholder
             // keeps it well-typed.
@@ -581,7 +585,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .ok_or_else(|| "typed backend: unknown union for Debug.toString".to_string())?;
         let i32_t = self.ctx.i32_type();
         let i64_t = self.ctx.i64_type();
-        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let ptr = val.into_pointer_value();
         let tag = self.builder.build_load(i32_t, ptr, "tag").unwrap().into_int_value();
         let default_bb = self.new_block("boxt.def");
@@ -712,6 +715,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Record(_) => self.unbox_record(w, tipe),
             Layout::List(_) => self.unbox_list(w, tipe),
             Layout::Tagged(_) => self.unbox_tagged(w, tipe),
+            // Opaque values are the uniform word already.
+            Layout::Opaque => Ok(w),
             Layout::Ref => Ok(self
                 .builder
                 .build_int_to_ptr(w.into_int_value(), self.ctx.ptr_type(inkwell::AddressSpace::default()), "ref")
@@ -2736,7 +2741,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .builder
                 .build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "eq")
                 .unwrap()),
-            Layout::Str => {
+            Layout::Str | Layout::Opaque => {
                 let cmp = self.call_named("rt_eq", &[a, b]);
                 Ok(self.call_named("rt_is_true", &[cmp]).into_int_value())
             }

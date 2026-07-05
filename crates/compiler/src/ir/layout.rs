@@ -45,10 +45,15 @@ pub enum Layout {
     /// A data-carrying union: a heap-allocated tagged value. Each inner
     /// vector is one constructor's field layouts, in constructor order.
     Tagged(Vec<Vec<Layout>>),
-    /// A boxed reference, used to break type recursion (a constructor field
-    /// whose type is the union being laid out) and as the fallback for types
-    /// the layout engine does not model.
+    /// A boxed reference used to break type recursion (a constructor field
+    /// whose type is the union being laid out) — a pointer to the same tagged
+    /// value, and the fallback for unresolved type variables.
     Ref,
+    /// An opaque value carried as the uniform runtime word (i64): a type the
+    /// layout engine does not model, such as a platform type (`Cmd`, `Sub`,
+    /// `Task`, `Time.Posix`). These pass through the typed backend unchanged
+    /// and interoperate directly with the runtime.
+    Opaque,
 }
 
 impl Layout {
@@ -179,9 +184,9 @@ impl LayoutCtx {
             return Layout::Ref;
         }
         let Some(def) = self.unions.get(&key) else {
-            // Unknown type (e.g. an opaque type from an interface): treat as
-            // an opaque boxed value.
-            return Layout::Ref;
+            // Unknown type (e.g. a platform/opaque type): carried as the
+            // uniform runtime word.
+            return Layout::Opaque;
         };
 
         // Enumeration: all constructors nullary.
