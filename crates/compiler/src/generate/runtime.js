@@ -1683,6 +1683,24 @@ var $File$decoder = _Json_decoder(function (v) {
 var $File$name = function (file) { return file.name; };
 var $File$size = function (file) { return file.size; };
 var $File$mime = function (file) { return file.type; };
+var $File$lastModified = function (file) { return _Time_posix(file.lastModified || 0); };
+var $File$toString = function (file) {
+    return _Task(function (ok, _err) {
+        if (file && typeof file.text === 'function') { file.text().then(ok); } else { ok(''); }
+    });
+};
+var $File$toUrl = function (file) {
+    return _Task(function (ok, _err) {
+        if (typeof FileReader !== 'undefined') {
+            var r = new FileReader();
+            r.onload = function () { ok(r.result); };
+            r.readAsDataURL(file);
+        } else { ok(''); }
+    });
+};
+var $File$toBytes = function (_file) {
+    return _Task(function (ok, _err) { ok(null); });
+};
 
 // URL
 
