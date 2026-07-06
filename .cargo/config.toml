@@ -1,4 +1,9 @@
 # The native backend links against libLLVM via inkwell/llvm-sys. Point
 # llvm-sys at the Homebrew LLVM 16 keg so the build needs no manual env.
+#
+# TMPDIR is redirected into the project's target/ dir (gitignored, cleaned by
+# `cargo clean`) so the test harnesses' std::env::temp_dir() no longer spills
+# GBs into the system temp dir. force=true overrides the OS default TMPDIR.
 [env]
 LLVM_SYS_160_PREFIX = "/opt/homebrew/opt/llvm@16"
+TMPDIR = { value = "target/alm-test-tmp", relative = true, force = true }
