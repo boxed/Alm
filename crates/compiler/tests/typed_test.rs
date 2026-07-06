@@ -1232,3 +1232,111 @@ fn debug_tuple_with_recursive_union() {
          \x20   Debug.toString ( sum t, Just t )\n",
     );
 }
+
+#[test]
+fn lambda_unit_param() {
+    // `\() -> e` thunks: destructuring a unit parameter.
+    assert_same(
+        "lambda_unit_param",
+        "module Test exposing (..)\n\
+         \n\
+         apply : List (() -> Int) -> Int\n\
+         apply fs = List.sum (List.map (\\f -> f ()) fs)\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (apply [ \\() -> 1, \\() -> 2, \\() -> 3 ])\n",
+    );
+}
+
+#[test]
+fn lambda_constructor_param() {
+    // `\(Id n) -> n`: destructuring a single-variant constructor parameter.
+    assert_same(
+        "lambda_ctor_param",
+        "module Test exposing (..)\n\
+         \n\
+         type Id = Id Int\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (List.sum (List.map (\\(Id n) -> n) [ Id 1, Id 2, Id 3 ]))\n",
+    );
+}
+
+#[test]
+fn lambda_tuple_param() {
+    // `\(a, b) -> a + b`: destructuring a tuple parameter.
+    assert_same(
+        "lambda_tuple_param",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main = String.fromInt ((\\( a, b ) -> a + b) ( 3, 4 ))\n",
+    );
+}
+
+#[test]
+fn lambda_record_param() {
+    // `\{x} -> x`: destructuring a record parameter.
+    assert_same(
+        "lambda_record_param",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main = String.fromInt ((\\{ x } -> x) { x = 5 })\n",
+    );
+}
+
+#[test]
+fn lambda_mixed_pattern_params() {
+    // Combined repro: constructor + tuple + record lambda params in one expr.
+    assert_same(
+        "lambda_mixed_params",
+        "module Test exposing (..)\n\
+         \n\
+         type Id = Id Int\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt\n\
+         \x20       (List.sum (List.map (\\(Id n) -> n) [ Id 1, Id 2 ])\n\
+         \x20           + (\\( a, b ) -> a + b) ( 3, 4 )\n\
+         \x20           + (\\{ x } -> x) { x = 5 }\n\
+         \x20       )\n",
+    );
+}
+
+#[test]
+fn unbox_closure_from_dict() {
+    // A function value stored in a Dict flows through the boxed/uniform slot;
+    // retrieving it must unbox the uniform closure into a typed closure that
+    // can be called with the typed calling convention.
+    assert_same(
+        "unbox_closure_dict",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   case Dict.get \"a\" (Dict.fromList [ ( \"a\", \\n -> n + 1 ), ( \"b\", \\n -> n * 2 ) ]) of\n\
+         \x20       Just f -> String.fromInt (f 10)\n\
+         \x20       Nothing -> \"none\"\n",
+    );
+}
+
+#[test]
+fn unbox_curried_closure_from_dict() {
+    // A curried (multi-argument) function unboxed from a Dict value.
+    assert_same(
+        "unbox_curried_closure_dict",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   case Dict.get \"add\" (Dict.fromList [ ( \"add\", \\a b -> a + b ) ]) of\n\
+         \x20       Just f -> String.fromInt (f 10 32)\n\
+         \x20       Nothing -> \"none\"\n",
+    );
+}

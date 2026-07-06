@@ -71,6 +71,9 @@ struct TypedCodegen<'ctx, 'l> {
     cur_fn: Option<FunctionValue<'ctx>>,
     blk: usize,
     lam_id: usize,
+    /// Monotonic counter for fresh variable names introduced when desugaring
+    /// destructuring parameters into `\fresh -> case fresh of pat -> body`.
+    fresh_id: usize,
 
     // DWARF debug info.
     di_builder: DebugInfoBuilder<'ctx>,
@@ -140,6 +143,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             cur_fn: None,
             blk: 0,
             lam_id: 0,
+            fresh_id: 0,
             di_builder,
             di_subroutine,
             di_files: HashMap::new(),
@@ -1225,6 +1229,105 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         ))
     }
 
+    /// The inverse of `box_closure`: wrap a uniform runtime closure word in a
+    /// typed closure `{fn_ptr, uniform_word}` whose lifted function boxes its
+    /// typed arguments, applies the uniform closure through `rt_apply`, and
+    /// unboxes the uniform result back to the typed result. This lets a function
+    /// value that flowed through a boxed/polymorphic slot (e.g. a `Dict` value,
+    /// or any generic container) be called with the typed calling convention.
+    fn unbox_closure(
+        &mut self,
+        w: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let mut arg_types = Vec::new();
+        let mut t = tipe.clone();
+        while let Type::Lambda(a, b) = t {
+            arg_types.push(*a);
+            t = *b;
+        }
+        let ret_type = t;
+        let n = arg_types.len();
+        let i64_t = self.ctx.i64_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        // Lifted typed function: (env, typed args...) -> typed result.
+        let ret_layout = self.layouts.layout_of(&ret_type);
+        let ret_ty = self.llvm_type(&ret_layout);
+        let mut fn_params: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        for at in &arg_types {
+            fn_params.push(self.llvm_type(&self.layouts.layout_of(at)).into());
+        }
+        let fn_ty = ret_ty.fn_type(&fn_params, false);
+        let name = format!("unclos.{}", self.lam_id);
+        self.lam_id += 1;
+        let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
+
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
+        self.cur_fn = Some(lifted);
+        let entry = self.ctx.append_basic_block(lifted, "entry");
+        self.builder.position_at_end(entry);
+        self.clear_loc();
+
+        let body = (|s: &mut Self| -> Result<BasicValueEnum<'ctx>, String> {
+            // The typed closure layout is {fn_ptr, uniform_word}; the captured
+            // uniform closure word lives in field 1.
+            let clos_ty = s.ctx.struct_type(&[ptr_t.into(), i64_t.into()], false);
+            let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
+            let fp = s.builder.build_struct_gep(clos_ty, env, 1, "capp").unwrap();
+            let uni_clos = s.builder.build_load(i64_t, fp, "unic").unwrap();
+            // Box each typed argument into a uniform word.
+            let mut boxed = Vec::with_capacity(n);
+            for (i, at) in arg_types.iter().enumerate() {
+                let a = lifted.get_nth_param((i + 1) as u32).unwrap();
+                boxed.push(s.box_value(a, at)?);
+            }
+            let args_arr = s.entry_alloca(i64_t.array_type(n as u32).into(), "uargs");
+            for (i, b) in boxed.iter().enumerate() {
+                let ep = unsafe {
+                    s.builder
+                        .build_in_bounds_gep(i64_t, args_arr, &[i64_t.const_int(i as u64, false)], "ep")
+                        .unwrap()
+                };
+                s.builder.build_store(ep, *b).unwrap();
+            }
+            let rt_apply = s.module.get_function("rt_apply").unwrap();
+            let uniform = s
+                .builder
+                .build_call(
+                    rt_apply,
+                    &[
+                        uni_clos.into(),
+                        s.ctx.i32_type().const_int(n as u64, false).into(),
+                        args_arr.into(),
+                    ],
+                    "uapp",
+                )
+                .unwrap()
+                .try_as_basic_value()
+                .left()
+                .unwrap();
+            s.unbox_value(uniform, &ret_type)
+        })(self);
+
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        let result = body?;
+        self.builder.build_return(Some(&result)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        self.restore_loc(saved_loc);
+
+        Ok(self
+            .build_closure_value(lifted.as_global_value().as_pointer_value(), &[w])
+            .into())
+    }
+
     fn box_list(
         &mut self,
         val: BasicValueEnum<'ctx>,
@@ -1298,6 +1401,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .build_int_to_ptr(w.into_int_value(), self.ctx.ptr_type(inkwell::AddressSpace::default()), "ref")
                 .unwrap()
                 .into()),
+            Layout::Closure => self.unbox_closure(w, tipe),
             other => Err(format!("typed backend: cannot unbox layout {:?}", other)),
         }
     }
@@ -2358,6 +2462,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                             .to_string(),
                     );
                 }
+                // Desugar destructuring parameters into fresh vars + a case-matched
+                // body, mirroring `gen_closure`, so an inlined lambda accepts unit,
+                // constructor, tuple and record parameters.
+                let (owned_params, owned_body);
+                let (params, body) =
+                    if params.iter().any(|(p, _)| simple_param_name(p).is_none()) {
+                        let (np, nb) =
+                            desugar_destructuring_params(&mut self.fresh_id, params, body);
+                        owned_params = np;
+                        owned_body = nb;
+                        (owned_params.as_slice(), &owned_body)
+                    } else {
+                        (params.as_slice(), body.as_ref())
+                    };
                 let mut saved: Vec<(String, Option<BasicValueEnum<'ctx>>)> = Vec::new();
                 for ((pat, _), val) in params.iter().zip(args) {
                     match simple_param_name(pat) {
@@ -3526,7 +3644,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         body: &TypedExpr,
         result_layout: &Layout,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        // Parameter names (simple variables only for now).
+        // Desugar destructuring parameters (`\() ->`, `\(Id n) ->`, `\(a,b) ->`,
+        // `\{x} ->`) into a fresh variable per such parameter whose body matches
+        // it with a single-arm `case`, reusing the case/pattern compiler.
+        let (owned_params, owned_body);
+        let (params, body) = if params.iter().any(|(p, _)| simple_param_name(p).is_none()) {
+            let (np, nb) = desugar_destructuring_params(&mut self.fresh_id, params, body);
+            owned_params = np;
+            owned_body = nb;
+            (owned_params.as_slice(), &owned_body)
+        } else {
+            (params, body)
+        };
+
+        // Parameter names (all simple after desugaring).
         let mut param_names = Vec::with_capacity(params.len());
         for (p, _) in params {
             match simple_param_name(p) {
@@ -3990,7 +4121,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             b.build_int_compare(IntPredicate::EQ, x, y, "casetest").unwrap()
         };
         Ok(match &pattern.value {
-            Var(_) | Anything => None,
+            // Irrefutable: variables, wildcards, and (top-level) unit/tuple/record
+            // patterns always match. Nested refutable sub-patterns inside a tuple
+            // or record are still unsupported (see below), but the destructuring
+            // itself happens at bind time.
+            Var(_) | Anything | Unit | Tuple(..) | Record(_) => None,
             Alias(inner, _) => self.pattern_test(inner, subject, layout)?,
             Int(n) => Some(eq_i(
                 &self.builder,
@@ -4073,6 +4208,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<(), String> {
         use crate::ast::canonical::Pattern_::*;
         match &pattern.value {
+            Unit => Ok(()),
             Var(_) | Anything | Tuple(..) | Record(_) => {
                 self.bind_pattern(pattern, subject, layout)
             }
@@ -4240,6 +4376,58 @@ fn foreign_arity(tipe: &crate::ast::canonical::Type) -> usize {
         t = b;
     }
     n
+}
+
+/// Rewrite a lambda's parameter list so every destructuring pattern becomes a
+/// fresh variable, and wrap the body in nested single-arm `case` expressions
+/// that re-match each fresh variable against the original pattern. This is the
+/// standard `\pat -> body` ==> `\fresh -> case fresh of pat -> body`
+/// desugaring, letting the typed backend reuse its case/pattern compiler for
+/// unit, constructor, tuple and record parameters. Simple `Var`/`_` parameters
+/// are left untouched. Earlier parameters wrap outermost.
+fn desugar_destructuring_params(
+    fresh: &mut usize,
+    params: &[(crate::ast::canonical::Pattern, crate::ast::canonical::Type)],
+    body: &TypedExpr,
+) -> (
+    Vec<(crate::ast::canonical::Pattern, crate::ast::canonical::Type)>,
+    TypedExpr,
+) {
+    use crate::ast::canonical::Pattern_;
+    let mut new_params = Vec::with_capacity(params.len());
+    // (fresh name, original pattern, parameter type) for each destructuring param.
+    let mut to_wrap: Vec<(String, crate::ast::canonical::Pattern, crate::ast::canonical::Type)> =
+        Vec::new();
+    for (pat, ty) in params {
+        if simple_param_name(pat).is_some() {
+            new_params.push((pat.clone(), ty.clone()));
+        } else {
+            let name = format!("$dp{}", *fresh);
+            *fresh += 1;
+            let var_pat = crate::reporting::Located {
+                region: pat.region,
+                value: Pattern_::Var(crate::data::Name::from(name.clone())),
+            };
+            new_params.push((var_pat, ty.clone()));
+            to_wrap.push((name, pat.clone(), ty.clone()));
+        }
+    }
+    // Fold from the last destructuring param inward so the earliest one ends up
+    // as the outermost `case`.
+    let mut wrapped = body.clone();
+    for (name, pat, ty) in to_wrap.into_iter().rev() {
+        let scrut = TypedExpr {
+            tipe: ty,
+            kind: TypedKind::Local(crate::data::Name::from(name)),
+            region: body.region,
+        };
+        wrapped = TypedExpr {
+            tipe: wrapped.tipe.clone(),
+            kind: TypedKind::Case(Box::new(scrut), vec![(pat, wrapped)]),
+            region: body.region,
+        };
+    }
+    (new_params, wrapped)
 }
 
 fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String> {
