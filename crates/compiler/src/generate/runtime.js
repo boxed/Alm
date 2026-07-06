@@ -1926,25 +1926,30 @@ var $Json$Encode$encode = F2(function (indent, value) {
 // TASKS — CPS-style: { fork: function (onSuccess, onFailure) }.
 
 function _Task(fork) { return { $: 'Task', fork: fork }; }
-var $Task$succeed = function (value) {
-    return _Task(function (ok, _err) { ok(value); });
-};
-var $Task$fail = function (error) {
-    return _Task(function (_ok, err) { err(error); });
-};
+// `Task.succeed`/`Task.fail` are pure DATA (tag 0/1 + value), like elm's
+// scheduler, so `Task.succeed x == Task.succeed x` is structurally true. Only
+// these carry no closure; every other task is a CPS `{ fork }`. `_Task_fork`
+// dispatches so the execution model is unchanged.
+function _Task_fork(task, ok, err) {
+    if (task.tag === 0) { return ok(task.a); }
+    if (task.tag === 1) { return err(task.a); }
+    return task.fork(ok, err);
+}
+var $Task$succeed = function (value) { return { $: 'Task', tag: 0, a: value }; };
+var $Task$fail = function (error) { return { $: 'Task', tag: 1, a: error }; };
 var $Task$andThen = F2(function (f, task) {
     return _Task(function (ok, err) {
-        task.fork(function (a) { f(a).fork(ok, err); }, err);
+        _Task_fork(task, function (a) { _Task_fork(f(a), ok, err); }, err);
     });
 });
 var $Task$onError = F2(function (f, task) {
     return _Task(function (ok, err) {
-        task.fork(ok, function (x) { f(x).fork(ok, err); });
+        _Task_fork(task, ok, function (x) { _Task_fork(f(x), ok, err); });
     });
 });
 var $Task$map = F2(function (f, task) {
     return _Task(function (ok, err) {
-        task.fork(function (a) { ok(f(a)); }, err);
+        _Task_fork(task, function (a) { ok(f(a)); }, err);
     });
 });
 var $Task$map2 = F3(function (f, ta, tb) {
@@ -1969,7 +1974,7 @@ var $Task$map5 = F6(function (f, ta, tb, tc, td, te) {
 });
 var $Task$mapError = F2(function (f, task) {
     return _Task(function (ok, err) {
-        task.fork(ok, function (x) { err(f(x)); });
+        _Task_fork(task, ok, function (x) { err(f(x)); });
     });
 });
 var $Task$sequence = function (tasks) {
@@ -1978,7 +1983,7 @@ var $Task$sequence = function (tasks) {
         var results = [];
         function step(i) {
             if (i >= arr.length) { return ok(_List_fromArray(results)); }
-            arr[i].fork(function (v) { results.push(v); step(i + 1); }, err);
+            _Task_fork(arr[i], function (v) { results.push(v); step(i + 1); }, err);
         }
         step(0);
     });
@@ -1990,7 +1995,7 @@ var $Task$attempt = F2(function (toMsg, task) {
     return {
         $: 'CmdTask',
         task: _Task(function (ok, _err) {
-            task.fork(
+            _Task_fork(task,
                 function (v) { ok(toMsg($Result$Ok(v))); },
                 function (x) { ok(toMsg($Result$Err(x))); }
             );
@@ -2783,7 +2788,7 @@ function _Platform_initialize(program, opts) {
                 console.log(cmd.s);
                 return;
             case 'CmdTask':
-                cmd.task.fork(
+                _Task_fork(cmd.task,
                     function (msg) { dispatch(tagger(msg)); },
                     function (x) {
                         throw new Error('Task failed without an error handler: ' + _Debug_toString(x));
@@ -2798,7 +2803,7 @@ function _Platform_initialize(program, opts) {
                     body: cmd.config.body,
                     timeout: cmd.config.timeout
                 };
-                _Http_makeTask(cfg, null).fork(function (response) {
+                _Task_fork(_Http_makeTask(cfg, null), function (response) {
                     var result = cmd.config.expect.handle(response);
                     dispatch(tagger(cmd.config.expect.toMsg(result)));
                 }, function () {});
