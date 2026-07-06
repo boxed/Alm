@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/Users/boxed/Projects/alm/.claude/worktrees/agent-a79f787c140bb5b7f/scratch_diag.py", line 8, in <module>
+    exec(open(os.path.join(BASE, which + ".py")).read())
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 11, in <module>
+IndexError: list index out of range

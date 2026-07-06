@@ -1,0 +1,23 @@
+testmajor=1 modules=[('TidyTests', ['suite'])]
+=== alm make rc=0 ===
+=== node rc=1 ===
+STDOUT: 
+STDERR: /Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:90
+        if (!_Utils_eqHelp(x[key], y[key], depth + 1, stack)) { return false; }
+                                    ^
+
+TypeError: Cannot read properties of undefined (reading '$')
+    at _Utils_eqHelp (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:90:37)
+    at _Utils_eqHelp (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:90:14)
+    at _Utils_eqHelp (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:90:14)
+    at _Utils_eq (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:73:19)
+    at Function.f (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:4138:94)
+    at A4 (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:38:51)
+    at /Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:4141:111
+    at /Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:11:103
+    at /Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:4197:250
+    at Object.<anonymous> (/Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy/alm_r.js:4197:24741)
+
+Node.js v23.6.0
+
+run dir kept: /Users/boxed/Projects/alm/.registry/tests/reprorun_gicentre~tidy

@@ -1,0 +1,138 @@
+PASS  creates a wrapped UpdateStringField msg / Forms.Update tests
+PASS  creates a wrapped UpdateBoolField msg / Forms.Update tests
+PASS  updates a string Field when the msg is UpdateStringField / Update.updateForm / Forms.Update tests
+PASS  updates a bool Field when the msg is UpdateBoolField / Update.updateForm / Forms.Update tests
+PASS  does nothing if the field does not exist / Update.updateForm / Forms.Update tests
+PASS  add commands on string field events / Update.stringFieldCommands / Forms.Update tests
+PASS  has no impact on the wrong field / Update.stringFieldCommands / Forms.Update tests
+PASS  has no impact on the wrong message / Update.stringFieldCommands / Forms.Update tests
+PASS  add commands on bool field events / Update.boolFieldCommands / Forms.Update tests
+PASS  has no impact on the wrong field / Update.boolFieldCommands / Forms.Update tests
+PASS  has no impact on the wrong message / Update.boolFieldCommands / Forms.Update tests
+PASS  add commands on string field events / Update.formCommands / Forms.Update tests
+PASS  add commands on bool field events / Update.formCommands / Forms.Update tests
+PASS  has no impact on the wrong string field / Update.formCommands / Forms.Update tests
+PASS  has no impact on the wrong bool field / Update.formCommands / Forms.Update tests
+PASS  Value.string creates a String Value / Forms.Value tests
+PASS  Value.bool creates a Bool Value / Forms.Value tests
+PASS  Value.defaultString creates a default String Value / Forms.Value tests
+PASS  Value.defaultBool creates a default Bool Value / Forms.Value tests
+PASS  returns the value of a String Value / Value.getString / Forms.Value tests
+PASS  returns Nothing otherwise / Value.getString / Forms.Value tests
+PASS  returns the value of a Bool Value / Value.isBool / Forms.Value tests
+PASS  returns Nothing otherwise / Value.isBool / Forms.Value tests
+PASS  updates value of same type / Value.safeUpdate / Forms.Value tests
+PASS  has no effect on value of different type / Value.safeUpdate / Forms.Value tests
+PASS  Field.input creates a default String FieldValue / Forms.Field tests
+PASS  Field.select creates a default String FieldValue / Forms.Field tests
+PASS  Field.checkbox creates a default Bool FieldValue / Forms.Field tests
+PASS  Field.group creates a FieldGroup from a tuple-list / Forms.Field tests
+PASS  Field.fields creates a Fields from a tuple-list / Forms.Field tests
+PASS  Field.inputWithDefault creates a String FieldValue / Forms.Field tests
+PASS  Field.selectWithDefault creates a String FieldValue / Forms.Field tests
+PASS  Field.checkboxWithDefault creates a Bool FieldValue / Forms.Field tests
+PASS  retrieves a value from a Fields (depth 1) / Field.getValue / Forms.Field tests
+PASS  retrieves a value from a Fields (depth 2) / Field.getValue / Forms.Field tests
+PASS  retrieves a value from a Fields (depth 3) / Field.getValue / Forms.Field tests
+PASS  returns Nothing otherwise / Field.getValue / Forms.Field tests
+PASS  retrieves a Fields from a Fields / Field.getGroup / Forms.Field tests
+PASS  returns Nothing otherwise / Field.getGroup / Forms.Field tests
+PASS  set a value in a Fields (depth 1) / Field.setValue / Forms.Field tests
+PASS  set a value in a Fields (depth 2) / Field.setValue / Forms.Field tests
+PASS  set a value in a Fields (depth 3) / Field.setValue / Forms.Field tests
+PASS  has no effect if the key does not exist / Field.setValue / Forms.Field tests
+PASS  has no effect if the Value has a different type / Field.setValue / Forms.Field tests
+PASS  Form.form creates a Form / Forms.Form tests
+PASS  helps validating a form / Form.validate / Forms.Form tests
+PASS  it may be invalid / Form.validate / Forms.Form tests
+PASS  or have errors / Form.validate / Forms.Form tests
+PASS  gets the value of a String Field / Forms.getStringField / Forms.Form tests
+PASS  returns Nothing if it's a Bool Field / Forms.getStringField / Forms.Form tests
+PASS  returns Nothing if the Field cannot be found / Forms.getStringField / Forms.Form tests
+PASS  gets the value of a Bool Field / Forms.getBoolField / Forms.Form tests
+PASS  returns Nothing if it's a String Field / Forms.getBoolField / Forms.Form tests
+PASS  returns Nothing if the Field cannot be found / Forms.getBoolField / Forms.Form tests
+PASS  sets the value of a String Field / Forms.setStringField / Forms.Form tests
+PASS  does nothing if it's a Bool Field / Forms.setStringField / Forms.Form tests
+PASS  does nothing if the Field cannot be found / Forms.setStringField / Forms.Form tests
+PASS  sets the value of a Bool Field / Forms.setBoolField / Forms.Form tests
+PASS  does nothing if it's a String Field / Forms.setBoolField / Forms.Form tests
+PASS  does nothing if the Field cannot be found / Forms.setBoolField / Forms.Form tests
+PASS  Validation.configFailure creates a failed FieldValidation with a ConfigError / Forms.Validation tests
+PASS  Validation.failure creates a failed FieldValidation with a CustomError / Forms.Validation tests
+PASS  Validation.success creates a successful FieldValidation / Forms.Validation tests
+PASS  helps creating a basic FieldValidation function / Validation.validation / Forms.Validation tests
+PASS  that may fail / Validation.validation / Forms.Validation tests
+PASS  helps validating a string field (input/select) / Validation.stringField / Forms.Validation tests
+PASS  fails otherwise / Validation.stringField / Forms.Validation tests
+PASS  helps validating a bool field (checkbox) / Validation.boolField / Forms.Validation tests
+PASS  fails otherwise / Validation.boolField / Forms.Validation tests
+PASS  helps validating a field with a Bool/True value / Validation.isChecked / Forms.Validation tests
+PASS  fails otherwise / Validation.isChecked / Forms.Validation tests
+PASS  helps validating a field with a String/Int value / Validation.int / Forms.Validation tests
+PASS  fails otherwise / Validation.int / Forms.Validation tests
+PASS  helps validating a field with a String/Float value / Validation.float / Forms.Validation tests
+PASS  fails otherwise / Validation.float / Forms.Validation tests
+PASS  helps validating a field with a non empty String value / Validation.notEmpty / Forms.Validation tests
+PASS  fails otherwise / Validation.notEmpty / Forms.Validation tests
+PASS  helps validating a field with a String value of a specific length / Validation.length / Forms.Validation tests
+PASS  fails otherwise / Validation.length / Forms.Validation tests
+PASS  helps validating a field with a String/email value / Validation.email / Forms.Validation tests
+PASS  fails otherwise / Validation.email / Forms.Validation tests
+PASS  helps validating two fields with String/Password matching values / Validation.passwordMatch / Forms.Validation tests
+PASS  fails if not String Values / Validation.passwordMatch / Forms.Validation tests
+PASS  fails if not equal / Validation.passwordMatch / Forms.Validation tests
+PASS  Validation.FieldValidation can return any types / Forms.Validation tests
+PASS  Validation.valid creates a successful FormdValidation / Forms.Validation tests
+PASS  converts a FormValidation into a FormResult / Validation.toFormResult / Forms.Validation tests
+PASS  it may have ConfigErrors (1) / Validation.toFormResult / Forms.Validation tests
+PASS  it may have ConfigErrors (2) / Validation.toFormResult / Forms.Validation tests
+PASS  it may have CustomErrors (1) / Validation.toFormResult / Forms.Validation tests
+PASS  it may have CustomErrors (2) / Validation.toFormResult / Forms.Validation tests
+PASS  helps validating a required Field / Validation.required / Forms.Validation tests
+PASS  fails if the field is missing / Validation.required / Forms.Validation tests
+PASS  fails if the validation fails / Validation.required / Forms.Validation tests
+PASS  Validation.hardcoded helps harcoding a value during a Validation / Forms.Validation tests
+PASS  helps validating an optional Field with a default value / Validation.optional / Forms.Validation tests
+PASS  fallback on default value if empty / Validation.optional / Forms.Validation tests
+PASS  fails if the field is missing / Validation.optional / Forms.Validation tests
+PASS  fails if the validation fails / Validation.optional / Forms.Validation tests
+PASS  helps validating an optional Field with a Maybe / Validation.optionalWithMaybe / Forms.Validation tests
+PASS  fallback with Maybe if empty / Validation.optionalWithMaybe / Forms.Validation tests
+PASS  fails if the field is missing / Validation.optionalWithMaybe / Forms.Validation tests
+PASS  fails if the validation fails / Validation.optionalWithMaybe / Forms.Validation tests
+FAIL Just { description = "Expect.equal", given = Nothing, reason = Equality "Success <function>" "Success <function>" }  helps validating a discardable Field / Validation.discardable / Forms.Validation tests
+PASS  fails if the field is missing / Validation.discardable / Forms.Validation tests
+PASS  fails if the validation fails / Validation.discardable / Forms.Validation tests
+PASS  helps validating two fields together / Validation.twoFields / Forms.Validation tests
+PASS  fails if the first field is missing / Validation.twoFields / Forms.Validation tests
+PASS  fails if the second field is missing / Validation.twoFields / Forms.Validation tests
+PASS  fails if both fields are missing / Validation.twoFields / Forms.Validation tests
+PASS  fails on both fields if the validation fails / Validation.twoFields / Forms.Validation tests
+PASS  helps validating a FieldGroup / Validation.fieldgroup / Forms.Validation tests
+PASS  fails if the group is missing / Validation.fieldgroup / Forms.Validation tests
+PASS  fails if the group validation fails / Validation.fieldgroup / Forms.Validation tests
+PASS  helps validating a required Field (bind) / Validation.required1 / Forms.Validation tests
+PASS  fails if the field is missing / Validation.required1 / Forms.Validation tests
+PASS  fails if the validation fails / Validation.required1 / Forms.Validation tests
+PASS  Validation.hardcoded1 helps harcoding a value during a Validation (bind) / Forms.Validation tests
+PASS  helps validating an optional Field with a default value (bind) / Validation.optional1 / Forms.Validation tests
+PASS  fallback on default value if empty / Validation.optional1 / Forms.Validation tests
+PASS  fails if the field is missing / Validation.optional1 / Forms.Validation tests
+PASS  fails if the validation fails / Validation.optional1 / Forms.Validation tests
+PASS  helps validating an optional Field with a Maybe (bind) / Validation.optionalWithMaybe1 / Forms.Validation tests
+PASS  fallback with Maybe if empty / Validation.optionalWithMaybe1 / Forms.Validation tests
+PASS  fails if the field is missing / Validation.optionalWithMaybe1 / Forms.Validation tests
+PASS  fails if the validation fails / Validation.optionalWithMaybe1 / Forms.Validation tests
+FAIL Just { description = "Expect.equal", given = Nothing, reason = Equality "Success <function>" "Success <function>" }  helps validating a discardable Field (bind) / Validation.discardable1 / Forms.Validation tests
+PASS  fails if the field is missing / Validation.discardable1 / Forms.Validation tests
+PASS  fails if the validation fails / Validation.discardable1 / Forms.Validation tests
+PASS  helps validating two fields together (bind) / Validation.twoFields1 / Forms.Validation tests
+PASS  fails if the first field is missing / Validation.twoFields1 / Forms.Validation tests
+PASS  fails if the second field is missing / Validation.twoFields1 / Forms.Validation tests
+PASS  fails if both fields are missing / Validation.twoFields1 / Forms.Validation tests
+PASS  fails on both fields if the validation fails / Validation.twoFields1 / Forms.Validation tests
+PASS  helps validating a FieldGroup (bind) / Validation.fieldgroup1 / Forms.Validation tests
+PASS  fails if the group is missing / Validation.fieldgroup1 / Forms.Validation tests
+PASS  fails if the group validation fails / Validation.fieldgroup1 / Forms.Validation tests
+

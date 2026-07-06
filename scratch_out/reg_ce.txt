@@ -1,0 +1,623 @@
+PASS  Tab / isControl / The Char.Extra module
+PASS  a / isControl / The Char.Extra module
+PASS  Tab / isSpace / The Char.Extra module
+PASS  a / isSpace / The Char.Extra module
+PASS  Space / isSpace / The Char.Extra module
+PASS  Same as concatMap and from/toList / #concatMap / Set.Extra
+PASS  left identity / #concatMap / Set.Extra
+PASS  right identity / #concatMap / Set.Extra
+PASS  associativity / #concatMap / Set.Extra
+PASS  Same as List.Extra.isInfixOf / #isSubsetOf / Set.Extra
+PASS  checks if a set is a subset of another set / #isSubsetOf / Set.Extra
+PASS  checks if a set isn't a subset of another set / #isSubsetOf / Set.Extra
+PASS  Removes an existing element / #toggle / Set.Extra
+PASS  Adds an new element / #toggle / Set.Extra
+PASS  Applies a function that may succeed to all values in the list, but only keep the successes. / #filterMap / Set.Extra
+PASS  should work like (List.filterMap >> Set.fromList) / #filterMap / Set.Extra
+PASS  disjoint is equivalent to empty intersection / #areDisjoint / Set.Extra
+PASS  equivalent to diff (union a b) (intersect a b) / #symmetricDifference / Set.Extra
+PASS  both Just / orElse / Maybe.Extra
+PASS  pipe input Nothing / orElse / Maybe.Extra
+PASS  pipe function Nothing / orElse / Maybe.Extra
+PASS  both Nothing / orElse / Maybe.Extra
+PASS  both Just / orLazy / Maybe.Extra
+PASS  first Nothing / orLazy / Maybe.Extra
+PASS  second Nothing / orLazy / Maybe.Extra
+PASS  both Nothing / orLazy / Maybe.Extra
+PASS  both Just / orElseLazy / Maybe.Extra
+PASS  pipe input Nothing / orElseLazy / Maybe.Extra
+PASS  pipe function Nothing / orElseLazy / Maybe.Extra
+PASS  both Nothing / orElseLazy / Maybe.Extra
+PASS  empty / orListLazy / Maybe.Extra
+PASS  all nothing / orListLazy / Maybe.Extra
+PASS  empty / traverseArray / Maybe.Extra
+PASS  all Just / traverseArray / Maybe.Extra
+PASS  one Nothing fails the whole function / traverseArray / Maybe.Extra
+PASS  empty / combineArray / Maybe.Extra
+PASS  succeed / combineArray / Maybe.Extra
+PASS  fail / combineArray / Maybe.Extra
+PASS  empty / oneOf / Maybe.Extra
+PASS  all fail / oneOf / Maybe.Extra
+PASS  last function succeeds / oneOf / Maybe.Extra
+PASS  first function succeeds / oneOf / Maybe.Extra
+PASS  returns a Just if it can / andThen3 / Maybe.Extra
+PASS  returns a Just if it can / andThen4 / Maybe.Extra
+PASS  returns the default value if it is a Nothing / unwrap / Maybe.Extra
+PASS  returns the unwrapped value if it is a Just / unwrap / Maybe.Extra
+PASS  returns the default value if it is a Nothing / unpack / Maybe.Extra
+PASS  returns the unpackped value if it is a Just / unpack / Maybe.Extra
+PASS  isOk - Ok / Common Helpers / Result.Extra
+PASS  isOk - Err / Common Helpers / Result.Extra
+PASS  isErr - Ok / Common Helpers / Result.Extra
+PASS  isErr - Err / Common Helpers / Result.Extra
+PASS  extract - Ok / Common Helpers / Result.Extra
+PASS  extract - Err / Common Helpers / Result.Extra
+PASS  unwrap - Ok / Common Helpers / Result.Extra
+PASS  unwrap - Err / Common Helpers / Result.Extra
+PASS  error - Ok / Common Helpers / Result.Extra
+PASS  error - Err / Common Helpers / Result.Extra
+PASS  mapBoth - Ok / Common Helpers / Result.Extra
+PASS  mapBoth - Err / Common Helpers / Result.Extra
+PASS  merge - Ok / Common Helpers / Result.Extra
+PASS  merge - Err / Common Helpers / Result.Extra
+PASS  join - Ok Ok / Common Helpers / Result.Extra
+PASS  join - Ok Err / Common Helpers / Result.Extra
+PASS  join - Err / Common Helpers / Result.Extra
+PASS  empty list / partition / Common Helpers / Result.Extra
+PASS  only Ok / partition / Common Helpers / Result.Extra
+PASS  only Err / partition / Common Helpers / Result.Extra
+PASS  mixed list / partition / Common Helpers / Result.Extra
+PASS  err is ignored / filter / Common Helpers / Result.Extra
+PASS  ok passes filter / filter / Common Helpers / Result.Extra
+PASS  ok filtered out / filter / Common Helpers / Result.Extra
+PASS  empty list / combine / Combining / Result.Extra
+PASS  all Ok / combine / Combining / Result.Extra
+PASS  all Err / combine / Combining / Result.Extra
+PASS  Err first / combine / Combining / Result.Extra
+PASS  Err last / combine / Combining / Result.Extra
+PASS  Err middle / combine / Combining / Result.Extra
+PASS  empty list / combineMap / Combining / Result.Extra
+PASS  all Ok / combineMap / Combining / Result.Extra
+PASS  all Ok #2 / combineMap / Combining / Result.Extra
+PASS  all Err / combineMap / Combining / Result.Extra
+PASS  mixed / combineMap / Combining / Result.Extra
+PASS  combineMap identity == combine / combineMap / Combining / Result.Extra
+PASS  combineFirst - Ok / Combining / Result.Extra
+PASS  combineFirst - Err / Combining / Result.Extra
+PASS  combineSecond - Ok / Combining / Result.Extra
+PASS  combineSecond - Err / Combining / Result.Extra
+PASS  combineBoth - Ok Ok / Combining / Result.Extra
+PASS  combineBoth - Ok Err / Combining / Result.Extra
+PASS  combineBoth - Err Ok / Combining / Result.Extra
+PASS  combineBoth - Err Err / Combining / Result.Extra
+PASS  combineMapFirst identity == combineFirst / Combining / Result.Extra
+PASS  combineMapSecond identity == combineSecond / Combining / Result.Extra
+PASS  combineMapBoth identity identity == combineBoth / Combining / Result.Extra
+PASS  Err -> Err -> Err / andMap / Applying / Result.Extra
+PASS  Err -> Ok -> Err / andMap / Applying / Result.Extra
+PASS  Ok -> Err -> Err / andMap / Applying / Result.Extra
+PASS  Ok -> Ok -> Ok / andMap / Applying / Result.Extra
+PASS  Ok1 -> Ok2 -> Ok1 / or / Alternatives / Result.Extra
+PASS  Ok -> Err -> Ok / or / Alternatives / Result.Extra
+PASS  Err -> Ok -> Ok / or / Alternatives / Result.Extra
+PASS  Err1 -> Err2 -> Err2 / or / Alternatives / Result.Extra
+PASS  Ok1 -> Ok2 -> Ok1 / orLazy / Alternatives / Result.Extra
+PASS  Ok -> Err -> Ok / orLazy / Alternatives / Result.Extra
+PASS  Err -> Ok -> Ok / orLazy / Alternatives / Result.Extra
+PASS  Err1 -> Err2 -> Err2 / orLazy / Alternatives / Result.Extra
+PASS  Ok1 -> Ok2 -> Ok2 / orElse / Alternatives / Result.Extra
+PASS  Ok -> Err -> Ok / orElse / Alternatives / Result.Extra
+PASS  Err -> Ok -> Ok / orElse / Alternatives / Result.Extra
+PASS  Err1 -> Err2 -> Err1 / orElse / Alternatives / Result.Extra
+PASS  Ok1 -> Ok2 -> Ok2 / orElseLazy / Alternatives / Result.Extra
+PASS  Ok -> Err -> Ok / orElseLazy / Alternatives / Result.Extra
+PASS  Err -> Ok -> Ok / orElseLazy / Alternatives / Result.Extra
+PASS  Err1 -> Err2 -> Err1 / orElseLazy / Alternatives / Result.Extra
+PASS  Ok / toTask / Result.Extra
+PASS  Err / toTask / Result.Extra
+PASS  does not loose information / invertAll / Dict.Extra
+PASS  the values are keys into the original dictionary / invertAll / Dict.Extra
+PASS  behaves the same as invert on an already inverted dictionary / invertAll / Dict.Extra
+PASS  Should pad with zeroes to required decimal places / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should pad zero values to required decimal places / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should round to integer with 0 decimal places / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should remove decimal places and round up / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should pad numbers less than 1 to required decimal places / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should maintain decimal places if no rounding is required / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should remove decimal places and round for numbers between 0 and 1 / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  Should round to 0 with padding for numbers between 0 and 1 that round down / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  handles NaN / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  handles Infinity / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  handles -Infinity / String.toFixedDecimalPlaces should take a string representation of a float value and round it to a fixed number of decimal places.
+PASS  should round down to required digits / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  should round up to required digits / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles negative values / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  produces at most n significant digits / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  more or less preserves the value / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  negative digits just means 1 / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  tricky rounding / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles very small numbers / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles NaN / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles Infinity / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles -Infinity / String.toFixedSignificantDigits should take a string representation of a float value and round it to a fixed number of significant digits.
+PASS  handles NaN / boundaryValuesAsUnicode fixes infinity and NaN to unicode
+PASS  handles Infinity / boundaryValuesAsUnicode fixes infinity and NaN to unicode
+PASS  handles -Infinity / boundaryValuesAsUnicode fixes infinity and NaN to unicode
+PASS  works like formatter / boundaryValuesAsUnicode fixes infinity and NaN to unicode
+PASS  makes numbers about equal even after some operations / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  NaN is not equal to any 'nice' float / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  no 'nice' float is equal to NaN / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  positive infinity equals positive infinity / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  negative infinity equals negative infinity / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  positive infinity does not equal negative infinity / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  positive infinity does not equal NaN / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  NaN does not equal positive infinity / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  negative infinity does not equal NaN / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  NaN does not equal negative infinity / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  NaN does not equal NaN / aboutEqual should compare numbers as equal within a reasonable tolerance
+PASS  small positive error / equalWithin should compare numbers as equal within a given tolerance
+PASS  small negative error / equalWithin should compare numbers as equal within a given tolerance
+PASS  large positive error / equalWithin should compare numbers as equal within a given tolerance
+PASS  large negative error / equalWithin should compare numbers as equal within a given tolerance
+PASS  infinity not equal to itself within any finite tolerance / equalWithin should compare numbers as equal within a given tolerance
+PASS  returns [start, start + step, start + 2 * step, … stop - step] / range start stop step
+PASS  allows a negative step / range start stop step
+PASS  returns an empty array if start >= stop and step > 0 / range start stop step
+PASS  returns an empty array if start <= stop and step < 0 / range start stop step
+PASS  returns an empty array if step is zero / range start stop step
+PASS  behaves the same as List.range for ints / range start stop step
+PASS  returns exactly [start + step * i, …] for fractional steps / range start stop step
+PASS  returns exactly [start + step * i, …] for very small fractional steps / range start stop step
+PASS  returns exactly [start + step * i, …] for very large fractional steps / range start stop step
+PASS  First element is always start / range start stop step
+PASS  example 1 / modBy
+PASS  example 2 / modBy
+PASS  example 3 / modBy
+PASS  behaves like modBy for int-like values / modBy
+PASS  should return the start value exactly if given 0 / interpolateFrom
+PASS  should return the end value exactly if given 1 / interpolateFrom
+PASS  should return the mean if given 0.5 / interpolateFrom
+PASS  ascending list / isOrdered / Ordering
+PASS  out-of-order list / isOrdered / Ordering
+PASS  empty list / isOrdered / Ordering
+PASS  singleton list / isOrdered / Ordering
+PASS  lessThanBy true / lessThanBy / greaterThanBy / Ordering
+PASS  greaterThanBy false / lessThanBy / greaterThanBy / Ordering
+PASS  lessThanBy false / lessThanBy / greaterThanBy / Ordering
+PASS  greaterThanBy true / lessThanBy / greaterThanBy / Ordering
+PASS  greaterThanBy and lessThanBy behave as ordering functions / lessThanBy / greaterThanBy / Ordering
+PASS  ordered / explicit / Ordering
+PASS  equal / explicit / Ordering
+PASS  less than / explicit / Ordering
+PASS  greater than / explicit / Ordering
+PASS  explicit ordering sorts unlisted items as less than / explicit / Ordering
+PASS  list -> list -> Order of points by field produces ascending ordered values / byField / Ordering
+PASS  Reversing the result of reverse sort is the same as the forward sort / reverse / Ordering
+PASS  Breaking ties three ways works / breakTiesWith / Ordering
+PASS  Orders jokers first / byRank / Ordering
+PASS  Cards are ordered / Overall sorting tests with cards / Ordering
+PASS  Cards in same suite are ordered / Overall sorting tests with cards / Ordering
+PASS  order by manufacturer, model / breakTies / Ordering
+PASS  order by model, manufacturer / breakTies / Ordering
+PASS  order by color, cylinders, manufacturer, model / breakTies / Ordering
+PASS  breakTies with an empty list should preserve the original ordering of the list / breakTies / Ordering
+PASS  filter test |> all test / True / all / Array.Extra
+PASS  example / True / all / Array.Extra
+PASS  1 failing element included / False / all / Array.Extra
+PASS  example / False / all / Array.Extra
+PASS  1 passing element included / True / any / Array.Extra
+PASS  example / True / any / Array.Extra
+PASS  removeWhen test |> any test / False / any / Array.Extra
+PASS  example / False / any / Array.Extra
+PASS  included → True / member / Array.Extra
+PASS  all removed → False / member / Array.Extra
+PASS  index valid / update / Array.Extra
+PASS  index negative / update / Array.Extra
+PASS  index too high / update / Array.Extra
+PASS  empty → Array.empty / pop / Array.Extra
+PASS  push |> pop  → no change / pop / Array.Extra
+PASS  index valid / splitAt / Array.Extra
+PASS  index not positive / splitAt / Array.Extra
+PASS  index too high / splitAt / Array.Extra
+PASS  index valid / removeAt / Array.Extra
+PASS  index negative / removeAt / Array.Extra
+PASS  index too high / removeAt / Array.Extra
+PASS  index valid / insertAt / Array.Extra
+PASS  index negative / insertAt / Array.Extra
+PASS  index too high / insertAt / Array.Extra
+PASS  index positive valid / sliceFrom / Array.Extra
+PASS  index negative valid / sliceFrom / Array.Extra
+PASS  index positive too high / sliceFrom / Array.Extra
+PASS  index negative too low / sliceFrom / Array.Extra
+PASS  index positive valid / sliceUntil / Array.Extra
+PASS  index negative valid / sliceUntil / Array.Extra
+PASS  index 0 / sliceUntil / Array.Extra
+PASS  index positive too high / sliceUntil / Array.Extra
+PASS  index negative too low / sliceUntil / Array.Extra
+PASS  all Just / filterMap / Array.Extra
+PASS  all Nothing / filterMap / Array.Extra
+PASS  some Nothing / filterMap / Array.Extra
+PASS  more elements than functions / apply / Array.Extra
+PASS  more functions than elements / apply / Array.Extra
+PASS  mapToList / Array.Extra
+PASS  indexedMapToList / Array.Extra
+PASS  behaves like List.map2 / map2 / Array.Extra
+PASS  first array shorter than the last example / map2 / Array.Extra
+PASS  first array longer than the last example / map2 / Array.Extra
+PASS  behaves like List.map3 / map3 / Array.Extra
+PASS  first array the shortest example / map3 / Array.Extra
+PASS  second array the shortest example / map3 / Array.Extra
+PASS  third array the shortest example / map3 / Array.Extra
+PASS  example / removeWhen / Array.Extra
+PASS  filter is |> removeWhen is  → Array.empty / removeWhen / Array.Extra
+PASS  removeWhen is |> filter is  → Array.empty / removeWhen / Array.Extra
+PASS  behaves like List.unzip / unzip / Array.Extra
+PASS  restores what was before zip with the same length taken / unzip / Array.Extra
+PASS  example / unzip / Array.Extra
+PASS  like List.reverse / reverse / Array.Extra
+PASS  example / reverse / Array.Extra
+PASS  length less than current / resizelRepeat / Array.Extra
+PASS  length greater than current / resizelRepeat / Array.Extra
+PASS  length not positive  → Array.empty / resizelRepeat / Array.Extra
+PASS  length less than current / resizerRepeat / Array.Extra
+PASS  length greater than current / resizerRepeat / Array.Extra
+PASS  length not positive  → Array.empty / resizerRepeat / Array.Extra
+PASS  length less than current / resizelIndexed / Array.Extra
+PASS  length greater than current / resizelIndexed / Array.Extra
+PASS  length not positive  → Array.empty / resizelIndexed / Array.Extra
+PASS  length less than current / resizerIndexed / Array.Extra
+PASS  length greater than current / resizerIndexed / Array.Extra
+PASS  negative length  → Array.empty / resizerIndexed / Array.Extra
+PASS  empty → Array.empty / intersperse / Array.Extra
+PASS  one → one / intersperse / Array.Extra
+PASS  combined length / intersperse / Array.Extra
+PASS  multiple / intersperse / Array.Extra
+PASS  lengths add up / interweave / Array.Extra
+PASS  works the same as List.Extra.interweave (well, should but the arguments are reversed for some reason.) / interweave / Array.Extra
+PASS  less to interweave / interweave / Array.Extra
+PASS  more to interweave / interweave / Array.Extra
+PASS  removes duplicates / unique / List.Extra
+PASS  preserves list order / unique / List.Extra
+PASS  detects duplicates / allDifferent / List.Extra
+PASS  computes piecemeal / andMap / List.Extra
+PASS  maps and reverses / reverseMap / List.Extra
+PASS  disconfirms member / notMember / List.Extra
+PASS  confirms non-member / notMember / List.Extra
+PASS  behaves as documented / find / List.Extra
+PASS  finds index of value / elemIndex / List.Extra
+PASS  doesn't find index of non-present / elemIndex / List.Extra
+PASS  finds index of first match / elemIndex / List.Extra
+PASS  finds singleton index / elemIndices / List.Extra
+PASS  doesn't find indices of non-present / elemIndices / List.Extra
+PASS  finds all indices / elemIndices / List.Extra
+PASS  finds index of value / findIndex / List.Extra
+PASS  doesn't find index of non-present / findIndex / List.Extra
+PASS  finds index of first match / findIndex / List.Extra
+PASS  finds singleton index / findIndices / List.Extra
+PASS  doesn't find indices of non-present / findIndices / List.Extra
+PASS  finds all indices / findIndices / List.Extra
+PASS  Nothing for empty list / findMap / List.Extra
+PASS  Finds and maps for list of one with first element matching / findMap / List.Extra
+PASS  Fails to find and map for list of one without element matching / findMap / List.Extra
+PASS  Finds and maps for list with middle element matching / findMap / List.Extra
+PASS  Finds and maps for list with last element matching / findMap / List.Extra
+PASS  Fails to find and map for list with no element matching / findMap / List.Extra
+PASS  isOdd predicate / count / List.Extra
+PASS  equal predicate / count / List.Extra
+PASS  computes example / intercalate / List.Extra
+PASS  performs basic transpose / transpose / List.Extra
+PASS  truncate the matrix to the shortest row size / transpose / List.Extra
+PASS  transposes large lists / transpose / List.Extra
+PASS  computes subsequences / subsequences / List.Extra
+PASS  computes subsequences to non-empty lists / subsequencesNonEmpty / List.Extra
+PASS  computes permutations / permutations / List.Extra
+PASS  works the same as sorting / isPermutationOf / List.Extra
+PASS  correctly notices permutations / isPermutationOf / List.Extra
+PASS  Notices that 1,1,1 is not a permutation of 1,2,3 / isPermutationOf / List.Extra
+PASS  Notices that 1,1,2 is not a permutation of 1,2,2 / isPermutationOf / List.Extra
+PASS  correctly notices non-permutations / isPermutationOf / List.Extra
+PASS  interweaves lists of equal length / interweave / List.Extra
+PASS  appends remaining members of first list, if longer / interweave / List.Extra
+PASS  appends remaining members of second list, if longer / interweave / List.Extra
+PASS  computes the cartesian product of lists of different length / cartesianProduct / List.Extra
+PASS  computes the cartesian product of a single list / cartesianProduct / List.Extra
+PASS  computes the cartesian product of lists including an empty one / cartesianProduct / List.Extra
+PASS  computes the nullary cartesian product / cartesianProduct / List.Extra
+PASS  computes minimum / foldl1 / List.Extra
+PASS  computes left to right difference / foldl1 / List.Extra
+PASS  concats in reverse / foldl1 / List.Extra
+PASS  falls back to Nothing / foldl1 / List.Extra
+PASS  computes minimum / foldr1 / List.Extra
+PASS  computes right to left difference / foldr1 / List.Extra
+PASS  concats properly / foldr1 / List.Extra
+PASS  falls back to Nothing / foldr1 / List.Extra
+PASS  computes left to right iterative sum / scanl1 / List.Extra
+PASS  computes left to right iterative difference / scanl1 / List.Extra
+PASS  computes left to right flipped iterative difference / scanl1 / List.Extra
+PASS  computes right to left iterative sum / scanr / List.Extra
+PASS  computes right to left iterative difference / scanr / List.Extra
+PASS  computes right to left iterative sum / scanr1 / List.Extra
+PASS  computes right to left iterative difference / scanr1 / List.Extra
+PASS  computes right to left flipped iterative difference / scanr1 / List.Extra
+PASS  on empty list / mapAccuml / List.Extra
+PASS  accumulate sum and map product / mapAccuml / List.Extra
+PASS  running total / mapAccuml / List.Extra
+PASS  works for very long list (i.e. is call stack size safe) / mapAccuml / List.Extra
+PASS  on empty list / mapAccumr / List.Extra
+PASS  accumulate sum and map product / mapAccumr / List.Extra
+PASS  add count down / mapAccumr / List.Extra
+PASS  works for very long list (i.e. is call stack size safe) / mapAccumr / List.Extra
+PASS  builds a decreasing list from a seed / unfoldr / List.Extra
+PASS  collatz 13 / iterate / List.Extra
+PASS  should not raise RangeError / iterate / List.Extra
+PASS  handles an empty list / init / List.Extra
+PASS  handles a nearly-empty list / init / List.Extra
+PASS  handles a non-empty list / init / List.Extra
+PASS  creates a list starting from zero / initialize / List.Extra
+PASS  creates a list by doubling the index / initialize / List.Extra
+PASS  creates a list of identical values / initialize / List.Extra
+PASS  same length / cycle / List.Extra
+PASS  multiple of length / cycle / List.Extra
+PASS  partial cycle / cycle / List.Extra
+PASS  empty list / cycle / List.Extra
+PASS  resulting length smaller than cycle length / cycle / List.Extra
+PASS  always equal to the reverse of List.range / reverseRange / List.Extra
+PASS  splits a list in the middle / splitAt / List.Extra
+PASS  splits a list at the first element / splitAt / List.Extra
+PASS  splits the entire list correctly / splitAt / List.Extra
+PASS  splits past the length of the list / splitAt / List.Extra
+PASS  handles zero correctly / splitAt / List.Extra
+PASS  handles negative numbers correctly / splitAt / List.Extra
+PASS  returns split list when predicate is true / splitWhen / List.Extra
+PASS  returns nothing when predicate is false / splitWhen / List.Extra
+PASS  keeps the correct items / takeWhileRight / List.Extra
+PASS  drops the correct items / takeWhileRight / List.Extra
+PASS  doesn't exceed maximum call stack / takeWhile / List.Extra
+PASS  splits in the middle of the list / span / List.Extra
+PASS  every element passes predicate / span / List.Extra
+PASS  first item doesn't pass predicate / span / List.Extra
+PASS  breaks in the middle of the list / break / List.Extra
+PASS  breaks on the first item / break / List.Extra
+PASS  doesn't break for any element / break / List.Extra
+PASS  removes a matching prefix / stripPrefix / List.Extra
+PASS  removes a matching 3-element prefix / stripPrefix / List.Extra
+PASS  can remove the entire list / stripPrefix / List.Extra
+PASS  fails when prefix is longer than list / stripPrefix / List.Extra
+PASS  fails when list doesn't contain prefix / stripPrefix / List.Extra
+PASS  groups elements correctly / group / List.Extra
+PASS  groups by sub-element equality / groupWhile / List.Extra
+PASS  comparison function is reflexive, symmetric, and transitive / groupWhile / List.Extra
+PASS  returns all initial segments / inits / List.Extra
+PASS  returns all final segments / tails / List.Extra
+PASS  returns all elements where the second value is true / conditional / List.Extra
+PASS  returns all variations with a single item removed / select / List.Extra
+PASS  returns all splits at a single item / selectSplit / List.Extra
+PASS  success / isSubsequenceOf / List.Extra
+PASS  failure / isSubsequenceOf / List.Extra
+PASS  success at last element / isSubsequenceOf / List.Extra
+PASS  produces all combinations of addition / lift2 / List.Extra
+PASS  groups by the correct number of items / groupsOf / List.Extra
+PASS  step == size / groupsOfWithStep / List.Extra
+PASS  step < size / groupsOfWithStep / List.Extra
+PASS  step > size / groupsOfWithStep / List.Extra
+PASS  group sizes match passed sizes / groupsOfVarying / List.Extra
+PASS  groups correctly when passed counts are less than list size / groupsOfVarying / List.Extra
+PASS  groups correctly when passed counts are greater than list size / groupsOfVarying / List.Extra
+PASS  groups correctly while keeping trailing group / greedyGroupsOf / List.Extra
+PASS  step == size / greedyGroupsOfWithStep / List.Extra
+PASS  step < size / greedyGroupsOfWithStep / List.Extra
+PASS  step > size / greedyGroupsOfWithStep / List.Extra
+PASS  [] is prefix to anything / isPrefixOf / List.Extra
+PASS  reflexivity / isPrefixOf / List.Extra
+PASS  antisymmetry / isPrefixOf / List.Extra
+PASS  transitivity / isPrefixOf / List.Extra
+PASS  stack safety / isPrefixOf / List.Extra
+PASS  generalized fuzz test / isPrefixOf / List.Extra
+PASS  [] is suffix to anything / isSuffixOf / List.Extra
+PASS  reflexivity / isSuffixOf / List.Extra
+PASS  antisymmetry / isSuffixOf / List.Extra
+PASS  transitivity / isSuffixOf / List.Extra
+PASS  stack safety / isSuffixOf / List.Extra
+PASS  generalized fuzz test / isSuffixOf / List.Extra
+PASS  success / isInfixOf / List.Extra
+PASS  not consecutive / isInfixOf / List.Extra
+PASS  not in-order / isInfixOf / List.Extra
+PASS  partial match then real match / isInfixOf / List.Extra
+PASS  stack safety / isInfixOf / List.Extra
+PASS  generalized fuzz test / isInfixOf / List.Extra
+PASS  empty is infix of empty / isInfixOf / List.Extra
+PASS  empty is infix of anything / isInfixOf / List.Extra
+PASS  non-empty is not infix of empty / isInfixOf / List.Extra
+PASS  equal lists are infix / isInfixOf / List.Extra
+PASS  is stack safe / isInfixOf / List.Extra
+PASS  negative index as first argument returns the original list / swapAt / List.Extra
+PASS  negative index as second argument returns the original list / swapAt / List.Extra
+PASS  out of range index as first argument returns the original list / swapAt / List.Extra
+PASS  out of range index as second argument returns the original list / swapAt / List.Extra
+PASS  identical indexes returns the original list / swapAt / List.Extra
+PASS  swap the elements at indices 0 and 1 / swapAt / List.Extra
+PASS  negative index returns the original list / removeAt / List.Extra
+PASS  remove the element at index 0 / removeAt / List.Extra
+PASS  remove the element at index 2 / removeAt / List.Extra
+PASS  out of range index returns the original list / removeAt / List.Extra
+PASS  negative index returns the original list / setAt / List.Extra
+PASS  set index 0 to 9 / setAt / List.Extra
+PASS  set index 2 to 9 / setAt / List.Extra
+PASS  out of range index returns the original list / setAt / List.Extra
+PASS  negative index returns the original list / updateAt / List.Extra
+PASS  increment the element at index 0 / updateAt / List.Extra
+PASS  increment the element at index 2 / updateAt / List.Extra
+PASS  out of range index returns the original list / updateAt / List.Extra
+PASS  increments first element / updateIfIndex / List.Extra
+PASS  if the index is 2, then increment the element / updateIfIndex / List.Extra
+PASS  if the index is even, increment the element / updateIfIndex / List.Extra
+PASS  leaves the list untouched if the value is not in the list / remove / List.Extra
+PASS  removes the element if it's present in the list / remove / List.Extra
+PASS  removes only the first element / remove / List.Extra
+PASS  is stack-safe / remove / List.Extra
+PASS  remove all the elements / removeIfIndex / List.Extra
+PASS  remove the element at index 2 / removeIfIndex / List.Extra
+PASS  remove all elements at even indices / removeIfIndex / List.Extra
+PASS  removes last element of list / unconsLast / List.Extra
+PASS  returns Nothing if the list is empty / unconsLast / List.Extra
+PASS  maximum of empty list / maximumWith / List.Extra
+PASS  first maximum of records list / maximumWith / List.Extra
+PASS  maximumBy of empty list / maximumBy / List.Extra
+PASS  first maximumBy of records list / maximumBy / List.Extra
+PASS  minimum of empty list / minimumWith / List.Extra
+PASS  first minimum of records list / minimumWith / List.Extra
+PASS  minimumBy of empty list / minimumBy / List.Extra
+PASS  first minimumBy of records list / minimumBy / List.Extra
+PASS  empty list / setIf / List.Extra
+PASS  set all / setIf / List.Extra
+PASS  set only evens / setIf / List.Extra
+PASS  empty list / gatherEquals / List.Extra
+PASS  single element / gatherEquals / List.Extra
+PASS  proper test / gatherEquals / List.Extra
+PASS  empty list / gatherEqualsBy / List.Extra
+PASS  single element / gatherEqualsBy / List.Extra
+PASS  proper test / gatherEqualsBy / List.Extra
+PASS  empty list / gatherWith / List.Extra
+PASS  single element / gatherWith / List.Extra
+PASS  proper test / gatherWith / List.Extra
+PASS  empty list / uniquePairs / List.Extra
+PASS  single element has no counterpart to pair with / uniquePairs / List.Extra
+PASS  two elements have exactly one way to pair / uniquePairs / List.Extra
+PASS  three elements have three ways to pair / uniquePairs / List.Extra
+PASS  with first list empty / joinOn / List.Extra
+PASS  with second list empty / joinOn / List.Extra
+PASS  with neither list empty / joinOn / List.Extra
+PASS  Final value similar list and List.sort list / Property testing with fuzz / frequencies / List.Extra
+PASS  Final value similar, no matter the order of composition for frequencies and List.sort / Property testing with fuzz / frequencies / List.Extra
+PASS  Two (different/similar) lists should give 2 (different/similar) results / Property testing with fuzz / frequencies / List.Extra
+PASS  Frequencies on List Int / Unit testing on basic examples / frequencies / List.Extra
+PASS  Frequencies on List String / Unit testing on basic examples / frequencies / List.Extra
+PASS  Frequencies on empty List a / Unit testing on basic examples / frequencies / List.Extra
+PASS  behaves like foldl if function always returns Continue / stoppableFoldl / List.Extra
+PASS  simple example / stoppableFoldl / List.Extra
+PASS  after Stop, the function is not called anymore / stoppableFoldl / List.Extra
+PASS  sortWith behaves like list sort / Triple.Extra
+PASS  maxSafeInteger behaves unexpectedly, as expected / numbers tests / Basics.Extra additional doc tests
+PASS  minSafeInteger behaves unexpectedly, as expected / numbers tests / Basics.Extra additional doc tests
+PASS  reports if an integer is within the range of safety / numbers tests / Basics.Extra additional doc tests
+PASS  divides a floating point number safely / numbers tests / Basics.Extra additional doc tests
+PASS  divides an integer safely / numbers tests / Basics.Extra additional doc tests
+PASS  all of the modular arithmetic and none of the crashing / numbers tests / Basics.Extra additional doc tests
+PASS  safe remainders and none of the crashing / numbers tests / Basics.Extra additional doc tests
+PASS  inDegrees should behave as expected / Basics.Extra additional doc tests
+PASS  example 1 / inRadians / Basics.Extra additional doc tests
+PASS  example 2 / inRadians / Basics.Extra additional doc tests
+PASS  example 1 / inTurns / Basics.Extra additional doc tests
+PASS  example 2 / inTurns / Basics.Extra additional doc tests
+PASS  flip / higher-order helpers / Basics.Extra additional doc tests
+PASS  curry / higher-order helpers / Basics.Extra additional doc tests
+PASS  uncurry / higher-order helpers / Basics.Extra additional doc tests
+PASS  It produces the same trimmed string / unindent
+PASS  It produces at least one line with no leading whitespace / unindent
+PASS  All lines' length have been reduced by exactly the minimum indentation / unindent
+PASS  fromCodePoints is inverse of toCodePoints / unicode
+PASS  toCodePoints is inverse of fromCodePoints / unicode
+PASS  string length is greater than or equal to number of code points / unicode
+PASS  number of code points is less than or equal to string length / unicode
+PASS  encoded string length is as expected / unicode
+PASS  toCodePoints works properly - test case 0 / toCodePoints works as expected on hard-coded test cases / unicode
+PASS  toCodePoints works properly - test case 1 / toCodePoints works as expected on hard-coded test cases / unicode
+PASS  toCodePoints works properly - test case 2 / toCodePoints works as expected on hard-coded test cases / unicode
+PASS  toCodePoints works properly - test case 3 / toCodePoints works as expected on hard-coded test cases / unicode
+PASS  fromCodePoints works properly - test case 0 / fromCodePoints works as expected on hard-coded test cases / unicode
+PASS  fromCodePoints works properly - test case 1 / fromCodePoints works as expected on hard-coded test cases / unicode
+PASS  fromCodePoints works properly - test case 2 / fromCodePoints works as expected on hard-coded test cases / unicode
+PASS  fromCodePoints works properly - test case 3 / fromCodePoints works as expected on hard-coded test cases / unicode
+PASS  Should result string without accents / removeAccents
+PASS  Should result in phrase without accents / removeAccents
+PASS  Should produce a Polish phrase without accents / removeAccents
+PASS  Should result in a just when string has greater length than 0 / nonEmpty
+PASS  Should result in Nothing when an empty string is passed in / nonEmpty
+PASS  removes anything that could look like HTML
+PASS  It converts the first char of the string to uppercase / toSentenceCase
+PASS  The tail of the string remains untouched / toSentenceCase
+PASS  It only converst the first char in the string to lowercase / decapitalize
+PASS  It does not change the tail of the string / decapitalize
+PASS  It converts the first letter of each word to uppercase / toTitleCase
+PASS  The list should have as many elements as the ceil division of the length / break
+PASS  Concatenating the result yields the original string / break
+PASS  No element in the list should have more than `width` chars / break
+PASS  Concatenating the result yields the original string / softBreak
+PASS  The list should not have more elements than words on a clean string / softBreak
+PASS  The String.split result is the same as String.words / clean
+PASS  It trims the string on the left side / clean
+PASS  It trims the string on the right side / clean
+PASS  Result contains the substitution string / insertAt
+PASS  Resulting string has length as the sum of both arguments / insertAt
+PASS  Start of the string remains the same / insertAt
+PASS  End of the string remains the same / insertAt
+PASS  Returns true if the given string is blank / isBlank
+PASS  Returns false if the given string is not blank / isBlank
+PASS  Oracle test: ensure no behaviour change between implementations / isBlank
+PASS  Returns Nothing if the given string is blank / nonBlank
+PASS  Returns just the string if the given string is not blank / nonBlank
+PASS  It starts with the wrapping string / surround
+PASS  It ends with the wrapping string / surround
+PASS  It contains the original string / surround
+PASS  It does not have anything else inside / surround
+PASS  Removing the occurences should yield the right length / countOccurrences
+PASS  The resulting string length does not exceed the specified length / ellipsis
+PASS  The resulting string contains three dots at the end if necessary / ellipsis
+PASS  It starts with the left of the original string / ellipsis
+PASS  Removes quotes from the start of the string / unquote
+PASS  Wraps given string at the requested length / wrap
+PASS  Does not wrap string shorter than the requested length / wrap
+PASS  It uses the singular version when the count is one / pluralize
+PASS  It uses the plural version for > 1 count / pluralize
+PASS  It uses the plural version for 0 count / pluralize
+PASS  leftOfBack
+PASS  basic contains multiple / leftOf
+PASS  not contains / leftOf
+PASS  newlines / leftOf
+PASS  basic contains multiple / rightOfBack
+PASS  not contains / rightOfBack
+PASS  newlines / rightOfBack
+PASS  basic contains multiple / rightOf
+PASS  not contains / rightOf
+PASS  newlines / rightOf
+PASS  It is a lowercased string / underscored
+PASS  It has no spaces in the resulting string / underscored
+PASS  It has no consecutive target characters in the resulting string / underscored
+PASS  It is a lowercased string / dasherize
+PASS  It has no spaces in the resulting string / dasherize
+PASS  It has no consecutive target characters in the resulting string / dasherize
+PASS  removes lowercase accents / String.Normalize.removeDiacritics
+PASS  removes uppercase accents / String.Normalize.removeDiacritics
+PASS  removes ligatures / String.Normalize.removeDiacritics
+PASS  normalizes a sentence / String.Normalize.removeDiacritics
+PASS  don't touch punctuation / String.Normalize.removeDiacritics
+PASS  don't touch non latin characters / String.Normalize.removeDiacritics
+PASS  don't touch ASCII / String.Normalize.removeDiacritics
+PASS  always change diacritics / String.Normalize.removeDiacritics
+PASS  second pass does nothing / String.Normalize.removeDiacritics
+PASS  no regression with optimized version / String.Normalize.removeDiacritics
+PASS  It does not contain non-word characters / classify
+PASS  It starts with an uppercase letter / classify
+PASS  It is camelized once replaced non word charactes with a compatible string / classify
+PASS  It does not contain dashes / camelize
+PASS  It does not contain underscores / camelize
+PASS  It is the same uppercased string after removing the dashes and spaces / camelize
+PASS  The first letter after each dash is capitalized / camelize
+PASS  The first letter after each space is capitalized / camelize
+PASS  All uppercase / humanize
+PASS  Some uppercase / humanize
+PASS  Snake case / humanize
+PASS  Capitalized / humanize
+PASS  Kebab case / humanize
+PASS  Id suffix / humanize
+PASS  It starts with an uppercase letter after trimming / humanize
+PASS  The tail of the string is lowercased / humanize
+PASS  It yields the same string after removing underscores, dashes and spaces / humanize
+PASS  It adds a space before each group of uppercase letter / humanize
+PASS  It does not leave double spaces around / humanize
+PASS  It strips the _id at the end / humanize
+PASS  Result contains the substitution string / replaceSlice
+PASS  Result string has the length of the substitution + string after removing the slice / replaceSlice
+PASS  Start of the original string remains the same / replaceSlice
+PASS  End of the original string remains the same / replaceSlice
+

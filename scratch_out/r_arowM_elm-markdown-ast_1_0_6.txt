@@ -1,0 +1,2 @@
+PASS  render sample markdown as expected.
+

@@ -1,0 +1,50 @@
+PASS  has exactly 5 tabs / #tabIndex / UI.Tabs
+PASS  them all have tabindex / #tabIndex / UI.Tabs
+PASS  has exactly 4 not selected tabs / #ariaSelected / UI.Tabs
+PASS  has exactly 1 selected tab / #ariaSelected / UI.Tabs
+PASS  the first one is the selected / #ariaSelected / UI.Tabs
+PASS  Click on the first does nothing / Events / UI.Tabs
+PASS  Enter on the second fires "SelectTab TabTwo" / Events / UI.Tabs
+PASS  Click on the fourth fires "SelectTab TabFour" / Events / UI.Tabs
+PASS  shows the title when it is set / primary / UI.Alert
+PASS  shows the title when it is set / success / UI.Alert
+PASS  shows the title when it is set / danger / UI.Alert
+PASS  shows the title when it is set / warning / UI.Alert
+PASS  TextField.singlelineText sets the aria-label correctly / when withLabel called / UI.TextField
+PASS  TextField.singlelineText sets the title correctly / when withLabel called / UI.TextField
+PASS  TextField.email sets the aria-label correctly / when withLabel called / UI.TextField
+PASS  TextField.email sets the title correctly / when withLabel called / UI.TextField
+PASS  TextField.currentPassword sets the aria-label correctly / when withLabel called / UI.TextField
+PASS  TextField.currentPassword sets the title correctly / when withLabel called / UI.TextField
+PASS  TextField.singlelineText sets the text correctly / when withText called / UI.TextField
+PASS  TextField.email sets the text correctly / when withText called / UI.TextField
+PASS  TextField.currentPassword sets the text correctly / when withText called / UI.TextField
+PASS  TextField.singlelineText sets the placeholder correctly / when withPlaceholder called / UI.TextField
+PASS  TextField.email sets the placeholder correctly / when withPlaceholder called / UI.TextField
+PASS  TextField.currentPassword sets the placeholder correctly / when withPlaceholder called / UI.TextField
+PASS  TextField.singlelineText triggers OnTextFieldChanged / when input changed event is triggered / Events / UI.TextField
+PASS  TextField.email triggers OnTextFieldChanged / when input changed event is triggered / Events / UI.TextField
+PASS  TextField.currentPassword triggers OnTextFieldChanged / when input changed event is triggered / Events / UI.TextField
+PASS  TextField.singlelineText triggers OnEnterPressed / when enter is triggered / Events / UI.TextField
+PASS  TextField.email triggers OnEnterPressed / when enter is triggered / Events / UI.TextField
+PASS  TextField.currentPassword triggers OnEnterPressed / when enter is triggered / Events / UI.TextField
+PASS  this is the maximum size considered mobile / #ifMobile / UI.RenderConfig tests
+PASS  this is the mininum non-mobile size / #noLongerMobile / UI.RenderConfig tests
+PASS  this is not mobile / #ifVeryBig / UI.RenderConfig tests
+PASS  this is absolutely mobile / #ifVerySmall / UI.RenderConfig tests
+PASS  this is portrait / #ifPortrait / UI.RenderConfig tests
+PASS  this is landscape / #ifLandscape / UI.RenderConfig tests
+PASS  a square is landscape / #ifSquare / UI.RenderConfig tests
+PASS  sets the content with text / #withText / UI.Button tests
+PASS  sets the content with an icon / #withIcon / UI.Button tests
+PASS  Button doesn't fire message on click / when withDisabledMode is set to True / #withDisabledMode / UI.Button tests
+PASS  Button has disabled attribute / when withDisabledMode is set to True / #withDisabledMode / UI.Button tests
+PASS  Button fires OnButtonClicked message on click / when withDisabledMode is set to False / #withDisabledMode / UI.Button tests
+PASS  Toogle fires OnButtonClicked message on click / when withDisabledMode is set to False / #withDisabledMode / UI.Button tests
+PASS  Click fires the OnButtonClicked / #button / Events / UI.Button tests
+PASS  Click fires the (OnToggleChanged True) when is Off / #toggle / Events / UI.Button tests
+PASS  Click fires the (OnToggleChanged False) when is On / #toggle / Events / UI.Button tests
+PASS  Click do not fires the any Message / #link / Events / UI.Button tests
+PASS  has href attribute / #link / Events / UI.Button tests
+PASS  sets the text content / UI.Badge
+

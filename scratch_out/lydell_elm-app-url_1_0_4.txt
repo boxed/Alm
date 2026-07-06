@@ -1,0 +1,46 @@
+PASS  roundtrip random URL string / AppUrl
+PASS  roundtrip random AppUrl / AppUrl
+PASS  fromPath / AppUrl
+PASS  empty path / path parsing / AppUrl
+PASS  single slash / path parsing / AppUrl
+PASS  double slash / path parsing / AppUrl
+PASS  triple slash / path parsing / AppUrl
+PASS  not starting with a slash / path parsing / AppUrl
+PASS  one trailing slash / path parsing / AppUrl
+PASS  two trailing slashes / path parsing / AppUrl
+PASS  empty / query parameter parsing / AppUrl
+PASS  just a question mark / query parameter parsing / AppUrl
+PASS  two question marks / query parameter parsing / AppUrl
+PASS  two question marks and two equals signs / query parameter parsing / AppUrl
+PASS  empty key / query parameter parsing / AppUrl
+PASS  empty key and value / query parameter parsing / AppUrl
+PASS  multiple empty key and value / query parameter parsing / AppUrl
+PASS  with and without equals sign / query parameter parsing / AppUrl
+PASS  empty spots / query parameter parsing / AppUrl
+PASS  single value / query parameter parsing / AppUrl
+PASS  multiple values / query parameter parsing / AppUrl
+PASS  plus / query parameter parsing / AppUrl
+PASS  escaped plus / query parameter parsing / AppUrl
+PASS  both escaped and unescaped plus / query parameter parsing / AppUrl
+PASS  never contains whitespace or control characters / escaping / AppUrl
+PASS  percent / escaping / AppUrl
+PASS  path escapes / escaping / AppUrl
+PASS  path non-escapes / escaping / AppUrl
+PASS  query key escapes / escaping / AppUrl
+PASS  query key non-escapes / escaping / AppUrl
+PASS  query value escapes / escaping / AppUrl
+PASS  query value non-escapes / escaping / AppUrl
+PASS  fragment non-escapes / escaping / AppUrl
+PASS  spaces and plus / escaping / AppUrl
+PASS  everything empty / empty / AppUrl
+PASS  one empty string path / empty / AppUrl
+PASS  two empty strings path / empty / AppUrl
+PASS  trailing slash / empty / AppUrl
+PASS  query parameters with no values / empty / AppUrl
+PASS  query parameters with only empty strings / empty / AppUrl
+PASS  empty string fragment / empty / AppUrl
+PASS  query keys are sorted / misc / AppUrl
+PASS  nice example / misc / AppUrl
+PASS  non-ascii / misc / AppUrl
+PASS  percent decoding / misc / AppUrl
+

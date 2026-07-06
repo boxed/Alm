@@ -1,0 +1,51 @@
+PASS  decode succeeds with int based dict / Dict dictDecoder
+PASS  fails with the expected error message / Dict dictDecoder
+PASS  decodes floats / Float stringOrFloatJsonDecoder
+PASS  decodes floats in string format / Float stringOrFloatJsonDecoder
+PASS  decodes floats in exponent notation / Float stringOrFloatJsonDecoder
+PASS  decodes strings in exponent notation / Float stringOrFloatJsonDecoder
+PASS  decodes Infinity / Float stringOrFloatJsonDecoder
+PASS  decodes -Infinity / Float stringOrFloatJsonDecoder
+PASS  decodes NaN / Float stringOrFloatJsonDecoder
+PASS  conversion to millis roundtrips / Duration
+PASS  corrects positive seconds with negative nanos / Duration
+PASS  corrects negative seconds with positive nanos / Duration
+PASS  corrects nanos over second barrier / Duration
+PASS  loses nanosecond precision because posix is millisecond based / Duration
+PASS  does not roundtrip in the unsafe int range / Duration
+PASS  roundtrips on the edge of the unsafe int range / Duration
+PASS  does not roundtrip in the negative unsafe int range / Duration
+PASS  roundtrips in the negative edge of the unsafe int range / Duration
+PASS  json encoding / Duration
+PASS  json encoding roundtrips / Duration
+PASS  roundtrips in the safe JS int range / Timestamp
+PASS  corrects positive seconds with negative nanos / Timestamp
+PASS  corrects negative seconds with positive nanos / Timestamp
+PASS  corrects nanos over second barrier / Timestamp
+PASS  loses nanosecond precision because posix is millisecond based / Timestamp
+PASS  does not roundtrip in the unsafe int range / Timestamp
+PASS  roundtrips on the edge of the unsafe int range / Timestamp
+PASS  does not roundtrip in the negative unsafe int range / Timestamp
+PASS  roundtrips in the negative edge of the unsafe int range / Timestamp
+PASS  json decoding roundtrips for safe timestamps / Timestamp
+PASS  json decoding fails when the year 10000 is passed / Timestamp
+PASS  json decoding fails when the year 0 is passed / Timestamp
+PASS  from/toUnsignedString / Int64
+PASS  from/toSignedString / Int64
+PASS  fromInt 32-bit range / Int64
+PASS  fromInt some large JS int / Int64
+PASS  fromInt some large negative JS int / Int64
+PASS  fromInt min safe JS int / Int64
+PASS  fromInt max safe JS int / Int64
+PASS  signed int json decoder accepts ints / Int64
+PASS  signed int json decoder fails for ints outside of the safe JS range / Int64
+PASS  signed int json decoder accepts strings / Int64
+PASS  signed int json decoder accepts strings outside of the safe JS range / Int64
+PASS  signed int json encoder produces strings / Int64
+PASS  unsigned int json decoder accepts ints / Int64
+PASS  unsigned int json decoder fails for ints outside of the safe JS range / Int64
+PASS  unsigned int json decoder accepts strings / Int64
+PASS  unsigned int json decoder accepts strings outside of the safe JS range / Int64
+PASS  unsigned int json encoder produces strings / Int64
+PASS  json encoder and decoder roundtrip / Bytes
+

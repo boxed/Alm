@@ -94,21 +94,46 @@ pub fn generate_project_typed(
         .unwrap();
     }
     for attr in crate::builtins::HTML_STRING_ATTRS {
-        if *attr == "value" {
-            writeln!(gen.out, "var $Html$Attributes$value = _VDom_prop('value');").unwrap();
-        } else {
-            let key = match *attr {
-                "httpEquiv" => "http-equiv",
-                "acceptCharset" => "accept-charset",
-                other => other.trim_end_matches('_'),
-            };
-            writeln!(
+        // elm defines most string attributes as DOM *properties* (stringProperty
+        // "name") and only a few as raw attributes. Matching this matters because
+        // a property and an attribute with the same DOM name (e.g. `type_` vs
+        // `attribute "type"`) must live in separate buckets — otherwise one
+        // clobbers the other. `Some(prop)` => property; `None` => raw attribute
+        // whose name is the second element.
+        let (prop, attr_name): (Option<&str>, &str) = match *attr {
+            "class" => (Some("className"), "class"),
+            "for" => (Some("htmlFor"), "for"),
+            "type_" => (Some("type"), "type"),
+            "usemap" => (Some("useMap"), "usemap"),
+            "accesskey" => (Some("accessKey"), "accesskey"),
+            // Raw attributes in elm (no property form).
+            "draggable" => (None, "draggable"),
+            "rel" => (None, "rel"),
+            "list" => (None, "list"),
+            "media" => (None, "media"),
+            "datetime" => (None, "datetime"),
+            "manifest" => (None, "manifest"),
+            "charset" => (None, "charset"),
+            "content" => (None, "content"),
+            "httpEquiv" => (None, "http-equiv"),
+            // Everything else: a property whose name is the attr (sans trailing _).
+            other => (Some(other.trim_end_matches('_')), other.trim_end_matches('_')),
+        };
+        match prop {
+            Some(name) => writeln!(
+                gen.out,
+                "var $Html$Attributes${} = _VDom_prop('{}');",
+                sanitize(attr),
+                name
+            )
+            .unwrap(),
+            None => writeln!(
                 gen.out,
                 "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
                 sanitize(attr),
-                key
+                attr_name
             )
-            .unwrap();
+            .unwrap(),
         }
     }
     for attr in crate::builtins::HTML_BOOL_ATTRS {
@@ -126,13 +151,30 @@ pub fn generate_project_typed(
         .unwrap();
     }
     for attr in crate::builtins::HTML_INT_ATTRS {
-        writeln!(
-            gen.out,
-            "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
-            sanitize(attr),
-            attr
-        )
-        .unwrap();
+        // elm's int attributes: `start` is a property (Json.int); the rest are
+        // raw attributes rendered with String.fromInt, and a couple use a
+        // camelCased DOM name (tabIndex, minLength).
+        match *attr {
+            "start" => writeln!(
+                gen.out,
+                "var $Html$Attributes$start = function (n) {{ return {{ $: 'AProp', key: 'start', val: n }}; }};"
+            )
+            .unwrap(),
+            _ => {
+                let key = match *attr {
+                    "tabindex" => "tabIndex",
+                    "minlength" => "minLength",
+                    other => other,
+                };
+                writeln!(
+                    gen.out,
+                    "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
+                    sanitize(attr),
+                    key
+                )
+                .unwrap();
+            }
+        }
     }
     writeln!(
         gen.out,
