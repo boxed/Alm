@@ -435,3 +435,64 @@ findIndices predicate =
     indexedFoldr consIndexIf []
 "#);
 }
+
+#[test]
+fn generalization_does_not_conflate_distinct_free_vars() {
+    // Regression: two distinct captured (env-free) type variables could both
+    // carry the stored name "a" (each from a separate `List.head : List a ->
+    // Maybe a` instantiation). Generalization keys its free-variable map by
+    // name, so seeding both onto one name conflated them at instantiation,
+    // unifying `List Char` with `List Token` — a spurious TYPE MISMATCH that
+    // appeared nondeterministically depending on HashSet iteration order.
+    // Distilled from abadi199/elm-input-extra `MaskedInput.Pattern.isValid`.
+    // Loop to defeat HashMap seed randomization.
+    let body = r#"type Token = Input | Other Char
+
+scan : List Token -> List Char -> String -> String
+scan tokens input value =
+    let
+        maybeToken = List.head tokens
+        maybeInputChar = List.head input
+        parseToken token inputChar =
+            case token of
+                Input ->
+                    scan (Maybe.withDefault [] (List.tail tokens)) (Maybe.withDefault [] (List.tail input)) (value ++ String.fromChar inputChar)
+                Other other ->
+                    if other == inputChar then
+                        scan (Maybe.withDefault [] (List.tail tokens)) (Maybe.withDefault [] (List.tail input)) value
+                    else
+                        String.fromList input
+    in
+    case maybeToken of
+        Nothing -> value
+        Just token -> maybeInputChar |> Maybe.map (parseToken token) |> Maybe.withDefault value
+
+isValid : String -> List Token -> Bool
+isValid value tokens =
+    let
+        scanIsValid unscannedCharacters unscannedTokens =
+            let
+                currentToken = List.head unscannedTokens
+                currentCharacter = List.head unscannedCharacters
+                tailTokens = List.tail unscannedTokens |> Maybe.withDefault []
+                tailCharacters = List.tail unscannedCharacters |> Maybe.withDefault []
+                isCharacterEmpty = List.isEmpty unscannedCharacters
+                isTokenEmpty = List.isEmpty unscannedTokens
+            in
+            if isCharacterEmpty then True
+            else
+                case currentToken of
+                    Just Input -> scanIsValid tailCharacters tailTokens
+                    Just (Other other) ->
+                        currentCharacter
+                            |> Maybe.map ((==) other)
+                            |> Maybe.map (\isMatch -> if isMatch then scanIsValid tailCharacters tailTokens else False)
+                            |> Maybe.withDefault False
+                    Nothing -> False
+    in
+    scanIsValid (String.toList value) tokens
+"#;
+    for _ in 0..100 {
+        ok(body);
+    }
+}
