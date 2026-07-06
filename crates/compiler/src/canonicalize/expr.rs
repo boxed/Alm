@@ -331,6 +331,7 @@ fn canonicalize_expr(env: &mut Env, expr: &src::Expr) -> CResult<can::Expr> {
             )
         }
         src::Expr_::Unit => can::Expr_::Unit,
+        src::Expr_::Shader(shader) => can::Expr_::Shader(shader.clone()),
         src::Expr_::Tuple(a, b, rest) => {
             if rest.len() > 1 {
                 return Err(Error::new(

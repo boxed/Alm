@@ -34,6 +34,19 @@ pub enum Expr_ {
     Record(Vec<(Located<Name>, Expr)>),
     Unit,
     Tuple(Box<Expr>, Box<Expr>, Vec<Expr>),
+    /// A `[glsl| ... |]` WebGL shader literal.
+    Shader(Shader),
+}
+
+/// A GLSL shader literal: its source plus the `attribute`/`uniform`/`varying`
+/// names declared in it (used to synthesize the `WebGL.Shader` record types
+/// and to emit the shader object during code generation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shader {
+    pub src: String,
+    pub attributes: Vec<Name>,
+    pub uniforms: Vec<Name>,
+    pub varyings: Vec<Name>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

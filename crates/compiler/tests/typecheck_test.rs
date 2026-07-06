@@ -496,3 +496,12 @@ isValid value tokens =
         ok(body);
     }
 }
+
+#[test]
+fn glsl_shader_typechecks() {
+    // A `[glsl|...|]` literal is accepted and takes a flexible type, so it
+    // unifies with whatever `WebGL.Shader ...` annotation or use site pins it.
+    ok("vertexShader =\n    [glsl| attribute vec3 position; uniform mat4 m; |]\n");
+    // Usable where any value is expected (here, inside a tuple).
+    ok("pair =\n    ( [glsl| attribute vec3 a; |], 1 )\n");
+}

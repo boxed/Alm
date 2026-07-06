@@ -38,6 +38,8 @@ pub enum Expr_ {
     Record(Vec<(Located<Name>, Expr)>),
     Unit,
     Tuple(Box<Expr>, Box<Expr>, Vec<Expr>),
+    /// A `[glsl| ... |]` WebGL shader literal.
+    Shader(crate::ast::source::Shader),
 }
 
 #[derive(Debug, Clone)]

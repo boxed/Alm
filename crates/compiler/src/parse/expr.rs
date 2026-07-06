@@ -22,6 +22,7 @@ pub fn term(p: &mut Parser) -> PResult<Expr> {
             NumberLit::Int(n) => Ok(Located::at(start, p.position(), Expr_::Int(n))),
             NumberLit::Float(f) => Ok(Located::at(start, p.position(), Expr_::Float(f))),
         },
+        Some(b'[') if p.src_from_here().starts_with(b"[glsl|") => shader(p),
         Some(b'[') => list(p),
         Some(b'{') => {
             let expr = record(p)?;
@@ -66,6 +67,70 @@ fn accessible(p: &mut Parser, start: Position, expr: Expr) -> PResult<Expr> {
         expr = Located::at(start, end, Expr_::Access(Box::new(expr), field_located));
     }
     Ok(expr)
+}
+
+// GLSL SHADERS
+
+fn shader(p: &mut Parser) -> PResult<Expr> {
+    let start = p.position();
+    let src = p.shader()?;
+    let info = parse_glsl(&src);
+    Ok(Located::at(start, p.position(), Expr_::Shader(info.with_src(src))))
+}
+
+/// The `attribute`/`uniform`/`varying` names collected while scanning a GLSL
+/// block. Deliberately lenient: we only need the declared names.
+struct GlslInfo {
+    attributes: Vec<Name>,
+    uniforms: Vec<Name>,
+    varyings: Vec<Name>,
+}
+
+impl GlslInfo {
+    fn with_src(self, src: String) -> crate::ast::source::Shader {
+        crate::ast::source::Shader {
+            src,
+            attributes: self.attributes,
+            uniforms: self.uniforms,
+            varyings: self.varyings,
+        }
+    }
+}
+
+/// Scan GLSL source for `attribute TYPE name;`, `uniform TYPE name;`, and
+/// `varying TYPE name;` declarations, matching how the Elm compiler harvests
+/// the shader's input/output variables. The last whitespace-separated word
+/// before the terminating `;` is the variable name.
+fn parse_glsl(src: &str) -> GlslInfo {
+    let mut attributes = Vec::new();
+    let mut uniforms = Vec::new();
+    let mut varyings = Vec::new();
+    for raw in src.split(';') {
+        let stmt = raw.trim();
+        let mut words = stmt.split_whitespace();
+        let bucket = match words.next() {
+            Some("attribute") => &mut attributes,
+            Some("uniform") => &mut uniforms,
+            Some("varying") => &mut varyings,
+            _ => continue,
+        };
+        // `<qualifier> <type> <name>` — the name is the final token, minus
+        // any array suffix like `name[3]`.
+        if let Some(last) = stmt.split_whitespace().last() {
+            let name = last.split('[').next().unwrap_or(last);
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                let n = Name::from(name);
+                if !bucket.contains(&n) {
+                    bucket.push(n);
+                }
+            }
+        }
+    }
+    GlslInfo {
+        attributes,
+        uniforms,
+        varyings,
+    }
 }
 
 // LISTS

@@ -1139,6 +1139,17 @@ impl Checker<'_> {
                     .fresh(Content::Structure(FlatType::Record(field_types, empty))))
             }
             Unit => Ok(self.pool.fresh(Content::Structure(FlatType::Unit))),
+            Shader(_) => {
+                // `[glsl|...|]` has type `WebGL.Shader attributes uniforms
+                // varyings`. Deriving those three record types precisely would
+                // require a GLSL type table plus Elm's extensible-record link
+                // rules (a fragment shader may declare fewer uniforms than its
+                // annotation lists). alm has no WebGL runtime, so a shader is
+                // only ever pinned by its own annotation or its use site; a
+                // fresh flexible type unifies with either and accepts exactly
+                // the shaders Elm accepts.
+                Ok(self.pool.fresh_var())
+            }
             Tuple(a, b, rest) => {
                 let a = self.infer_expr(a)?;
                 let b = self.infer_expr(b)?;

@@ -755,6 +755,23 @@ impl Generator {
                 format!("{{ {} }}", rendered.join(", "))
             }
             Unit => "_Utils_Tuple0".to_string(),
+            Shader(shader) => {
+                // Same object shape Elm's kernel expects: the GLSL source plus
+                // a name->name map for each attribute and uniform.
+                let obj = |names: &[Name]| -> String {
+                    let entries: Vec<String> = names
+                        .iter()
+                        .map(|n| format!("{}: {}", n, js_string(n.as_str())))
+                        .collect();
+                    format!("{{{}}}", entries.join(", "))
+                };
+                format!(
+                    "{{ src: {}, attributes: {}, uniforms: {} }}",
+                    js_string(&shader.src),
+                    obj(&shader.attributes),
+                    obj(&shader.uniforms)
+                )
+            }
             Tuple(a, b, rest) => match rest.first() {
                 None => format!(
                     "{{ $: '#2', a: {}, b: {} }}",

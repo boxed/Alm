@@ -471,6 +471,39 @@ impl<'a> Parser<'a> {
 
     // STRINGS — port of Parse.String
 
+    /// Parse a `[glsl| ... |]` WebGL shader literal. The cursor is on `[`.
+    /// Captures the raw GLSL source between `[glsl|` and `|]`, tracking
+    /// newlines so later regions stay accurate.
+    pub fn shader(&mut self) -> PResult<String> {
+        let open = self.region_here();
+        debug_assert!(self.src_from_here().starts_with(b"[glsl|"));
+        self.bump(6); // `[glsl|`
+        let start = self.pos;
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(ParseError::new(
+                        "I got to the end of the file without seeing the closing `|]` of this GLSL block.",
+                        open,
+                    ))
+                }
+                Some(b'|') if self.peek_at(1) == Some(b']') => {
+                    let src = std::str::from_utf8(&self.src[start..self.pos])
+                        .map_err(|_| self.error("This GLSL block contains invalid UTF-8"))?
+                        .to_string();
+                    self.bump(2); // `|]`
+                    return Ok(src);
+                }
+                Some(b'\n') => self.bump_newline(),
+                Some(b) => {
+                    let n = utf8_len(b);
+                    self.pos += n;
+                    self.col += 1;
+                }
+            }
+        }
+    }
+
     pub fn string(&mut self) -> PResult<String> {
         if self.peek() != Some(b'"') {
             return Err(self.error("Expecting a string"));

@@ -206,7 +206,7 @@ fn check_expr(table: &UnionTable, expr: &can::Expr, errors: &mut Vec<Error>) {
     use can::Expr_::*;
     match &expr.value {
         VarLocal(_) | VarTopLevel(_) | VarForeign(..) | VarCtor(..) | Chr(_) | Str(_)
-        | Int(_) | Float(_) | Accessor(_) | Unit => {}
+        | Int(_) | Float(_) | Accessor(_) | Unit | Shader(_) => {}
         List(entries) => entries.iter().for_each(|e| check_expr(table, e, errors)),
         Negate(inner) => check_expr(table, inner, errors),
         Binop(_, _, _, left, right) => {
