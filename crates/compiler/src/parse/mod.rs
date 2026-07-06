@@ -591,25 +591,33 @@ impl<'a> Parser<'a> {
             Some(b'u') if self.peek_at(1) == Some(b'{') => {
                 let code = self.unicode_escape_code()?;
                 // Elm sources may write astral-plane characters as UTF-16
-                // surrogate pairs: `\u{D835}\u{DD04}`.
-                if (0xD800..=0xDBFF).contains(&code) {
-                    if self.peek() == Some(b'\\')
-                        && self.peek_at(1) == Some(b'u')
-                        && self.peek_at(2) == Some(b'{')
-                    {
-                        self.bump(1); // the backslash
-                        let low = self.unicode_escape_code()?;
-                        if (0xDC00..=0xDFFF).contains(&low) {
-                            let combined =
-                                0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                            return char::from_u32(combined).ok_or_else(|| {
-                                self.error("This surrogate pair is not a valid code point")
-                            });
-                        }
+                // surrogate pairs: `\u{D835}\u{DD04}`. Combine a high surrogate
+                // with a following low one into a single scalar value.
+                if (0xD800..=0xDBFF).contains(&code)
+                    && self.peek() == Some(b'\\')
+                    && self.peek_at(1) == Some(b'u')
+                    && self.peek_at(2) == Some(b'{')
+                {
+                    let (save_pos, save_col) = (self.pos, self.col);
+                    self.bump(1); // the backslash
+                    let low = self.unicode_escape_code()?;
+                    if (0xDC00..=0xDFFF).contains(&low) {
+                        let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                        return char::from_u32(combined).ok_or_else(|| {
+                            self.error("This surrogate pair is not a valid code point")
+                        });
                     }
-                    return Err(self.error(
-                        "This is half of a surrogate pair; it must be followed by the low half",
-                    ));
+                    // The second escape was not a low surrogate; rewind so it
+                    // is lexed on its own next iteration.
+                    self.pos = save_pos;
+                    self.col = save_col;
+                }
+                // A lone surrogate (high or low). Elm's strings are UTF-16 and
+                // can hold these (e.g. the regex ranges in wolfadex/elm-ansi),
+                // so smuggle it through as a private-use scalar; JS codegen
+                // turns it back into a `\uXXXX` escape.
+                if (0xD800..=0xDFFF).contains(&code) {
+                    return Ok(encode_lone_surrogate(code));
                 }
                 char::from_u32(code)
                     .ok_or_else(|| self.error("This is not a valid unicode code point"))
@@ -653,6 +661,27 @@ impl<'a> Parser<'a> {
 pub enum NumberLit {
     Int(i64),
     Float(f64),
+}
+
+/// Lone UTF-16 surrogate code points (U+D800..=U+DFFF) are not Unicode scalar
+/// values, so they cannot be stored in a Rust `char`/`String`. Elm's strings
+/// are UTF-16 and *can* hold them, so we smuggle each lone surrogate through
+/// the compiler as a plane-16 private-use scalar (SPUA-B, U+10F800..=U+10FFFF).
+/// JS codegen (`generate::js_string`) reverses the mapping and emits the
+/// original surrogate as a `\uXXXX` escape, matching stock elm's output.
+pub(crate) const SURROGATE_PUA_BASE: u32 = 0x10_F800;
+
+/// Map a lone surrogate code point to its private-use stand-in scalar.
+pub(crate) fn encode_lone_surrogate(code: u32) -> char {
+    debug_assert!((0xD800..=0xDFFF).contains(&code));
+    char::from_u32(SURROGATE_PUA_BASE + (code - 0xD800)).expect("valid private-use scalar")
+}
+
+/// Inverse of [`encode_lone_surrogate`]: if `c` stands in for a lone surrogate,
+/// return the original surrogate code point (U+D800..=U+DFFF), else `None`.
+pub(crate) fn decode_lone_surrogate(c: char) -> Option<u32> {
+    let v = c as u32;
+    (SURROGATE_PUA_BASE..=SURROGATE_PUA_BASE + 0x7FF).contains(&v).then(|| 0xD800 + (v - SURROGATE_PUA_BASE))
 }
 
 fn utf8_len(first_byte: u8) -> usize {

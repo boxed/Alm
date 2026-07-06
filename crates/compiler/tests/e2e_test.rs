@@ -483,6 +483,42 @@ fn codegen_branches() {
 }
 
 #[test]
+fn lone_surrogate_escapes_round_trip_like_elm() {
+    // Elm's strings are UTF-16 and accept lone surrogate escapes (e.g. the
+    // regex ranges in wolfadex/elm-ansi). alm smuggles each lone surrogate
+    // through as a private-use scalar and JS codegen re-emits it as `\uXXXX`.
+    // Expected lengths verified against stock elm 0.19.1.
+    assert_eq!(run("main = String.fromInt (String.length \"\\u{D800}\")"), "1");
+    assert_eq!(
+        run("main = String.fromInt (String.length \"[\\u{D800}-\\u{DBFF}]\")"),
+        "5"
+    );
+    // Lone low surrogate and a lone high surrogate mixed with plain chars.
+    assert_eq!(
+        run("main = String.fromInt (String.length \"a\\u{D800}b\\u{DC00}c\")"),
+        "5"
+    );
+    // A surrogate PAIR escape must still combine into one astral char (2 units).
+    assert_eq!(run("main = String.fromInt (String.length \"\\u{1F600}\")"), "2");
+    assert_eq!(
+        run("main = String.fromInt (String.length (String.reverse \"a\\u{D800}c\"))"),
+        "3"
+    );
+
+    // The generated JS must reproduce the lone surrogate as a `\uD800` escape,
+    // byte-for-byte like stock elm (not a replacement char or raw UTF-8).
+    let js = common::compile_single(
+        "Test.elm",
+        "module Test exposing (..)\n\nmain = \"a\\u{D800}b\\u{DC00}c\"",
+    );
+    assert!(
+        js.contains("'a\\uD800b\\uDC00c'"),
+        "expected lone surrogate escapes in generated JS, got a literal like: {}",
+        js.lines().find(|l| l.contains("Main$main") || l.contains("Test$main")).unwrap_or("<none>")
+    );
+}
+
+#[test]
 fn dependency_sorting_walks_every_expression_shape() {
     // Every definition references ones defined later, through a different
     // expression form each time, so the reference walker visits them all.
