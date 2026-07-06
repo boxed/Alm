@@ -1340,3 +1340,87 @@ fn unbox_curried_closure_from_dict() {
          \x20       Nothing -> \"none\"\n",
     );
 }
+
+#[test]
+fn local_function_definition() {
+    // A non-recursive `let`-bound function, closure-converted like a lambda.
+    assert_same(
+        "local_fn",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       inc x = x + 1\n\
+         \x20   in\n\
+         \x20   String.fromInt (inc 41)\n",
+    );
+}
+
+#[test]
+fn local_function_captures_outer() {
+    // A local function that captures an enclosing `let` binding.
+    assert_same(
+        "local_fn_capture",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       base = 100\n\
+         \x20       add n = base + n\n\
+         \x20   in\n\
+         \x20   String.fromInt (add 23)\n",
+    );
+}
+
+#[test]
+fn recursive_local_function() {
+    // A self-recursive `let`-bound function reaches itself via its environment.
+    assert_same(
+        "rec_local_fn",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       go n acc = if n == 0 then acc else go (n - 1) (acc + n)\n\
+         \x20   in\n\
+         \x20   String.fromInt (go 100 0)\n",
+    );
+}
+
+#[test]
+fn local_function_pattern_param() {
+    // A `let`-bound function with a destructuring (constructor) parameter.
+    assert_same(
+        "local_fn_pat",
+        "module Test exposing (..)\n\
+         \n\
+         type Id = Id Int\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       unwrap (Id n) = n\n\
+         \x20   in\n\
+         \x20   String.fromInt (unwrap (Id 7))\n",
+    );
+}
+
+#[test]
+fn toplevel_pattern_param() {
+    // A top-level function whose parameter is a destructuring pattern.
+    assert_same(
+        "toplevel_pat_param",
+        "module Test exposing (..)\n\
+         \n\
+         type Id = Id Int\n\
+         \n\
+         unwrap : Id -> Int\n\
+         unwrap (Id n) = n\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (unwrap (Id 42))\n",
+    );
+}

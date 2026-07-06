@@ -418,6 +418,10 @@ impl Checker<'_> {
                     )
                 })?;
             }
+            // Record the definition's own (arg1 -> .. -> body) type at its name
+            // region so monomorphization can recover a `let`-bound function's
+            // parameter types. Zonked with this definition's naming state below.
+            self.node_vars.push((def.name.region, def_type));
             Ok(def_type)
         })();
 

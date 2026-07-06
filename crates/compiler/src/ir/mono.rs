@@ -628,22 +628,14 @@ impl Specializer<'_> {
         match decl {
             can::LetDecl::Def(def) => TypedLetDecl::Def {
                 name: def.name.value.clone(),
-                params: def
-                    .args
-                    .iter()
-                    .map(|a| (a.clone(), can::Type::Unit))
-                    .collect(),
+                params: self.local_params(def, subst),
                 body: self.expr(&def.body, subst),
             },
             can::LetDecl::Recursive(defs) => TypedLetDecl::Recursive(
                 defs.iter()
                     .map(|def| TypedLetDecl::Def {
                         name: def.name.value.clone(),
-                        params: def
-                            .args
-                            .iter()
-                            .map(|a| (a.clone(), can::Type::Unit))
-                            .collect(),
+                        params: self.local_params(def, subst),
                         body: self.expr(&def.body, subst),
                     })
                     .collect(),
@@ -652,6 +644,38 @@ impl Specializer<'_> {
                 TypedLetDecl::Destruct(pattern.clone(), self.expr(value, subst))
             }
         }
+    }
+
+    /// Peel a `let`-bound definition's parameter types off its recorded
+    /// function type (captured at `def.name.region` by the checker), applying
+    /// the enclosing substitution. Falls back to `Unit` when the type is
+    /// unavailable or under-applied (a non-function value binding).
+    fn local_params(
+        &self,
+        def: &can::Def,
+        subst: &HashMap<Name, can::Type>,
+    ) -> Vec<(can::Pattern, can::Type)> {
+        let mut remaining = self
+            .ctx
+            .node_types
+            .get(&def.name.region)
+            .map(|t| apply_subst(subst, t));
+        def.args
+            .iter()
+            .map(|arg| {
+                let ty = match remaining.take() {
+                    Some(can::Type::Lambda(a, b)) => {
+                        remaining = Some(*b);
+                        *a
+                    }
+                    other => {
+                        remaining = other;
+                        can::Type::Unit
+                    }
+                };
+                (arg.clone(), ty)
+            })
+            .collect()
     }
 }
 

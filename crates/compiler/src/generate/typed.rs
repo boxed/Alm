@@ -673,7 +673,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         );
         fv.set_subprogram(subprogram);
 
-        for (i, (pattern, _)) in f.params.iter().enumerate() {
+        // Desugar destructuring parameters (`unwrap (Id n) = n`, `f (a, b) = ..`)
+        // into fresh variables plus a case-matched body, exactly as `gen_closure`
+        // does for lambdas, so the case/pattern compiler binds them.
+        let (owned_params, owned_body);
+        let (params, body) = if f.params.iter().any(|(p, _)| simple_param_name(p).is_none()) {
+            let (np, nb) = desugar_destructuring_params(&mut self.fresh_id, &f.params, &f.body);
+            owned_params = np;
+            owned_body = nb;
+            (owned_params.as_slice(), &owned_body)
+        } else {
+            (f.params.as_slice(), &f.body)
+        };
+
+        for (i, (pattern, _)) in params.iter().enumerate() {
             if let Some(name) = simple_param_name(pattern) {
                 self.locals
                     .insert(name, fv.get_nth_param(i as u32).unwrap());
@@ -686,7 +699,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.builder.position_at_end(entry);
-        let value = self.gen(&f.body)?;
+        let value = self.gen(body)?;
         self.builder.build_return(Some(&value)).unwrap();
         Ok(())
     }
@@ -1701,8 +1714,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         func: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        // A saturated constructor application builds a tagged heap value.
-        if let TypedKind::Ctor(_, _, ctor) = &func.kind {
+        // A saturated constructor application builds a tagged heap value; a
+        // partial one (result type still a function) is eta-expanded into a
+        // closure that constructs once the remaining arguments arrive.
+        if let TypedKind::Ctor(home, union, ctor) = &func.kind {
+            if matches!(whole.tipe, crate::ast::canonical::Type::Lambda(..)) {
+                return self.gen_ctor_partial(whole, home, union, ctor, args);
+            }
             return self.gen_ctor_apply(whole, ctor, args);
         }
         // A built-in call becomes a generated, type-specialized kernel — but
@@ -1854,20 +1872,51 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     let v = self.gen(body)?;
                     self.locals.insert(name.to_string(), v);
                 }
+                // A non-recursive local function `let f x = e`: closure-convert
+                // it like a lambda (capturing outer locals) and bind the closure.
+                Def { name, params, body } => {
+                    let result_layout = self.layouts.layout_of(&body.tipe);
+                    let clos = self.gen_closure(params, body, &result_layout)?;
+                    self.locals.insert(name.to_string(), clos);
+                }
                 Destruct(pattern, value) => {
                     let v = self.gen(value)?;
                     let layout = self.layouts.layout_of(&value.tipe);
                     self.bind_pattern(pattern, v, &layout)?;
                 }
-                _ => {
-                    return Err(
-                        "typed backend: local function definitions are not supported yet"
-                            .to_string(),
-                    )
-                }
+                Recursive(group) => self.gen_rec_group(group)?,
             }
         }
         self.gen(body)
+    }
+
+    /// Generate a group of mutually-recursive local definitions. A singleton
+    /// group is a self-recursive function, compiled with `gen_closure_named` so
+    /// its body reaches itself through the environment pointer. Larger groups
+    /// (genuine mutual recursion) are not yet supported by the typed backend.
+    fn gen_rec_group(
+        &mut self,
+        group: &[crate::ir::mono::TypedLetDecl],
+    ) -> Result<(), String> {
+        use crate::ir::mono::TypedLetDecl::*;
+        match group {
+            [Def { name, params, body }] if !params.is_empty() => {
+                let result_layout = self.layouts.layout_of(&body.tipe);
+                let clos =
+                    self.gen_closure_named(params, body, &result_layout, Some(name.as_str()))?;
+                self.locals.insert(name.to_string(), clos);
+                Ok(())
+            }
+            // A recursive *value* (e.g. `x = 1 :: x`) — not a function. Rare and
+            // not modelled by the typed backend.
+            [Def { params, .. }] if params.is_empty() => Err(
+                "typed backend: recursive local value bindings are not supported".to_string(),
+            ),
+            _ => Err(
+                "typed backend: mutually-recursive local functions are not supported yet"
+                    .to_string(),
+            ),
+        }
     }
 
     fn gen_tuple(
@@ -2093,6 +2142,60 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let body = TypedExpr {
             tipe: result_ty.clone(),
             kind: TypedKind::Call(Box::new(ctor_fn), arg_exprs),
+            region: whole.region,
+        };
+        let result_layout = self.layouts.layout_of(&result_ty);
+        self.gen_closure(&params, &body, &result_layout)
+    }
+
+    /// A partially-applied constructor `Ctor a0..ak` whose result is still a
+    /// function: eta-expand into `\rest.. -> Ctor a0..ak rest..` and
+    /// closure-convert it. `whole.tipe` is the remaining function type.
+    fn gen_ctor_partial(
+        &mut self,
+        whole: &TypedExpr,
+        home: &crate::data::Name,
+        union: &crate::data::Name,
+        ctor: &crate::ast::canonical::Ctor,
+        applied: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        use crate::ast::canonical::{Pattern_, Type};
+        // Peel the remaining argument types and the final (constructed) type.
+        let mut rest_types = Vec::new();
+        let mut t = whole.tipe.clone();
+        while let Type::Lambda(a, b) = t {
+            rest_types.push(*a);
+            t = *b;
+        }
+        let result_ty = t;
+        let id = self.lam_id;
+        self.lam_id += 1;
+        let mut params = Vec::new();
+        let mut call_args: Vec<TypedExpr> = applied.to_vec();
+        for (i, at) in rest_types.iter().enumerate() {
+            let pname = crate::data::Name::from(format!("$cpart{}_{}", id, i));
+            params.push((
+                crate::reporting::Located {
+                    region: crate::reporting::Region::ZERO,
+                    value: Pattern_::Var(pname.clone()),
+                },
+                at.clone(),
+            ));
+            call_args.push(TypedExpr {
+                tipe: at.clone(),
+                kind: TypedKind::Local(pname),
+                region: whole.region,
+            });
+        }
+        let ctor_fn = TypedExpr {
+            // The constructor's full function type: applied-arg types -> whole.tipe.
+            tipe: whole.tipe.clone(),
+            kind: TypedKind::Ctor(home.clone(), union.clone(), ctor.clone()),
+            region: whole.region,
+        };
+        let body = TypedExpr {
+            tipe: result_ty.clone(),
+            kind: TypedKind::Call(Box::new(ctor_fn), call_args),
             region: whole.region,
         };
         let result_layout = self.layouts.layout_of(&result_ty);
@@ -3644,6 +3747,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         body: &TypedExpr,
         result_layout: &Layout,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.gen_closure_named(params, body, result_layout, None)
+    }
+
+    /// As [`gen_closure`], but `self_name`, when set, names the closure itself
+    /// for a recursive local function: the name is excluded from the captured
+    /// free variables and, inside the lifted body, bound to the environment
+    /// pointer — which *is* the closure `{fn_ptr, captures...}`, so a
+    /// self-call re-enters through the ordinary closure calling convention.
+    fn gen_closure_named(
+        &mut self,
+        params: &[(crate::ast::canonical::Pattern, crate::ast::canonical::Type)],
+        body: &TypedExpr,
+        result_layout: &Layout,
+        self_name: Option<&str>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         // Desugar destructuring parameters (`\() ->`, `\(Id n) ->`, `\(a,b) ->`,
         // `\{x} ->`) into a fresh variable per such parameter whose body matches
         // it with a single-arm `case`, reusing the case/pattern compiler.
@@ -3671,9 +3789,14 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
         }
 
-        // Free variables = referenced locals not bound within the lambda.
+        // Free variables = referenced locals not bound within the lambda. A
+        // recursive function's own name is not a capture: it is supplied inside
+        // the body from the environment pointer.
         let mut bound: std::collections::HashSet<String> =
             param_names.iter().cloned().collect();
+        if let Some(sn) = self_name {
+            bound.insert(sn.to_string());
+        }
         let mut refs = Vec::new();
         free_vars(body, &mut bound, &mut refs);
         let captures: Vec<(String, BasicValueEnum<'ctx>)> = refs
@@ -3737,6 +3860,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .unwrap();
             let v = self.builder.build_load(struct_fields[i + 1], fp, n).unwrap();
             self.locals.insert(n.clone(), v);
+        }
+        // A recursive function refers to itself through the environment pointer,
+        // which is precisely its own closure value.
+        if let Some(sn) = self_name {
+            self.locals.insert(sn.to_string(), env.into());
         }
         for (idx, pn) in param_names.iter().enumerate() {
             let val = lifted.get_nth_param((idx + 1) as u32).unwrap();
