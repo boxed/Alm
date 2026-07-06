@@ -254,3 +254,58 @@ fn maximum_minimum_sum_product() {
          \x20       ]\n",
     );
 }
+
+#[test]
+fn random_generators() {
+    // Random must be bit-identical to elm/JS: the PCG-XSH-RR port is exact,
+    // so int/float/list and seed-threading all reproduce the same sequence.
+    assert_same(
+        "random_generators",
+        "module Test exposing (..)\n\
+         \n\
+         import Random\n\
+         \n\
+         main =\n\
+         \x20   let\n\
+         \x20       ( a, s1 ) =\n\
+         \x20           Random.step (Random.int 1 6) (Random.initialSeed 42)\n\
+         \n\
+         \x20       ( b, s2 ) =\n\
+         \x20           Random.step (Random.int 1 6) s1\n\
+         \n\
+         \x20       ( c, _ ) =\n\
+         \x20           Random.step (Random.int 0 1000000) s2\n\
+         \n\
+         \x20       ( f, _ ) =\n\
+         \x20           Random.step (Random.float 0 1) (Random.initialSeed 42)\n\
+         \n\
+         \x20       ( xs, _ ) =\n\
+         \x20           Random.step (Random.list 5 (Random.int 0 100)) (Random.initialSeed 99)\n\
+         \n\
+         \x20       ( ys, _ ) =\n\
+         \x20           Random.step (Random.map (\\n -> n * 2) (Random.int 1 10)) (Random.initialSeed 7)\n\
+         \x20   in\n\
+         \x20   Debug.toString ( ( a, b, c ), ( f, xs, ys ) )\n",
+    );
+}
+
+#[test]
+fn debug_to_string_values() {
+    // Exercises Debug.toString across chars, records (sorted fields), custom
+    // types, negative numbers, nested containers and Maybe/Result.
+    assert_same(
+        "debug_to_string_values",
+        "module Test exposing (..)\n\
+         \n\
+         type Shape\n\
+         \x20   = Circle Float\n\
+         \x20   | Rect Int Int\n\
+         \n\
+         main =\n\
+         \x20   Debug.toString\n\
+         \x20       ( { y = 2, x = 'a', name = \"hi\" }\n\
+         \x20       , [ Circle 1.5, Rect -3 4 ]\n\
+         \x20       , ( ( Just [ -1, 0, 2 ], Ok 'z', Err \"no\" ), ( -0.25, 'x' ) )\n\
+         \x20       )\n",
+    );
+}

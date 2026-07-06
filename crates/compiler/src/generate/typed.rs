@@ -1613,7 +1613,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 // A function used as a first-class value becomes a closure;
                 // a zero-argument value is called to produce its value.
                 if matches!(expr.tipe, crate::ast::canonical::Type::Lambda(..)) {
-                    Ok(self.wrap_global(&name.to_string()).into())
+                    Ok(self.wrap_global(&name.to_string(), &expr.tipe).into())
                 } else {
                     Ok(self
                         .builder
@@ -4019,9 +4019,33 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     /// A closure wrapping a named function used as a first-class value: an
     /// env-ignoring trampoline `wrap(env, args...) = f(args...)`, cached.
-    fn wrap_global(&mut self, mangled: &str) -> inkwell::values::PointerValue<'ctx> {
+    ///
+    /// `tipe` is the function's value type. A point-free top-level definition
+    /// (e.g. `f = g []`) compiles to fewer LLVM parameters than its type
+    /// arity, but the closure ABI is arity-less: whoever applies this closure
+    /// passes one argument per arrow in the type. So when the compiled arity
+    /// is short, the trampoline is eta-expanded — it calls the target with the
+    /// arguments it does take, then applies the returned closure to the rest.
+    fn wrap_global(
+        &mut self,
+        mangled: &str,
+        tipe: &crate::ast::canonical::Type,
+    ) -> inkwell::values::PointerValue<'ctx> {
         if let Some(w) = self.wrappers.get(mangled) {
             return self.build_closure_value(w.as_global_value().as_pointer_value(), &[]);
+        }
+        let compiled = self.functions[mangled].count_params() as usize;
+        let type_arity = {
+            let mut n = 0;
+            let mut t = tipe;
+            while let crate::ast::canonical::Type::Lambda(_, b) = t {
+                n += 1;
+                t = b;
+            }
+            n
+        };
+        if type_arity > compiled {
+            return self.wrap_global_eta(mangled, tipe, compiled, type_arity);
         }
         let target = self.functions[mangled];
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
@@ -4059,6 +4083,73 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // Restore the caller's debug location: a helper must neither leak its
         // own (subprogram-less) scope nor its inner body's scope into the
         // function it returns to.
+        self.restore_loc(saved_loc);
+        self.wrappers.insert(mangled.to_string(), wrapper);
+        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
+    }
+
+    /// The eta-expanding variant of `wrap_global` for a point-free (under-arity)
+    /// global. The trampoline takes one parameter per arrow in the type; it
+    /// calls the target with its `compiled` leading parameters (producing a
+    /// closure) and applies that closure to the remaining `type_arity -
+    /// compiled` parameters, so the closure the caller applies is saturated the
+    /// same way an eta-expanded definition would be.
+    fn wrap_global_eta(
+        &mut self,
+        mangled: &str,
+        tipe: &crate::ast::canonical::Type,
+        compiled: usize,
+        type_arity: usize,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        use crate::ast::canonical::Type;
+        // The layout of each argument (one per arrow) and of the final result.
+        let mut arg_layouts = Vec::with_capacity(type_arity);
+        let mut t = tipe;
+        while let Type::Lambda(a, b) = t {
+            arg_layouts.push(self.layouts.layout_of(a));
+            t = b;
+        }
+        let ret_layout = self.layouts.layout_of(t);
+
+        let target = self.functions[mangled];
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let mut wrap_params: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        for l in &arg_layouts {
+            wrap_params.push(self.llvm_type(l).into());
+        }
+        let ret_ty = self.llvm_type(&ret_layout);
+        let wrap_ty = ret_ty.fn_type(&wrap_params, false);
+        let wname = format!("{}$clos", mangled);
+        let wrapper = self.module.add_function(&wname, wrap_ty, Some(Linkage::Internal));
+
+        let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
+        let entry = self.ctx.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+        self.clear_loc();
+
+        // Call the target with the leading arguments it actually takes.
+        let lead: Vec<inkwell::values::BasicMetadataValueEnum> = (0..compiled)
+            .map(|i| wrapper.get_nth_param((i + 1) as u32).unwrap().into())
+            .collect();
+        let inner = self
+            .builder
+            .build_call(target, &lead, "eta")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+        // Apply the returned closure to the remaining arguments.
+        let rest: Vec<BasicValueEnum<'ctx>> = (compiled..type_arity)
+            .map(|i| wrapper.get_nth_param((i + 1) as u32).unwrap())
+            .collect();
+        let result = self.apply_closure(inner, &rest, &ret_layout);
+        self.builder.build_return(Some(&result)).unwrap();
+
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
         self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])

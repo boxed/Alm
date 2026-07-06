@@ -3323,6 +3323,284 @@ pub unsafe extern "C" fn bytes_decode(decoder: u64, bytes: u64) -> u64 {
     }
 }
 
+// RANDOM — elm/random's PCG-XSH-RR, ported byte-identically from runtime.js
+// so generated sequences (and thus fuzz-test inputs) match elm/JS bit-for-bit.
+// A Seed is the uniform ctor `Seed a b` (index 0, two uint32 ints) and a
+// Generator is the uniform ctor `Generator gen` (index 0) wrapping a
+// `seed -> (value, seed)` closure — exactly the representation the typed
+// backend's box/unbox produces for elm/random's `type Seed = Seed Int Int`
+// and `type Generator a = Generator (Seed -> ( a, Seed ))`, so kernel-built
+// and Elm-built generators interoperate across the boxed boundary.
+
+/// ECMAScript `ToUint32` of an f64: truncate toward zero, then take mod 2^32.
+/// The PCG `word` multiply overflows 2^53, so JS's `>>> 0` recovers the low
+/// 32 bits of the f64's exact integer value — an `i64` cast reproduces that
+/// exactly (the product magnitude stays well under 2^63).
+fn to_uint32(f: f64) -> u32 {
+    if !f.is_finite() {
+        return 0;
+    }
+    (f as i64 as u64 & 0xFFFF_FFFF) as u32
+}
+
+unsafe fn seed_a(seed: u64) -> u32 {
+    int_val(rt_ctor_arg(seed, 0)) as u32
+}
+unsafe fn seed_b(seed: u64) -> u32 {
+    int_val(rt_ctor_arg(seed, 1)) as u32
+}
+unsafe fn mk_seed(a: u32, b: u32) -> u64 {
+    ctor(b"Seed\0".as_ptr(), 0, vec![rt_int(a as i64), rt_int(b as i64)])
+}
+unsafe fn mk_generator(gen: u64) -> u64 {
+    ctor1(b"Generator\0".as_ptr(), 0, gen)
+}
+
+fn random_peel(a: u32) -> u32 {
+    // RXS-M-XS output permutation, mirroring `_Random_peel` op-for-op.
+    let shift = (a >> 28) + 4; // 4..=19
+    let inner = (a as i32) ^ ((a >> shift) as i32);
+    let word = to_uint32((inner as f64) * 277803737.0);
+    ((word >> 22) as i32 ^ word as i32) as u32
+}
+
+unsafe fn random_next_seed(seed: u64) -> u64 {
+    let a = seed_a(seed);
+    let b = seed_b(seed);
+    // `a * 1664525 + b` stays under 2^53, so the u64 arithmetic is exact and
+    // truncating to u32 matches JS's `>>> 0`.
+    let na = ((a as u64) * 1664525 + b as u64) as u32;
+    mk_seed(na, b)
+}
+
+unsafe extern "C" fn random_initial_seed(x: u64) -> u64 {
+    let seed1 = random_next_seed(mk_seed(0, 1013904223));
+    let state2 = to_uint32(seed_a(seed1) as f64 + int_val(x) as f64);
+    random_next_seed(mk_seed(state2, seed_b(seed1)))
+}
+
+unsafe extern "C" fn random_int(a: u64, b: u64) -> u64 {
+    mk_generator(closure(random_int_gen as *const (), 3, &[a, b]))
+}
+unsafe extern "C" fn random_int_gen(a: u64, b: u64, seed0: u64) -> u64 {
+    let av = int_val(a);
+    let bv = int_val(b);
+    let lo = av.min(bv);
+    let hi = av.max(bv);
+    let range = hi - lo + 1;
+    if ((range - 1) as i32) & (range as i32) == 0 {
+        // Power-of-two range: one peel masked to the low bits (via ToInt32),
+        // then `>>> 0` and `+ lo`.
+        let masked = ((range - 1) as i32) & (random_peel(seed_a(seed0)) as i32);
+        return pair(rt_int(masked as u32 as i64 + lo), random_next_seed(seed0));
+    }
+    let neg = to_uint32(-(range as f64));
+    let threshold = (neg as u64 % range as u64) as u32;
+    let mut seed = seed0;
+    loop {
+        let x = random_peel(seed_a(seed));
+        let seed_n = random_next_seed(seed);
+        if x < threshold {
+            seed = seed_n;
+            continue;
+        }
+        let val = (x as u64 % range as u64) as i64 + lo;
+        return pair(rt_int(val), seed_n);
+    }
+}
+
+unsafe extern "C" fn random_float(a: u64, b: u64) -> u64 {
+    mk_generator(closure(random_float_gen as *const (), 3, &[a, b]))
+}
+unsafe extern "C" fn random_float_gen(a: u64, b: u64, seed0: u64) -> u64 {
+    let af = num(a);
+    let seed1 = random_next_seed(seed0);
+    let n0 = random_peel(seed_a(seed0));
+    let n1 = random_peel(seed_a(seed1));
+    let hi = (n0 & 0x03FF_FFFF) as f64;
+    let lo = (n1 & 0x07FF_FFFF) as f64;
+    let val = (hi * 134217728.0 + lo) / 9007199254740992.0;
+    let range = (num(b) - af).abs();
+    pair(rt_float(val * range + af), random_next_seed(seed1))
+}
+
+unsafe extern "C" fn random_constant(x: u64) -> u64 {
+    mk_generator(closure(random_constant_gen as *const (), 2, &[x]))
+}
+unsafe extern "C" fn random_constant_gen(x: u64, seed: u64) -> u64 {
+    pair(x, seed)
+}
+
+unsafe extern "C" fn random_map(f: u64, g: u64) -> u64 {
+    mk_generator(closure(random_map_gen as *const (), 3, &[f, g]))
+}
+unsafe extern "C" fn random_map_gen(f: u64, g: u64, seed: u64) -> u64 {
+    let r = ap1(rt_ctor_arg(g, 0), seed);
+    pair(ap1(f, rt_tuple_item(r, 0)), rt_tuple_item(r, 1))
+}
+
+unsafe extern "C" fn random_map2(f: u64, ga: u64, gb: u64) -> u64 {
+    mk_generator(closure(random_map2_gen as *const (), 4, &[f, ga, gb]))
+}
+unsafe extern "C" fn random_map2_gen(f: u64, ga: u64, gb: u64, seed: u64) -> u64 {
+    let ra = ap1(rt_ctor_arg(ga, 0), seed);
+    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
+    pair(
+        ap2(f, rt_tuple_item(ra, 0), rt_tuple_item(rb, 0)),
+        rt_tuple_item(rb, 1),
+    )
+}
+
+unsafe extern "C" fn random_map3(f: u64, ga: u64, gb: u64, gc: u64) -> u64 {
+    mk_generator(closure(random_map3_gen as *const (), 5, &[f, ga, gb, gc]))
+}
+unsafe extern "C" fn random_map3_gen(f: u64, ga: u64, gb: u64, gc: u64, seed: u64) -> u64 {
+    let ra = ap1(rt_ctor_arg(ga, 0), seed);
+    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
+    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
+    pair(
+        ap3(
+            f,
+            rt_tuple_item(ra, 0),
+            rt_tuple_item(rb, 0),
+            rt_tuple_item(rc, 0),
+        ),
+        rt_tuple_item(rc, 1),
+    )
+}
+
+unsafe extern "C" fn random_map4(f: u64, ga: u64, gb: u64, gc: u64, gd: u64) -> u64 {
+    mk_generator(closure(random_map4_gen as *const (), 6, &[f, ga, gb, gc, gd]))
+}
+unsafe extern "C" fn random_map4_gen(f: u64, ga: u64, gb: u64, gc: u64, gd: u64, seed: u64) -> u64 {
+    let ra = ap1(rt_ctor_arg(ga, 0), seed);
+    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
+    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
+    let rd = ap1(rt_ctor_arg(gd, 0), rt_tuple_item(rc, 1));
+    pair(
+        ap4(
+            f,
+            rt_tuple_item(ra, 0),
+            rt_tuple_item(rb, 0),
+            rt_tuple_item(rc, 0),
+            rt_tuple_item(rd, 0),
+        ),
+        rt_tuple_item(rd, 1),
+    )
+}
+
+unsafe extern "C" fn random_map5(f: u64, ga: u64, gb: u64, gc: u64, gd: u64, ge: u64) -> u64 {
+    mk_generator(closure(
+        random_map5_gen as *const (),
+        7,
+        &[f, ga, gb, gc, gd, ge],
+    ))
+}
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn random_map5_gen(
+    f: u64,
+    ga: u64,
+    gb: u64,
+    gc: u64,
+    gd: u64,
+    ge: u64,
+    seed: u64,
+) -> u64 {
+    let ra = ap1(rt_ctor_arg(ga, 0), seed);
+    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
+    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
+    let rd = ap1(rt_ctor_arg(gd, 0), rt_tuple_item(rc, 1));
+    let re = ap1(rt_ctor_arg(ge, 0), rt_tuple_item(rd, 1));
+    pair(
+        ap5(
+            f,
+            rt_tuple_item(ra, 0),
+            rt_tuple_item(rb, 0),
+            rt_tuple_item(rc, 0),
+            rt_tuple_item(rd, 0),
+            rt_tuple_item(re, 0),
+        ),
+        rt_tuple_item(re, 1),
+    )
+}
+
+unsafe extern "C" fn random_and_then(f: u64, g: u64) -> u64 {
+    mk_generator(closure(random_and_then_gen as *const (), 3, &[f, g]))
+}
+unsafe extern "C" fn random_and_then_gen(f: u64, g: u64, seed: u64) -> u64 {
+    let r = ap1(rt_ctor_arg(g, 0), seed);
+    let g2 = ap1(f, rt_tuple_item(r, 0));
+    ap1(rt_ctor_arg(g2, 0), rt_tuple_item(r, 1))
+}
+
+unsafe extern "C" fn random_pair(ga: u64, gb: u64) -> u64 {
+    mk_generator(closure(random_pair_gen as *const (), 3, &[ga, gb]))
+}
+unsafe extern "C" fn random_pair_gen(ga: u64, gb: u64, seed: u64) -> u64 {
+    let ra = ap1(rt_ctor_arg(ga, 0), seed);
+    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
+    pair(
+        pair(rt_tuple_item(ra, 0), rt_tuple_item(rb, 0)),
+        rt_tuple_item(rb, 1),
+    )
+}
+
+unsafe extern "C" fn random_list(n: u64, g: u64) -> u64 {
+    mk_generator(closure(random_list_gen as *const (), 3, &[n, g]))
+}
+unsafe extern "C" fn random_list_gen(n: u64, g: u64, seed0: u64) -> u64 {
+    // elm's listHelp prepends each value (so the result is in reverse
+    // generation order) — mirror it exactly for reproducible fuzz inputs.
+    let count = int_val(n);
+    let gen = rt_ctor_arg(g, 0);
+    let mut seed = seed0;
+    let mut out: Vec<u64> = Vec::new();
+    let mut i = 0i64;
+    while i < count {
+        let r = ap1(gen, seed);
+        out.insert(0, rt_tuple_item(r, 0));
+        seed = rt_tuple_item(r, 1);
+        i += 1;
+    }
+    pair(list_from_slice(&out), seed)
+}
+
+unsafe extern "C" fn random_step(g: u64, seed: u64) -> u64 {
+    // The gen closure already returns the `( value, seed )` 2-tuple elm's
+    // `step` produces, so forward it unchanged.
+    ap1(rt_ctor_arg(g, 0), seed)
+}
+
+unsafe extern "C" fn random_independent_seed_gen(seed0: u64) -> u64 {
+    let gen = rt_ctor_arg(random_int(rt_int(0), rt_int(0xFFFF_FFFF)), 0);
+    let r1 = ap1(gen, seed0);
+    let r2 = ap1(gen, rt_tuple_item(r1, 1));
+    let r3 = ap1(gen, rt_tuple_item(r2, 1));
+    let r1_0 = int_val(rt_tuple_item(r1, 0)) as u32;
+    let r2_0 = int_val(rt_tuple_item(r2, 0)) as u32;
+    let r3_0 = int_val(rt_tuple_item(r3, 0)) as u32;
+    let b = (1i32 | ((r2_0 as i32) ^ (r3_0 as i32))) as u32;
+    let new_seed = random_next_seed(mk_seed(r1_0, b));
+    pair(new_seed, rt_tuple_item(r3, 1))
+}
+
+unsafe extern "C" fn random_generate(to_msg: u64, g: u64) -> u64 {
+    // Non-deterministic like JS's `Math.random()` seed; the result is a Cmd,
+    // never a printed value, so it need not be reproducible.
+    let seed = random_initial_seed(rt_int(to_uint32(now_ms()) as i64));
+    let r = ap1(rt_ctor_arg(g, 0), seed);
+    let msg = ap1(to_msg, rt_tuple_item(r, 0));
+    ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_succeed(msg)])
+}
+
+// TEST — elm-explorations/test's `Elm.Kernel.Test.runThunk`: run a `() -> a`
+// thunk and wrap its result in `Ok`. Native crashes abort rather than throw,
+// so (unlike JS) a failing thunk cannot be caught into `Err`; the success
+// path — all this API needs — matches JS exactly.
+unsafe extern "C" fn test_run_thunk(thunk: u64) -> u64 {
+    res_ok(ap1(thunk, unit()))
+}
+
 // KERNEL VALUE TABLE — the globals the generated code imports.
 
 macro_rules! kernel_fns {
@@ -3366,6 +3644,15 @@ kernel_fns! {
     G_BASICS_APR "$Basics$apR" basics_ap_r, 2;
     G_BASICS_NEVER "$Basics$never" basics_never, 1;
     G_BASICS_APPEND "$Basics$append" rt_append, 2;
+    G_BASICS_ADD "$Basics$add" rt_add, 2;
+    G_BASICS_SUB "$Basics$sub" rt_sub, 2;
+    G_BASICS_MUL "$Basics$mul" rt_mul, 2;
+    G_BASICS_EQ "$Basics$eq" rt_eq, 2;
+    G_BASICS_NEQ "$Basics$neq" rt_neq, 2;
+    G_BASICS_LT "$Basics$lt" rt_lt, 2;
+    G_BASICS_GT "$Basics$gt" rt_gt, 2;
+    G_BASICS_LE "$Basics$le" rt_le, 2;
+    G_BASICS_GE "$Basics$ge" rt_ge, 2;
 
     G_LIST_SINGLETON "$List$singleton" list_singleton, 1;
     G_LIST_REPEAT "$List$repeat" list_repeat, 2;
@@ -3475,6 +3762,27 @@ kernel_fns! {
     G_DEBUG_TOSTRING "$Debug$toString" debug_to_string, 1;
     G_DEBUG_LOG "$Debug$log" debug_log, 2;
     G_DEBUG_TODO "$Debug$todo" debug_todo, 1;
+
+    // Compiler-internal `Elm.Kernel.*` values referenced by source-compiled
+    // packages (elm/core, elm-explorations/test).
+    G_KERNEL_DEBUG_TOSTRING "$Elm$Kernel$Debug$toString" debug_to_string, 1;
+    G_KERNEL_DEBUG_LOG "$Elm$Kernel$Debug$log" debug_log, 2;
+    G_KERNEL_TEST_RUNTHUNK "$Elm$Kernel$Test$runThunk" test_run_thunk, 1;
+
+    G_RANDOM_INITIALSEED "$Random$initialSeed" random_initial_seed, 1;
+    G_RANDOM_INT "$Random$int" random_int, 2;
+    G_RANDOM_FLOAT "$Random$float" random_float, 2;
+    G_RANDOM_CONSTANT "$Random$constant" random_constant, 1;
+    G_RANDOM_MAP "$Random$map" random_map, 2;
+    G_RANDOM_MAP2 "$Random$map2" random_map2, 3;
+    G_RANDOM_MAP3 "$Random$map3" random_map3, 4;
+    G_RANDOM_MAP4 "$Random$map4" random_map4, 5;
+    G_RANDOM_MAP5 "$Random$map5" random_map5, 6;
+    G_RANDOM_ANDTHEN "$Random$andThen" random_and_then, 2;
+    G_RANDOM_PAIR "$Random$pair" random_pair, 2;
+    G_RANDOM_LIST "$Random$list" random_list, 2;
+    G_RANDOM_STEP "$Random$step" random_step, 2;
+    G_RANDOM_GENERATE "$Random$generate" random_generate, 2;
 
     G_TASK_SUCCEED "$Task$succeed" task_succeed, 1;
     G_TASK_FAIL "$Task$fail" task_fail, 1;
@@ -3602,6 +3910,9 @@ kernel_vals! {
     G_DICT_EMPTY "$Dict$empty";
     G_SET_EMPTY "$Set$empty";
     G_ARRAY_EMPTY "$Array$empty";
+    G_RANDOM_MININT "$Random$minInt";
+    G_RANDOM_MAXINT "$Random$maxInt";
+    G_RANDOM_INDEPENDENTSEED "$Random$independentSeed";
 }
 
 unsafe fn runtime_init() {
@@ -3630,6 +3941,10 @@ unsafe fn runtime_init() {
     G_DICT_EMPTY.set(alloc(Value::Dict(Vec::new())));
     G_SET_EMPTY.set(alloc(Value::Set(Vec::new())));
     G_ARRAY_EMPTY.set(alloc(Value::Array(Vec::new())));
+    G_RANDOM_MININT.set(rt_int(-2147483648));
+    G_RANDOM_MAXINT.set(rt_int(2147483647));
+    G_RANDOM_INDEPENDENTSEED
+        .set(mk_generator(closure(random_independent_seed_gen as *const (), 1, &[])));
 }
 
 // THE EVENT LOOP — the Rust twin of runtime.js's _Platform_initialize for
