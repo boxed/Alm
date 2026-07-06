@@ -59,10 +59,26 @@ function _List_toArray(xs) {
 // EQUALITY — structural, like _Utils_eq
 
 function _Utils_eq(x, y) {
+    // Cap JS recursion depth (~100) and defer deeper subtrees onto an explicit
+    // stack, so equality on a long list spine (or deep structure) can't blow the
+    // call stack — same technique as elm's runtime.
+    var stack = [];
+    var isEqual = _Utils_eqHelp(x, y, 0, stack);
+    var pair;
+    while (isEqual && (pair = stack.pop())) {
+        isEqual = _Utils_eqHelp(pair.a, pair.b, 0, stack);
+    }
+    return isEqual;
+}
+function _Utils_eqHelp(x, y, depth, stack) {
     if (x === y) { return true; }
     if (typeof x !== 'object' || x === null || y === null) { return false; }
+    if (depth > 100) {
+        stack.push({ $: '#2', a: x, b: y });
+        return true;
+    }
     for (var key in x) {
-        if (!_Utils_eq(x[key], y[key])) { return false; }
+        if (!_Utils_eqHelp(x[key], y[key], depth + 1, stack)) { return false; }
     }
     for (var key2 in y) {
         if (!(key2 in x)) { return false; }
@@ -2128,28 +2144,53 @@ var $Browser$Navigation$reloadAndSkipCache = { $: 'CmdReload' };
 
 // RANDOM — generators as seed -> [value, seed] functions.
 
-function _Random_next(seed) {
-    // mulberry32
-    var t = (seed + 0x6D2B79F5) | 0;
-    var r = Math.imul(t ^ (t >>> 15), 1 | t);
-    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
-    return { state: t, value: ((r ^ (r >>> 14)) >>> 0) / 4294967296 };
+// Elm's PCG-XSH-RR (from elm/random) — a Seed is { a: state, b: incr }, both
+// uint32. Ported op-for-op so generated random sequences (and thus fuzz-test
+// inputs) match elm bit-for-bit.
+function _Random_peel(seed) {
+    var state = seed.a;
+    var word = (state ^ (state >>> (((state >>> 28) + 4) | 0))) * 277803737;
+    return ((word >>> 22) ^ word) >>> 0;
+}
+function _Random_nextSeed(seed) {
+    return { $: 'Seed', a: (seed.a * 1664525 + seed.b) >>> 0, b: seed.b };
 }
 function _Random_gen(fn) { return { $: 'Generator', gen: fn }; }
 var $Random$minInt = -2147483648;
 var $Random$maxInt = 2147483647;
-var $Random$initialSeed = function (n) { return { $: 'Seed', state: n | 0 }; };
-var $Random$int = F2(function (lo, hi) {
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        var value = lo + Math.floor(next.value * (hi - lo + 1));
-        return [value, { $: 'Seed', state: next.state }];
+var $Random$initialSeed = function (x) {
+    var seed1 = _Random_nextSeed({ $: 'Seed', a: 0, b: 1013904223 });
+    var state2 = (seed1.a + x) >>> 0;
+    return _Random_nextSeed({ $: 'Seed', a: state2, b: seed1.b });
+};
+var $Random$int = F2(function (a, b) {
+    return _Random_gen(function (seed0) {
+        var lo = a < b ? a : b;
+        var hi = a < b ? b : a;
+        var range = hi - lo + 1;
+        if (((range - 1) & range) === 0) {
+            return [(((range - 1) & _Random_peel(seed0)) >>> 0) + lo, _Random_nextSeed(seed0)];
+        }
+        var threshold = ((-range >>> 0) % range) >>> 0;
+        var seed = seed0;
+        for (;;) {
+            var x = _Random_peel(seed);
+            var seedN = _Random_nextSeed(seed);
+            if (x < threshold) { seed = seedN; continue; }
+            return [(x % range) + lo, seedN];
+        }
     });
 });
-var $Random$float = F2(function (lo, hi) {
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        return [lo + next.value * (hi - lo), { $: 'Seed', state: next.state }];
+var $Random$float = F2(function (a, b) {
+    return _Random_gen(function (seed0) {
+        var seed1 = _Random_nextSeed(seed0);
+        var n0 = _Random_peel(seed0);
+        var n1 = _Random_peel(seed1);
+        var hi = (n0 & 0x03FFFFFF) * 1.0;
+        var lo = (n1 & 0x07FFFFFF) * 1.0;
+        var val = ((hi * 134217728.0) + lo) / 9007199254740992.0;
+        var range = Math.abs(b - a);
+        return [val * range + a, _Random_nextSeed(seed1)];
     });
 });
 var $Random$constant = function (x) {
@@ -2201,41 +2242,41 @@ var $Random$pair = F2(function (ga, gb) {
         return [{ $: '#2', a: ra[0], b: rb[0] }, rb[1]];
     });
 });
-var $Random$uniform = F2(function (head, tail) {
-    var arr = [head].concat(_List_toArray(tail));
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        var i = Math.floor(next.value * arr.length);
-        if (i >= arr.length) { i = arr.length - 1; }
-        return [arr[i], { $: 'Seed', state: next.state }];
-    });
-});
-var $Random$weighted = F2(function (headPair, tailPairs) {
-    var pairs = [headPair].concat(_List_toArray(tailPairs));
+var $Random$weighted = F2(function (first, others) {
+    var pairs = [first].concat(_List_toArray(others));
     var total = 0;
     for (var i = 0; i < pairs.length; i++) { total += Math.abs(pairs[i].a); }
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        var target = next.value * total;
+    return A2($Random$map, function (countdown) {
         var acc = 0;
         for (var j = 0; j < pairs.length; j++) {
             acc += Math.abs(pairs[j].a);
-            if (target <= acc) { return [pairs[j].b, { $: 'Seed', state: next.state }]; }
+            if (countdown <= acc) { return pairs[j].b; }
         }
-        return [pairs[pairs.length - 1].b, { $: 'Seed', state: next.state }];
-    });
+        return pairs[pairs.length - 1].b;
+    }, A2($Random$float, 0, total));
 });
-var $Random$independentSeed = _Random_gen(function (seed) {
-    var a = _Random_next(seed.state);
-    var b = _Random_next(a.state);
-    return [{ $: 'Seed', state: a.state }, { $: 'Seed', state: b.state }];
+var $Random$uniform = F2(function (head, rest) {
+    var vals = [head].concat(_List_toArray(rest));
+    return A2($Random$map, function (countdown) {
+        var acc = 0;
+        for (var j = 0; j < vals.length; j++) { acc += 1; if (countdown <= acc) { return vals[j]; } }
+        return vals[vals.length - 1];
+    }, A2($Random$float, 0, vals.length));
+});
+var $Random$independentSeed = _Random_gen(function (seed0) {
+    var gen = A2($Random$int, 0, 0xFFFFFFFF);
+    var r1 = gen.gen(seed0), r2 = gen.gen(r1[1]), r3 = gen.gen(r2[1]);
+    var newSeed = _Random_nextSeed({ $: 'Seed', a: r1[0], b: ((1 | (r2[0] ^ r3[0])) >>> 0) });
+    return [newSeed, r3[1]];
 });
 var $Random$list = F2(function (n, g) {
     return _Random_gen(function (seed) {
+        // elm's listHelp prepends each value, so the result is in reverse
+        // generation order — match it (matters for reproducible fuzz inputs).
         var out = [];
         for (var i = 0; i < n; i++) {
             var r = g.gen(seed);
-            out.push(r[0]);
+            out.unshift(r[0]);
             seed = r[1];
         }
         return [_List_fromArray(out), seed];
@@ -2249,7 +2290,7 @@ var $Random$generate = F2(function (toMsg, g) {
     return {
         $: 'CmdTask',
         task: _Task(function (ok, _err) {
-            var seed = { $: 'Seed', state: (Math.random() * 0xFFFFFFFF) | 0 };
+            var seed = $Random$initialSeed((Math.random() * 0xFFFFFFFF) >>> 0);
             ok(toMsg(g.gen(seed)[0]));
         })
     };
@@ -2261,13 +2302,12 @@ var $UUID$generator = _Random_gen(function (seed) {
     var hex = '';
     var s = seed;
     for (var i = 0; i < 32; i++) {
-        var next = _Random_next(s.state !== undefined ? s.state : s);
-        s = { state: next.state };
-        hex += ((next.value * 16) | 0).toString(16);
+        hex += (_Random_peel(s) & 15).toString(16);
+        s = _Random_nextSeed(s);
     }
     var uuid = hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-4' + hex.slice(13, 16) +
         '-' + ((parseInt(hex[16], 16) & 3 | 8)).toString(16) + hex.slice(17, 20) + '-' + hex.slice(20, 32);
-    return [{ $: 'UUID', s: uuid }, { $: 'Seed', state: s.state }];
+    return [{ $: 'UUID', s: uuid }, s];
 });
 var $UUID$toString = function (uuid) { return uuid.s; };
 var $UUID$compare = F2(function (a, b) { return A2($Basics$compare, a.s, b.s); });

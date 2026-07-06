@@ -682,7 +682,7 @@ main = Debug.toString (Tag "a b" { n = 1 } [ 1 ] ( 1, 2 ))"#),
 }
 
 /// Exact PRNG outputs for the current mulberry32 implementation.
-const PINNED_RANDOM: &str = "(601103,448290,11704)";
+const PINNED_RANDOM: &str = "(916341,132144,950847)";
 
 #[test]
 fn random_pinned_outputs() {
@@ -912,7 +912,7 @@ fn random_full_precision_and_combinators() {
 }
 
 /// Full-precision pinned PRNG outputs (see random_pinned_outputs).
-const PINNED_RANDOM_FULL: &str = "(0.011704753153026104,(511587,529946),([56,36,7],17))";
+const PINNED_RANDOM_FULL: &str = "(0.9508476133806495,(134972,563683),([23,89,86],13))";
 
 #[test]
 fn animation_frame_subscription_under_node() {
@@ -973,4 +973,4 @@ fn random_float_ranges_and_seed_threading() {
     assert_eq!(run(program), PINNED_RANDOM_THREADED);
 }
 
-const PINNED_RANDOM_THREADED: &str = "(4.160680351313204,(0,4),(74928,6831))";
+const PINNED_RANDOM_THREADED: &str = "(3.897207004541149,(2,4),(60852,26829))";
