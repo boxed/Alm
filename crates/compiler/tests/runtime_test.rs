@@ -318,7 +318,8 @@ fn string_long_tail() {
 fn char_and_basics_long_tail() {
     assert_eq!(
         run("main = String.join \"|\" [ Debug.toString (Char.fromCode 66), Debug.toString (Char.isAlpha 'a'), Debug.toString (Char.isUpper 'a'), Debug.toString (Char.isLower 'a'), Debug.toString (Char.toUpper 'a'), Debug.toString (Char.toLower 'A'), Debug.toString (Char.isAlphaNum '_'), Debug.toString (Char.isHexDigit 'f') ]"),
-        r#""B"|True|False|True|"A"|"a"|False|True"#
+        // Chars render with single quotes, matching elm's dev-build Debug.toString.
+        r#"'B'|True|False|True|'A'|'a'|False|True"#
     );
     assert_eq!(
         run("main = String.join \"|\" [ Debug.toString (truncate -3.7), Debug.toString (abs -4), Debug.toString (identity 9), Debug.toString (isNaN (0 / 0)), Debug.toString (isInfinite (1 / 0)) ]"),

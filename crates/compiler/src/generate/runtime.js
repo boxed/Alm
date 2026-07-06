@@ -56,6 +56,10 @@ function _List_toArray(xs) {
     return out;
 }
 
+// CHAR — dev builds box every Char as a `new String(c)` object so `Debug.toString`
+// (and `instanceof String` checks) can tell a Char apart from a 1-char String.
+function _Utils_chr(c) { return new String(c); }
+
 // EQUALITY — structural, like _Utils_eq
 
 function _Utils_eq(x, y) {
@@ -73,6 +77,8 @@ function _Utils_eq(x, y) {
 function _Utils_eqHelp(x, y, depth, stack) {
     if (x === y) { return true; }
     if (typeof x !== 'object' || x === null || y === null) { return false; }
+    // Boxed chars compare by value: two `new String('a')` are equal.
+    if (x instanceof String) { return x.valueOf() === y.valueOf(); }
     if (depth > 100) {
         stack.push({ $: '#2', a: x, b: y });
         return true;
@@ -89,6 +95,11 @@ function _Utils_eqHelp(x, y, depth, stack) {
 // COMPARISON — only ever called on comparable values
 
 function _Utils_cmp(x, y) {
+    // A boxed char is `typeof 'object'`, so unwrap it before the primitive check.
+    if (x instanceof String) {
+        var a = x.valueOf(), b = y.valueOf();
+        return a === b ? 0 : a < b ? -1 : 1;
+    }
     if (typeof x !== 'object') {
         return x === y ? 0 : x < y ? -1 : 1;
     }
@@ -425,8 +436,8 @@ var $String$toFloat = function (s) {
     return isNaN(n) ? $Maybe$Nothing : $Maybe$Just(n);
 };
 var $String$fromFloat = function (n) { return String(n); };
-var $String$fromChar = function (c) { return c; };
-var $String$toList = function (s) { return _List_fromArray(Array.from(s)); };
+var $String$fromChar = function (c) { return c + ''; };
+var $String$toList = function (s) { return _List_fromArray(Array.from(s, _Utils_chr)); };
 var $String$fromList = function (cs) { return _List_toArray(cs).join(''); };
 var $String$toUpper = function (s) { return s.toUpperCase(); };
 var $String$toLower = function (s) { return s.toLowerCase(); };
@@ -444,24 +455,26 @@ var $String$padRight = F3(function (n, c, s) {
     return s + c.repeat(Math.max(0, n - s.length));
 });
 var $String$filter = F2(function (isGood, s) {
-    return Array.from(s).filter(function (c) { return isGood(c); }).join('');
+    return Array.from(s).filter(function (c) { return isGood(_Utils_chr(c)); }).join('');
 });
 var $String$map = F2(function (f, s) {
-    return Array.from(s).map(function (c) { return f(c); }).join('');
+    return Array.from(s).map(function (c) { return f(_Utils_chr(c)); }).join('');
 });
 
 // CHAR
 
 var $Char$toCode = function (c) { return c.codePointAt(0); };
-var $Char$fromCode = function (n) { return String.fromCodePoint(n); };
+var $Char$fromCode = function (n) {
+    return _Utils_chr(n < 0 || 0x10FFFF < n ? '�' : String.fromCodePoint(n));
+};
 var $Char$isDigit = function (c) { return c >= '0' && c <= '9'; };
 var $Char$isAlpha = function (c) { return /^[a-zA-Z]$/.test(c); };
 var $Char$isUpper = function (c) { return c >= 'A' && c <= 'Z'; };
 var $Char$isLower = function (c) { return c >= 'a' && c <= 'z'; };
-var $Char$toUpper = function (c) { return c.toUpperCase(); };
-var $Char$toLower = function (c) { return c.toLowerCase(); };
-var $Char$toLocaleUpper = function (c) { return c.toLocaleUpperCase(); };
-var $Char$toLocaleLower = function (c) { return c.toLocaleLowerCase(); };
+var $Char$toUpper = function (c) { return _Utils_chr(c.toUpperCase()); };
+var $Char$toLower = function (c) { return _Utils_chr(c.toLowerCase()); };
+var $Char$toLocaleUpper = function (c) { return _Utils_chr(c.toLocaleUpperCase()); };
+var $Char$toLocaleLower = function (c) { return _Utils_chr(c.toLocaleLowerCase()); };
 
 // TUPLE
 
@@ -517,6 +530,12 @@ function _Debug_toString(value) {
     }
     if (tag === 'Array_elm_builtin') {
         return 'Array.fromList ' + _Debug_toString(_List_fromArray(value.a));
+    }
+    // Internal scheduler values (Tasks) render as `<internals>`, like elm — its
+    // scheduler tags these with a number, ours with `'Task'` plus a `fork`
+    // closure or numeric `tag`, which a user `Task` constructor never carries.
+    if (tag === 'Task' && (typeof value.fork === 'function' || typeof value.tag === 'number')) {
+        return '<internals>';
     }
     if (tag !== undefined) {
         var out = tag;
@@ -694,10 +713,11 @@ var $Elm$Kernel$Parser$isSubString = F5(function (small, offset, row, col, big) 
     return { $: '#3', a: isGood ? offset : -1, b: row, c: col };
 });
 var $Elm$Kernel$Parser$isSubChar = F3(function (predicate, offset, string) {
+    // The predicate is `Char -> Bool`, so hand it a boxed char (dev-build Char rep).
     return string.length <= offset ? -1
         : (string.charCodeAt(offset) & 0xF800) === 0xD800
-            ? (predicate(string.substr(offset, 2)) ? offset + 2 : -1)
-        : predicate(string[offset]) ? (string[offset] === '\n' ? -2 : offset + 1) : -1;
+            ? (predicate(_Utils_chr(string.substr(offset, 2))) ? offset + 2 : -1)
+        : predicate(_Utils_chr(string[offset])) ? (string[offset] === '\n' ? -2 : offset + 1) : -1;
 });
 var $Elm$Kernel$Parser$isAsciiCode = F3(function (code, offset, string) {
     return string.charCodeAt(offset) === code;
@@ -1030,7 +1050,7 @@ var $List$map3 = F4(function (f, xs, ys, zs) {
 var $String$uncons = function (s) {
     if (s === '') { return $Maybe$Nothing; }
     var c = Array.from(s)[0];
-    return $Maybe$Just({ $: '#2', a: c, b: s.slice(c.length) });
+    return $Maybe$Just({ $: '#2', a: _Utils_chr(c), b: s.slice(c.length) });
 };
 var $String$cons = F2(function (c, s) { return c + s; });
 var $String$indexes = F2(function (sub, s) {
@@ -1042,19 +1062,19 @@ var $String$indexes = F2(function (sub, s) {
 });
 var $String$indices = $String$indexes;
 var $String$any = F2(function (isGood, s) {
-    return Array.from(s).some(function (c) { return isGood(c); });
+    return Array.from(s).some(function (c) { return isGood(_Utils_chr(c)); });
 });
 var $String$all = F2(function (isGood, s) {
-    return Array.from(s).every(function (c) { return isGood(c); });
+    return Array.from(s).every(function (c) { return isGood(_Utils_chr(c)); });
 });
 var $String$foldl = F3(function (f, acc, s) {
     var chars = Array.from(s);
-    for (var i = 0; i < chars.length; i++) { acc = A2(f, chars[i], acc); }
+    for (var i = 0; i < chars.length; i++) { acc = A2(f, _Utils_chr(chars[i]), acc); }
     return acc;
 });
 var $String$foldr = F3(function (f, acc, s) {
     var chars = Array.from(s);
-    for (var i = chars.length; i--;) { acc = A2(f, chars[i], acc); }
+    for (var i = chars.length; i--;) { acc = A2(f, _Utils_chr(chars[i]), acc); }
     return acc;
 });
 
@@ -2591,11 +2611,12 @@ var $Elm$Kernel$Parser$isSubString = F5(function (smallString, offset, row, col,
     return { $: '#3', a: isGood ? offset : -1, b: row, c: col };
 });
 var $Elm$Kernel$Parser$isSubChar = F3(function (predicate, offset, string) {
+    // The predicate is `Char -> Bool`, so hand it a boxed char (dev-build Char rep).
     return string.length <= offset
         ? -1
         : (string.charCodeAt(offset) & 0xF800) === 0xD800
-            ? (predicate(string.substr(offset, 2)) ? offset + 2 : -1)
-            : (predicate(string[offset])
+            ? (predicate(_Utils_chr(string.substr(offset, 2))) ? offset + 2 : -1)
+            : (predicate(_Utils_chr(string[offset]))
                 ? (string[offset] === '\n' ? -2 : offset + 1)
                 : -1);
 });

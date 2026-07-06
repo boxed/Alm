@@ -280,9 +280,10 @@ fn chars() {
         run("main = String.fromInt (Char.toCode 'A')"),
         "65"
     );
+    // Chars render with single quotes, matching elm's dev-build Debug.toString.
     assert_eq!(
         run("main = Debug.toString (String.toList \"ab\")"),
-        "[\"a\",\"b\"]"
+        "['a','b']"
     );
 }
 
@@ -438,7 +439,7 @@ fn bitwise() {
 fn string_extras() {
     assert_eq!(
         run("main = Debug.toString (String.uncons \"abc\")"),
-        "Just (\"a\",\"bc\")"
+        "Just ('a',\"bc\")"
     );
     assert_eq!(
         run("main = Debug.toString (String.indexes \"a\" \"banana\")"),

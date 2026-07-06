@@ -614,7 +614,7 @@ impl Generator {
     fn expr(&mut self, expr: &can::Expr) -> String {
         use can::Expr_::*;
         match &expr.value {
-            Chr(c) => js_string(&c.to_string()),
+            Chr(c) => format!("_Utils_chr({})", js_string(&c.to_string())),
             Str(s) => js_string(s),
             Int(n) => n.to_string(),
             Float(f) => {
@@ -910,7 +910,9 @@ fn pattern_tests(
             bindings.push((name.value.to_string(), path.to_string()));
             pattern_tests(inner, path, tests, bindings);
         }
-        Chr(c) => tests.push(format!("{} === {}", path, js_string(&c.to_string()))),
+        // A Char scrutinee is a boxed `new String(c)`; unwrap it to compare
+        // against the primitive char literal (`new String('a') === "a"` is false).
+        Chr(c) => tests.push(format!("{}.valueOf() === {}", path, js_string(&c.to_string()))),
         Str(s) => tests.push(format!("{} === {}", path, js_string(s))),
         Int(n) => tests.push(format!("{} === {}", path, n)),
         Record(fields) => {
