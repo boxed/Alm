@@ -389,7 +389,7 @@ var $List$unzip = function (pairs) {
 
 var $String$isEmpty = function (s) { return s === ''; };
 var $String$length = function (s) { return s.length; };
-var $String$reverse = function (s) { return s.split('').reverse().join(''); };
+var $String$reverse = function (s) { return Array.from(s).reverse().join(''); };
 var $String$repeat = F2(function (n, s) { return n < 1 ? '' : s.repeat(n); });
 var $String$replace = F3(function (before, after, s) { return s.split(before).join(after); });
 var $String$append = F2(function (a, b) { return a + b; });
