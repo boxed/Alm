@@ -583,6 +583,82 @@ var $Elm$Kernel$Parser$findSubString = F5(function (small, offset, row, col, big
     return { $: '#3', a: newOffset, b: row, c: col };
 });
 
+// Elm.Kernel.Regex — elm/regex 1.0 runtime, ported from the reference kernel.
+// A `Regex` is a JS `RegExp` (always global-flagged). `Regex.Match` is a record
+// alias { match, index, number, submatches }, built here as a plain object.
+
+var $Elm$Kernel$Regex$never = /.^/;
+var $Elm$Kernel$Regex$infinity = Infinity;
+var $Elm$Kernel$Regex$fromStringWith = F2(function (options, string) {
+    var flags = 'g';
+    if (options.multiline) { flags += 'm'; }
+    if (options.caseInsensitive) { flags += 'i'; }
+    try {
+        return $Maybe$Just(new RegExp(string, flags));
+    } catch (error) {
+        return $Maybe$Nothing;
+    }
+});
+var $Elm$Kernel$Regex$contains = F2(function (re, string) {
+    var out = string.match(re) !== null;
+    re.lastIndex = 0;
+    return out;
+});
+function _Regex_submatches(result) {
+    var i = result.length - 1;
+    var subs = new Array(i);
+    while (i-- > 0) {
+        var sm = result[i + 1];
+        subs[i] = sm ? $Maybe$Just(sm) : $Maybe$Nothing;
+    }
+    return _List_fromArray(subs);
+}
+var $Elm$Kernel$Regex$findAtMost = F3(function (n, re, str) {
+    var out = [];
+    var number = 0;
+    var lastIndex = re.lastIndex;
+    var prevLastIndex = -1;
+    var result;
+    while (number++ < n && (result = re.exec(str))) {
+        if (prevLastIndex === re.lastIndex) { break; }
+        out.push({ $: 'Match', match: result[0], index: result.index,
+                   number: number, submatches: _Regex_submatches(result) });
+        prevLastIndex = re.lastIndex;
+    }
+    re.lastIndex = lastIndex;
+    return _List_fromArray(out);
+});
+var $Elm$Kernel$Regex$replaceAtMost = F4(function (n, re, replacer, string) {
+    var count = 0;
+    function jsReplacer() {
+        if (count++ >= n) { return arguments[0]; }
+        var args = arguments;
+        var i = args.length - 3;
+        var subs = new Array(i);
+        while (i-- > 0) {
+            var sm = args[i + 1];
+            subs[i] = sm ? $Maybe$Just(sm) : $Maybe$Nothing;
+        }
+        var m = { $: 'Match', match: args[0], index: args[args.length - 2],
+                  number: count, submatches: _List_fromArray(subs) };
+        return replacer(m);
+    }
+    return string.replace(re, jsReplacer);
+});
+var $Elm$Kernel$Regex$splitAtMost = F3(function (n, re, str) {
+    var out = [];
+    var start = re.lastIndex;
+    var restIndex = 0;
+    var result;
+    while (n-- && (result = re.exec(str))) {
+        out.push(str.slice(restIndex, result.index));
+        restIndex = result.index + result[0].length;
+    }
+    out.push(str.slice(restIndex));
+    re.lastIndex = start;
+    return _List_fromArray(out);
+});
+
 // Elm.Kernel.Bytes — a real elm/bytes 1.0.8 runtime ported from the reference
 // kernel (Elm/Kernel/Bytes.js), adapted to alm's value representations.
 //
