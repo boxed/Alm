@@ -531,10 +531,130 @@ var $Elm$Kernel$Test$runThunk = function (thunk) {
         return $Result$Err(err.toString());
     }
 };
-var $Elm$Kernel$HtmlAsJson$toJson = function (_html) { return null; };
-var $Elm$Kernel$HtmlAsJson$attributeToJson = function (_attr) { return null; };
-var $Elm$Kernel$HtmlAsJson$eventHandler = function (_h) { return null; };
-var $Elm$Kernel$HtmlAsJson$taggerFunction = function (_t) { return null; };
+// elm-explorations/test's Test.Html decodes the virtual dom as elm/virtual-dom
+// JSON: objects keyed by `$` (0 text, 1 node, 2 keyed, 4 tagger), with facts
+// bucketed under a0 (events), a1 (styles), a3 (attributes), a4 (namespaced
+// attributes) and plain DOM properties at the top level. alm's own node/attr
+// representation differs, so these translate rather than acting as identity.
+function _HtmlAsJson_facts(node) {
+    var facts = {};
+    var attrs = node.attrs;
+    var classes = null; // merged like elm's className, kept under the attr bucket
+    for (var i = 0; i < attrs.length; i++) {
+        var a = attrs[i];
+        switch (a.$) {
+            case 'AStyle': {
+                var styles = facts.a1 || (facts.a1 = {});
+                styles[a.key] = a.val;
+                break;
+            }
+            case 'AAttr': {
+                if (a.ns) {
+                    var nsAttrs = facts.a4 || (facts.a4 = {});
+                    nsAttrs[a.key] = { o: a.val, f: a.ns };
+                } else if (a.key === 'class') {
+                    classes = classes === null ? a.val : classes + ' ' + a.val;
+                } else {
+                    var stringAttrs = facts.a3 || (facts.a3 = {});
+                    stringAttrs[a.key] = a.val;
+                }
+                break;
+            }
+            case 'AProp': {
+                // className is a property in elm; keep it merged with `class`.
+                if (a.key === 'className') {
+                    classes = classes === null ? a.val : classes + ' ' + a.val;
+                } else {
+                    facts[a.key] = a.val;
+                }
+                break;
+            }
+            case 'AEvent': {
+                var events = facts.a0 || (facts.a0 = {});
+                // _HtmlAsJson_eventHandler extracts `.a`, which must be a
+                // VirtualDom.Handler value ({ $: ctor, a: decoder }) so
+                // Test.Html.Event.simulate can pattern-match it.
+                events[a.name] = { a: _HtmlAsJson_handler(a) };
+                break;
+            }
+        }
+    }
+    if (classes !== null) {
+        // elm/virtual-dom applies `class`/`classList` as the `className`
+        // property, so classes are queried as the top-level `className`
+        // property (the elm-explorations/test decoder reads them there).
+        facts.className = classes;
+    }
+    return facts;
+}
+
+function _HtmlAsJson_handler(attr) {
+    var opts = attr.opts || {};
+    var ctor = opts.custom
+        ? 'Custom'
+        : (opts.pair && opts.stopField)
+            ? 'MayStopPropagation'
+            : (opts.pair && opts.preventField)
+                ? 'MayPreventDefault'
+                : 'Normal';
+    return { $: ctor, a: attr.decoder };
+}
+
+function _HtmlAsJson_countOf(translated) {
+    return typeof translated.b === 'number' ? translated.b : 0;
+}
+
+function _HtmlAsJson_translate(node) {
+    while (node && node.$ === 'VLazy') { node = _VDom_forceLazy(node); }
+    switch (node.$) {
+        case 'VText':
+            return { $: 0, a: node.text };
+        case 'VMap':
+            return { $: 4, j: { a: node.f }, k: _HtmlAsJson_translate(node.node) };
+        case 'VKeyed': {
+            var kkids = [];
+            var kcount = 0;
+            for (var i = 0; i < node.kids.length; i++) {
+                var kt = _HtmlAsJson_translate(node.kids[i].b);
+                kcount += 1 + _HtmlAsJson_countOf(kt);
+                kkids.push({ a: node.kids[i].a, b: kt });
+            }
+            return { $: 2, c: node.tag, d: _HtmlAsJson_facts(node), e: kkids, b: kcount, f: node.ns };
+        }
+        default: {
+            var kids = [];
+            var count = 0;
+            for (var j = 0; j < node.kids.length; j++) {
+                var t = _HtmlAsJson_translate(node.kids[j]);
+                count += 1 + _HtmlAsJson_countOf(t);
+                kids.push(t);
+            }
+            return { $: 1, c: node.tag, d: _HtmlAsJson_facts(node), e: kids, b: count, f: node.ns };
+        }
+    }
+}
+
+function _HtmlAsJson_attribute(attr) {
+    switch (attr.$) {
+        case 'AStyle':
+            return { $: 'a1', n: attr.key, o: attr.val };
+        case 'AProp':
+            return { $: 'a2', n: attr.key, o: { a: attr.val } };
+        case 'AEvent':
+            return { $: 'a0', n: attr.name, o: { a: attr.decoder, opts: attr.opts } };
+        case 'AAttr':
+            return attr.ns
+                ? { $: 'a4', n: attr.key, o: { o: attr.val, f: attr.ns } }
+                : { $: 'a3', n: attr.key, o: attr.val };
+        default:
+            return attr;
+    }
+}
+
+var $Elm$Kernel$HtmlAsJson$toJson = function (html) { return _HtmlAsJson_translate(html); };
+var $Elm$Kernel$HtmlAsJson$attributeToJson = function (attr) { return _HtmlAsJson_attribute(attr); };
+var $Elm$Kernel$HtmlAsJson$eventHandler = function (h) { return h.a; };
+var $Elm$Kernel$HtmlAsJson$taggerFunction = function (t) { return t.a; };
 
 // Elm.Kernel.Parser — string-scanning primitives for elm/parser (ported from
 // its reference kernel; Char is a plain JS string here, tuples are #2/#3).
