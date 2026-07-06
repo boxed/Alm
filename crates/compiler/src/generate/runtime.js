@@ -838,6 +838,27 @@ var $Result$map2 = F3(function (f, ra, rb) {
     if (rb.$ === 'Err') { return rb; }
     return $Result$Ok(A2(f, ra.a, rb.a));
 });
+var $Result$map3 = F4(function (f, ra, rb, rc) {
+    if (ra.$ === 'Err') { return ra; }
+    if (rb.$ === 'Err') { return rb; }
+    if (rc.$ === 'Err') { return rc; }
+    return $Result$Ok(A3(f, ra.a, rb.a, rc.a));
+});
+var $Result$map4 = F5(function (f, ra, rb, rc, rd) {
+    if (ra.$ === 'Err') { return ra; }
+    if (rb.$ === 'Err') { return rb; }
+    if (rc.$ === 'Err') { return rc; }
+    if (rd.$ === 'Err') { return rd; }
+    return $Result$Ok(A4(f, ra.a, rb.a, rc.a, rd.a));
+});
+var $Result$map5 = F6(function (f, ra, rb, rc, rd, re) {
+    if (ra.$ === 'Err') { return ra; }
+    if (rb.$ === 'Err') { return rb; }
+    if (rc.$ === 'Err') { return rc; }
+    if (rd.$ === 'Err') { return rd; }
+    if (re.$ === 'Err') { return re; }
+    return $Result$Ok(A5(f, ra.a, rb.a, rc.a, rd.a, re.a));
+});
 
 // DICT
 //
