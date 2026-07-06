@@ -79,6 +79,15 @@ function _Utils_eqHelp(x, y, depth, stack) {
     if (typeof x !== 'object' || x === null || y === null) { return false; }
     // Boxed chars compare by value: two `new String('a')` are equal.
     if (x instanceof String) { return x.valueOf() === y.valueOf(); }
+    // Json decoders are opaque closures in alm. elm represents them as data and
+    // compares structurally; `Json.succeed a == Json.succeed b` iff `a == b`.
+    // Compare `succeed` decoders by their value; others by identity (the `run`
+    // closures are functions, which are otherwise incomparable).
+    if (x.$ === 'Decoder' || y.$ === 'Decoder') {
+        if (!y || x.$ !== 'Decoder' || y.$ !== 'Decoder') { return false; }
+        if (x.succeed && y.succeed) { return _Utils_eqHelp(x.value, y.value, depth + 1, stack); }
+        return x.run === y.run;
+    }
     if (depth > 100) {
         stack.push({ $: '#2', a: x, b: y });
         return true;
@@ -1392,16 +1401,45 @@ var $Bitwise$shiftRightZfBy = F2(function (offset, a) { return a >>> offset; });
 // VIRTUAL DOM
 
 function _VDom_text(text) { return { $: 'VText', text: text }; }
+// elm/virtual-dom's `_VirtualDom_organizeFacts` merges repeated `className`
+// (and `class`) declarations into a single space-joined value (see
+// `_VirtualDom_addClass`). alm keeps facts as an attribute list, so mirror that
+// merge here — otherwise `Html.div [ class "a", class "b" ]` would not be
+// structurally equal to a node built with a single `class "a b"`.
+function _VDom_organize(attrs) {
+    var classNames = 0;
+    var classes = 0;
+    for (var i = 0; i < attrs.length; i++) {
+        var a = attrs[i];
+        if (a.$ === 'AProp' && a.key === 'className') { classNames++; }
+        else if (a.$ === 'AAttr' && a.key === 'class' && !a.ns) { classes++; }
+    }
+    if (classNames < 2 && classes < 2) { return attrs; }
+    var out = [];
+    var cnIdx = -1;
+    var cIdx = -1;
+    for (var j = 0; j < attrs.length; j++) {
+        var b = attrs[j];
+        if (b.$ === 'AProp' && b.key === 'className') {
+            if (cnIdx === -1) { cnIdx = out.length; out.push(b); }
+            else { var p = out[cnIdx]; out[cnIdx] = { $: 'AProp', key: 'className', val: p.val ? p.val + ' ' + b.val : b.val }; }
+        } else if (b.$ === 'AAttr' && b.key === 'class' && !b.ns) {
+            if (cIdx === -1) { cIdx = out.length; out.push(b); }
+            else { var q = out[cIdx]; out[cIdx] = { $: 'AAttr', key: 'class', val: q.val ? q.val + ' ' + b.val : b.val }; }
+        } else { out.push(b); }
+    }
+    return out;
+}
 function _VDom_node(tag) {
     return F2(function (attrs, kids) {
-        return { $: 'VNode', tag: tag, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
+        return { $: 'VNode', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids) };
     });
 }
 function _VDom_nodeNS(tag) {
     return F2(function (attrs, kids) {
         return {
             $: 'VNode', tag: tag, ns: 'http://www.w3.org/2000/svg',
-            attrs: _List_toArray(attrs), kids: _List_toArray(kids)
+            attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids)
         };
     });
 }
@@ -1411,7 +1449,7 @@ var $VirtualDom$text = _VDom_text;
 var $VirtualDom$node = function (tag) { return _VDom_node(tag); };
 var $VirtualDom$nodeNS = F2(function (ns, tag) {
     return F2(function (attrs, kids) {
-        return { $: 'VNode', tag: tag, ns: ns, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
+        return { $: 'VNode', tag: tag, ns: ns, attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids) };
     });
 });
 var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
@@ -1427,7 +1465,7 @@ var $Svg$node = function (tag) { return _VDom_nodeNS(tag); };
 var $Html$Keyed$node = function (tag) {
     return F2(function (attrs, keyedKids) {
         return {
-            $: 'VKeyed', tag: tag, attrs: _List_toArray(attrs),
+            $: 'VKeyed', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)),
             kids: _List_toArray(keyedKids) // (key, node) tuples
         };
     });
@@ -1438,7 +1476,7 @@ var $VirtualDom$keyedNode = $Html$Keyed$node;
 var $VirtualDom$keyedNodeNS = F2(function (ns, tag) {
     return F2(function (attrs, keyedKids) {
         return {
-            $: 'VKeyed', tag: tag, ns: ns, attrs: _List_toArray(attrs),
+            $: 'VKeyed', tag: tag, ns: ns, attrs: _VDom_organize(_List_toArray(attrs)),
             kids: _List_toArray(keyedKids)
         };
     });
@@ -1506,7 +1544,10 @@ function _VDom_on(name, decoder, opts) {
 }
 
 function _Json_succeedDecoder(msg) {
-    return { $: 'Decoder', run: function (_v) { return { ok: true, value: msg }; } };
+    // `succeed`/`value` let structural equality compare two `succeed` decoders
+    // by their produced value (elm represents decoders as data, so `==` works;
+    // alm uses closures, so record the value for comparison — see _Utils_eqHelp).
+    return { $: 'Decoder', run: function (_v) { return { ok: true, value: msg }; }, succeed: true, value: msg };
 }
 
 var $Html$Events$on = F2(function (name, decoder) { return _VDom_on(name, decoder); });
@@ -1796,7 +1837,7 @@ var $Json$Decode$_null = function (fallback) {
     });
 };
 var $Json$Decode$succeed = function (x) {
-    return _Json_decoder(function (_v) { return _Json_ok(x); });
+    return { $: 'Decoder', run: function (_v) { return _Json_ok(x); }, succeed: true, value: x };
 };
 var $Json$Decode$fail = function (msg) {
     return _Json_decoder(function (v) { return _Json_failure(msg, v); });
@@ -2336,6 +2377,10 @@ var $Url$percentDecode = function (s) {
 var $Url$fromString = function (str) {
     var match = /^(https?):\/\/([^/:?#]*)(?::(\d+))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(str);
     if (!match) { return $Maybe$Nothing; }
+    // elm's `Url.fromString` rejects a URL with nothing after the protocol
+    // (`chompAfterProtocol` returns Nothing on an empty remainder), so e.g.
+    // "http://" is invalid.
+    if (str.length <= match[1].length + 3) { return $Maybe$Nothing; }
     return $Maybe$Just({
         protocol: match[1] === 'https' ? { $: 'Https' } : { $: 'Http' },
         host: match[2],
