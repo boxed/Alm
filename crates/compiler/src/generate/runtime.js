@@ -1719,7 +1719,13 @@ var $Json$Decode$string = _Json_decoder(function (v) {
     return typeof v === 'string' ? _Json_ok(v) : _Json_expecting('a STRING', v);
 });
 var $Json$Decode$int = _Json_decoder(function (v) {
-    return typeof v === 'number' && (v | 0) === v ? _Json_ok(v) : _Json_expecting('an INT', v);
+    // Match elm: accept 32-bit ints via the fast (v|0) path, and any finite
+    // whole number beyond int32 range via the second branch. `(v | 0) === v`
+    // alone caps at 2^31, wrongly rejecting e.g. 2147483648.
+    if (typeof v !== 'number') { return _Json_expecting('an INT', v); }
+    if (-2147483647 < v && v < 2147483647 && (v | 0) === v) { return _Json_ok(v); }
+    if (isFinite(v) && !(v % 1)) { return _Json_ok(v); }
+    return _Json_expecting('an INT', v);
 });
 var $Json$Decode$float = _Json_decoder(function (v) {
     return typeof v === 'number' ? _Json_ok(v) : _Json_expecting('a FLOAT', v);
