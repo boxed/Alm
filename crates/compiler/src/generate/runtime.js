@@ -463,7 +463,17 @@ var $String$map = F2(function (f, s) {
 
 // CHAR
 
-var $Char$toCode = function (c) { return c.codePointAt(0); };
+var $Char$toCode = function (c) {
+    // Match elm/core Elm.Kernel.Char._Char_toCode exactly. For a lone high
+    // surrogate charCodeAt(1) is NaN, so the result is NaN (not the surrogate
+    // value that codePointAt would give) — elm-syntax relies on this to detect
+    // 2-part UTF-16 chars via isNaN.
+    var code = c.charCodeAt(0);
+    if (0xD800 <= code && code <= 0xDBFF) {
+        return (code - 0xD800) * 0x400 + c.charCodeAt(1) - 0xDC00 + 0x10000;
+    }
+    return code;
+};
 var $Char$fromCode = function (n) {
     return _Utils_chr(n < 0 || 0x10FFFF < n ? '�' : String.fromCodePoint(n));
 };
