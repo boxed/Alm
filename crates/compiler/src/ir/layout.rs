@@ -174,6 +174,12 @@ impl LayoutCtx {
             ("List", "List") if args.len() == 1 => {
                 return Layout::List(Box::new(self.go(&args[0], visiting)))
             }
+            // `Bytes` is declared `type Bytes = Bytes` (a phantom nullary
+            // constructor), which would otherwise lay out as a bare enum tag
+            // and discard the actual byte buffer. It is carried as the uniform
+            // runtime word (a heap byte buffer) instead, like other opaque
+            // platform types.
+            ("Bytes", "Bytes") => return Layout::Opaque,
             _ => {}
         }
 
