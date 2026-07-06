@@ -2131,27 +2131,47 @@ var $Time$getZoneName = _Task(function (ok, _err) {
 var $Time$every = F2(function (interval, toMsg) {
     return { $: 'SubTime', interval: interval, toMsg: toMsg };
 });
-function _Time_toAdjusted(zone, posix) {
-    var minutes = posix.ms / 60000;
-    var offset = zone.offset;
+// Pure-integer date math, ported from elm/time's Time.elm (toAdjustedMinutes +
+// toCivil). NOT via `new Date`, because JS Date is Invalid beyond ~271821 years
+// (getUTCMonth => NaN), whereas elm's algorithm works for any Posix. `//` in elm
+// truncates toward zero, matched here with `| 0`; flooredDiv uses Math.floor.
+function _Time_flooredDiv(numerator, denominator) { return Math.floor(numerator / denominator); }
+function _Time_toAdjustedMinutes(zone, posix) {
+    var posixMinutes = _Time_flooredDiv(posix.ms, 60000);
     for (var i = 0; i < zone.eras.length; i++) {
-        if (zone.eras[i].start < minutes) { offset = zone.eras[i].offset; break; }
+        if (zone.eras[i].start < posixMinutes) { return posixMinutes + zone.eras[i].offset; }
     }
-    return new Date(posix.ms + offset * 60000);
+    return posixMinutes + zone.offset;
 }
-var $Time$toYear = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCFullYear(); });
+function _Time_toCivil(minutes) {
+    var rawDay = _Time_flooredDiv(minutes, 1440) + 719468;
+    var era = ((rawDay >= 0 ? rawDay : rawDay - 146096) / 146097) | 0;
+    var dayOfEra = rawDay - era * 146097;
+    var yearOfEra = ((dayOfEra - ((dayOfEra / 1460) | 0) + ((dayOfEra / 36524) | 0) - ((dayOfEra / 146096) | 0)) / 365) | 0;
+    var year = yearOfEra + era * 400;
+    var dayOfYear = dayOfEra - (365 * yearOfEra + ((yearOfEra / 4) | 0) - ((yearOfEra / 100) | 0));
+    var mp = ((5 * dayOfYear + 2) / 153) | 0;
+    var month = mp + (mp < 10 ? 3 : -9);
+    return {
+        year: year + (month <= 2 ? 1 : 0),
+        month: month,
+        day: dayOfYear - (((153 * mp + 2) / 5) | 0) + 1
+    };
+}
+var $Time$toYear = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).year; });
 var _Time_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var $Time$toMonth = F2(function (zone, posix) {
-    return { $: _Time_months[_Time_toAdjusted(zone, posix).getUTCMonth()] };
+    return { $: _Time_months[_Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).month - 1] };
 });
-var $Time$toDay = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCDate(); });
-var $Time$toHour = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCHours(); });
-var $Time$toMinute = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMinutes(); });
-var $Time$toSecond = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCSeconds(); });
-var $Time$toMillis = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMilliseconds(); });
-var _Time_weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var $Time$toDay = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).day; });
+var $Time$toHour = F2(function (zone, posix) { return A2($Basics$modBy, 24, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 60)); });
+var $Time$toMinute = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_toAdjustedMinutes(zone, posix)); });
+var $Time$toSecond = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_flooredDiv(posix.ms, 1000)); });
+var $Time$toMillis = F2(function (zone, posix) { return A2($Basics$modBy, 1000, posix.ms); });
+// elm's toWeekday: modBy 7 (flooredDiv adjMinutes 1440) => 0:Thu 1:Fri 2:Sat 3:Sun 4:Mon 5:Tue _:Wed
+var _Time_weekdays = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed'];
 var $Time$toWeekday = F2(function (zone, posix) {
-    return { $: _Time_weekdays[_Time_toAdjusted(zone, posix).getUTCDay()] };
+    return { $: _Time_weekdays[A2($Basics$modBy, 7, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 1440))] };
 });
 
 // HTTP — fetch-based.
