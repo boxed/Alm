@@ -498,7 +498,13 @@ var $Debug$todo = function (message) {
 // own implementations where possible; HtmlAsJson (test introspection) stubbed.
 var $Elm$Kernel$Debug$toString = _Debug_toString;
 var $Elm$Kernel$Debug$log = $Debug$log;
-var $Elm$Kernel$Test$runThunk = function (thunk) { return thunk(_Utils_Tuple0); };
+var $Elm$Kernel$Test$runThunk = function (thunk) {
+    try {
+        return $Result$Ok(thunk(_Utils_Tuple0));
+    } catch (err) {
+        return $Result$Err(err.toString());
+    }
+};
 var $Elm$Kernel$HtmlAsJson$toJson = function (_html) { return null; };
 var $Elm$Kernel$HtmlAsJson$attributeToJson = function (_attr) { return null; };
 var $Elm$Kernel$HtmlAsJson$eventHandler = function (_h) { return null; };
@@ -561,37 +567,187 @@ var $Elm$Kernel$Parser$findSubString = F5(function (small, offset, row, col, big
     return { $: '#3', a: newOffset, b: row, c: col };
 });
 
-// Elm.Kernel.Bytes — placeholder shims so bundles that merely reference elm/bytes
-// (e.g. transitively via elm-explorations/test) load. `getHostEndianness` runs at
-// module load, so it must return a valid endianness. The rest are defined but not
-// yet real — programs that actually use Bytes need a proper implementation.
-var $Elm$Kernel$Bytes$getHostEndianness = F2(function (le, _be) { return le; });
-var $Elm$Kernel$Bytes$width = function (_bytes) { return 0; };
-var $Elm$Kernel$Bytes$getStringWidth = function (s) { return typeof s === 'string' ? s.length : 0; };
-var $Elm$Kernel$Bytes$encode = function (_encoder) { return { $: 'Bytes', buffer: new ArrayBuffer(0) }; };
-var $Elm$Kernel$Bytes$decode = F2(function (_decoder, _bytes) { return $Maybe$Nothing; });
-var $Elm$Kernel$Bytes$decodeFailure = $Maybe$Nothing;
-function _Bytes_todo() { throw new Error('elm/bytes is not implemented in the alm runtime yet'); }
-var $Elm$Kernel$Bytes$read_i8 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_i16 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_i32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_u8 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_u16 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_u32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_f32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_f64 = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_bytes = _Bytes_todo;
-var $Elm$Kernel$Bytes$read_string = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_i8 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_i16 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_i32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_u8 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_u16 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_u32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_f32 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_f64 = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_bytes = _Bytes_todo;
-var $Elm$Kernel$Bytes$write_string = _Bytes_todo;
+// Elm.Kernel.Bytes — a real elm/bytes 1.0.8 runtime ported from the reference
+// kernel (Elm/Kernel/Bytes.js), adapted to alm's value representations.
+//
+// A `Bytes` value is represented as a JS `DataView` (matching the reference).
+// `width` reads `.byteLength`; `encode` allocates an `ArrayBuffer`, writes into
+// it via a `DataView`, and returns that view; `read_bytes` returns a sub-`DataView`.
+//
+// The generated Elm `Bytes.Encode.write`/`getWidth` are subject to dead-code
+// elimination (they are only reachable from this kernel, which alm does not scan
+// for dependencies), so `encode` cannot rely on them. Instead it walks the
+// `Encoder` tree here, pattern-matching on the constructor tags alm emits for
+// `Bytes.Encode.Encoder` (`I8`/`I16`/`I32`/`U8`/`U16`/`U32`/`F32`/`F64`/`Seq`/
+// `Utf8`/`Bytes`). Endianness values are `{ $: 'LE' }` / `{ $: 'BE' }`.
+
+function _Bytes_isLE(endianness) { return endianness.$ === 'LE'; }
+
+// The UTF-8 byte length of a string (not `.length`, which counts UTF-16 units).
+function _Bytes_getStringWidth(string) {
+	for (var width = 0, i = 0; i < string.length; i++) {
+		var code = string.charCodeAt(i);
+		width +=
+			(code < 0x80) ? 1 :
+			(code < 0x800) ? 2 :
+			(code < 0xD800 || 0xDBFF < code) ? 3 : (i++, 4);
+	}
+	return width;
+}
+
+// Write `string` as UTF-8 into `mb` at `offset`; return the new offset.
+function _Bytes_writeString(mb, offset, string) {
+	for (var i = 0; i < string.length; i++) {
+		var code = string.charCodeAt(i);
+		offset +=
+			(code < 0x80)
+				? (mb.setUint8(offset, code), 1)
+				:
+			(code < 0x800)
+				? (mb.setUint16(offset,
+					0xC080 | (code >>> 6 & 0x1F) << 8 | code & 0x3F), 2)
+				:
+			(code < 0xD800 || 0xDBFF < code)
+				? (mb.setUint16(offset,
+					0xE080 | (code >>> 12 & 0xF) << 8 | code >>> 6 & 0x3F)
+				, mb.setUint8(offset + 2, 0x80 | code & 0x3F), 3)
+				:
+				(code = (code - 0xD800) * 0x400 + string.charCodeAt(++i) - 0xDC00 + 0x10000
+				, mb.setUint32(offset,
+					0xF0808080
+					| (code >>> 18 & 0x7) << 24
+					| (code >>> 12 & 0x3F) << 16
+					| (code >>> 6 & 0x3F) << 8
+					| code & 0x3F), 4);
+	}
+	return offset;
+}
+
+// Copy the bytes of DataView `bytes` into `mb` at `offset`; return new offset.
+function _Bytes_writeBytes(mb, offset, bytes) {
+	for (var i = 0, len = bytes.byteLength, limit = len - 4; i <= limit; i += 4) {
+		mb.setUint32(offset + i, bytes.getUint32(i));
+	}
+	for (; i < len; i++) {
+		mb.setUint8(offset + i, bytes.getUint8(i));
+	}
+	return offset + len;
+}
+
+// Total width, in bytes, of an `Encoder` tree. `Seq`/`Utf8` carry a precomputed
+// width in `.a` (via `Bytes.Encode.sequence`/`string`), mirroring the reference.
+function _Bytes_encoderWidth(encoder) {
+	switch (encoder.$) {
+		case 'I8': case 'U8': return 1;
+		case 'I16': case 'U16': return 2;
+		case 'I32': case 'U32': case 'F32': return 4;
+		case 'F64': return 8;
+		case 'Seq': return encoder.a;
+		case 'Utf8': return encoder.a;
+		case 'Bytes': return encoder.a.byteLength;
+	}
+	return 0;
+}
+
+// Write an `Encoder` tree into `mb` at `offset`; return the new offset.
+function _Bytes_writeEncoder(mb, offset, encoder) {
+	switch (encoder.$) {
+		case 'I8': mb.setInt8(offset, encoder.a); return offset + 1;
+		case 'U8': mb.setUint8(offset, encoder.a); return offset + 1;
+		case 'I16': mb.setInt16(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 2;
+		case 'U16': mb.setUint16(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 2;
+		case 'I32': mb.setInt32(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 4;
+		case 'U32': mb.setUint32(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 4;
+		case 'F32': mb.setFloat32(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 4;
+		case 'F64': mb.setFloat64(offset, encoder.b, _Bytes_isLE(encoder.a)); return offset + 8;
+		case 'Seq': {
+			var arr = _List_toArray(encoder.b);
+			for (var i = 0; i < arr.length; i++) {
+				offset = _Bytes_writeEncoder(mb, offset, arr[i]);
+			}
+			return offset;
+		}
+		case 'Utf8': return _Bytes_writeString(mb, offset, encoder.b);
+		case 'Bytes': return _Bytes_writeBytes(mb, offset, encoder.a);
+	}
+	return offset;
+}
+
+// `getHostEndianness : Task x Endianness` — resolves to LE on little-endian
+// machines (virtually all of them), otherwise BE.
+var $Elm$Kernel$Bytes$getHostEndianness = F2(function (le, be) {
+	return $Task$succeed(new Uint8Array(new Uint32Array([1]).buffer)[0] === 1 ? le : be);
+});
+var $Elm$Kernel$Bytes$width = function (bytes) { return bytes.byteLength; };
+var $Elm$Kernel$Bytes$getStringWidth = function (s) { return _Bytes_getStringWidth(s); };
+var $Elm$Kernel$Bytes$encode = function (encoder) {
+	var mb = new DataView(new ArrayBuffer(_Bytes_encoderWidth(encoder)));
+	_Bytes_writeEncoder(mb, 0, encoder);
+	return mb;
+};
+
+// A decoder is `Bytes -> Int -> (Int, a)`; run it at offset 0 and take the
+// value. Out-of-range reads (DataView throws) or `fail` become `Nothing`.
+var $Elm$Kernel$Bytes$decode = F2(function (decoder, bytes) {
+	try {
+		return $Maybe$Just(A2(decoder, bytes, 0).b);
+	} catch (e) {
+		return $Maybe$Nothing;
+	}
+});
+var $Elm$Kernel$Bytes$decodeFailure = F2(function () { throw 0; });
+
+var $Elm$Kernel$Bytes$read_i8 = F2(function (bytes, offset) { return { $: '#2', a: offset + 1, b: bytes.getInt8(offset) }; });
+var $Elm$Kernel$Bytes$read_i16 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 2, b: bytes.getInt16(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_i32 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 4, b: bytes.getInt32(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_u8 = F2(function (bytes, offset) { return { $: '#2', a: offset + 1, b: bytes.getUint8(offset) }; });
+var $Elm$Kernel$Bytes$read_u16 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 2, b: bytes.getUint16(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_u32 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 4, b: bytes.getUint32(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_f32 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 4, b: bytes.getFloat32(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_f64 = F3(function (isLE, bytes, offset) { return { $: '#2', a: offset + 8, b: bytes.getFloat64(offset, isLE) }; });
+var $Elm$Kernel$Bytes$read_bytes = F3(function (len, bytes, offset) {
+	return { $: '#2', a: offset + len, b: new DataView(bytes.buffer, bytes.byteOffset + offset, len) };
+});
+var $Elm$Kernel$Bytes$read_string = F3(function (len, bytes, offset) {
+	var string = '';
+	var end = offset + len;
+	for (; offset < end;) {
+		var byte = bytes.getUint8(offset++);
+		string +=
+			(byte < 128)
+				? String.fromCharCode(byte)
+				:
+			((byte & 0xE0) === 0xC0)
+				? String.fromCharCode((byte & 0x1F) << 6 | bytes.getUint8(offset++) & 0x3F)
+				:
+			((byte & 0xF0) === 0xE0)
+				? String.fromCharCode(
+					(byte & 0xF) << 12
+					| (bytes.getUint8(offset++) & 0x3F) << 6
+					| bytes.getUint8(offset++) & 0x3F)
+				:
+				(byte =
+					((byte & 0x7) << 18
+						| (bytes.getUint8(offset++) & 0x3F) << 12
+						| (bytes.getUint8(offset++) & 0x3F) << 6
+						| bytes.getUint8(offset++) & 0x3F) - 0x10000
+				, String.fromCharCode(Math.floor(byte / 0x400) + 0xD800, byte % 0x400 + 0xDC00));
+	}
+	return { $: '#2', a: offset, b: string };
+});
+
+// The generated `Bytes.Encode.write` dispatches to these when it is present;
+// `encode` above does not depend on them.
+var $Elm$Kernel$Bytes$write_i8 = F3(function (mb, offset, n) { mb.setInt8(offset, n); return offset + 1; });
+var $Elm$Kernel$Bytes$write_i16 = F4(function (mb, offset, n, isLE) { mb.setInt16(offset, n, isLE); return offset + 2; });
+var $Elm$Kernel$Bytes$write_i32 = F4(function (mb, offset, n, isLE) { mb.setInt32(offset, n, isLE); return offset + 4; });
+var $Elm$Kernel$Bytes$write_u8 = F3(function (mb, offset, n) { mb.setUint8(offset, n); return offset + 1; });
+var $Elm$Kernel$Bytes$write_u16 = F4(function (mb, offset, n, isLE) { mb.setUint16(offset, n, isLE); return offset + 2; });
+var $Elm$Kernel$Bytes$write_u32 = F4(function (mb, offset, n, isLE) { mb.setUint32(offset, n, isLE); return offset + 4; });
+var $Elm$Kernel$Bytes$write_f32 = F4(function (mb, offset, n, isLE) { mb.setFloat32(offset, n, isLE); return offset + 4; });
+var $Elm$Kernel$Bytes$write_f64 = F4(function (mb, offset, n, isLE) { mb.setFloat64(offset, n, isLE); return offset + 8; });
+var $Elm$Kernel$Bytes$write_bytes = F3(function (mb, offset, bytes) { return _Bytes_writeBytes(mb, offset, bytes); });
+var $Elm$Kernel$Bytes$write_string = F3(function (mb, offset, string) { return _Bytes_writeString(mb, offset, string); });
 
 // BASICS — extras
 
