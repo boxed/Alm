@@ -94,14 +94,24 @@ pub fn generate_project_typed(
         .unwrap();
     }
     for attr in crate::builtins::HTML_STRING_ATTRS {
-        if *attr == "value" {
-            writeln!(gen.out, "var $Html$Attributes$value = _VDom_prop('value');").unwrap();
-        } else {
-            let key = match *attr {
-                "httpEquiv" => "http-equiv",
-                "acceptCharset" => "accept-charset",
-                other => other.trim_end_matches('_'),
-            };
+        // A handful of these are implemented in elm/html via
+        // `Elm.Kernel.VirtualDom.attribute` (a real DOM attribute) rather than
+        // as a property; keep them as AAttr so introspection (Test.Html) and
+        // structural equality match stock elm. `charset`/`content`/`httpEquiv`
+        // are not defined by elm/html at all — keep alm's historical mapping.
+        let real_attr_key = match *attr {
+            "draggable" => Some("draggable"),
+            "rel" => Some("rel"),
+            "list" => Some("list"),
+            "media" => Some("media"),
+            "datetime" => Some("datetime"),
+            "manifest" => Some("manifest"),
+            "charset" => Some("charset"),
+            "content" => Some("content"),
+            "httpEquiv" => Some("http-equiv"),
+            _ => None,
+        };
+        if let Some(key) = real_attr_key {
             writeln!(
                 gen.out,
                 "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
@@ -109,12 +119,42 @@ pub fn generate_project_typed(
                 key
             )
             .unwrap();
+            continue;
         }
+        // Everything else is `stringProperty` in elm/html: emit an AProp under
+        // elm's property key (which differs from the helper name for a few).
+        let prop_key = match *attr {
+            "class" => "className",
+            "for" => "htmlFor",
+            "type_" => "type",
+            "usemap" => "useMap",
+            "accesskey" => "accessKey",
+            other => other,
+        };
+        writeln!(
+            gen.out,
+            "var $Html$Attributes${} = _VDom_prop('{}');",
+            sanitize(attr),
+            prop_key
+        )
+        .unwrap();
     }
     for attr in crate::builtins::HTML_BOOL_ATTRS {
+        // elm/html defines `autocomplete : Bool -> Attribute msg` as a *string*
+        // property "autocomplete" whose value is "on"/"off", not a bool prop.
+        if *attr == "autocomplete" {
+            writeln!(
+                gen.out,
+                "var $Html$Attributes$autocomplete = function (b) {{ return {{ $: 'AProp', key: 'autocomplete', val: b ? 'on' : 'off' }}; }};"
+            )
+            .unwrap();
+            continue;
+        }
         let property = match *attr {
             "readonly" => "readOnly",
             "novalidate" => "noValidate",
+            "contenteditable" => "contentEditable",
+            "ismap" => "isMap",
             other => other,
         };
         writeln!(
@@ -136,7 +176,7 @@ pub fn generate_project_typed(
     }
     writeln!(
         gen.out,
-        "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ if (xs.a.b) {{ names.push(xs.a.a); }} }} return {{ $: 'AAttr', key: 'class', val: names.join(' ') }}; }};"
+        "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ if (xs.a.b) {{ names.push(xs.a.a); }} }} return {{ $: 'AProp', key: 'className', val: names.join(' ') }}; }};"
     )
     .unwrap();
     writeln!(

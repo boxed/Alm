@@ -67,6 +67,19 @@ Object.defineProperty(Element.prototype, 'textContent', {
         return this.childNodes.map(function (c) { return c.textContent; }).join('');
     }
 });
+// Browsers reflect certain DOM properties to attributes (e.g. `el.className`
+// backs the `class` attribute, `el.htmlFor` backs `for`). alm/elm apply
+// `class`/`id`/`for`/`placeholder` as properties, so mirror that reflection
+// here — otherwise `getAttribute('class')` wouldn't see a set `className`.
+var _reflectedProps = { className: 'class', htmlFor: 'for', id: 'id', placeholder: 'placeholder' };
+Object.keys(_reflectedProps).forEach(function (prop) {
+    var attr = _reflectedProps[prop];
+    Object.defineProperty(Element.prototype, prop, {
+        get: function () { return attr in this._attributes ? this._attributes[attr] : ''; },
+        set: function (v) { this._attributes[attr] = String(v); },
+        configurable: true
+    });
+});
 
 var document = {
     createElement: function (tag) { return new Element(tag); },
@@ -604,7 +617,9 @@ fire(i, 'click');
 console.log(byText(root, 'hey/True') !== null);
 "#,
     );
-    assert_eq!(output, vec!["fancy/red", "null/none", "true", "true"]);
+    // `class` is applied as the `className` property; removing it resets the
+    // property to "" (elm's behavior), which reflects to an empty class attr.
+    assert_eq!(output, vec!["fancy/red", "/none", "true", "true"]);
 }
 
 #[test]
