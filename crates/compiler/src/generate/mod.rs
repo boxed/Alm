@@ -974,7 +974,7 @@ fn to_js_converter(tipe: &can::Type) -> String {
                 to_js_converter(&args[0])
             ),
             "Array" => format!(
-                "function (a) {{ return a.a.map({}); }}",
+                "function (a) {{ return _Array_toJsArray(a).map({}); }}",
                 to_js_converter(&args[0])
             ),
             "Maybe" => format!(
@@ -1015,7 +1015,7 @@ fn from_js_converter(tipe: &can::Type) -> String {
                 from_js_converter(&args[0])
             ),
             "Array" => format!(
-                "function (a) {{ return {{ $: 'Array_elm_builtin', a: a.map({}) }}; }}",
+                "function (a) {{ return _Array_fromJsArray(a.map({})); }}",
                 from_js_converter(&args[0])
             ),
             "Maybe" => format!(
