@@ -242,12 +242,20 @@ fn mangle_module(name: &Name) -> String {
 
 /// JavaScript reserved words that are legal Elm identifiers.
 fn sanitize(name: &str) -> String {
+    // Mirrors elm's list (Generate.JavaScript.Name.reservedWords). Includes the
+    // strict-mode "future reserved words" (interface/implements/package/private/
+    // protected/public) and the literals false/true/null — all legal lowercase
+    // Elm identifiers but reserved in the strict-mode bundle we emit. elm mangles
+    // these the same way: prefix with `_`.
     match name {
         "arguments" | "await" | "break" | "case" | "catch" | "class" | "const" | "continue"
         | "debugger" | "default" | "delete" | "do" | "else" | "enum" | "eval" | "export"
-        | "extends" | "finally" | "for" | "function" | "instanceof" | "new" | "null"
-        | "return" | "static" | "super" | "switch" | "this" | "throw" | "try" | "typeof"
-        | "var" | "void" | "while" | "with" | "yield" => format!("_{}", name),
+        | "extends" | "false" | "finally" | "for" | "function" | "if" | "implements" | "import"
+        | "in" | "instanceof" | "interface" | "let" | "new" | "null" | "package" | "private"
+        | "protected" | "public" | "return" | "static" | "super" | "switch" | "this" | "throw"
+        | "true" | "try" | "typeof" | "var" | "void" | "while" | "with" | "yield" => {
+            format!("_{}", name)
+        }
         _ => name.to_string(),
     }
 }
