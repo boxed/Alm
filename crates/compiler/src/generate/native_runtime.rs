@@ -2075,7 +2075,10 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
         }
         Value::Record { fields } => {
             out.push_str("{ ");
-            for (i, &(name, value)) in fields.iter().enumerate() {
+            // elm renders record fields in alphabetical order, not definition order.
+            let mut sorted: Vec<&(*const u8, u64)> = fields.iter().collect();
+            sorted.sort_by(|a, b| cname(a.0).cmp(cname(b.0)));
+            for (i, &&(name, value)) in sorted.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }

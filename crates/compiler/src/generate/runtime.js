@@ -512,11 +512,11 @@ function _Debug_toString(value) {
         }
         return out;
     }
-    // record
-    var fields = [];
-    for (var name in value) {
-        fields.push(name + ' = ' + _Debug_toString(value[name]));
-    }
+    // record — elm renders fields in alphabetical order, not definition order
+    var names = [];
+    for (var name in value) { names.push(name); }
+    names.sort();
+    var fields = names.map(function (n) { return n + ' = ' + _Debug_toString(value[n]); });
     return '{ ' + fields.join(', ') + ' }';
 }
 var $Debug$toString = _Debug_toString;
