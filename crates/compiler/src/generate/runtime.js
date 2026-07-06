@@ -1044,6 +1044,22 @@ var $List$map3 = F4(function (f, xs, ys, zs) {
     }
     return _List_fromArray(out);
 });
+var $List$map4 = F5(function (f, ws, xs, ys, zs) {
+    var out = [];
+    for (; ws.$ === '::' && xs.$ === '::' && ys.$ === '::' && zs.$ === '::';
+        ws = ws.b, xs = xs.b, ys = ys.b, zs = zs.b) {
+        out.push(A4(f, ws.a, xs.a, ys.a, zs.a));
+    }
+    return _List_fromArray(out);
+});
+var $List$map5 = F6(function (f, vs, ws, xs, ys, zs) {
+    var out = [];
+    for (; vs.$ === '::' && ws.$ === '::' && xs.$ === '::' && ys.$ === '::' && zs.$ === '::';
+        vs = vs.b, ws = ws.b, xs = xs.b, ys = ys.b, zs = zs.b) {
+        out.push(A5(f, vs.a, ws.a, xs.a, ys.a, zs.a));
+    }
+    return _List_fromArray(out);
+});
 
 // STRING — extras
 
