@@ -459,10 +459,37 @@ impl Checker<'_> {
                 if let Some(var) = substitutions.get(name) {
                     return *var;
                 }
+                // Instantiation (rigid == false) creates *fresh* variables:
+                // they must not carry the scheme's variable names, or two
+                // distinct instantiated variables that happen to share a
+                // source name (e.g. every `a` from `a -> Promise m a`)
+                // collide in the name-keyed `free`/`names` maps during
+                // generalization, conflating them. Whether the collision
+                // corrupts inference depended on `env_free` (a HashSet)
+                // iteration order, making compilation nondeterministic.
+                // Names are assigned uniquely at generalization time instead.
+                // Instantiation (rigid == false) creates *fresh* variables:
+                // they must not carry the scheme's variable names, or two
+                // distinct instantiated variables that happen to share a
+                // source name (e.g. every `a` from `a -> Promise m a`)
+                // collide in the name-keyed `free`/`names` maps during
+                // generalization and get conflated — an error that surfaced
+                // or not depending on `env_free` (a HashSet) iteration order,
+                // making compilation nondeterministic. Names are assigned
+                // uniquely at generalization time instead.
+                // Instantiation (rigid == false) creates *fresh* variables:
+                // they must not carry the scheme's variable names, or two
+                // distinct instantiated variables that happen to share a
+                // source name (e.g. every `a` from `a -> Promise m a`)
+                // collide in the name-keyed `free`/`names` maps during
+                // generalization and get conflated — an error that surfaced
+                // or not depending on `env_free` (a HashSet) iteration order,
+                // making compilation nondeterministic. Names are assigned
+                // uniquely at generalization time instead.
                 let content = match (var_super(name), rigid) {
-                    (Some(super_), false) => Content::FlexSuper(super_, Some(name.clone())),
+                    (Some(super_), false) => Content::FlexSuper(super_, None),
                     (Some(super_), true) => Content::RigidSuper(super_, name.clone()),
-                    (None, false) => Content::FlexVar(Some(name.clone())),
+                    (None, false) => Content::FlexVar(None),
                     (None, true) => Content::RigidVar(name.clone()),
                 };
                 let var = self.pool.fresh(content);

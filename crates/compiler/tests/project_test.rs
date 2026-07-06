@@ -33,6 +33,39 @@ fn project(files: &[(&str, &str)]) -> Result<String, String> {
     compile_and_run(&src.join(files[0].0))
 }
 
+/// Write a project and type-check it (front end only, no codegen or run),
+/// returning any rendered errors. Used for programs that type-check but
+/// cannot be evaluated (e.g. ones with a `Debug.todo` placeholder value).
+fn check_project(files: &[(&str, &str)]) -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!(
+        "alm-check-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"] }"#,
+    )
+    .unwrap();
+    for (name, contents) in files {
+        let path = src.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    alm_compiler::project::check_project(&src.join(files[0].0))
+        .map(|_| ())
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.render())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
+
 fn compile_and_run(entry: &Path) -> Result<String, String> {
     let javascript = alm_compiler::project::compile_project(entry)
         .map_err(|errors| {
@@ -70,6 +103,64 @@ fn user_module_named_uuid_is_not_shadowed_by_a_builtin() {
         ),
     ]);
     assert_eq!(result.unwrap(), "v7/str");
+}
+
+#[test]
+fn recursive_polymorphic_memory_lift_type_checks() {
+    // Reduced from arowM/tepa Internal.Core.maybeLiftPromiseMemory. A
+    // recursive, annotated function whose body instantiates schemes with
+    // shared type-variable names (every `a`/`m` from `a -> Promise m a`).
+    // Instantiated variables used to carry those names, so distinct fresh
+    // variables collided in the name-keyed generalization maps and were
+    // conflated. Whether that produced a spurious `<|` type mismatch
+    // depended on `env_free` (a HashSet) iteration order — i.e. the same
+    // source compiled or not at random. Runs through the full pipeline so
+    // the ordering-sensitive path is exercised.
+    let result = check_project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\n\
+         type Promise m a = Promise (Context m -> PromiseEffect m a)\n\
+         type alias Context m = { layer : Layer_ m, counter : Int }\n\
+         type alias Layer_ m = { id : Id m, state : m, events : Ev m, values : Vs m }\n\
+         type Id m = Id Int\n\
+         type Ev m = Ev Int\n\
+         type Vs m = Vs Int\n\
+         coerceId : Id m1 -> Id m2\n\
+         coerceId (Id i) = Id i\n\
+         unwrapV : Vs m -> Int\n\
+         unwrapV (Vs d) = d\n\
+         type alias PromiseEffect m a = { newContext : Context m, state : PromiseState m a }\n\
+         type PromiseState m a = Resolved a | AwaitMsg (Int -> m -> Promise m a)\n\
+         succeedPromise : a -> Promise m a\n\
+         succeedPromise a = Promise (\\ctx -> { newContext = ctx, state = Resolved a })\n\
+         maybeLift : { get : m -> Maybe m1, set : m1 -> m -> m } -> Promise m1 a -> Promise m a\n\
+         maybeLift o (Promise prom1) =\n\
+         \x20   Promise <|\n\
+         \x20       \\context ->\n\
+         \x20           case o.get context.layer.state of\n\
+         \x20               Nothing -> { newContext = context, state = Resolved defaultA }\n\
+         \x20               Just state1 ->\n\
+         \x20                   let\n\
+         \x20                       eff1 = prom1 { layer = { id = coerceId context.layer.id, state = state1, events = Ev 0, values = Vs (unwrapV context.layer.values) }, counter = context.counter }\n\
+         \x20                   in\n\
+         \x20                   { newContext = { layer = { id = context.layer.id, state = o.set eff1.newContext.layer.state context.layer.state, events = Ev 0, values = Vs (unwrapV eff1.newContext.layer.values) }, counter = eff1.newContext.counter }\n\
+         \x20                   , state =\n\
+         \x20                       case eff1.state of\n\
+         \x20                           Resolved a -> Resolved a\n\
+         \x20                           AwaitMsg nextProm ->\n\
+         \x20                               AwaitMsg <| \\msg m ->\n\
+         \x20                                   case o.get m of\n\
+         \x20                                       Just mNext -> maybeLift o (nextProm msg mNext)\n\
+         \x20                                       Nothing -> succeedPromise defaultA\n\
+         \x20                   }\n\
+         defaultA : a\n\
+         defaultA = Debug.todo \"y\"\n\
+         main : String\n\
+         main = \"ok\"\n",
+    )]);
+    if let Err(errors) = result {
+        panic!("expected the module to type-check, got:\n{}", errors);
+    }
 }
 
 #[test]
