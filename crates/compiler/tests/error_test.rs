@@ -314,8 +314,8 @@ fn expression_parse_errors() {
 #[test]
 fn string_and_escape_errors() {
     expect("x = \"\"\"never closed\n", "closing `\"\"\"`");
-    expect("x = \"\\u{D835}\"\n", "surrogate pair");
-    expect("x = \"\\u{D835}\\u{0041}\"\n", "surrogate pair");
+    // Lone surrogate escapes are valid Elm (UTF-16 strings); see the e2e test
+    // `lone_surrogate_escapes_round_trip_like_elm`.
     expect("x = \"\\u{}\"\n", "hex digits");
     expect("x = \"\\u{41\"\n", "closing `}`");
     expect("x = ''\n", "character literal");

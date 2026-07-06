@@ -1154,7 +1154,12 @@ fn js_string(s: &str) -> String {
             c if (c as u32) < 0x20 => {
                 write!(out, "\\u{{{:x}}}", c as u32).unwrap();
             }
-            c => out.push(c),
+            c => match crate::parse::decode_lone_surrogate(c) {
+                // A smuggled lone surrogate: emit the raw UTF-16 code unit,
+                // exactly as stock elm does (e.g. `'\uD800'`).
+                Some(surrogate) => write!(out, "\\u{:04X}", surrogate).unwrap(),
+                None => out.push(c),
+            },
         }
     }
     out.push('\'');
