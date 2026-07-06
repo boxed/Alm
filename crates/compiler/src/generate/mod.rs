@@ -94,50 +94,46 @@ pub fn generate_project_typed(
         .unwrap();
     }
     for attr in crate::builtins::HTML_STRING_ATTRS {
-        // A handful of these are implemented in elm/html via
-        // `Elm.Kernel.VirtualDom.attribute` (a real DOM attribute) rather than
-        // as a property; keep them as AAttr so introspection (Test.Html) and
-        // structural equality match stock elm. `charset`/`content`/`httpEquiv`
-        // are not defined by elm/html at all — keep alm's historical mapping.
-        let real_attr_key = match *attr {
-            "draggable" => Some("draggable"),
-            "rel" => Some("rel"),
-            "list" => Some("list"),
-            "media" => Some("media"),
-            "datetime" => Some("datetime"),
-            "manifest" => Some("manifest"),
-            "charset" => Some("charset"),
-            "content" => Some("content"),
-            "httpEquiv" => Some("http-equiv"),
-            _ => None,
+        // elm defines most string attributes as DOM *properties* (stringProperty
+        // "name") and only a few as raw attributes. Matching this matters because
+        // a property and an attribute with the same DOM name (e.g. `type_` vs
+        // `attribute "type"`) must live in separate buckets. `Some(prop)` => a
+        // property; `None` => a raw attribute whose DOM name is the second element.
+        let (prop, attr_name): (Option<&str>, &str) = match *attr {
+            "class" => (Some("className"), "class"),
+            "for" => (Some("htmlFor"), "for"),
+            "type_" => (Some("type"), "type"),
+            "usemap" => (Some("useMap"), "usemap"),
+            "accesskey" => (Some("accessKey"), "accesskey"),
+            // Raw attributes in elm (no property form).
+            "draggable" => (None, "draggable"),
+            "rel" => (None, "rel"),
+            "list" => (None, "list"),
+            "media" => (None, "media"),
+            "datetime" => (None, "datetime"),
+            "manifest" => (None, "manifest"),
+            "charset" => (None, "charset"),
+            "content" => (None, "content"),
+            "httpEquiv" => (None, "http-equiv"),
+            // Everything else: a property whose name is the attr (sans trailing _).
+            other => (Some(other.trim_end_matches('_')), other.trim_end_matches('_')),
         };
-        if let Some(key) = real_attr_key {
-            writeln!(
+        match prop {
+            Some(name) => writeln!(
+                gen.out,
+                "var $Html$Attributes${} = _VDom_prop('{}');",
+                sanitize(attr),
+                name
+            )
+            .unwrap(),
+            None => writeln!(
                 gen.out,
                 "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
                 sanitize(attr),
-                key
+                attr_name
             )
-            .unwrap();
-            continue;
+            .unwrap(),
         }
-        // Everything else is `stringProperty` in elm/html: emit an AProp under
-        // elm's property key (which differs from the helper name for a few).
-        let prop_key = match *attr {
-            "class" => "className",
-            "for" => "htmlFor",
-            "type_" => "type",
-            "usemap" => "useMap",
-            "accesskey" => "accessKey",
-            other => other,
-        };
-        writeln!(
-            gen.out,
-            "var $Html$Attributes${} = _VDom_prop('{}');",
-            sanitize(attr),
-            prop_key
-        )
-        .unwrap();
     }
     for attr in crate::builtins::HTML_BOOL_ATTRS {
         // elm/html defines `autocomplete : Bool -> Attribute msg` as a *string*
@@ -166,13 +162,30 @@ pub fn generate_project_typed(
         .unwrap();
     }
     for attr in crate::builtins::HTML_INT_ATTRS {
-        writeln!(
-            gen.out,
-            "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
-            sanitize(attr),
-            attr
-        )
-        .unwrap();
+        // elm's int attributes: `start` is a property (Json.int); the rest are
+        // raw attributes rendered with String.fromInt, and a couple use a
+        // camelCased DOM name (tabIndex, minLength).
+        match *attr {
+            "start" => writeln!(
+                gen.out,
+                "var $Html$Attributes$start = function (n) {{ return {{ $: 'AProp', key: 'start', val: n }}; }};"
+            )
+            .unwrap(),
+            _ => {
+                let key = match *attr {
+                    "tabindex" => "tabIndex",
+                    "minlength" => "minLength",
+                    other => other,
+                };
+                writeln!(
+                    gen.out,
+                    "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
+                    sanitize(attr),
+                    key
+                )
+                .unwrap();
+            }
+        }
     }
     writeln!(
         gen.out,
@@ -689,7 +702,12 @@ impl Generator {
             Binop(op, home, function, left, right) => {
                 self.binop(op, home, function, left, right)
             }
-            Lambda(args, body) => self.function(args, body),
+            Lambda(args, body) => match record_ctor_fields(args, body) {
+                // A record type-alias constructor used as a value: emit a shared,
+                // memoized constructor so `(==)` matches elm (see _Record_ctor).
+                Some(fields) => format!("_Record_ctor('{}')", fields),
+                None => self.function(args, body),
+            },
             Call(func, args) => {
                 let func_js = self.expr(func);
                 let arg_js: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
@@ -891,6 +909,40 @@ fn callable(js: String) -> String {
 
 fn foreign(module: &Name, name: &Name) -> String {
     format!("${}${}", module.as_str().replace('.', "$"), sanitize(name))
+}
+
+/// Recognize a record type-alias constructor lambda as produced by
+/// `record_alias_ctor` in canonicalization: args are `_r0.._r{n-1}` in order and
+/// the body is a record whose i-th field's value is exactly `_r{i}`. Returns the
+/// comma-joined field names, so codegen can emit a shared memoized constructor
+/// (so equality of records built from the constructor matches elm's semantics).
+fn record_ctor_fields(args: &[can::Pattern], body: &can::Expr) -> Option<String> {
+    let n = args.len();
+    if n == 0 {
+        return None;
+    }
+    for (i, arg) in args.iter().enumerate() {
+        match &arg.value {
+            can::Pattern_::Var(name) if name.as_str() == format!("_r{}", i) => {}
+            _ => return None,
+        }
+    }
+    let fields = match &body.value {
+        can::Expr_::Record(fields) => fields,
+        _ => return None,
+    };
+    if fields.len() != n {
+        return None;
+    }
+    let mut names = Vec::with_capacity(n);
+    for (i, (fname, fexpr)) in fields.iter().enumerate() {
+        match &fexpr.value {
+            can::Expr_::VarLocal(vn) if vn.as_str() == format!("_r{}", i) => {}
+            _ => return None,
+        }
+        names.push(fname.value.as_str().to_string());
+    }
+    Some(names.join(","))
 }
 
 /// Emit one union constructor: a value for arity 0, otherwise a curried

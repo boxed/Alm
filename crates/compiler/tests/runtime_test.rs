@@ -890,11 +890,13 @@ main =
 
 #[test]
 fn time_era_boundary_and_millis() {
-    // The era starts at exactly ms/60000 for this posix: any drift in the
-    // 60000 constants moves the boundary.
+    // Era boundaries are minute-granular: elm compares `flooredDiv ms 60000`
+    // (whole minutes) against era.start, so 12000000ms and 12000001ms both fall
+    // in minute 200. era.start=200 is NOT `< 200`, so the era does not apply and
+    // both use the default offset 0 -> hour 3. (Matches elm/time exactly.)
     assert_eq!(
         run("zone = Time.customZone 0 [ { start = 200, offset = 120 } ]\n\nmain = Debug.toString [ Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 12000001), Time.toMillis zone (Time.millisToPosix 12000001) ]"),
-        "[3,5,1]"
+        "[3,3,1]"
     );
 }
 

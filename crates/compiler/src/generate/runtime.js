@@ -24,6 +24,24 @@ function _Fn(arity, fun) {
     wrapper.f = fun;
     return wrapper;
 }
+// Record type-alias constructors used as first-class values (e.g. `map Point xs`)
+// must be a single shared function so `(==)` on values built from them matches
+// elm (elm emits one top-level constructor; a fresh closure per use would make
+// two equal records compare unequal). Memoize by the comma-joined field list.
+var _Record_ctorCache = {};
+function _Record_ctor(fieldsCsv) {
+    var cached = _Record_ctorCache[fieldsCsv];
+    if (cached !== undefined) { return cached; }
+    var fields = fieldsCsv.length === 0 ? [] : fieldsCsv.split(',');
+    var n = fields.length;
+    var fn = _Fn(n, function () {
+        var rec = {};
+        for (var i = 0; i < n; i++) { rec[fields[i]] = arguments[i]; }
+        return rec;
+    });
+    _Record_ctorCache[fieldsCsv] = fn;
+    return fn;
+}
 function _An(f, args) {
     if (f.a === args.length) { return f.f.apply(null, args); }
     var result = f;
@@ -76,7 +94,10 @@ function _Utils_eq(x, y) {
 }
 function _Utils_eqHelp(x, y, depth, stack) {
     if (x === y) { return true; }
-    if (typeof x !== 'object' || x === null || y === null) { return false; }
+    // A `y === undefined` here means x has a field/index that y lacks (a shape
+    // mismatch, e.g. comparing a non-empty array-backed Dict with Dict.empty):
+    // they are unequal — guard so we don't recurse into `undefined` and throw.
+    if (typeof x !== 'object' || x === null || y === null || y === undefined) { return false; }
     // Boxed chars compare by value: two `new String('a')` are equal.
     if (x instanceof String) { return x.valueOf() === y.valueOf(); }
     // Json decoders are opaque closures in alm. elm represents them as data and
@@ -395,7 +416,7 @@ var $List$unzip = function (pairs) {
 
 var $String$isEmpty = function (s) { return s === ''; };
 var $String$length = function (s) { return s.length; };
-var $String$reverse = function (s) { return s.split('').reverse().join(''); };
+var $String$reverse = function (s) { return Array.from(s).reverse().join(''); };
 var $String$repeat = F2(function (n, s) { return n < 1 ? '' : s.repeat(n); });
 var $String$replace = F3(function (before, after, s) { return s.split(before).join(after); });
 var $String$append = F2(function (a, b) { return a + b; });
@@ -403,10 +424,9 @@ var $String$concat = function (xs) { return _List_toArray(xs).join(''); };
 var $String$split = F2(function (sep, s) { return _List_fromArray(s.split(sep)); });
 var $String$join = F2(function (sep, xs) { return _List_toArray(xs).join(sep); });
 var $String$words = function (s) {
-    var trimmed = s.trim();
-    return _List_fromArray(trimmed === '' ? [] : trimmed.split(/\s+/));
+    return _List_fromArray(s.trim().split(/\s+/g));
 };
-var $String$lines = function (s) { return _List_fromArray(s.split('\n')); };
+var $String$lines = function (s) { return _List_fromArray(s.split(/\r\n|\r|\n/g)); };
 var $String$slice = F3(function (a, b, s) {
     // Clamp both ends into [0, len] like elm — a negative end that underflows
     // past 0 must become 0, not leak into JS slice as an offset-from-end.
@@ -440,9 +460,11 @@ var $String$toInt = function (s) {
 };
 var $String$fromInt = function (n) { return String(n); };
 var $String$toFloat = function (s) {
-    if (s === '' || /[^0-9+\-.eE]/.test(s)) { return $Maybe$Nothing; }
-    var n = Number(s);
-    return isNaN(n) ? $Maybe$Nothing : $Maybe$Just(n);
+    // Match elm: reject only whitespace / hex-octal-binary markers, then coerce
+    // via +s so "Infinity"/"-Infinity" parse (like JS), and NaN => Nothing.
+    if (s.length === 0 || /[\sxbo]/.test(s)) { return $Maybe$Nothing; }
+    var n = +s;
+    return n === n ? $Maybe$Just(n) : $Maybe$Nothing;
 };
 var $String$fromFloat = function (n) { return String(n); };
 var $String$fromChar = function (c) { return c + ''; };
@@ -3107,11 +3129,12 @@ var $Json$Decode$fail = function (msg) {
     return _Json_decoder(function (v) { return _Json_failure(msg, v); });
 };
 var $Json$Decode$nullable = function (decoder) {
-    return _Json_decoder(function (v) {
-        if (v === null || v === undefined) { return _Json_ok($Maybe$Nothing); }
-        var r = decoder.run(v);
-        return r.ok ? _Json_ok($Maybe$Just(r.value)) : r;
-    });
+    // elm: oneOf [ null Nothing, map Just decoder ] — so the failure on a
+    // non-null, non-matching value is a OneOf of both branches' errors.
+    return $Json$Decode$oneOf(_List_fromArray([
+        $Json$Decode$_null($Maybe$Nothing),
+        A2($Json$Decode$map, $Maybe$Just, decoder)
+    ]));
 };
 var $Json$Decode$maybe = function (decoder) {
     return _Json_decoder(function (v) {
@@ -3142,6 +3165,7 @@ var $Json$Decode$oneOrMore = F2(function (toValue, decoder) {
 });
 var $Json$Decode$array = function (decoder) {
     return _Json_decoder(function (v) {
+        if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
         var r = $Json$Decode$list(decoder).run(v);
         return r.ok ? _Json_ok($Array$fromList(r.value)) : r;
     });
@@ -3168,7 +3192,7 @@ var $Json$Decode$dict = function (decoder) {
 };
 var $Json$Decode$field = F2(function (name, decoder) {
     return _Json_decoder(function (v) {
-        if (v === null || typeof v !== 'object' || Array.isArray(v) || !(name in v)) {
+        if (v === null || typeof v !== 'object' || !(name in v)) {
             return _Json_expecting('an OBJECT with a field named `' + name + '`', v);
         }
         var r = decoder.run(v[name]);
@@ -3185,7 +3209,7 @@ var $Json$Decode$index = F2(function (i, decoder) {
     return _Json_decoder(function (v) {
         if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
         if (i >= v.length) {
-            return _Json_expecting('a LONGER array — need index ' + i, v);
+            return _Json_expecting('a LONGER array. Need index ' + i + ' but only see ' + v.length + ' entries', v);
         }
         var r = decoder.run(v[i]);
         return r.ok ? r : _Json_err({ $: 'Index', a: i, b: r.error });
@@ -3446,27 +3470,47 @@ var $Time$getZoneName = _Task(function (ok, _err) {
 var $Time$every = F2(function (interval, toMsg) {
     return { $: 'SubTime', interval: interval, toMsg: toMsg };
 });
-function _Time_toAdjusted(zone, posix) {
-    var minutes = posix.ms / 60000;
-    var offset = zone.offset;
+// Pure-integer date math, ported from elm/time's Time.elm (toAdjustedMinutes +
+// toCivil). NOT via `new Date`, because JS Date is Invalid beyond ~271821 years
+// (getUTCMonth => NaN), whereas elm's algorithm works for any Posix. `//` in elm
+// truncates toward zero, matched here with `| 0`; flooredDiv uses Math.floor.
+function _Time_flooredDiv(numerator, denominator) { return Math.floor(numerator / denominator); }
+function _Time_toAdjustedMinutes(zone, posix) {
+    var posixMinutes = _Time_flooredDiv(posix.ms, 60000);
     for (var i = 0; i < zone.eras.length; i++) {
-        if (zone.eras[i].start < minutes) { offset = zone.eras[i].offset; break; }
+        if (zone.eras[i].start < posixMinutes) { return posixMinutes + zone.eras[i].offset; }
     }
-    return new Date(posix.ms + offset * 60000);
+    return posixMinutes + zone.offset;
 }
-var $Time$toYear = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCFullYear(); });
+function _Time_toCivil(minutes) {
+    var rawDay = _Time_flooredDiv(minutes, 1440) + 719468;
+    var era = ((rawDay >= 0 ? rawDay : rawDay - 146096) / 146097) | 0;
+    var dayOfEra = rawDay - era * 146097;
+    var yearOfEra = ((dayOfEra - ((dayOfEra / 1460) | 0) + ((dayOfEra / 36524) | 0) - ((dayOfEra / 146096) | 0)) / 365) | 0;
+    var year = yearOfEra + era * 400;
+    var dayOfYear = dayOfEra - (365 * yearOfEra + ((yearOfEra / 4) | 0) - ((yearOfEra / 100) | 0));
+    var mp = ((5 * dayOfYear + 2) / 153) | 0;
+    var month = mp + (mp < 10 ? 3 : -9);
+    return {
+        year: year + (month <= 2 ? 1 : 0),
+        month: month,
+        day: dayOfYear - (((153 * mp + 2) / 5) | 0) + 1
+    };
+}
+var $Time$toYear = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).year; });
 var _Time_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 var $Time$toMonth = F2(function (zone, posix) {
-    return { $: _Time_months[_Time_toAdjusted(zone, posix).getUTCMonth()] };
+    return { $: _Time_months[_Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).month - 1] };
 });
-var $Time$toDay = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCDate(); });
-var $Time$toHour = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCHours(); });
-var $Time$toMinute = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMinutes(); });
-var $Time$toSecond = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCSeconds(); });
-var $Time$toMillis = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMilliseconds(); });
-var _Time_weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var $Time$toDay = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).day; });
+var $Time$toHour = F2(function (zone, posix) { return A2($Basics$modBy, 24, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 60)); });
+var $Time$toMinute = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_toAdjustedMinutes(zone, posix)); });
+var $Time$toSecond = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_flooredDiv(posix.ms, 1000)); });
+var $Time$toMillis = F2(function (zone, posix) { return A2($Basics$modBy, 1000, posix.ms); });
+// elm's toWeekday: modBy 7 (flooredDiv adjMinutes 1440) => 0:Thu 1:Fri 2:Sat 3:Sun 4:Mon 5:Tue _:Wed
+var _Time_weekdays = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed'];
 var $Time$toWeekday = F2(function (zone, posix) {
-    return { $: _Time_weekdays[_Time_toAdjusted(zone, posix).getUTCDay()] };
+    return { $: _Time_weekdays[A2($Basics$modBy, 7, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 1440))] };
 });
 
 // HTTP — fetch-based.
@@ -3651,21 +3695,43 @@ var $Url$percentDecode = function (s) {
     try { return $Maybe$Just(decodeURIComponent(s)); }
     catch (e) { return $Maybe$Nothing; }
 };
+function _Url_chompPort(protocol, params, frag, authority, path) {
+    var i = authority.indexOf(':');
+    if (i < 0) {
+        return $Maybe$Just({ protocol: protocol, host: authority, port_: $Maybe$Nothing, path: path, query: params, fragment: frag });
+    }
+    var portNum = $String$toInt(authority.slice(i + 1));
+    if (portNum.$ !== 'Just') { return $Maybe$Nothing; }
+    return $Maybe$Just({ protocol: protocol, host: authority.slice(0, i), port_: portNum, path: path, query: params, fragment: frag });
+}
+function _Url_chompAfterAuthority(protocol, params, frag, authority, path) {
+    if (authority === '') { return $Maybe$Nothing; }
+    var i = authority.indexOf('@');
+    if (i < 0) { return _Url_chompPort(protocol, params, frag, authority, path); }
+    return _Url_chompPort(protocol, params, frag, authority.slice(i + 1), path);
+}
+function _Url_chompBeforeQuery(protocol, params, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('/');
+    if (i < 0) { return _Url_chompAfterAuthority(protocol, params, frag, str, ''); }
+    return _Url_chompAfterAuthority(protocol, params, frag, str.slice(0, i), str.slice(i));
+}
+function _Url_chompBeforeFragment(protocol, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('?');
+    if (i < 0) { return _Url_chompBeforeQuery(protocol, $Maybe$Nothing, frag, str); }
+    return _Url_chompBeforeQuery(protocol, $Maybe$Just(str.slice(i + 1)), frag, str.slice(0, i));
+}
+function _Url_chompAfterProtocol(protocol, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('#');
+    if (i < 0) { return _Url_chompBeforeFragment(protocol, $Maybe$Nothing, str); }
+    return _Url_chompBeforeFragment(protocol, $Maybe$Just(str.slice(i + 1)), str.slice(0, i));
+}
 var $Url$fromString = function (str) {
-    var match = /^(https?):\/\/([^/:?#]*)(?::(\d+))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(str);
-    if (!match) { return $Maybe$Nothing; }
-    // elm's `Url.fromString` rejects a URL with nothing after the protocol
-    // (`chompAfterProtocol` returns Nothing on an empty remainder), so e.g.
-    // "http://" is invalid.
-    if (str.length <= match[1].length + 3) { return $Maybe$Nothing; }
-    return $Maybe$Just({
-        protocol: match[1] === 'https' ? { $: 'Https' } : { $: 'Http' },
-        host: match[2],
-        port_: match[3] ? $Maybe$Just(parseInt(match[3], 10)) : $Maybe$Nothing,
-        path: match[4] || '/',
-        query: match[5] !== undefined ? $Maybe$Just(match[5]) : $Maybe$Nothing,
-        fragment: match[6] !== undefined ? $Maybe$Just(match[6]) : $Maybe$Nothing
-    });
+    if (str.indexOf('http://') === 0) { return _Url_chompAfterProtocol({ $: 'Http' }, str.slice(7)); }
+    if (str.indexOf('https://') === 0) { return _Url_chompAfterProtocol({ $: 'Https' }, str.slice(8)); }
+    return $Maybe$Nothing;
 };
 var $Url$toString = function (url) {
     var s = (url.protocol.$ === 'Https' ? 'https' : 'http') + '://' + url.host;

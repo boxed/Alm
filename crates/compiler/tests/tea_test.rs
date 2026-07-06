@@ -51,8 +51,22 @@ Element.prototype.replaceChild = function (newChild, oldChild) {
 };
 Element.prototype.setAttribute = function (k, v) { this._attributes[k] = String(v); };
 Element.prototype.getAttribute = function (k) {
-    return k in this._attributes ? this._attributes[k] : null;
+    if (k in this._attributes) { return this._attributes[k]; }
+    // Reflect DOM properties to attributes like a real browser (elm renders
+    // most attributes — class, id, placeholder, href… — as properties).
+    var propKey = k === 'class' ? 'className' : k;
+    var v = this[propKey];
+    return (typeof v === 'string' || typeof v === 'number') ? String(v) : null;
 };
+// `id` and `className` reflect to/from the class/id attributes both ways.
+Object.defineProperty(Element.prototype, 'id', {
+    get: function () { return this._attributes.id !== undefined ? this._attributes.id : ''; },
+    set: function (v) { this._attributes.id = String(v); }
+});
+Object.defineProperty(Element.prototype, 'className', {
+    get: function () { return this._attributes.class !== undefined ? this._attributes.class : ''; },
+    set: function (v) { this._attributes.class = String(v); }
+});
 Element.prototype.removeAttribute = function (k) { delete this._attributes[k]; };
 Element.prototype.addEventListener = function (name, fn) {
     (this._listeners[name] = this._listeners[name] || []).push(fn);
@@ -617,8 +631,8 @@ fire(i, 'click');
 console.log(byText(root, 'hey/True') !== null);
 "#,
     );
-    // `class` is applied as the `className` property; removing it resets the
-    // property to "" (elm's behavior), which reflects to an empty class attr.
+    // class is a property (className); removing it sets className = "" (which
+    // reflects to an empty class attribute), matching elm — not attribute removal.
     assert_eq!(output, vec!["fancy/red", "/none", "true", "true"]);
 }
 
