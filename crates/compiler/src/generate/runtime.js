@@ -3445,6 +3445,36 @@ var $Elm$Kernel$Texture$load = F6(function (magnify, minify, hWrap, vWrap, flipY
     return _Task(function (ok, err) { err(_Utils_Tuple0); });
 });
 
+// WEBGL (elm-explorations/webgl Elm.Kernel.WebGL). Real rendering needs a
+// GPU/DOM `gl` context, which node lacks, so these headless stand-ins only let
+// modules that build WebGL entities/scenes (e.g. emilgoldsmith/elm-speedcubing)
+// load and be tested for their non-rendering logic. `entity` is F5, `toHtml`
+// is F3, and every `enable*` setting/option is F2 returning unit — matching the
+// arities the WebGL package expects. The nodes carry their inputs as plain data
+// (no function fields) so structural equality behaves predictably.
+var $Elm$Kernel$WebGL$entity = F5(function (settings, vert, frag, mesh, uniforms) {
+    return { $: 'Entity', settings: settings, vert: vert, frag: frag, mesh: mesh, uniforms: uniforms };
+});
+var $Elm$Kernel$WebGL$toHtml = F3(function (options, attributes, entities) {
+    return { $: 'WebGLScene', options: options, attributes: attributes, entities: entities };
+});
+var _WebGL_enable = F2(function (_ctx, _setting) { return _Utils_Tuple0; });
+var $Elm$Kernel$WebGL$enableAlpha = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableAntialias = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableBlend = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableClearColor = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableColorMask = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableCullFace = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableDepth = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableDepthTest = _WebGL_enable;
+var $Elm$Kernel$WebGL$enablePolygonOffset = _WebGL_enable;
+var $Elm$Kernel$WebGL$enablePreserveDrawingBuffer = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableSampleAlphaToCoverage = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableSampleCoverage = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableScissor = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableStencil = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableStencilTest = _WebGL_enable;
+
 var $Terminal$writeLine = function (s) { return { $: 'CmdWrite', s: s }; };
 
 // TIME

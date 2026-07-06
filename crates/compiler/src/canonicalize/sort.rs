@@ -127,7 +127,7 @@ fn collect_refs_help(expr: &can::Expr, direct_only: bool, refs: &mut HashSet<Nam
             walk(right, refs);
         }
         VarForeign(..) | VarCtor(..) | Chr(_) | Str(_) | Int(_) | Float(_) | Accessor(_)
-        | Unit => {}
+        | Unit | Shader(_) => {}
         Lambda(_, body) => {
             if !direct_only {
                 walk(body, refs);

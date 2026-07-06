@@ -284,7 +284,7 @@ fn collect_refs<'a>(expr: &'a can::Expr, out: &mut Vec<&'a can::Expr>) {
             collect_refs(b, out);
             rest.iter().for_each(|e| collect_refs(e, out))
         }
-        Chr(_) | Str(_) | Int(_) | Float(_) | Accessor(_) | Unit => {}
+        Chr(_) | Str(_) | Int(_) | Float(_) | Accessor(_) | Unit | Shader(_) => {}
     }
 }
 
@@ -513,6 +513,9 @@ impl Specializer<'_> {
             Str(s) => TypedKind::Str(s.clone()),
             Chr(c) => TypedKind::Chr(*c),
             Unit => TypedKind::Unit,
+            // WebGL shaders are JS-backend only; the native/typed path never
+            // renders them. Carry the source so the node is well-formed.
+            Shader(shader) => TypedKind::Str(shader.src.clone()),
             VarLocal(name) => TypedKind::Local(name.clone()),
             VarTopLevel(name) => {
                 if self.ctx.defs.contains_key(name) {

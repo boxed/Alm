@@ -237,6 +237,9 @@ impl Lowerer {
             Int(n) => Expr::Int(*n),
             Float(f) => Expr::Float(*f),
             Unit => Expr::Unit,
+            // GLSL shaders target WebGL, which the native backend has no
+            // runtime for; they are only reachable through the JS backend.
+            Shader(_) => Expr::Crash("GLSL shaders are not supported by the native backend".to_string()),
             VarLocal(name) => Expr::Local(name.to_string()),
             VarTopLevel(name) => self.global_ref(&self.module.clone(), name),
             VarForeign(module, name) => {
@@ -858,7 +861,7 @@ fn free_vars(expr: &can::Expr, bound: &mut Vec<Name>, out: &mut BTreeSet<Name>) 
             }
         }
         VarTopLevel(_) | VarForeign(..) | VarCtor(..) | Chr(_) | Str(_) | Int(_) | Float(_)
-        | Accessor(_) | Unit => {}
+        | Accessor(_) | Unit | Shader(_) => {}
         List(items) => {
             for item in items {
                 free_vars(item, bound, out);

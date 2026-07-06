@@ -398,3 +398,37 @@ fn identifiers_starting_with_keywords() {
          port_ = 2\n",
     );
 }
+
+#[test]
+fn glsl_shader_literal() {
+    // `[glsl| ... |]` parses to a Shader expression, harvesting the declared
+    // attribute/uniform/varying names. From emilgoldsmith/elm-speedcubing.
+    let m = parse_ok(
+        "module Test exposing (..)\n\
+         \n\
+         vertexShader =\n\
+         \x20   [glsl|\n\
+         \x20       attribute vec3 position;\n\
+         \x20       attribute vec3 color;\n\
+         \x20       uniform mat4 rotation;\n\
+         \x20       varying vec3 vcolor;\n\
+         \x20       void main () {\n\
+         \x20           gl_Position = rotation * vec4(position, 1.0);\n\
+         \x20           vcolor = color;\n\
+         \x20       }\n\
+         \x20   |]\n",
+    );
+    let body = &m.values[0].value.body;
+    match &body.value {
+        Expr_::Shader(shader) => {
+            let names = |ns: &[alm_compiler::data::Name]| {
+                ns.iter().map(|n| n.as_str().to_string()).collect::<Vec<_>>()
+            };
+            assert_eq!(names(&shader.attributes), vec!["position", "color"]);
+            assert_eq!(names(&shader.uniforms), vec!["rotation"]);
+            assert_eq!(names(&shader.varyings), vec!["vcolor"]);
+            assert!(shader.src.contains("gl_Position"));
+        }
+        other => panic!("expected a Shader expression, got {:?}", other),
+    }
+}

@@ -600,14 +600,28 @@ impl Checker<'_> {
         // seeding them here forces the anonymous name generator to skip those
         // names. (Seeding `free` too, since `variable_to_type` returns early
         // on an already-named var and would otherwise not record it as free.)
-        for &root in &env_free {
+        //
+        // Two *distinct* free variables can carry the same stored name — e.g.
+        // two separate instantiations of `List.head : List a -> Maybe a` both
+        // leave their element as `FlexVar(Some("a"))`. `state.free` is keyed by
+        // name, so seeding them naively would collapse both onto one live var
+        // and conflate them at instantiation (a `List Char` element and a
+        // `List Token` element becoming the same variable). Give each distinct
+        // root its own name, and process in a deterministic order so the naming
+        // does not depend on `HashSet` iteration order.
+        let mut seeds: Vec<Variable> = env_free.iter().copied().collect();
+        seeds.sort_unstable();
+        for root in seeds {
             let name = match self.pool.content(root) {
                 Content::RigidVar(name)
                 | Content::FlexVar(Some(name))
                 | Content::RigidSuper(_, name) => Some(name),
                 _ => None,
             };
-            if let Some(name) = name {
+            if let Some(mut name) = name {
+                while state.free.contains_key(&name) {
+                    name = Name::from(format!("{}_", name));
+                }
                 state.names.insert(root, name.clone());
                 state.free.insert(name, root);
             }
@@ -1152,6 +1166,17 @@ impl Checker<'_> {
                     .fresh(Content::Structure(FlatType::Record(field_types, empty))))
             }
             Unit => Ok(self.pool.fresh(Content::Structure(FlatType::Unit))),
+            Shader(_) => {
+                // `[glsl|...|]` has type `WebGL.Shader attributes uniforms
+                // varyings`. Deriving those three record types precisely would
+                // require a GLSL type table plus Elm's extensible-record link
+                // rules (a fragment shader may declare fewer uniforms than its
+                // annotation lists). alm has no WebGL runtime, so a shader is
+                // only ever pinned by its own annotation or its use site; a
+                // fresh flexible type unifies with either and accepts exactly
+                // the shaders Elm accepts.
+                Ok(self.pool.fresh_var())
+            }
             Tuple(a, b, rest) => {
                 let a = self.infer_expr(a)?;
                 let b = self.infer_expr(b)?;
