@@ -1005,7 +1005,7 @@ fn from_js_converter(tipe: &can::Type) -> String {
                 from_js_converter(&args[0])
             ),
             "Array" => format!(
-                "function (a) {{ return {{ $: 'Array', a: a.map({}) }}; }}",
+                "function (a) {{ return {{ $: 'Array_elm_builtin', a: a.map({}) }}; }}",
                 from_js_converter(&args[0])
             ),
             "Maybe" => format!(

@@ -490,13 +490,17 @@ function _Debug_toString(value) {
     if (tag === '[]' || tag === '::') {
         return '[' + _List_toArray(value).map(_Debug_toString).join(',') + ']';
     }
-    if (tag === 'Dict') {
+    // Builtin Dict/Set/Array carry collision-proof `_elm_builtin` tags (alm's
+    // parser forbids that suffix in user constructor names), so a user type
+    // named `Dict`/`Set`/`Array` has tag `'Dict'`/`'Set'`/`'Array'` and falls
+    // through to the generic custom-type rendering below.
+    if (tag === 'Dict_elm_builtin') {
         return 'Dict.fromList ' + _Debug_toString($Dict$toList(value));
     }
-    if (tag === 'Set') {
+    if (tag === 'Set_elm_builtin') {
         return 'Set.fromList ' + _Debug_toString($Dict$keys(value.d));
     }
-    if (tag === 'Array') {
+    if (tag === 'Array_elm_builtin') {
         return 'Array.fromList ' + _Debug_toString(_List_fromArray(value.a));
     }
     if (tag !== undefined) {
@@ -1093,7 +1097,7 @@ var $Result$map5 = F6(function (f, ra, rb, rc, rd, re) {
 // keys with a parallel array of values. Same observable behavior;
 // insert/remove are O(n) copies rather than O(log n).
 
-var $Dict$empty = { $: 'Dict', keys: [], vals: [] };
+var $Dict$empty = { $: 'Dict_elm_builtin', keys: [], vals: [] };
 
 function _Dict_search(dict, key) {
     // Binary search: returns index if found, otherwise ~insertionPoint.
@@ -1108,7 +1112,7 @@ function _Dict_search(dict, key) {
 }
 
 var $Dict$singleton = F2(function (key, value) {
-    return { $: 'Dict', keys: [key], vals: [value] };
+    return { $: 'Dict_elm_builtin', keys: [key], vals: [value] };
 });
 var $Dict$insert = F3(function (key, value, dict) {
     var i = _Dict_search(dict, key);
@@ -1120,7 +1124,7 @@ var $Dict$insert = F3(function (key, value, dict) {
         keys.splice(~i, 0, key);
         vals.splice(~i, 0, value);
     }
-    return { $: 'Dict', keys: keys, vals: vals };
+    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
 });
 var $Dict$remove = F2(function (key, dict) {
     var i = _Dict_search(dict, key);
@@ -1129,7 +1133,7 @@ var $Dict$remove = F2(function (key, dict) {
     var vals = dict.vals.slice();
     keys.splice(i, 1);
     vals.splice(i, 1);
-    return { $: 'Dict', keys: keys, vals: vals };
+    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
 });
 var $Dict$update = F3(function (key, alter, dict) {
     var i = _Dict_search(dict, key);
@@ -1162,7 +1166,7 @@ var $Dict$fromList = function (pairs) {
 };
 var $Dict$map = F2(function (f, dict) {
     return {
-        $: 'Dict',
+        $: 'Dict_elm_builtin',
         keys: dict.keys.slice(),
         vals: dict.vals.map(function (v, i) { return A2(f, dict.keys[i], v); })
     };
@@ -1183,11 +1187,11 @@ var $Dict$filter = F2(function (isGood, dict) {
             vals.push(dict.vals[i]);
         }
     }
-    return { $: 'Dict', keys: keys, vals: vals };
+    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
 });
 var $Dict$partition = F2(function (isGood, dict) {
-    var yes = { $: 'Dict', keys: [], vals: [] };
-    var no = { $: 'Dict', keys: [], vals: [] };
+    var yes = { $: 'Dict_elm_builtin', keys: [], vals: [] };
+    var no = { $: 'Dict_elm_builtin', keys: [], vals: [] };
     for (var i = 0; i < dict.keys.length; i++) {
         var target = A2(isGood, dict.keys[i], dict.vals[i]) ? yes : no;
         target.keys.push(dict.keys[i]);
@@ -1225,10 +1229,10 @@ var $Dict$merge = F6(function (leftStep, bothStep, rightStep, left, right, initi
 
 // SET — a Dict with unit values.
 
-var $Set$empty = { $: 'Set', d: $Dict$empty };
-var $Set$singleton = function (key) { return { $: 'Set', d: A2($Dict$singleton, key, 0) }; };
-var $Set$insert = F2(function (key, set) { return { $: 'Set', d: A3($Dict$insert, key, 0, set.d) }; });
-var $Set$remove = F2(function (key, set) { return { $: 'Set', d: A2($Dict$remove, key, set.d) }; });
+var $Set$empty = { $: 'Set_elm_builtin', d: $Dict$empty };
+var $Set$singleton = function (key) { return { $: 'Set_elm_builtin', d: A2($Dict$singleton, key, 0) }; };
+var $Set$insert = F2(function (key, set) { return { $: 'Set_elm_builtin', d: A3($Dict$insert, key, 0, set.d) }; });
+var $Set$remove = F2(function (key, set) { return { $: 'Set_elm_builtin', d: A2($Dict$remove, key, set.d) }; });
 var $Set$isEmpty = function (set) { return $Dict$isEmpty(set.d); };
 var $Set$member = F2(function (key, set) { return A2($Dict$member, key, set.d); });
 var $Set$size = function (set) { return $Dict$size(set.d); };
@@ -1248,30 +1252,30 @@ var $Set$foldr = F3(function (f, acc, set) {
     return A3($Dict$foldr, F3(function (k, _v, a) { return A2(f, k, a); }), acc, set.d);
 });
 var $Set$filter = F2(function (isGood, set) {
-    return { $: 'Set', d: A2($Dict$filter, F2(function (k, _v) { return isGood(k); }), set.d) };
+    return { $: 'Set_elm_builtin', d: A2($Dict$filter, F2(function (k, _v) { return isGood(k); }), set.d) };
 });
 var $Set$partition = F2(function (isGood, set) {
     var pair = A2($Dict$partition, F2(function (k, _v) { return isGood(k); }), set.d);
-    return { $: '#2', a: { $: 'Set', d: pair.a }, b: { $: 'Set', d: pair.b } };
+    return { $: '#2', a: { $: 'Set_elm_builtin', d: pair.a }, b: { $: 'Set_elm_builtin', d: pair.b } };
 });
-var $Set$union = F2(function (a, b) { return { $: 'Set', d: A2($Dict$union, a.d, b.d) }; });
-var $Set$intersect = F2(function (a, b) { return { $: 'Set', d: A2($Dict$intersect, a.d, b.d) }; });
-var $Set$diff = F2(function (a, b) { return { $: 'Set', d: A2($Dict$diff, a.d, b.d) }; });
+var $Set$union = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict$union, a.d, b.d) }; });
+var $Set$intersect = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict$intersect, a.d, b.d) }; });
+var $Set$diff = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict$diff, a.d, b.d) }; });
 
 // ARRAY — immutable JS array copies (Elm uses a Hickey trie).
 
-var $Array$empty = { $: 'Array', a: [] };
+var $Array$empty = { $: 'Array_elm_builtin', a: [] };
 var $Array$initialize = F2(function (n, f) {
     var out = [];
     for (var i = 0; i < n; i++) { out.push(f(i)); }
-    return { $: 'Array', a: out };
+    return { $: 'Array_elm_builtin', a: out };
 });
 var $Array$repeat = F2(function (n, x) {
     var out = [];
     for (var i = 0; i < n; i++) { out.push(x); }
-    return { $: 'Array', a: out };
+    return { $: 'Array_elm_builtin', a: out };
 });
-var $Array$fromList = function (xs) { return { $: 'Array', a: _List_toArray(xs) }; };
+var $Array$fromList = function (xs) { return { $: 'Array_elm_builtin', a: _List_toArray(xs) }; };
 var $Array$isEmpty = function (arr) { return arr.a.length === 0; };
 var $Array$length = function (arr) { return arr.a.length; };
 var $Array$get = F2(function (i, arr) {
@@ -1281,22 +1285,22 @@ var $Array$set = F3(function (i, x, arr) {
     if (i < 0 || i >= arr.a.length) { return arr; }
     var out = arr.a.slice();
     out[i] = x;
-    return { $: 'Array', a: out };
+    return { $: 'Array_elm_builtin', a: out };
 });
 var $Array$push = F2(function (x, arr) {
     var out = arr.a.slice();
     out.push(x);
-    return { $: 'Array', a: out };
+    return { $: 'Array_elm_builtin', a: out };
 });
 var $Array$toList = function (arr) { return _List_fromArray(arr.a); };
 var $Array$toIndexedList = function (arr) {
     return _List_fromArray(arr.a.map(function (x, i) { return { $: '#2', a: i, b: x }; }));
 };
 var $Array$map = F2(function (f, arr) {
-    return { $: 'Array', a: arr.a.map(function (x) { return f(x); }) };
+    return { $: 'Array_elm_builtin', a: arr.a.map(function (x) { return f(x); }) };
 });
 var $Array$indexedMap = F2(function (f, arr) {
-    return { $: 'Array', a: arr.a.map(function (x, i) { return A2(f, i, x); }) };
+    return { $: 'Array_elm_builtin', a: arr.a.map(function (x, i) { return A2(f, i, x); }) };
 });
 var $Array$foldl = F3(function (f, acc, arr) {
     for (var i = 0; i < arr.a.length; i++) { acc = A2(f, arr.a[i], acc); }
@@ -1307,16 +1311,16 @@ var $Array$foldr = F3(function (f, acc, arr) {
     return acc;
 });
 var $Array$filter = F2(function (isGood, arr) {
-    return { $: 'Array', a: arr.a.filter(function (x) { return isGood(x); }) };
+    return { $: 'Array_elm_builtin', a: arr.a.filter(function (x) { return isGood(x); }) };
 });
-var $Array$append = F2(function (a, b) { return { $: 'Array', a: a.a.concat(b.a) }; });
+var $Array$append = F2(function (a, b) { return { $: 'Array_elm_builtin', a: a.a.concat(b.a) }; });
 var $Array$slice = F3(function (from, to, arr) {
     // Clamp both ends into [0, len] like elm — a negative index that underflows
     // past 0 becomes 0 (not an offset-from-end); from > to yields empty.
     var len = arr.a.length;
     from = from < 0 ? Math.max(len + from, 0) : Math.min(from, len);
     to = to < 0 ? Math.max(len + to, 0) : Math.min(to, len);
-    return { $: 'Array', a: arr.a.slice(from, to) };
+    return { $: 'Array_elm_builtin', a: arr.a.slice(from, to) };
 });
 
 // BITWISE
@@ -1772,7 +1776,7 @@ var $Json$Decode$oneOrMore = F2(function (toValue, decoder) {
 var $Json$Decode$array = function (decoder) {
     return _Json_decoder(function (v) {
         var r = $Json$Decode$list(decoder).run(v);
-        return r.ok ? _Json_ok({ $: 'Array', a: _List_toArray(r.value) }) : r;
+        return r.ok ? _Json_ok({ $: 'Array_elm_builtin', a: _List_toArray(r.value) }) : r;
     });
 };
 var $Json$Decode$keyValuePairs = function (decoder) {
