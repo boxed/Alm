@@ -76,7 +76,10 @@ function _Utils_eq(x, y) {
 }
 function _Utils_eqHelp(x, y, depth, stack) {
     if (x === y) { return true; }
-    if (typeof x !== 'object' || x === null || y === null) { return false; }
+    // A `y === undefined` here means x has a field/index that y lacks (a shape
+    // mismatch, e.g. comparing a non-empty array-backed Dict with Dict.empty):
+    // they are unequal — guard so we don't recurse into `undefined` and throw.
+    if (typeof x !== 'object' || x === null || y === null || y === undefined) { return false; }
     // Boxed chars compare by value: two `new String('a')` are equal.
     if (x instanceof String) { return x.valueOf() === y.valueOf(); }
     if (depth > 100) {
