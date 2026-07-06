@@ -54,6 +54,25 @@ fn compile_and_run(entry: &Path) -> Result<String, String> {
 }
 
 #[test]
+fn user_module_named_uuid_is_not_shadowed_by_a_builtin() {
+    // `UUID` (TSFoster/elm-uuid) is an ordinary package, not a kernel module.
+    // It must be compiled from source; a stale builtin used to shadow it and
+    // only exposed a partial value surface, so names like `stepV7` looked
+    // "missing". Guard that a user-provided UUID module resolves fully.
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport UUID\n\nmain : String\nmain = UUID.stepV7 ++ \"/\" ++ UUID.toString\n",
+        ),
+        (
+            "UUID.elm",
+            "module UUID exposing (stepV7, toString)\n\nstepV7 : String\nstepV7 = \"v7\"\n\ntoString : String\ntoString = \"str\"\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "v7/str");
+}
+
+#[test]
 fn two_modules() {
     let result = project(&[
         (

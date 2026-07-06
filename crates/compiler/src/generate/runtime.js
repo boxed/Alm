@@ -4001,42 +4001,6 @@ var $Random$generate = F2(function (toMsg, g) {
     };
 });
 
-// UUID
-
-var $UUID$generator = _Random_gen(function (seed) {
-    var hex = '';
-    var s = seed;
-    for (var i = 0; i < 32; i++) {
-        hex += (_Random_peel(s) & 15).toString(16);
-        s = _Random_nextSeed(s);
-    }
-    var uuid = hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-4' + hex.slice(13, 16) +
-        '-' + ((parseInt(hex[16], 16) & 3 | 8)).toString(16) + hex.slice(17, 20) + '-' + hex.slice(20, 32);
-    return [{ $: 'UUID', s: uuid }, s];
-});
-var $UUID$toString = function (uuid) { return uuid.s; };
-var $UUID$compare = F2(function (a, b) { return A2($Basics$compare, a.s, b.s); });
-var $UUID$toRepresentation = F2(function (representation, uuid) {
-    switch (representation.$) {
-        case 'Compact': return uuid.s.replace(/-/g, '');
-        case 'Guid': return '{' + uuid.s + '}';
-        case 'Urn': return 'urn:uuid:' + uuid.s;
-        default: return uuid.s;
-    }
-});
-var $UUID$fromString = function (s) {
-    var normalized = s.trim().toLowerCase();
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)
-        ? $Result$Ok({ $: 'UUID', s: normalized })
-        : $Result$Err({ $: 'WrongFormat' });
-};
-var $UUID$jsonDecoder = _Json_decoder(function (v) {
-    if (typeof v !== 'string') { return _Json_expecting('a UUID string', v); }
-    var r = $UUID$fromString(v);
-    return r.$ === 'Ok' ? _Json_ok(r.a) : _Json_failure('Invalid UUID', v);
-});
-var $UUID$toValue = function (uuid) { return uuid.s; };
-
 // ELM.KERNEL.PARSER — the primitives behind elm/parser, ported from
 // its kernel JavaScript so the package compiles from source.
 

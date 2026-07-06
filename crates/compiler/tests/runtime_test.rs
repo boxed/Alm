@@ -242,7 +242,7 @@ fn random_step_deterministic() {
     );
 }
 
-// URL / UUID / HTTP helpers — pure
+// URL / HTTP helpers — pure
 
 #[test]
 fn url_parsing() {
@@ -260,24 +260,6 @@ fn url_parsing() {
     assert_eq!(
         run(r#"main = Debug.toString ( Url.percentEncode "a b/c", Url.percentDecode "a%20b" )"#),
         r#"("a%20b%2Fc",Just "a b")"#
-    );
-}
-
-#[test]
-fn uuid_helpers() {
-    assert_eq!(
-        run(r#"main =
-    case UUID.fromString "123e4567-E89B-12d3-a456-426614174000" of
-        Ok uuid ->
-            UUID.toString uuid ++ "|" ++ UUID.toRepresentation UUID.Compact uuid
-
-        Err _ ->
-            "bad uuid""#),
-        "123e4567-e89b-12d3-a456-426614174000|123e4567e89b12d3a456426614174000"
-    );
-    assert_eq!(
-        run(r#"main = Debug.toString (Result.toMaybe (UUID.fromString "nope"))"#),
-        "Nothing"
     );
 }
 
@@ -733,20 +715,6 @@ main =
 }
 
 #[test]
-fn uuid_representations() {
-    assert_eq!(
-        run(r#"main =
-    case UUID.fromString "123e4567-e89b-12d3-a456-426614174000" of
-        Ok u ->
-            UUID.toRepresentation UUID.Guid u ++ " / " ++ UUID.toRepresentation UUID.Urn u
-
-        Err _ ->
-            "bad""#),
-        "{123e4567-e89b-12d3-a456-426614174000} / urn:uuid:123e4567-e89b-12d3-a456-426614174000"
-    );
-}
-
-#[test]
 fn time_zone_eras() {
     // A zone with eras: times after the era start use the era offset,
     // older times fall back to the default.
@@ -938,21 +906,6 @@ main = Debug.toString (Wrap ( 1, "a b" ) [ "c d" ])"#),
         r#"Wrap (1,"a b") ["c d"]"#
     );
     assert_eq!(run("main = Debug.toString Json.Encode.null"), "<internal>");
-}
-
-#[test]
-fn uuid_hex_ranges_every_group() {
-    // Every group exercises both digit and letter interiors.
-    assert_eq!(
-        run(r#"main =
-    case UUID.fromString "0b0c0d0e-0bcd-0b1d-a0cd-0bcdef012345" of
-        Ok u ->
-            UUID.toString u
-
-        Err _ ->
-            "rejected""#),
-        "0b0c0d0e-0bcd-0b1d-a0cd-0bcdef012345"
-    );
 }
 
 #[test]

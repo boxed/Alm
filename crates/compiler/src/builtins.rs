@@ -575,14 +575,6 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Random", "generate", "(a -> msg) -> Random.Generator a -> Cmd msg"),
             V("Random", "minInt", "Int"),
             V("Random", "maxInt", "Int"),
-            // UUID (TSFoster/elm-uuid surface used in practice)
-            V("UUID", "generator", "Random.Generator UUID.UUID"),
-            V("UUID", "toString", "UUID.UUID -> String"),
-            V("UUID", "compare", "UUID.UUID -> UUID.UUID -> Order"),
-            V("UUID", "toRepresentation", "UUID.Representation -> UUID.UUID -> String"),
-            V("UUID", "fromString", "String -> Result UUID.Error UUID.UUID"),
-            V("UUID", "jsonDecoder", "Decoder UUID.UUID"),
-            V("UUID", "toValue", "UUID.UUID -> Value"),
             // VirtualDom (the parts packages use directly)
             V("VirtualDom", "text", "String -> Html msg"),
             V("VirtualDom", "node", "String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
@@ -1003,9 +995,6 @@ pub const UNIONS: &[BuiltinUnion] = &[
     BuiltinUnion { module: "Browser", name: "UrlRequest", vars: &[], ctors: &[
         ("Internal", &["Url.Url"]), ("External", &["String"]),
     ] },
-    BuiltinUnion { module: "UUID", name: "Representation", vars: &[], ctors: &[
-        ("Canonical", &[]), ("Compact", &[]), ("Guid", &[]), ("Urn", &[]),
-    ] },
     BuiltinUnion { module: "VirtualDom", name: "Handler", vars: &["msg"], ctors: &[
         ("Normal", &["Decoder msg"]),
         ("MayStopPropagation", &["Decoder ( msg, Bool )"]),
@@ -1080,8 +1069,6 @@ pub const OPAQUE_TYPES: &[(&str, &str)] = &[
     ("Random", "Generator"),
     ("Random", "Seed"),
     ("Browser.Navigation", "Key"),
-    ("UUID", "UUID"),
-    ("UUID", "Error"),
 ];
 
 /// Where each built-in type constructor lives.
@@ -1118,7 +1105,7 @@ pub const MODULES: &[&str] = &[
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
     "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process", "Time",
-    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "UUID", "VirtualDom", "Terminal",
+    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "VirtualDom", "Terminal",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {
