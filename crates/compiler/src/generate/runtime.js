@@ -504,6 +504,95 @@ var $Elm$Kernel$HtmlAsJson$attributeToJson = function (_attr) { return null; };
 var $Elm$Kernel$HtmlAsJson$eventHandler = function (_h) { return null; };
 var $Elm$Kernel$HtmlAsJson$taggerFunction = function (_t) { return null; };
 
+// Elm.Kernel.Parser — string-scanning primitives for elm/parser (ported from
+// its reference kernel; Char is a plain JS string here, tuples are #2/#3).
+var $Elm$Kernel$Parser$isSubString = F5(function (small, offset, row, col, big) {
+    var smallLength = small.length;
+    var isGood = offset + smallLength <= big.length;
+    for (var i = 0; isGood && i < smallLength;) {
+        var code = big.charCodeAt(offset);
+        isGood = small[i++] === big[offset++]
+            && (code === 0x0A ? (row++, col = 1)
+                : (col++, (code & 0xF800) === 0xD800 ? small[i++] === big[offset++] : 1));
+    }
+    return { $: '#3', a: isGood ? offset : -1, b: row, c: col };
+});
+var $Elm$Kernel$Parser$isSubChar = F3(function (predicate, offset, string) {
+    return string.length <= offset ? -1
+        : (string.charCodeAt(offset) & 0xF800) === 0xD800
+            ? (predicate(string.substr(offset, 2)) ? offset + 2 : -1)
+        : predicate(string[offset]) ? (string[offset] === '\n' ? -2 : offset + 1) : -1;
+});
+var $Elm$Kernel$Parser$isAsciiCode = F3(function (code, offset, string) {
+    return string.charCodeAt(offset) === code;
+});
+var $Elm$Kernel$Parser$chompBase10 = F2(function (offset, string) {
+    for (; offset < string.length; offset++) {
+        var code = string.charCodeAt(offset);
+        if (code < 0x30 || 0x39 < code) { return offset; }
+    }
+    return offset;
+});
+var $Elm$Kernel$Parser$consumeBase = F3(function (base, offset, string) {
+    for (var total = 0; offset < string.length; offset++) {
+        var digit = string.charCodeAt(offset) - 0x30;
+        if (digit < 0 || base <= digit) { break; }
+        total = base * total + digit;
+    }
+    return { $: '#2', a: offset, b: total };
+});
+var $Elm$Kernel$Parser$consumeBase16 = F2(function (offset, string) {
+    for (var total = 0; offset < string.length; offset++) {
+        var code = string.charCodeAt(offset);
+        if (0x30 <= code && code <= 0x39) { total = 16 * total + code - 0x30; }
+        else if (0x41 <= code && code <= 0x46) { total = 16 * total + code - 55; }
+        else if (0x61 <= code && code <= 0x66) { total = 16 * total + code - 87; }
+        else { break; }
+    }
+    return { $: '#2', a: offset, b: total };
+});
+var $Elm$Kernel$Parser$findSubString = F5(function (small, offset, row, col, big) {
+    var newOffset = big.indexOf(small, offset);
+    var target = newOffset < 0 ? big.length : newOffset + small.length;
+    while (offset < target) {
+        var code = big.charCodeAt(offset++);
+        code === 0x0A ? (col = 1, row++) : (col++, (code & 0xF800) === 0xD800 && offset++);
+    }
+    return { $: '#3', a: newOffset, b: row, c: col };
+});
+
+// Elm.Kernel.Bytes — placeholder shims so bundles that merely reference elm/bytes
+// (e.g. transitively via elm-explorations/test) load. `getHostEndianness` runs at
+// module load, so it must return a valid endianness. The rest are defined but not
+// yet real — programs that actually use Bytes need a proper implementation.
+var $Elm$Kernel$Bytes$getHostEndianness = F2(function (le, _be) { return le; });
+var $Elm$Kernel$Bytes$width = function (_bytes) { return 0; };
+var $Elm$Kernel$Bytes$getStringWidth = function (s) { return typeof s === 'string' ? s.length : 0; };
+var $Elm$Kernel$Bytes$encode = function (_encoder) { return { $: 'Bytes', buffer: new ArrayBuffer(0) }; };
+var $Elm$Kernel$Bytes$decode = F2(function (_decoder, _bytes) { return $Maybe$Nothing; });
+var $Elm$Kernel$Bytes$decodeFailure = $Maybe$Nothing;
+function _Bytes_todo() { throw new Error('elm/bytes is not implemented in the alm runtime yet'); }
+var $Elm$Kernel$Bytes$read_i8 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_i16 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_i32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_u8 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_u16 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_u32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_f32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_f64 = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_bytes = _Bytes_todo;
+var $Elm$Kernel$Bytes$read_string = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_i8 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_i16 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_i32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_u8 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_u16 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_u32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_f32 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_f64 = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_bytes = _Bytes_todo;
+var $Elm$Kernel$Bytes$write_string = _Bytes_todo;
+
 // BASICS — extras
 
 var $Basics$isNaN = function (n) { return isNaN(n); };
