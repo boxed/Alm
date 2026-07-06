@@ -1,9 +1,11 @@
 # The native backend links against libLLVM via inkwell/llvm-sys. Point
 # llvm-sys at the Homebrew LLVM 16 keg so the build needs no manual env.
 #
-# TMPDIR is redirected into the project's target/ dir (gitignored, cleaned by
-# `cargo clean`) so the test harnesses' std::env::temp_dir() no longer spills
-# GBs into the system temp dir. force=true overrides the OS default TMPDIR.
+# TMPDIR is redirected into an in-project, gitignored dir so the test harnesses'
+# std::env::temp_dir() (and rustc's own temps) no longer spill GBs into the
+# system temp dir. It lives at .almtmp/ (not target/) so `cargo clean`
+# doesn't remove it out from under rustc; the dir is committed with a tracked .gitignore so it
+# always exists. force=true overrides the OS default TMPDIR.
 [env]
 LLVM_SYS_160_PREFIX = "/opt/homebrew/opt/llvm@16"
-TMPDIR = { value = "target/alm-test-tmp", relative = true, force = true }
+TMPDIR = { value = ".almtmp", relative = true, force = true }

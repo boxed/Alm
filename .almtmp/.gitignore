@@ -1,0 +1,3 @@
+# Redirected TMPDIR (see .cargo/config.toml). Keep the dir; ignore its contents.
+*
+!.gitignore
