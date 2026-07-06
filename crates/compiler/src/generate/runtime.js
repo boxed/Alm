@@ -394,10 +394,9 @@ var $String$concat = function (xs) { return _List_toArray(xs).join(''); };
 var $String$split = F2(function (sep, s) { return _List_fromArray(s.split(sep)); });
 var $String$join = F2(function (sep, xs) { return _List_toArray(xs).join(sep); });
 var $String$words = function (s) {
-    var trimmed = s.trim();
-    return _List_fromArray(trimmed === '' ? [] : trimmed.split(/\s+/));
+    return _List_fromArray(s.trim().split(/\s+/g));
 };
-var $String$lines = function (s) { return _List_fromArray(s.split('\n')); };
+var $String$lines = function (s) { return _List_fromArray(s.split(/\r\n|\r|\n/g)); };
 var $String$slice = F3(function (a, b, s) {
     // Clamp both ends into [0, len] like elm — a negative end that underflows
     // past 0 must become 0, not leak into JS slice as an offset-from-end.
@@ -431,9 +430,11 @@ var $String$toInt = function (s) {
 };
 var $String$fromInt = function (n) { return String(n); };
 var $String$toFloat = function (s) {
-    if (s === '' || /[^0-9+\-.eE]/.test(s)) { return $Maybe$Nothing; }
-    var n = Number(s);
-    return isNaN(n) ? $Maybe$Nothing : $Maybe$Just(n);
+    // Match elm: reject only whitespace / hex-octal-binary markers, then coerce
+    // via +s so "Infinity"/"-Infinity" parse (like JS), and NaN => Nothing.
+    if (s.length === 0 || /[\sxbo]/.test(s)) { return $Maybe$Nothing; }
+    var n = +s;
+    return n === n ? $Maybe$Just(n) : $Maybe$Nothing;
 };
 var $String$fromFloat = function (n) { return String(n); };
 var $String$fromChar = function (c) { return c + ''; };
@@ -1802,11 +1803,12 @@ var $Json$Decode$fail = function (msg) {
     return _Json_decoder(function (v) { return _Json_failure(msg, v); });
 };
 var $Json$Decode$nullable = function (decoder) {
-    return _Json_decoder(function (v) {
-        if (v === null || v === undefined) { return _Json_ok($Maybe$Nothing); }
-        var r = decoder.run(v);
-        return r.ok ? _Json_ok($Maybe$Just(r.value)) : r;
-    });
+    // elm: oneOf [ null Nothing, map Just decoder ] — so the failure on a
+    // non-null, non-matching value is a OneOf of both branches' errors.
+    return $Json$Decode$oneOf(_List_fromArray([
+        $Json$Decode$_null($Maybe$Nothing),
+        A2($Json$Decode$map, $Maybe$Just, decoder)
+    ]));
 };
 var $Json$Decode$maybe = function (decoder) {
     return _Json_decoder(function (v) {
@@ -1837,6 +1839,7 @@ var $Json$Decode$oneOrMore = F2(function (toValue, decoder) {
 });
 var $Json$Decode$array = function (decoder) {
     return _Json_decoder(function (v) {
+        if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
         var r = $Json$Decode$list(decoder).run(v);
         return r.ok ? _Json_ok({ $: 'Array_elm_builtin', a: _List_toArray(r.value) }) : r;
     });
@@ -1880,7 +1883,7 @@ var $Json$Decode$index = F2(function (i, decoder) {
     return _Json_decoder(function (v) {
         if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
         if (i >= v.length) {
-            return _Json_expecting('a LONGER array — need index ' + i, v);
+            return _Json_expecting('a LONGER array. Need index ' + i + ' but only see ' + v.length + ' entries', v);
         }
         var r = decoder.run(v[i]);
         return r.ok ? r : _Json_err({ $: 'Index', a: i, b: r.error });
@@ -2333,17 +2336,43 @@ var $Url$percentDecode = function (s) {
     try { return $Maybe$Just(decodeURIComponent(s)); }
     catch (e) { return $Maybe$Nothing; }
 };
+function _Url_chompPort(protocol, params, frag, authority, path) {
+    var i = authority.indexOf(':');
+    if (i < 0) {
+        return $Maybe$Just({ protocol: protocol, host: authority, port_: $Maybe$Nothing, path: path, query: params, fragment: frag });
+    }
+    var portNum = $String$toInt(authority.slice(i + 1));
+    if (portNum.$ !== 'Just') { return $Maybe$Nothing; }
+    return $Maybe$Just({ protocol: protocol, host: authority.slice(0, i), port_: portNum, path: path, query: params, fragment: frag });
+}
+function _Url_chompAfterAuthority(protocol, params, frag, authority, path) {
+    if (authority === '') { return $Maybe$Nothing; }
+    var i = authority.indexOf('@');
+    if (i < 0) { return _Url_chompPort(protocol, params, frag, authority, path); }
+    return _Url_chompPort(protocol, params, frag, authority.slice(i + 1), path);
+}
+function _Url_chompBeforeQuery(protocol, params, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('/');
+    if (i < 0) { return _Url_chompAfterAuthority(protocol, params, frag, str, ''); }
+    return _Url_chompAfterAuthority(protocol, params, frag, str.slice(0, i), str.slice(i));
+}
+function _Url_chompBeforeFragment(protocol, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('?');
+    if (i < 0) { return _Url_chompBeforeQuery(protocol, $Maybe$Nothing, frag, str); }
+    return _Url_chompBeforeQuery(protocol, $Maybe$Just(str.slice(i + 1)), frag, str.slice(0, i));
+}
+function _Url_chompAfterProtocol(protocol, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('#');
+    if (i < 0) { return _Url_chompBeforeFragment(protocol, $Maybe$Nothing, str); }
+    return _Url_chompBeforeFragment(protocol, $Maybe$Just(str.slice(i + 1)), str.slice(0, i));
+}
 var $Url$fromString = function (str) {
-    var match = /^(https?):\/\/([^/:?#]*)(?::(\d+))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(str);
-    if (!match) { return $Maybe$Nothing; }
-    return $Maybe$Just({
-        protocol: match[1] === 'https' ? { $: 'Https' } : { $: 'Http' },
-        host: match[2],
-        port_: match[3] ? $Maybe$Just(parseInt(match[3], 10)) : $Maybe$Nothing,
-        path: match[4] || '/',
-        query: match[5] !== undefined ? $Maybe$Just(match[5]) : $Maybe$Nothing,
-        fragment: match[6] !== undefined ? $Maybe$Just(match[6]) : $Maybe$Nothing
-    });
+    if (str.indexOf('http://') === 0) { return _Url_chompAfterProtocol({ $: 'Http' }, str.slice(7)); }
+    if (str.indexOf('https://') === 0) { return _Url_chompAfterProtocol({ $: 'Https' }, str.slice(8)); }
+    return $Maybe$Nothing;
 };
 var $Url$toString = function (url) {
     var s = (url.protocol.$ === 'Https' ? 'https' : 'http') + '://' + url.host;
