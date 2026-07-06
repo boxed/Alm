@@ -1863,7 +1863,7 @@ var $Json$Decode$dict = function (decoder) {
 };
 var $Json$Decode$field = F2(function (name, decoder) {
     return _Json_decoder(function (v) {
-        if (v === null || typeof v !== 'object' || Array.isArray(v) || !(name in v)) {
+        if (v === null || typeof v !== 'object' || !(name in v)) {
             return _Json_expecting('an OBJECT with a field named `' + name + '`', v);
         }
         var r = decoder.run(v[name]);
