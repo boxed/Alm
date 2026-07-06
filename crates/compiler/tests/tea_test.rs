@@ -58,15 +58,6 @@ Element.prototype.getAttribute = function (k) {
     var v = this[propKey];
     return (typeof v === 'string' || typeof v === 'number') ? String(v) : null;
 };
-// `id` and `className` reflect to/from the class/id attributes both ways.
-Object.defineProperty(Element.prototype, 'id', {
-    get: function () { return this._attributes.id !== undefined ? this._attributes.id : ''; },
-    set: function (v) { this._attributes.id = String(v); }
-});
-Object.defineProperty(Element.prototype, 'className', {
-    get: function () { return this._attributes.class !== undefined ? this._attributes.class : ''; },
-    set: function (v) { this._attributes.class = String(v); }
-});
 Element.prototype.removeAttribute = function (k) { delete this._attributes[k]; };
 Element.prototype.addEventListener = function (name, fn) {
     (this._listeners[name] = this._listeners[name] || []).push(fn);
