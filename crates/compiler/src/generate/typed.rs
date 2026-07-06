@@ -18,7 +18,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use inkwell::context::Context;
-use inkwell::module::{Linkage, Module};
+use inkwell::debug_info::{
+    AsDIScope, DIFile, DIFlags, DIFlagsConstants, DILocation, DISubroutineType, DWARFEmissionKind,
+    DWARFSourceLanguage, DebugInfoBuilder,
+};
+use inkwell::module::{FlagBehavior, Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue};
 use inkwell::{FloatPredicate, IntPredicate};
@@ -26,6 +30,7 @@ use inkwell::{FloatPredicate, IntPredicate};
 use super::native::{self, Target};
 use crate::ir::layout::{Layout, LayoutCtx};
 use crate::ir::mono::{MonoProgram, TypedExpr, TypedFn, TypedKind, TypedLetDecl};
+use crate::reporting::Region;
 
 /// Compile a monomorphized program to a native/wasm binary at `output`.
 pub fn build(
@@ -37,6 +42,9 @@ pub fn build(
     let context = Context::create();
     let mut cg = TypedCodegen::new(&context, layouts);
     cg.emit(mono)?;
+    // Resolve all debug-info metadata before verification or optimization —
+    // the verifier and passes both walk (and validate) DWARF metadata.
+    cg.di_builder.finalize();
     cg.module
         .verify()
         .map_err(|e| format!("internal error: generated invalid typed IR:\n{}", e))?;
@@ -63,13 +71,65 @@ struct TypedCodegen<'ctx, 'l> {
     cur_fn: Option<FunctionValue<'ctx>>,
     blk: usize,
     lam_id: usize,
+
+    // DWARF debug info.
+    di_builder: DebugInfoBuilder<'ctx>,
+    di_subroutine: DISubroutineType<'ctx>,
+    /// One `DIFile` per source module, keyed by module name.
+    di_files: HashMap<String, DIFile<'ctx>>,
+    /// The source file of the top-level function currently being emitted, so
+    /// lifted lambdas get subprograms in the right `.elm` file.
+    cur_file: Option<DIFile<'ctx>>,
+    /// The debug location currently applied to the builder. Tracked here rather
+    /// than read back from the builder, because LLVM's `GetCurrentDebugLocation`
+    /// returns a bogus empty node when the location is unset. Helpers that
+    /// switch to another LLVM function save and restore this.
+    cur_loc: Option<DILocation<'ctx>>,
 }
 
 impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     fn new(ctx: &'ctx Context, layouts: &'l LayoutCtx) -> Self {
+        let module = ctx.create_module("alm_typed");
+
+        // Module-level debug-info flags LLVM requires: DWARF v4 line tables and
+        // debug-info metadata schema v3. `Warning` behavior lets the runtime
+        // bitcode (which carries no debug info after we strip it) merge in
+        // without a flag conflict.
+        module.add_basic_value_flag(
+            "Dwarf Version",
+            FlagBehavior::Warning,
+            ctx.i32_type().const_int(4, false),
+        );
+        module.add_basic_value_flag(
+            "Debug Info Version",
+            FlagBehavior::Warning,
+            ctx.i32_type().const_int(3, false),
+        );
+
+        // A single compile unit; each function points at its own module file.
+        let (di_builder, di_cu) = module.create_debug_info_builder(
+            /* allow_unresolved */ true,
+            DWARFSourceLanguage::C,
+            /* filename */ "alm",
+            /* directory */ ".",
+            /* producer */ "alm",
+            /* is_optimized */ true,
+            /* flags */ "",
+            /* runtime_ver */ 0,
+            /* split_name */ "",
+            DWARFEmissionKind::Full,
+            /* dwo_id */ 0,
+            /* split_debug_inlining */ false,
+            /* debug_info_for_profiling */ false,
+            /* sysroot */ "",
+            /* sdk */ "",
+        );
+        let di_subroutine =
+            di_builder.create_subroutine_type(di_cu.get_file(), None, &[], DIFlags::ZERO);
+
         TypedCodegen {
             ctx,
-            module: ctx.create_module("alm_typed"),
+            module,
             builder: ctx.create_builder(),
             layouts,
             functions: HashMap::new(),
@@ -80,6 +140,74 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             cur_fn: None,
             blk: 0,
             lam_id: 0,
+            di_builder,
+            di_subroutine,
+            di_files: HashMap::new(),
+            cur_file: None,
+            cur_loc: None,
+        }
+    }
+
+    /// Get (or create) the `DIFile` for a source module. Real `.elm` paths are
+    /// not threaded this far, so we derive `Foo/Bar.elm` from the module name
+    /// `Foo.Bar` (filename = last segment, directory = the earlier segments).
+    fn di_file(&mut self, module: &str) -> DIFile<'ctx> {
+        if let Some(f) = self.di_files.get(module) {
+            return *f;
+        }
+        let (dir, base) = match module.rsplit_once('.') {
+            Some((prefix, last)) => (prefix.replace('.', "/"), last.to_string()),
+            None => (".".to_string(), module.to_string()),
+        };
+        let dir = if dir.is_empty() { ".".to_string() } else { dir };
+        let filename = format!("{}.elm", base);
+        let file = self.di_builder.create_file(&filename, &dir);
+        self.di_files.insert(module.to_string(), file);
+        file
+    }
+
+    /// Attach a source location to the instructions emitted next. The scope is
+    /// taken from the *current* LLVM function's subprogram, so it always
+    /// matches (satisfying the verifier). Functions without a subprogram
+    /// (runtime glue: box/unbox helpers, trampolines) get no location.
+    fn set_loc(&mut self, region: Region) {
+        let scope = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .and_then(|f| f.get_subprogram());
+        match scope {
+            Some(sp) if region.start.row != 0 => {
+                let loc = self.di_builder.create_debug_location(
+                    self.ctx,
+                    region.start.row,
+                    region.start.col,
+                    sp.as_debug_info_scope(),
+                    None,
+                );
+                self.cur_loc = Some(loc);
+                self.builder.set_current_debug_location(loc);
+            }
+            // No subprogram (or synthetic node): leave instructions unlocated
+            // rather than pointing at the wrong scope.
+            _ => self.clear_loc(),
+        }
+    }
+
+    /// Drop the current debug location. Used at the entry of a generated
+    /// function so its first instructions carry no (foreign) location.
+    fn clear_loc(&mut self) {
+        self.cur_loc = None;
+        self.builder.unset_current_debug_location();
+    }
+
+    /// Restore a previously-saved debug location after returning from a helper
+    /// that switched to another LLVM function.
+    fn restore_loc(&mut self, loc: Option<DILocation<'ctx>>) {
+        self.cur_loc = loc;
+        match loc {
+            Some(loc) => self.builder.set_current_debug_location(loc),
+            None => self.builder.unset_current_debug_location(),
         }
     }
 
@@ -519,6 +647,28 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let fv = self.functions[&f.mangled.to_string()];
         self.cur_fn = Some(fv);
         self.locals.clear();
+
+        // A DISubprogram per specialization, named for the source function and
+        // located in its module's `.elm` file. Attaching it to `fv` lets
+        // `set_loc` scope each expression's location to this function.
+        let file = self.di_file(f.module.as_str());
+        self.cur_file = Some(file);
+        let line = f.region.start.row;
+        let subprogram = self.di_builder.create_function(
+            file.as_debug_info_scope(),
+            f.original.as_str(),
+            Some(f.mangled.as_str()),
+            file,
+            line,
+            self.di_subroutine,
+            /* is_local_to_unit */ true,
+            /* is_definition */ true,
+            /* scope_line */ line,
+            DIFlags::ZERO,
+            /* is_optimized */ true,
+        );
+        fv.set_subprogram(subprogram);
+
         for (i, (pattern, _)) in f.params.iter().enumerate() {
             if let Some(name) = simple_param_name(pattern) {
                 self.locals
@@ -546,6 +696,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         );
         let block = self.ctx.append_basic_block(fv, "entry");
         self.builder.position_at_end(block);
+        self.clear_loc();
         self.builder.build_return(None).unwrap();
     }
 
@@ -558,6 +709,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .add_function("alm_main", i64_t.fn_type(&[], false), Some(Linkage::External));
         let block = self.ctx.append_basic_block(fv, "entry");
         self.builder.position_at_end(block);
+        // `alm_main` (and the box helpers it calls) carry no subprogram; keep
+        // their instructions unlocated so they never reference a stale scope.
+        self.clear_loc();
 
         let main = mono.functions.iter().find(|f| f.original.as_str() == "main");
         let Some(main) = main else {
@@ -862,9 +1016,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_fn = self.cur_fn;
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         self.cur_fn = Some(f);
         let entry = self.ctx.append_basic_block(f, "entry");
         self.builder.position_at_end(entry);
+        self.clear_loc();
         let param = f.get_nth_param(0).unwrap();
         let result = self.box_tagged(param, tipe);
         self.locals = saved_locals;
@@ -874,6 +1030,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
         Ok(f)
     }
 
@@ -898,9 +1058,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_fn = self.cur_fn;
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         self.cur_fn = Some(f);
         let entry = self.ctx.append_basic_block(f, "entry");
         self.builder.position_at_end(entry);
+        self.clear_loc();
         let param = f.get_nth_param(0).unwrap();
         let result = self.unbox_tagged(param, tipe);
         self.locals = saved_locals;
@@ -910,6 +1072,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
         Ok(f)
     }
 
@@ -1014,9 +1180,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_fn = self.cur_fn;
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         self.cur_fn = Some(tramp);
         let entry = self.ctx.append_basic_block(tramp, "entry");
         self.builder.position_at_end(entry);
+        self.clear_loc();
         let cap = tramp.get_nth_param(0).unwrap().into_int_value();
         let clos = self.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
         let mut typed_args = Vec::new();
@@ -1034,6 +1202,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
 
         // Build the uniform closure capturing the typed closure pointer.
         let closure_word = self
@@ -1297,6 +1469,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     }
 
     fn gen(&mut self, expr: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        self.set_loc(expr.region);
         match &expr.kind {
             TypedKind::Int(n) => {
                 // A number literal used at Float type must be an f64 constant
@@ -1371,7 +1544,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // around; otherwise it is a nullary kernel (e.g. `Cmd.none`).
             TypedKind::Foreign(module, name) => {
                 if matches!(expr.tipe, crate::ast::canonical::Type::Lambda(..)) {
-                    self.eta_expand_foreign(module, name, &expr.tipe, &[])
+                    self.eta_expand_foreign(module, name, &expr.tipe, &[], expr.region)
                 } else {
                     self.gen_kernel(expr, module.as_str(), name.as_str(), &[])
                 }
@@ -1396,10 +1569,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let r_local = TypedExpr {
                     tipe: rec_ty.clone(),
                     kind: TypedKind::Local(crate::data::Name::from(rname.clone())),
+                    region: expr.region,
                 };
                 let body = TypedExpr {
                     tipe: field_ty.clone(),
                     kind: TypedKind::Access(Box::new(r_local), field.clone()),
+                    region: expr.region,
                 };
                 let pat = crate::reporting::Located {
                     region: crate::reporting::Region::ZERO,
@@ -1433,7 +1608,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let TypedKind::Foreign(module, name) = &func.kind {
             let arity = foreign_arity(&func.tipe);
             if args.len() < arity {
-                return self.eta_expand_foreign(module, name, &func.tipe, args);
+                return self.eta_expand_foreign(module, name, &func.tipe, args, whole.region);
             }
             return self.gen_kernel(whole, module.as_str(), name.as_str(), args);
         }
@@ -1778,15 +1953,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             arg_exprs.push(TypedExpr {
                 tipe: at.clone(),
                 kind: TypedKind::Local(pname),
+                region: whole.region,
             });
         }
         let ctor_fn = TypedExpr {
             tipe: whole.tipe.clone(),
             kind: TypedKind::Ctor(home.clone(), union.clone(), ctor.clone()),
+            region: whole.region,
         };
         let body = TypedExpr {
             tipe: result_ty.clone(),
             kind: TypedKind::Call(Box::new(ctor_fn), arg_exprs),
+            region: whole.region,
         };
         let result_layout = self.layouts.layout_of(&result_ty);
         self.gen_closure(&params, &body, &result_layout)
@@ -1802,6 +1980,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         name: &crate::data::Name,
         full_type: &crate::ast::canonical::Type,
         applied: &[TypedExpr],
+        region: crate::reporting::Region,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         use crate::ast::canonical::{Pattern_, Type};
         // Peel the function type into argument types and the final result type.
@@ -1830,15 +2009,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             call_args.push(TypedExpr {
                 tipe: at,
                 kind: TypedKind::Local(pname),
+                region,
             });
         }
         let foreign = TypedExpr {
             tipe: full_type.clone(),
             kind: TypedKind::Foreign(module.clone(), name.clone()),
+            region,
         };
         let body = TypedExpr {
             tipe: result_ty.clone(),
             kind: TypedKind::Call(Box::new(foreign), call_args),
+            region,
         };
         let result_layout = self.layouts.layout_of(&result_ty);
         self.gen_closure(&params, &body, &result_layout)
@@ -2935,14 +3117,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let x_local = TypedExpr {
             tipe: a_ty.clone(),
             kind: TypedKind::Local(crate::data::Name::from(xname.clone())),
+            region: whole.region,
         };
         let inner = TypedExpr {
             tipe: b_ty,
             kind: TypedKind::Call(Box::new(first.clone()), vec![x_local]),
+            region: whole.region,
         };
         let outer = TypedExpr {
             tipe: c_ty.clone(),
             kind: TypedKind::Call(Box::new(second.clone()), vec![inner]),
+            region: whole.region,
         };
         let pat = crate::reporting::Located {
             region: crate::reporting::Region::ZERO,
@@ -3315,9 +3500,31 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_fn = self.cur_fn;
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         self.cur_fn = Some(lifted);
         let entry = self.ctx.append_basic_block(lifted, "entry");
         self.builder.position_at_end(entry);
+        // A subprogram for the lifted lambda so its body carries line info in
+        // the enclosing module's file; without one, clear the location so its
+        // instructions don't inherit the outer function's scope.
+        if let Some(file) = self.cur_file {
+            let line = body.region.start.row;
+            let sp = self.di_builder.create_function(
+                file.as_debug_info_scope(),
+                &name,
+                Some(&name),
+                file,
+                line,
+                self.di_subroutine,
+                true,
+                true,
+                line,
+                DIFlags::ZERO,
+                true,
+            );
+            lifted.set_subprogram(sp);
+        }
+        self.clear_loc();
         let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
         for (i, (n, _)) in captures.iter().enumerate() {
             let fp = self
@@ -3340,6 +3547,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
 
         let capture_vals: Vec<BasicValueEnum> = captures.iter().map(|(_, v)| *v).collect();
         Ok(self
@@ -3379,8 +3590,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let wrapper = self.module.add_function(&wname, wty, Some(Linkage::Internal));
 
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         let entry = self.ctx.append_basic_block(wrapper, "entry");
         self.builder.position_at_end(entry);
+        self.clear_loc();
         let env = wrapper.get_nth_param(0).unwrap().into_pointer_value();
         let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
         for (i, a) in applied.iter().enumerate() {
@@ -3399,6 +3612,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
 
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), applied)
             .into()
@@ -3492,8 +3709,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let wrapper = self.module.add_function(&wname, wrap_ty, Some(Linkage::Internal));
 
         let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
         let entry = self.ctx.append_basic_block(wrapper, "entry");
         self.builder.position_at_end(entry);
+        self.clear_loc();
         let fwd: Vec<inkwell::values::BasicMetadataValueEnum> = (0..param_types.len())
             .map(|i| wrapper.get_nth_param((i + 1) as u32).unwrap().into())
             .collect();
@@ -3505,6 +3724,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(b) = saved_block {
             self.builder.position_at_end(b);
         }
+        // Restore the caller's debug location: a helper must neither leak its
+        // own (subprogram-less) scope nor its inner body's scope into the
+        // function it returns to.
+        self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
     }

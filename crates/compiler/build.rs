@@ -56,6 +56,7 @@ fn main() {
     let llvm_prefix = env::var("LLVM_SYS_160_PREFIX")
         .unwrap_or_else(|_| "/opt/homebrew/opt/llvm@16".to_string());
     println!("cargo:rustc-env=ALM_WASM_LD={}/bin/wasm-ld", llvm_prefix);
+    println!("cargo:rustc-env=ALM_DWARFDUMP={}/bin/llvm-dwarfdump", llvm_prefix);
 }
 
 fn run(cmd: &str, args: &[&str]) -> String {
