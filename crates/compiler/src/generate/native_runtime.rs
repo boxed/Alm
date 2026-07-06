@@ -105,6 +105,9 @@ pub enum Value {
     Set(Vec<u64>),
     /// A persistent array: elements in order (index 0 first).
     Array(Vec<u64>),
+    /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
+    /// runtime's `DataView`; `encode` fills one, `read_*` read from it.
+    Bytes(Vec<u8>),
 }
 
 /// A list's backing store, shared by a list and its tails. `rc` counts how
@@ -1051,6 +1054,7 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
         (Value::Set(x), Value::Set(y)) | (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
         }
+        (Value::Bytes(x), Value::Bytes(y)) => x == y,
         _ => false,
     }
 }
@@ -2017,16 +2021,19 @@ unsafe extern "C" fn tuple_map_both(f: u64, g: u64, t: u64) -> u64 {
 // DEBUG — mirrors runtime.js's _Debug_toString formatting.
 
 fn debug_string(out: &mut String, bytes: &[u8]) {
+    // Elm strings are UTF-8; render them as characters (not per-byte, which
+    // would re-encode multi-byte scalars) so non-ASCII prints faithfully.
+    let text = unsafe { std::str::from_utf8_unchecked(bytes) };
     out.push('"');
-    for &b in bytes {
-        match b {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            c if c < 0x20 => out.push_str(&format!("\\u{:04x}", c)),
-            c => out.push(c as char),
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
     }
     out.push('"');
@@ -2131,6 +2138,11 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
                 debug_fmt(out, x);
             }
             out.push(']');
+        }
+        Value::Bytes(bytes) => {
+            out.push('<');
+            out.push_str(&bytes.len().to_string());
+            out.push_str(" bytes>");
         }
     }
 }
@@ -3051,6 +3063,258 @@ pub unsafe extern "C" fn array_slice(from: u64, to: u64, a: u64) -> u64 {
         Vec::new()
     };
     alloc(Value::Array(els))
+}
+
+// -- elm/bytes --
+//
+// `Bytes` is a `Value::Bytes(Vec<u8>)` (the JS runtime uses a DataView).
+// `encode` walks the alm-generated `Encoder` tree — a uniform tagged value
+// whose constructor names match `Bytes.Encode` (`I8`/`U8`/`I16`/…/`Bytes`) —
+// exactly as the JS kernel does, so it does not depend on the (dead-code-
+// eliminated) Elm `Bytes.Encode.write`. A `Decoder` is a function
+// `Bytes -> Int -> (Int, a)`; `decode` runs it at offset 0. Out-of-range
+// reads set a sticky failure flag (the analogue of the JS `DataView` throwing)
+// which `decode` turns into `Nothing`.
+
+// Decode failure — the analogue of the JS `DataView` throwing — is threaded
+// through the decoder's *offset* rather than a shared flag: a failed read
+// returns this sentinel offset, which is negative so every subsequent read's
+// bounds check fails too (propagating it), and `decode` reports `Nothing`
+// whenever the final offset is negative. Real offsets are always in
+// `0..=len`, so a negative offset is unambiguous, and threading it through
+// the value the decoder already returns is robust under any optimization.
+const BYTES_FAIL_OFFSET: i64 = i64::MIN / 2;
+
+unsafe fn as_bytes<'a>(v: u64) -> &'a [u8] {
+    match deref(v) {
+        Value::Bytes(b) => b.as_slice(),
+        _ => crash!("expected Bytes"),
+    }
+}
+
+/// The constructor name of an `Encoder`/`Endianness` value.
+unsafe fn enc_name<'a>(v: u64) -> &'a str {
+    match deref(v) {
+        Value::Ctor { name, .. } => cname(*name),
+        _ => "?",
+    }
+}
+
+/// `Endianness` is `LE | BE`; little-endian is constructor index 0.
+unsafe fn enc_is_le(endianness: u64) -> bool {
+    match deref(endianness) {
+        Value::Ctor { index, .. } => *index == 0,
+        _ => true,
+    }
+}
+
+/// Total encoded width, in bytes, of an `Encoder` tree.
+unsafe fn encoder_width(enc: u64) -> usize {
+    match enc_name(enc) {
+        "I8" | "U8" => 1,
+        "I16" | "U16" => 2,
+        "I32" | "U32" | "F32" => 4,
+        "F64" => 8,
+        "Seq" => to_vec(ctor_get(enc, 1)).into_iter().map(|e| encoder_width(e)).sum(),
+        "Utf8" => sbytes(ctor_get(enc, 1)).len(),
+        "Bytes" => as_bytes(ctor_get(enc, 0)).len(),
+        _ => 0,
+    }
+}
+
+/// Append the encoding of `enc` to `buf`.
+unsafe fn write_encoder(buf: &mut Vec<u8>, enc: u64) {
+    match enc_name(enc) {
+        "I8" | "U8" => buf.push(int_val(ctor_get(enc, 0)) as u8),
+        "I16" | "U16" => {
+            let le = enc_is_le(ctor_get(enc, 0));
+            let n = int_val(ctor_get(enc, 1)) as u16;
+            let b = n.to_le_bytes();
+            if le {
+                buf.extend_from_slice(&b);
+            } else {
+                buf.extend_from_slice(&[b[1], b[0]]);
+            }
+        }
+        "I32" | "U32" => {
+            let le = enc_is_le(ctor_get(enc, 0));
+            let n = int_val(ctor_get(enc, 1)) as u32;
+            if le {
+                buf.extend_from_slice(&n.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&n.to_be_bytes());
+            }
+        }
+        "F32" => {
+            let le = enc_is_le(ctor_get(enc, 0));
+            let f = rt_unfloat(ctor_get(enc, 1)) as f32;
+            if le {
+                buf.extend_from_slice(&f.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&f.to_be_bytes());
+            }
+        }
+        "F64" => {
+            let le = enc_is_le(ctor_get(enc, 0));
+            let f = rt_unfloat(ctor_get(enc, 1));
+            if le {
+                buf.extend_from_slice(&f.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&f.to_be_bytes());
+            }
+        }
+        "Seq" => {
+            for e in to_vec(ctor_get(enc, 1)) {
+                write_encoder(buf, e);
+            }
+        }
+        "Utf8" => buf.extend_from_slice(sbytes(ctor_get(enc, 1))),
+        "Bytes" => buf.extend_from_slice(as_bytes(ctor_get(enc, 0))),
+        _ => {}
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_encode(enc: u64) -> u64 {
+    let mut buf = Vec::with_capacity(encoder_width(enc));
+    write_encoder(&mut buf, enc);
+    alloc(Value::Bytes(buf))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_width(b: u64) -> u64 {
+    mk_int(as_bytes(b).len() as i64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_get_string_width(s: u64) -> u64 {
+    // Elm strings are stored UTF-8, so the byte length is the width.
+    mk_int(sbytes(s).len() as i64)
+}
+
+/// `getHostEndianness le be` — the host is little-endian; succeed with `le`.
+#[no_mangle]
+pub unsafe extern "C" fn bytes_get_host_endianness(le: u64, _be: u64) -> u64 {
+    task_succeed(le)
+}
+
+/// A `read_*` helper: the `width` bytes at `off`, or `None` on an out-of-range
+/// (or already-failed, i.e. negative) offset.
+unsafe fn read_at(b: u64, off: i64, width: usize) -> Option<&'static [u8]> {
+    let buf = as_bytes(b);
+    if off < 0 || off as usize + width > buf.len() {
+        return None;
+    }
+    Some(&buf[off as usize..off as usize + width])
+}
+
+/// Build the `(newOffset, value)` result of a successful decoder read.
+unsafe fn read_result(off: i64, width: usize, value: u64) -> u64 {
+    pair(mk_int(off + width as i64), value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_read_i8(b: u64, off: u64) -> u64 {
+    let off = int_val(off);
+    match read_at(b, off, 1) {
+        Some(s) => read_result(off, 1, mk_int(s[0] as i8 as i64)),
+        None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn bytes_read_u8(b: u64, off: u64) -> u64 {
+    let off = int_val(off);
+    match read_at(b, off, 1) {
+        Some(s) => read_result(off, 1, mk_int(s[0] as i64)),
+        None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+    }
+}
+
+macro_rules! read_int {
+    ($name:ident, $width:literal, $ty:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(is_le: u64, b: u64, off: u64) -> u64 {
+            let off = int_val(off);
+            match read_at(b, off, $width) {
+                Some(s) => {
+                    let mut a = [0u8; $width];
+                    a.copy_from_slice(s);
+                    let v = if rt_is_true(is_le) {
+                        <$ty>::from_le_bytes(a)
+                    } else {
+                        <$ty>::from_be_bytes(a)
+                    };
+                    read_result(off, $width, mk_int(v as i64))
+                }
+                None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+            }
+        }
+    };
+}
+read_int!(bytes_read_i16, 2, i16);
+read_int!(bytes_read_u16, 2, u16);
+read_int!(bytes_read_i32, 4, i32);
+read_int!(bytes_read_u32, 4, u32);
+
+macro_rules! read_float {
+    ($name:ident, $width:literal, $ty:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(is_le: u64, b: u64, off: u64) -> u64 {
+            let off = int_val(off);
+            match read_at(b, off, $width) {
+                Some(s) => {
+                    let mut a = [0u8; $width];
+                    a.copy_from_slice(s);
+                    let v = if rt_is_true(is_le) {
+                        <$ty>::from_le_bytes(a)
+                    } else {
+                        <$ty>::from_be_bytes(a)
+                    };
+                    read_result(off, $width, rt_float(v as f64))
+                }
+                None => pair(mk_int(BYTES_FAIL_OFFSET), rt_float(0.0)),
+            }
+        }
+    };
+}
+read_float!(bytes_read_f32, 4, f32);
+read_float!(bytes_read_f64, 8, f64);
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_read_bytes(len: u64, b: u64, off: u64) -> u64 {
+    let off = int_val(off);
+    let len = int_val(len).max(0) as usize;
+    match read_at(b, off, len) {
+        Some(s) => read_result(off, len, alloc(Value::Bytes(s.to_vec()))),
+        None => pair(mk_int(BYTES_FAIL_OFFSET), alloc(Value::Bytes(Vec::new()))),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_read_string(len: u64, b: u64, off: u64) -> u64 {
+    let off = int_val(off);
+    let len = int_val(len).max(0) as usize;
+    match read_at(b, off, len) {
+        Some(s) => read_result(off, len, mkstr(s.to_vec())),
+        None => pair(mk_int(BYTES_FAIL_OFFSET), mkstr(Vec::new())),
+    }
+}
+
+/// `Bytes.Decode.fail` — always fails.
+#[no_mangle]
+pub unsafe extern "C" fn bytes_decode_failure(_b: u64, _off: u64) -> u64 {
+    pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bytes_decode(decoder: u64, bytes: u64) -> u64 {
+    let result = ap2(decoder, bytes, mk_int(0));
+    // `result` is `(offset, value)`; a negative offset means a read ran past
+    // the end (or `fail` fired), so the decode failed.
+    match deref(result) {
+        Value::Tuple(items) if items.len() == 2 && int_val(items[0]) >= 0 => just(items[1]),
+        _ => nothing(),
+    }
 }
 
 // KERNEL VALUE TABLE — the globals the generated code imports.

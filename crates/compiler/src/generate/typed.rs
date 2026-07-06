@@ -1619,7 +1619,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .functions
                 .get(&name.to_string())
                 .ok_or_else(|| format!("typed backend: unknown call target `{}`", name))?;
-            if f.count_params() as usize == args.len() {
+            let np = f.count_params() as usize;
+            if np == args.len() {
                 let mut argv = Vec::with_capacity(args.len());
                 for arg in args {
                     argv.push(self.gen(arg)?.into());
@@ -1632,13 +1633,37 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .left()
                     .unwrap());
             }
-            // Partial application: capture the given arguments in a closure
-            // that takes the rest.
-            let mut applied = Vec::with_capacity(args.len());
-            for arg in args {
-                applied.push(self.gen(arg)?);
+            if args.len() < np {
+                // Partial application: capture the given arguments in a closure
+                // that takes the rest.
+                let mut applied = Vec::with_capacity(args.len());
+                for arg in args {
+                    applied.push(self.gen(arg)?);
+                }
+                return Ok(self.gen_partial_app(f, &applied));
             }
-            return Ok(self.gen_partial_app(f, &applied));
+            // Over-application: a point-free (or under-arity) function whose
+            // result is itself a closure applied to further arguments — e.g.
+            // `encode = Elm.Kernel.Bytes.encode` called as `encode x`, or
+            // `signedInt32 = I32` called as `signedInt32 BE n`. Call the
+            // function with its own parameters, then apply the returned closure
+            // to the remaining arguments.
+            let mut evaled = Vec::with_capacity(args.len());
+            for arg in args {
+                evaled.push(self.gen(arg)?);
+            }
+            let head: Vec<inkwell::values::BasicMetadataValueEnum> =
+                evaled[..np].iter().map(|v| (*v).into()).collect();
+            let closure = self
+                .builder
+                .build_call(f, &head, "call")
+                .unwrap()
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_pointer_value();
+            let ret_layout = self.layouts.layout_of(&whole.tipe);
+            return Ok(self.apply_closure(closure, &evaled[np..], &ret_layout));
         }
 
         // Otherwise the callee is a closure value (a function-typed local,
@@ -2181,6 +2206,36 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let x = self.gen(&args[0])?.into_float_value();
                 Ok(self.call_f64_intrinsic("llvm.sqrt.f64", x).into())
             }
+            // elm/bytes: `Bytes` is an opaque uniform byte buffer; `Encoder` is
+            // a normal tagged union the runtime's `bytes_encode` tree-walks; a
+            // `Decoder`'s inner `Bytes -> Int -> (Int, a)` function is applied
+            // by `bytes_decode`. Every primitive marshals through the runtime.
+            ("Elm.Kernel.Bytes", "encode") => self.marshal_call("bytes_encode", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "width") => self.marshal_call("bytes_width", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "getStringWidth") => {
+                self.marshal_call("bytes_get_string_width", args, &whole.tipe)
+            }
+            ("Elm.Kernel.Bytes", "getHostEndianness") => {
+                self.marshal_call("bytes_get_host_endianness", args, &whole.tipe)
+            }
+            ("Elm.Kernel.Bytes", "decode") => self.marshal_call("bytes_decode", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "decodeFailure") => {
+                self.marshal_call("bytes_decode_failure", args, &whole.tipe)
+            }
+            ("Elm.Kernel.Bytes", "read_i8") => self.marshal_call("bytes_read_i8", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_u8") => self.marshal_call("bytes_read_u8", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_i16") => self.marshal_call("bytes_read_i16", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_u16") => self.marshal_call("bytes_read_u16", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_i32") => self.marshal_call("bytes_read_i32", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_u32") => self.marshal_call("bytes_read_u32", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_f32") => self.marshal_call("bytes_read_f32", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_f64") => self.marshal_call("bytes_read_f64", args, &whole.tipe),
+            ("Elm.Kernel.Bytes", "read_bytes") => {
+                self.marshal_call("bytes_read_bytes", args, &whole.tipe)
+            }
+            ("Elm.Kernel.Bytes", "read_string") => {
+                self.marshal_call("bytes_read_string", args, &whole.tipe)
+            }
             // Dict/Set/Array: opaque uniform values managed by the runtime.
             // Empty collections are value globals; the rest marshal.
             ("Dict", "empty") => Ok(self.load_uniform_global("$Dict$empty")),
@@ -2276,7 +2331,25 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .functions
                     .get(&name.to_string())
                     .ok_or_else(|| format!("typed backend: unknown function `{}`", name))?;
-                Ok(self.call_fn(f, args))
+                let np = f.count_params() as usize;
+                if np >= args.len() {
+                    return Ok(self.call_fn(f, args));
+                }
+                // Over-application: a point-free function (e.g. a bare
+                // constructor `unsignedInt8 = U8`) passed to a higher-order
+                // kernel and applied to more arguments than it names. Call it
+                // with its own parameters, then apply the returned closure to
+                // the rest.
+                let closure = self.call_fn(f, &args[..np]).into_pointer_value();
+                let mut t = func.tipe.clone();
+                for _ in 0..args.len() {
+                    match t {
+                        crate::ast::canonical::Type::Lambda(_, r) => t = *r,
+                        _ => break,
+                    }
+                }
+                let ret_layout = self.layouts.layout_of(&t);
+                Ok(self.apply_closure(closure, &args[np..], &ret_layout))
             }
             TypedKind::Lambda(params, body) => {
                 if params.len() != args.len() {
