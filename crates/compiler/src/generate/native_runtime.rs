@@ -2018,23 +2018,28 @@ unsafe extern "C" fn tuple_map_both(f: u64, g: u64, t: u64) -> u64 {
 
 // DEBUG — mirrors runtime.js's _Debug_toString formatting.
 
-fn debug_string(out: &mut String, bytes: &[u8]) {
+fn debug_string(out: &mut String, bytes: &[u8], is_char: bool) {
     // Elm strings are UTF-8; render them as characters (not per-byte, which
     // would re-encode multi-byte scalars) so non-ASCII prints faithfully.
+    // Escaping matches elm's addSlashes: only \ \n \t \r \v \0 and the quote —
+    // other control chars pass through raw. Chars use single quotes.
     let text = unsafe { std::str::from_utf8_unchecked(bytes) };
-    out.push('"');
+    let quote = if is_char { '\'' } else { '"' };
+    out.push(quote);
     for c in text.chars() {
         match c {
-            '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            '\r' => out.push_str("\\r"),
+            '\u{0B}' => out.push_str("\\v"),
+            '\0' => out.push_str("\\0"),
+            '\'' if is_char => out.push_str("\\'"),
+            '"' if !is_char => out.push_str("\\\""),
             c => out.push(c),
         }
     }
-    out.push('"');
+    out.push(quote);
 }
 
 unsafe fn debug_fmt(out: &mut String, v: u64) {
@@ -2046,13 +2051,13 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
         Value::Float(f) => out.push_str(&fmt_float(*f)),
         Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         Value::Unit => out.push_str("()"),
-        // The JS runtime represents chars as strings, so they format like
-        // one-character strings.
+        // Chars render with single quotes, like elm (and the JS backend, which
+        // boxes chars to distinguish them from one-char strings).
         Value::Char(c) => {
             let s = char::from_u32(*c).unwrap_or('\u{fffd}').to_string();
-            debug_string(out, s.as_bytes());
+            debug_string(out, s.as_bytes(), true);
         }
-        Value::Str(b) => debug_string(out, b),
+        Value::Str(b) => debug_string(out, b, false),
         Value::List { .. } => {
             out.push('[');
             for (i, x) in to_vec(v).into_iter().enumerate() {
