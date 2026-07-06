@@ -113,6 +113,14 @@ function _Utils_eqHelp(x, y, depth, stack) {
         stack.push({ $: '#2', a: x, b: y });
         return true;
     }
+    // Dict/Set are red-black trees: two trees with identical contents can have
+    // different shapes, so structural field comparison would wrongly disagree.
+    // Compare by their canonical sorted list instead (as elm's kernel does).
+    if (x.$ === 'Set_elm_builtin') {
+        x = $Set$toList(x); y = $Set$toList(y);
+    } else if (x.$ === 'RBNode_elm_builtin' || x.$ === 'RBEmpty_elm_builtin') {
+        x = $Dict$toList(x); y = $Dict$toList(y);
+    }
     for (var key in x) {
         if (!_Utils_eqHelp(x[key], y[key], depth + 1, stack)) { return false; }
     }
@@ -563,7 +571,7 @@ function _Debug_toString(value) {
     // parser forbids that suffix in user constructor names), so a user type
     // named `Dict`/`Set`/`Array` has tag `'Dict'`/`'Set'`/`'Array'` and falls
     // through to the generic custom-type rendering below.
-    if (tag === 'Dict_elm_builtin') {
+    if (tag === 'RBNode_elm_builtin' || tag === 'RBEmpty_elm_builtin') {
         return 'Dict.fromList ' + _Debug_toString($Dict$toList(value));
     }
     if (tag === 'Set_elm_builtin') {
@@ -1190,138 +1198,292 @@ var $Result$map5 = F6(function (f, ra, rb, rc, rd, re) {
 
 // DICT
 //
-// Elm's Dict is a red-black tree; alm uses an immutable sorted array of
-// keys with a parallel array of values. Same observable behavior;
-// insert/remove are O(n) copies rather than O(log n).
+// Faithful port of elm/core's red-black tree (Dict.elm): a node is
+//   { $: 'RBNode_elm_builtin', clr, key, val, left, right }
+// and the empty tree is the shared singleton `$Dict$empty` tagged
+// 'RBEmpty_elm_builtin'. Colors are 0 = Red, 1 = Black (internal only;
+// never surfaced — equality and Debug.toString convert to a sorted list).
+// insert/remove are O(log n); in-order traversal yields sorted-by-key order.
+// elm's `_elm_builtin` tags are collision-proof against user constructors.
 
-var $Dict$empty = { $: 'Dict_elm_builtin', keys: [], vals: [] };
+var $Dict$empty = { $: 'RBEmpty_elm_builtin' };
 
-function _Dict_search(dict, key) {
-    // Binary search: returns index if found, otherwise ~insertionPoint.
-    var lo = 0, hi = dict.keys.length - 1;
-    while (lo <= hi) {
-        var mid = (lo + hi) >> 1;
-        var cmp = _Utils_cmp(dict.keys[mid], key);
-        if (cmp === 0) { return mid; }
-        if (cmp < 0) { lo = mid + 1; } else { hi = mid - 1; }
-    }
-    return ~lo;
+function _Dict_node(clr, key, val, left, right) {
+    return { $: 'RBNode_elm_builtin', clr: clr, key: key, val: val, left: left, right: right };
 }
 
-var $Dict$singleton = F2(function (key, value) {
-    return { $: 'Dict_elm_builtin', keys: [key], vals: [value] };
-});
-var $Dict$insert = F3(function (key, value, dict) {
-    var i = _Dict_search(dict, key);
-    var keys = dict.keys.slice();
-    var vals = dict.vals.slice();
-    if (i >= 0) {
-        vals[i] = value;
-    } else {
-        keys.splice(~i, 0, key);
-        vals.splice(~i, 0, value);
+var $Dict$get = F2(function (targetKey, dict) {
+    while (dict.$ === 'RBNode_elm_builtin') {
+        var c = _Utils_cmp(targetKey, dict.key);
+        if (c < 0) { dict = dict.left; }
+        else if (c === 0) { return $Maybe$Just(dict.val); }
+        else { dict = dict.right; }
     }
-    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
+    return $Maybe$Nothing;
 });
+var $Dict$member = F2(function (key, dict) {
+    return A2($Dict$get, key, dict).$ === 'Just';
+});
+function _Dict_sizeHelp(n, dict) {
+    while (dict.$ === 'RBNode_elm_builtin') {
+        n = _Dict_sizeHelp(n + 1, dict.right);
+        dict = dict.left;
+    }
+    return n;
+}
+var $Dict$size = function (dict) { return _Dict_sizeHelp(0, dict); };
+var $Dict$isEmpty = function (dict) { return dict.$ === 'RBEmpty_elm_builtin'; };
+
+function _Dict_balance(color, key, value, left, right) {
+    if (right.$ === 'RBNode_elm_builtin' && right.clr === 0) {
+        if (left.$ === 'RBNode_elm_builtin' && left.clr === 0) {
+            return _Dict_node(0, key, value,
+                _Dict_node(1, left.key, left.val, left.left, left.right),
+                _Dict_node(1, right.key, right.val, right.left, right.right));
+        }
+        return _Dict_node(color, right.key, right.val,
+            _Dict_node(0, key, value, left, right.left), right.right);
+    }
+    if (left.$ === 'RBNode_elm_builtin' && left.clr === 0 &&
+        left.left.$ === 'RBNode_elm_builtin' && left.left.clr === 0) {
+        var ll = left.left;
+        return _Dict_node(0, left.key, left.val,
+            _Dict_node(1, ll.key, ll.val, ll.left, ll.right),
+            _Dict_node(1, key, value, left.right, right));
+    }
+    return _Dict_node(color, key, value, left, right);
+}
+function _Dict_insertHelp(key, value, dict) {
+    if (dict.$ === 'RBEmpty_elm_builtin') {
+        return _Dict_node(0, key, value, $Dict$empty, $Dict$empty);
+    }
+    var c = _Utils_cmp(key, dict.key);
+    if (c < 0) {
+        return _Dict_balance(dict.clr, dict.key, dict.val, _Dict_insertHelp(key, value, dict.left), dict.right);
+    } else if (c === 0) {
+        return _Dict_node(dict.clr, dict.key, value, dict.left, dict.right);
+    } else {
+        return _Dict_balance(dict.clr, dict.key, dict.val, dict.left, _Dict_insertHelp(key, value, dict.right));
+    }
+}
+var $Dict$insert = F3(function (key, value, dict) {
+    var x = _Dict_insertHelp(key, value, dict);
+    if (x.$ === 'RBNode_elm_builtin' && x.clr === 0) {
+        return _Dict_node(1, x.key, x.val, x.left, x.right);
+    }
+    return x;
+});
+var $Dict$singleton = F2(function (key, value) {
+    return _Dict_node(1, key, value, $Dict$empty, $Dict$empty);
+});
+
+function _Dict_moveRedLeft(dict) {
+    var l = dict.left, r = dict.right;
+    if (l.$ === 'RBNode_elm_builtin' && r.$ === 'RBNode_elm_builtin') {
+        if (r.left.$ === 'RBNode_elm_builtin' && r.left.clr === 0) {
+            var rl = r.left;
+            return _Dict_node(0, rl.key, rl.val,
+                _Dict_node(1, dict.key, dict.val, _Dict_node(0, l.key, l.val, l.left, l.right), rl.left),
+                _Dict_node(1, r.key, r.val, rl.right, r.right));
+        }
+        return _Dict_node(1, dict.key, dict.val,
+            _Dict_node(0, l.key, l.val, l.left, l.right),
+            _Dict_node(0, r.key, r.val, r.left, r.right));
+    }
+    return dict;
+}
+function _Dict_moveRedRight(dict) {
+    var l = dict.left, r = dict.right;
+    if (l.$ === 'RBNode_elm_builtin' && r.$ === 'RBNode_elm_builtin') {
+        if (l.left.$ === 'RBNode_elm_builtin' && l.left.clr === 0) {
+            var ll = l.left;
+            return _Dict_node(0, l.key, l.val,
+                _Dict_node(1, ll.key, ll.val, ll.left, ll.right),
+                _Dict_node(1, dict.key, dict.val, l.right, _Dict_node(0, r.key, r.val, r.left, r.right)));
+        }
+        return _Dict_node(1, dict.key, dict.val,
+            _Dict_node(0, l.key, l.val, l.left, l.right),
+            _Dict_node(0, r.key, r.val, r.left, r.right));
+    }
+    return dict;
+}
+function _Dict_getMin(dict) {
+    while (dict.$ === 'RBNode_elm_builtin' && dict.left.$ === 'RBNode_elm_builtin') {
+        dict = dict.left;
+    }
+    return dict;
+}
+function _Dict_removeMin(dict) {
+    if (dict.$ === 'RBNode_elm_builtin' && dict.left.$ === 'RBNode_elm_builtin') {
+        var left = dict.left;
+        if (left.clr === 1) {
+            if (left.left.$ === 'RBNode_elm_builtin' && left.left.clr === 0) {
+                return _Dict_node(dict.clr, dict.key, dict.val, _Dict_removeMin(left), dict.right);
+            }
+            var m = _Dict_moveRedLeft(dict);
+            if (m.$ === 'RBNode_elm_builtin') {
+                return _Dict_balance(m.clr, m.key, m.val, _Dict_removeMin(m.left), m.right);
+            }
+            return $Dict$empty;
+        }
+        return _Dict_node(dict.clr, dict.key, dict.val, _Dict_removeMin(left), dict.right);
+    }
+    return $Dict$empty;
+}
+function _Dict_removeHelpPrepEQGT(dict, color, key, value, left, right) {
+    if (left.$ === 'RBNode_elm_builtin' && left.clr === 0) {
+        return _Dict_node(color, left.key, left.val, left.left,
+            _Dict_node(0, key, value, left.right, right));
+    }
+    if (right.$ === 'RBNode_elm_builtin' && right.clr === 1 &&
+        (right.left.$ === 'RBEmpty_elm_builtin' || (right.left.$ === 'RBNode_elm_builtin' && right.left.clr === 1))) {
+        return _Dict_moveRedRight(dict);
+    }
+    return dict;
+}
+function _Dict_removeHelpEQGT(targetKey, dict) {
+    if (dict.$ === 'RBNode_elm_builtin') {
+        if (_Utils_cmp(targetKey, dict.key) === 0) {
+            var mn = _Dict_getMin(dict.right);
+            if (mn.$ === 'RBNode_elm_builtin') {
+                return _Dict_balance(dict.clr, mn.key, mn.val, dict.left, _Dict_removeMin(dict.right));
+            }
+            return $Dict$empty;
+        }
+        return _Dict_balance(dict.clr, dict.key, dict.val, dict.left, _Dict_removeHelp(targetKey, dict.right));
+    }
+    return $Dict$empty;
+}
+function _Dict_removeHelp(targetKey, dict) {
+    if (dict.$ === 'RBEmpty_elm_builtin') { return $Dict$empty; }
+    if (_Utils_cmp(targetKey, dict.key) < 0) {
+        var left = dict.left;
+        if (left.$ === 'RBNode_elm_builtin' && left.clr === 1) {
+            if (left.left.$ === 'RBNode_elm_builtin' && left.left.clr === 0) {
+                return _Dict_node(dict.clr, dict.key, dict.val, _Dict_removeHelp(targetKey, left), dict.right);
+            }
+            var m = _Dict_moveRedLeft(dict);
+            if (m.$ === 'RBNode_elm_builtin') {
+                return _Dict_balance(m.clr, m.key, m.val, _Dict_removeHelp(targetKey, m.left), m.right);
+            }
+            return $Dict$empty;
+        }
+        return _Dict_node(dict.clr, dict.key, dict.val, _Dict_removeHelp(targetKey, left), dict.right);
+    }
+    return _Dict_removeHelpEQGT(targetKey,
+        _Dict_removeHelpPrepEQGT(dict, dict.clr, dict.key, dict.val, dict.left, dict.right));
+}
 var $Dict$remove = F2(function (key, dict) {
-    var i = _Dict_search(dict, key);
-    if (i < 0) { return dict; }
-    var keys = dict.keys.slice();
-    var vals = dict.vals.slice();
-    keys.splice(i, 1);
-    vals.splice(i, 1);
-    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
+    var x = _Dict_removeHelp(key, dict);
+    if (x.$ === 'RBNode_elm_builtin' && x.clr === 0) {
+        return _Dict_node(1, x.key, x.val, x.left, x.right);
+    }
+    return x;
 });
-var $Dict$update = F3(function (key, alter, dict) {
-    var i = _Dict_search(dict, key);
-    var current = i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
-    var next = alter(current);
+var $Dict$update = F3(function (targetKey, alter, dict) {
+    var next = alter(A2($Dict$get, targetKey, dict));
     return next.$ === 'Just'
-        ? A3($Dict$insert, key, next.a, dict)
-        : A2($Dict$remove, key, dict);
+        ? A3($Dict$insert, targetKey, next.a, dict)
+        : A2($Dict$remove, targetKey, dict);
 });
-var $Dict$isEmpty = function (dict) { return dict.keys.length === 0; };
-var $Dict$member = F2(function (key, dict) { return _Dict_search(dict, key) >= 0; });
-var $Dict$get = F2(function (key, dict) {
-    var i = _Dict_search(dict, key);
-    return i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
-});
-var $Dict$size = function (dict) { return dict.keys.length; };
-var $Dict$keys = function (dict) { return _List_fromArray(dict.keys); };
-var $Dict$values = function (dict) { return _List_fromArray(dict.vals); };
-var $Dict$toList = function (dict) {
-    return _List_fromArray(dict.keys.map(function (k, i) {
-        return { $: '#2', a: k, b: dict.vals[i] };
-    }));
+
+// In-order (left, node, right) traversal → nodes sorted ascending by key.
+function _Dict_toArray(dict) {
+    var out = [];
+    var stack = [];
+    var node = dict;
+    while (node.$ === 'RBNode_elm_builtin' || stack.length) {
+        while (node.$ === 'RBNode_elm_builtin') { stack.push(node); node = node.left; }
+        node = stack.pop();
+        out.push(node);
+        node = node.right;
+    }
+    return out;
+}
+var $Dict$keys = function (dict) {
+    return _List_fromArray(_Dict_toArray(dict).map(function (n) { return n.key; }));
 };
-var $Dict$fromList = function (pairs) {
+var $Dict$values = function (dict) {
+    return _List_fromArray(_Dict_toArray(dict).map(function (n) { return n.val; }));
+};
+var $Dict$toList = function (dict) {
+    return _List_fromArray(_Dict_toArray(dict).map(function (n) { return { $: '#2', a: n.key, b: n.val }; }));
+};
+var $Dict$fromList = function (assocs) {
     var dict = $Dict$empty;
-    for (; pairs.$ === '::'; pairs = pairs.b) {
-        dict = A3($Dict$insert, pairs.a.a, pairs.a.b, dict);
+    for (; assocs.$ === '::'; assocs = assocs.b) {
+        dict = A3($Dict$insert, assocs.a.a, assocs.a.b, dict);
     }
     return dict;
 };
-var $Dict$map = F2(function (f, dict) {
-    return {
-        $: 'Dict_elm_builtin',
-        keys: dict.keys.slice(),
-        vals: dict.vals.map(function (v, i) { return A2(f, dict.keys[i], v); })
-    };
-});
-var $Dict$foldl = F3(function (f, acc, dict) {
-    for (var i = 0; i < dict.keys.length; i++) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
-    return acc;
-});
-var $Dict$foldr = F3(function (f, acc, dict) {
-    for (var i = dict.keys.length; i--;) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
-    return acc;
-});
-var $Dict$filter = F2(function (isGood, dict) {
-    var keys = [], vals = [];
-    for (var i = 0; i < dict.keys.length; i++) {
-        if (A2(isGood, dict.keys[i], dict.vals[i])) {
-            keys.push(dict.keys[i]);
-            vals.push(dict.vals[i]);
-        }
+function _Dict_map(func, dict) {
+    if (dict.$ === 'RBNode_elm_builtin') {
+        return _Dict_node(dict.clr, dict.key, A2(func, dict.key, dict.val),
+            _Dict_map(func, dict.left), _Dict_map(func, dict.right));
     }
-    return { $: 'Dict_elm_builtin', keys: keys, vals: vals };
+    return dict;
+}
+var $Dict$map = F2(_Dict_map);
+function _Dict_foldl(func, acc, dict) {
+    while (dict.$ === 'RBNode_elm_builtin') {
+        acc = A3(func, dict.key, dict.val, _Dict_foldl(func, acc, dict.left));
+        dict = dict.right;
+    }
+    return acc;
+}
+var $Dict$foldl = F3(_Dict_foldl);
+function _Dict_foldr(func, acc, dict) {
+    while (dict.$ === 'RBNode_elm_builtin') {
+        acc = A3(func, dict.key, dict.val, _Dict_foldr(func, acc, dict.right));
+        dict = dict.left;
+    }
+    return acc;
+}
+var $Dict$foldr = F3(_Dict_foldr);
+var $Dict$filter = F2(function (isGood, dict) {
+    return _Dict_foldl(F3(function (k, v, d) {
+        return A2(isGood, k, v) ? A3($Dict$insert, k, v, d) : d;
+    }), $Dict$empty, dict);
 });
 var $Dict$partition = F2(function (isGood, dict) {
-    var yes = { $: 'Dict_elm_builtin', keys: [], vals: [] };
-    var no = { $: 'Dict_elm_builtin', keys: [], vals: [] };
-    for (var i = 0; i < dict.keys.length; i++) {
-        var target = A2(isGood, dict.keys[i], dict.vals[i]) ? yes : no;
-        target.keys.push(dict.keys[i]);
-        target.vals.push(dict.vals[i]);
-    }
-    return { $: '#2', a: yes, b: no };
+    return _Dict_foldl(F3(function (key, value, pair) {
+        return A2(isGood, key, value)
+            ? { $: '#2', a: A3($Dict$insert, key, value, pair.a), b: pair.b }
+            : { $: '#2', a: pair.a, b: A3($Dict$insert, key, value, pair.b) };
+    }), { $: '#2', a: $Dict$empty, b: $Dict$empty }, dict);
 });
-var $Dict$union = F2(function (left, right) {
-    var result = right;
-    for (var i = 0; i < left.keys.length; i++) {
-        result = A3($Dict$insert, left.keys[i], left.vals[i], result);
+var $Dict$union = F2(function (t1, t2) {
+    return _Dict_foldl($Dict$insert, t2, t1);
+});
+var $Dict$intersect = F2(function (t1, t2) {
+    return A2($Dict$filter, F2(function (k, _v) { return A2($Dict$member, k, t2); }), t1);
+});
+var $Dict$diff = F2(function (t1, t2) {
+    return _Dict_foldl(F3(function (k, v, t) { return A2($Dict$remove, k, t); }), t1, t2);
+});
+var $Dict$merge = F6(function (leftStep, bothStep, rightStep, leftDict, rightDict, initialResult) {
+    var stepState = F3(function (rKey, rValue, acc) {
+        var list = acc.a;
+        var result = acc.b;
+        while (list.$ === '::' && _Utils_cmp(list.a.a, rKey) < 0) {
+            result = A3(leftStep, list.a.a, list.a.b, result);
+            list = list.b;
+        }
+        if (list.$ !== '::') {
+            return { $: '#2', a: list, b: A3(rightStep, rKey, rValue, result) };
+        }
+        if (_Utils_cmp(list.a.a, rKey) > 0) {
+            return { $: '#2', a: list, b: A3(rightStep, rKey, rValue, result) };
+        }
+        return { $: '#2', a: list.b, b: A4(bothStep, list.a.a, list.a.b, rValue, result) };
+    });
+    var acc = _Dict_foldl(stepState, { $: '#2', a: $Dict$toList(leftDict), b: initialResult }, rightDict);
+    var leftovers = acc.a;
+    var result = acc.b;
+    for (; leftovers.$ === '::'; leftovers = leftovers.b) {
+        result = A3(leftStep, leftovers.a.a, leftovers.a.b, result);
     }
     return result;
-});
-var $Dict$intersect = F2(function (left, right) {
-    return A2($Dict$filter, F2(function (k, _v) { return A2($Dict$member, k, right); }), left);
-});
-var $Dict$diff = F2(function (left, right) {
-    return A2($Dict$filter, F2(function (k, _v) { return !A2($Dict$member, k, right); }), left);
-});
-var $Dict$merge = F6(function (leftStep, bothStep, rightStep, left, right, initial) {
-    var acc = initial;
-    var i = 0, j = 0;
-    while (i < left.keys.length && j < right.keys.length) {
-        var lk = left.keys[i], rk = right.keys[j];
-        var c = _Utils_cmp(lk, rk);
-        if (c < 0) { acc = A3(leftStep, lk, left.vals[i], acc); i++; }
-        else if (c > 0) { acc = A3(rightStep, rk, right.vals[j], acc); j++; }
-        else { acc = A4(bothStep, lk, left.vals[i], right.vals[j], acc); i++; j++; }
-    }
-    for (; i < left.keys.length; i++) { acc = A3(leftStep, left.keys[i], left.vals[i], acc); }
-    for (; j < right.keys.length; j++) { acc = A3(rightStep, right.keys[j], right.vals[j], acc); }
-    return acc;
 });
 
 // SET — a Dict with unit values.
@@ -3328,7 +3490,7 @@ var $Json$Encode$array = F2(function (encodeItem, arr) {
     return _Array_toJsArray(arr).map(function (x) { return encodeItem(x); });
 });
 var $Json$Encode$set = F2(function (encodeItem, set) {
-    return $Dict$keys(set.d) === undefined ? [] : _List_toArray($Dict$keys(set.d)).map(function (x) { return encodeItem(x); });
+    return _List_toArray($Set$toList(set)).map(function (x) { return encodeItem(x); });
 });
 var $Json$Encode$object = function (pairs) {
     var out = {};
@@ -3337,8 +3499,9 @@ var $Json$Encode$object = function (pairs) {
 };
 var $Json$Encode$dict = F3(function (toKey, toValue, dict) {
     var out = {};
-    for (var i = 0; i < dict.keys.length; i++) {
-        out[toKey(dict.keys[i])] = toValue(dict.vals[i]);
+    var arr = _Dict_toArray(dict);
+    for (var i = 0; i < arr.length; i++) {
+        out[toKey(arr[i].key)] = toValue(arr[i].val);
     }
     return out;
 });
