@@ -3713,7 +3713,8 @@ function _Url_chompAfterAuthority(protocol, params, frag, authority, path) {
 function _Url_chompBeforeQuery(protocol, params, frag, str) {
     if (str === '') { return $Maybe$Nothing; }
     var i = str.indexOf('/');
-    if (i < 0) { return _Url_chompAfterAuthority(protocol, params, frag, str, ''); }
+    // elm defaults a pathless URL to "/" (so "https://x.com" -> path "/").
+    if (i < 0) { return _Url_chompAfterAuthority(protocol, params, frag, str, '/'); }
     return _Url_chompAfterAuthority(protocol, params, frag, str.slice(0, i), str.slice(i));
 }
 function _Url_chompBeforeFragment(protocol, frag, str) {
