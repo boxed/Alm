@@ -141,6 +141,13 @@ pub(crate) fn finish<'ctx>(
     std::fs::write(&bc_path, runtime_bc).map_err(|e| e.to_string())?;
     let runtime_module = Module::parse_bitcode_from_path(&bc_path, context)
         .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
+    // The typed backend emits DWARF debug info (line tables mapping generated
+    // code back to `.elm` source) and sets the "Debug Info Version"/"Dwarf
+    // Version" module flags. The runtime bitcode (from rustc) may carry its own
+    // debug info and conflicting flag values, which makes `link_in_module`
+    // fail. Strip the runtime's debug info so only the program's survives; the
+    // program's line tables are preserved through the link and O2.
+    runtime_module.strip_debug_info();
     // Only exported (external-linkage) definitions live in the static
     // library, so only those may become `available_externally` (inline-only,
     // resolved to the .a). Internal helpers (value_eq, the allocator, …) are

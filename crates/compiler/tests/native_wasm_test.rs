@@ -204,3 +204,76 @@ fn custom_types_and_debug() {
          \x20   Debug.toString ( sum t, Just t )\n",
     );
 }
+
+/// The typed backend emits DWARF debug info: a `.wasm` built through it must
+/// carry a `.debug_line` table naming the `.elm` source and a subprogram for a
+/// user function. `llvm-dwarfdump` reads the wasm container directly.
+#[test]
+fn wasm_has_dwarf_line_table() {
+    let dir = std::env::temp_dir()
+        .join("alm-wasm-dwarf")
+        .join(format!("dwarf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create test dir");
+    let entry = dir.join("Test.elm");
+    // A recursive function survives O2 as a real out-of-line function, so its
+    // line program is retained (a trivial helper would be inlined and folded
+    // away, taking its line table with it).
+    std::fs::write(
+        &entry,
+        "module Test exposing (..)\n\
+         \n\
+         \n\
+         fib : Int -> Int\n\
+         fib n =\n\
+         \x20   if n < 2 then\n\
+         \x20       n\n\
+         \n\
+         \x20   else\n\
+         \x20       fib (n - 1) + fib (n - 2)\n\
+         \n\
+         main =\n\
+         \x20   String.fromInt (fib 20)\n",
+    )
+    .expect("write fixture");
+
+    let wasm = dir.join("test.wasm");
+    project::compile_project_typed(&entry, &wasm, generate::native::Target::Wasm)
+        .unwrap_or_else(|e| {
+            panic!(
+                "typed wasm build failed:\n{}",
+                e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            )
+        });
+
+    let dwarfdump = env!("ALM_DWARFDUMP");
+    if !std::path::Path::new(dwarfdump).exists() {
+        eprintln!("skipping DWARF check: {} not found", dwarfdump);
+        return;
+    }
+
+    // Line table must reference the `.elm` source file.
+    let lines = Command::new(dwarfdump)
+        .arg("--debug-line")
+        .arg(&wasm)
+        .output()
+        .expect("run llvm-dwarfdump");
+    assert!(lines.status.success(), "llvm-dwarfdump --debug-line failed");
+    let lines = String::from_utf8_lossy(&lines.stdout);
+    assert!(
+        lines.contains("Test.elm"),
+        "wasm .debug_line does not reference Test.elm:\n{}",
+        lines
+    );
+
+    // And there must be a subprogram for the user function `fib`.
+    let info = Command::new(dwarfdump)
+        .arg("--debug-info")
+        .arg(&wasm)
+        .output()
+        .expect("run llvm-dwarfdump");
+    let info = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        info.contains("\"fib\""),
+        "wasm .debug_info has no subprogram for `fib`"
+    );
+}

@@ -343,21 +343,28 @@ pub struct MonoProgram {
 }
 
 /// A specialized function: its mangled name, the source name and concrete
-/// type it came from, its typed parameters, and its typed body.
+/// type it came from, its typed parameters, and its typed body. `module` and
+/// `region` locate the definition in its source `.elm` module for debug info.
 #[derive(Debug, Clone)]
 pub struct TypedFn {
     pub mangled: Name,
     pub original: Name,
+    pub module: Name,
     pub tipe: can::Type,
     pub params: Vec<(can::Pattern, can::Type)>,
     pub body: TypedExpr,
+    /// Source region of the definition (used for DWARF line info).
+    pub region: Region,
 }
 
-/// An expression annotated with its concrete type.
+/// An expression annotated with its concrete type and source region.
 #[derive(Debug, Clone)]
 pub struct TypedExpr {
     pub tipe: can::Type,
     pub kind: TypedKind,
+    /// Source region this expression was built from. Synthetic (desugared)
+    /// nodes inherit their enclosing expression's region.
+    pub region: Region,
 }
 
 #[derive(Debug, Clone)]
@@ -466,9 +473,11 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         functions.push(TypedFn {
             mangled: mangle(&instance.module, &instance.name, &instance.tipe),
             original: instance.name.clone(),
+            module: instance.module.clone(),
             tipe: instance.tipe.clone(),
             params,
             body: spec.expr(&def.body, &subst),
+            region: def.name.region,
         });
     }
 
@@ -601,7 +610,11 @@ impl Specializer<'_> {
                 rest.first().map(|c| Box::new(self.expr(c, subst))),
             ),
         };
-        TypedExpr { tipe, kind }
+        TypedExpr {
+            tipe,
+            kind,
+            region: expr.region,
+        }
     }
 
     fn let_decl(
