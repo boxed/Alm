@@ -1761,11 +1761,9 @@ pub unsafe extern "C" fn string_to_int(s: u64) -> u64 {
         Some(b'-') => (1, true),
         _ => (0, false),
     };
-    let digits = &bytes[i..];
-    // Reject empty, and leading zeros (matching the JS round-trip rule).
-    if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
-        return nothing();
-    }
+    // elm accepts an optional sign then one or more digits, leading zeros
+    // included ("007" -> Just 7); only empty / bare-sign / non-digit is Nothing.
+    let start = i;
     let mut n: i64 = 0;
     while i < bytes.len() {
         let d = bytes[i];
@@ -1775,7 +1773,7 @@ pub unsafe extern "C" fn string_to_int(s: u64) -> u64 {
         n = n * 10 + (d - b'0') as i64;
         i += 1;
     }
-    if negative && n == 0 {
+    if i == start {
         return nothing();
     }
     just(rt_int(if negative { -n } else { n }))

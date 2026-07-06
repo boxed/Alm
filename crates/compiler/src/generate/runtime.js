@@ -400,8 +400,18 @@ var $String$endsWith = F2(function (sub, s) {
     return s.length >= sub.length && s.lastIndexOf(sub) === s.length - sub.length;
 });
 var $String$toInt = function (s) {
-    var n = parseInt(s, 10);
-    return isNaN(n) || String(n) !== s.replace(/^\+/, '') ? $Maybe$Nothing : $Maybe$Just(n);
+    // elm accepts an optional leading +/- and any run of digits (including
+    // leading zeros: "01" -> Just 1); rejects empty / non-digit / bare sign.
+    var total = 0;
+    var code0 = s.charCodeAt(0);
+    var start = code0 === 0x2B || code0 === 0x2D ? 1 : 0;
+    var i = start;
+    for (; i < s.length; ++i) {
+        var code = s.charCodeAt(i);
+        if (code < 0x30 || 0x39 < code) { return $Maybe$Nothing; }
+        total = 10 * total + code - 0x30;
+    }
+    return i === start ? $Maybe$Nothing : $Maybe$Just(code0 === 0x2D ? -total : total);
 };
 var $String$fromInt = function (n) { return String(n); };
 var $String$toFloat = function (s) {
