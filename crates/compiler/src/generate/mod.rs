@@ -649,7 +649,12 @@ impl Generator {
             Binop(op, home, function, left, right) => {
                 self.binop(op, home, function, left, right)
             }
-            Lambda(args, body) => self.function(args, body),
+            Lambda(args, body) => match record_ctor_fields(args, body) {
+                // A record type-alias constructor used as a value: emit a shared,
+                // memoized constructor so `(==)` matches elm (see _Record_ctor).
+                Some(fields) => format!("_Record_ctor('{}')", fields),
+                None => self.function(args, body),
+            },
             Call(func, args) => {
                 let func_js = self.expr(func);
                 let arg_js: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
@@ -851,6 +856,40 @@ fn callable(js: String) -> String {
 
 fn foreign(module: &Name, name: &Name) -> String {
     format!("${}${}", module.as_str().replace('.', "$"), sanitize(name))
+}
+
+/// Recognize a record type-alias constructor lambda as produced by
+/// `record_alias_ctor` in canonicalization: args are `_r0.._r{n-1}` in order and
+/// the body is a record whose i-th field's value is exactly `_r{i}`. Returns the
+/// comma-joined field names, so codegen can emit a shared memoized constructor
+/// (so equality of records built from the constructor matches elm's semantics).
+fn record_ctor_fields(args: &[can::Pattern], body: &can::Expr) -> Option<String> {
+    let n = args.len();
+    if n == 0 {
+        return None;
+    }
+    for (i, arg) in args.iter().enumerate() {
+        match &arg.value {
+            can::Pattern_::Var(name) if name.as_str() == format!("_r{}", i) => {}
+            _ => return None,
+        }
+    }
+    let fields = match &body.value {
+        can::Expr_::Record(fields) => fields,
+        _ => return None,
+    };
+    if fields.len() != n {
+        return None;
+    }
+    let mut names = Vec::with_capacity(n);
+    for (i, (fname, fexpr)) in fields.iter().enumerate() {
+        match &fexpr.value {
+            can::Expr_::VarLocal(vn) if vn.as_str() == format!("_r{}", i) => {}
+            _ => return None,
+        }
+        names.push(fname.value.as_str().to_string());
+    }
+    Some(names.join(","))
 }
 
 /// Emit one union constructor: a value for arity 0, otherwise a curried

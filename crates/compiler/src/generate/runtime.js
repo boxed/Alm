@@ -24,6 +24,24 @@ function _Fn(arity, fun) {
     wrapper.f = fun;
     return wrapper;
 }
+// Record type-alias constructors used as first-class values (e.g. `map Point xs`)
+// must be a single shared function so `(==)` on values built from them matches
+// elm (elm emits one top-level constructor; a fresh closure per use would make
+// two equal records compare unequal). Memoize by the comma-joined field list.
+var _Record_ctorCache = {};
+function _Record_ctor(fieldsCsv) {
+    var cached = _Record_ctorCache[fieldsCsv];
+    if (cached !== undefined) { return cached; }
+    var fields = fieldsCsv.length === 0 ? [] : fieldsCsv.split(',');
+    var n = fields.length;
+    var fn = _Fn(n, function () {
+        var rec = {};
+        for (var i = 0; i < n; i++) { rec[fields[i]] = arguments[i]; }
+        return rec;
+    });
+    _Record_ctorCache[fieldsCsv] = fn;
+    return fn;
+}
 function _An(f, args) {
     if (f.a === args.length) { return f.f.apply(null, args); }
     var result = f;
