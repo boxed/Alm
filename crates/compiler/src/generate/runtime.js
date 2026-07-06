@@ -474,11 +474,26 @@ var $Tuple$mapBoth = F3(function (f, g, t) { return { $: '#2', a: f(t.a), b: g(t
 
 // DEBUG
 
+// Escape a string the way elm's Debug.toString does: only \ \n \t \r \v \0 and
+// the surrounding quote — other control chars pass through raw (JSON.stringify
+// would emit \uXXXX for them, which elm does not).
+function _Debug_addSlashes(str, isChar) {
+    var s = String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/\n/g, '\\n')
+        .replace(/\t/g, '\\t')
+        .replace(/\r/g, '\\r')
+        .replace(/\v/g, '\\v')
+        .replace(/\0/g, '\\0');
+    return isChar ? s.replace(/'/g, "\\'") : s.replace(/"/g, '\\"');
+}
 function _Debug_toString(value) {
     if (value === true) { return 'True'; }
     if (value === false) { return 'False'; }
     if (typeof value === 'number') { return String(value); }
-    if (typeof value === 'string') { return JSON.stringify(value); }
+    // A boxed String object is elm's dev-build Char representation → single quotes.
+    if (value instanceof String) { return "'" + _Debug_addSlashes(value.valueOf(), true) + "'"; }
+    if (typeof value === 'string') { return '"' + _Debug_addSlashes(value, false) + '"'; }
     if (typeof value === 'function') { return '<function>'; }
     if (value === null || value === undefined) { return '<internal>'; }
     var tag = value.$;
