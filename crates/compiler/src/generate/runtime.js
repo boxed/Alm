@@ -388,7 +388,12 @@ var $String$words = function (s) {
 };
 var $String$lines = function (s) { return _List_fromArray(s.split('\n')); };
 var $String$slice = F3(function (a, b, s) {
-    return s.slice(a < 0 ? Math.max(0, s.length + a) : a, b < 0 ? s.length + b : b);
+    // Clamp both ends into [0, len] like elm — a negative end that underflows
+    // past 0 must become 0, not leak into JS slice as an offset-from-end.
+    var len = s.length;
+    var start = a < 0 ? Math.max(len + a, 0) : Math.min(a, len);
+    var end = b < 0 ? Math.max(len + b, 0) : Math.min(b, len);
+    return s.slice(start, end);
 });
 var $String$left = F2(function (n, s) { return n < 1 ? '' : s.slice(0, n); });
 var $String$right = F2(function (n, s) { return n < 1 ? '' : s.slice(-n); });
@@ -1306,9 +1311,11 @@ var $Array$filter = F2(function (isGood, arr) {
 });
 var $Array$append = F2(function (a, b) { return { $: 'Array', a: a.a.concat(b.a) }; });
 var $Array$slice = F3(function (from, to, arr) {
+    // Clamp both ends into [0, len] like elm — a negative index that underflows
+    // past 0 becomes 0 (not an offset-from-end); from > to yields empty.
     var len = arr.a.length;
-    if (from < 0) { from = Math.max(0, len + from); }
-    if (to < 0) { to = len + to; }
+    from = from < 0 ? Math.max(len + from, 0) : Math.min(from, len);
+    to = to < 0 ? Math.max(len + to, 0) : Math.min(to, len);
     return { $: 'Array', a: arr.a.slice(from, to) };
 });
 
