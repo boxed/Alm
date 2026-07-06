@@ -974,3 +974,36 @@ fn random_float_ranges_and_seed_threading() {
 }
 
 const PINNED_RANDOM_THREADED: &str = "(4.160680351313204,(0,4),(74928,6831))";
+
+// A legal cycle among top-level *values* where one member is initialized
+// eagerly (it destructures a sibling parser at construction, like
+// `ParserFast.map3`) while the back-reference is deferred behind a lambda.
+// Such values must be emitted as lazy thunks and forced in a cycle, exactly
+// as Elm does; naive in-order emission reads the sibling before it exists and
+// throws `Cannot read properties of undefined`. This underpins
+// `stil4m/elm-syntax`, which broke before the thunk-based cycle codegen.
+#[test]
+fn cyclic_top_level_values_use_lazy_thunks() {
+    let program = "type Parser = Parser (Int -> Int)\n\
+\n\
+run : Parser -> Int -> Int\n\
+run (Parser f) i = f i\n\
+\n\
+seq : Parser -> Parser -> Parser\n\
+seq (Parser f) (Parser g) = Parser (\\i -> if i < 0 then f i else g i)\n\
+\n\
+lazy : (() -> Parser) -> Parser\n\
+lazy thunk = Parser (\\i -> run (thunk ()) i)\n\
+\n\
+top : Parser\n\
+top = seq inner leaf\n\
+\n\
+inner : Parser\n\
+inner = lazy (\\_ -> top)\n\
+\n\
+leaf : Parser\n\
+leaf = Parser (\\i -> i + 1)\n\
+\n\
+main = String.fromInt (run top 41)";
+    assert_eq!(run(program), "42");
+}

@@ -7,7 +7,7 @@
 pub mod native;
 pub mod typed;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::ast::canonical as can;
@@ -47,6 +47,7 @@ pub fn generate_project_typed(
         module_name: None,
         temp_counter: 0,
         node_types: HashMap::new(),
+        cyclic_values: HashSet::new(),
     };
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
@@ -186,8 +187,8 @@ pub fn generate_project_typed(
                     exports.push(def.name.value.clone());
                 }
                 can::DeclGroup::Recursive(defs) => {
+                    gen.recursive_group(defs);
                     for def in defs {
-                        gen.top_level_def(def);
                         exports.push(def.name.value.clone());
                     }
                 }
@@ -262,6 +263,11 @@ struct Generator {
     /// the operands are scalar comparables (the common, hot case). Empty when
     /// types are unavailable — then comparisons fall back to `_Utils_cmp`.
     node_types: HashMap<Region, can::Type>,
+    /// Names of the *value* members of the cyclic top-level group currently
+    /// being emitted. References to these are compiled to lazy thunk calls
+    /// (`$Module$cyclic$x()`) because the value may not be initialized yet.
+    /// Empty except while emitting the bodies of such a group.
+    cyclic_values: HashSet<Name>,
 }
 
 impl Generator {
@@ -273,6 +279,15 @@ impl Generator {
 
     fn global(&self, name: &Name) -> String {
         format!("{}${}", mangle_module(self.module_name()), sanitize(name))
+    }
+
+    /// The name of the lazy thunk for a cyclic value: `$Module$cyclic$name`.
+    fn cyclic_global(&self, name: &Name) -> String {
+        format!(
+            "{}$cyclic${}",
+            mangle_module(self.module_name()),
+            sanitize(name)
+        )
     }
 
     fn fresh_temp(&mut self) -> String {
@@ -342,6 +357,70 @@ impl Generator {
         let var = self.global(&def.name.value);
         let value = self.def_value(def, SelfRef::TopLevel);
         writeln!(self.out, "var {} = {};", var, value).unwrap();
+    }
+
+    /// Emit a group of mutually recursive top-level definitions.
+    ///
+    /// Function members never run at initialization, so they are emitted as
+    /// ordinary `var f = function ...` bindings. Value members would run
+    /// eagerly, so a legal cycle among them is broken exactly as Elm does:
+    /// each value becomes a lazy thunk `function $M$cyclic$x() { return ...; }`
+    /// whose references to sibling values are thunk calls; the values are then
+    /// forced in order inside a `try`, and each thunk is replaced by one that
+    /// returns the now-computed value (memoization). A genuine infinite
+    /// recursion surfaces as the caught stack overflow.
+    fn recursive_group(&mut self, defs: &[can::Def]) {
+        let is_function = |def: &can::Def| {
+            !def.args.is_empty() || matches!(def.body.value, can::Expr_::Lambda(..))
+        };
+        let values: Vec<&can::Def> = defs.iter().filter(|d| !is_function(d)).collect();
+
+        // Purely mutually-recursive functions need no special handling: their
+        // bodies are deferred, so emission order is irrelevant.
+        if values.is_empty() {
+            for def in defs {
+                self.top_level_def(def);
+            }
+            return;
+        }
+
+        self.cyclic_values = values.iter().map(|d| d.name.value.clone()).collect();
+
+        // Function members first: a value's thunk may call them while forcing.
+        for def in defs {
+            if is_function(def) {
+                self.top_level_def(def);
+            }
+        }
+        // Lazy thunks for the value members.
+        for def in &values {
+            let thunk = self.cyclic_global(&def.name.value);
+            let body = self.expr(&def.body);
+            writeln!(self.out, "function {}() {{ return {}; }}", thunk, body).unwrap();
+        }
+        // Force the values in order, memoizing each thunk once computed.
+        self.out.push_str("try {\n");
+        for def in &values {
+            let var = self.global(&def.name.value);
+            let thunk = self.cyclic_global(&def.name.value);
+            writeln!(self.out, "  var {} = {}();", var, thunk).unwrap();
+            writeln!(self.out, "  {} = function () {{ return {}; }};", thunk, var).unwrap();
+        }
+        let names = values
+            .iter()
+            .map(|d| d.name.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let module = self.module_name().clone();
+        writeln!(
+            self.out,
+            "}} catch ($) {{ throw new Error('Some top-level definitions from `{}` are causing infinite recursion: {}'); }}",
+            module,
+            names
+        )
+        .unwrap();
+
+        self.cyclic_values.clear();
     }
 
     /// The JS expression for a definition: a function wrapper when it has
@@ -539,7 +618,15 @@ impl Generator {
                 }
             }
             VarLocal(name) => sanitize(name),
-            VarTopLevel(name) => self.global(name),
+            VarTopLevel(name) => {
+                // Inside a value cycle, a reference to another value member is
+                // a call to its lazy thunk so it is forced on demand.
+                if self.cyclic_values.contains(name) {
+                    format!("{}()", self.cyclic_global(name))
+                } else {
+                    self.global(name)
+                }
+            }
             VarForeign(module, name) => foreign(module, name),
             VarCtor(home, _union, ctor) => self.ctor_ref(home, ctor),
             List(items) => {
