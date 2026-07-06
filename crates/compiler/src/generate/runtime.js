@@ -529,7 +529,7 @@ function _Debug_toString(value) {
         return 'Set.fromList ' + _Debug_toString($Dict$keys(value.d));
     }
     if (tag === 'Array_elm_builtin') {
-        return 'Array.fromList ' + _Debug_toString(_List_fromArray(value.a));
+        return 'Array.fromList ' + _Debug_toString($Array$toList(value));
     }
     // Internal scheduler values (Tasks) render as `<internals>`, like elm — its
     // scheduler tags these with a number, ours with `'Task'` plus a `fork`
@@ -1318,65 +1318,223 @@ var $Set$union = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict
 var $Set$intersect = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict$intersect, a.d, b.d) }; });
 var $Set$diff = F2(function (a, b) { return { $: 'Set_elm_builtin', d: A2($Dict$diff, a.d, b.d) }; });
 
-// ARRAY — immutable JS array copies (Elm uses a Hickey trie).
+// ARRAY — persistent bit-partitioned vector (Hickey trie), a faithful port of
+// elm/core's Array + Elm.Kernel.JsArray. Representation matches elm exactly:
+//   { $: 'Array_elm_builtin', a: len, b: startShift, c: tree, d: tail }
+// where `tree` is a JS array of nodes ({$:'SubTree',a:tree} | {$:'Leaf',a:leaf})
+// and `tail`/leaves are plain JS arrays of up to 32 elements.
+//
+// `get`/`set`/`push` touch only the root-to-leaf path (a handful of 32-wide
+// nodes), so they are O(log32 n) — reads effectively O(1), and building by
+// repeated push/set is O(n log n). The previous flat-array representation
+// copied the whole array on every set/push, i.e. O(n^2) to build.
+//
+// Because every array of a given length has the same canonical tree shape and
+// arrays are only ever built by these deterministic operations, structurally
+// equal arrays are byte-identical objects, so generic `_Utils_eq` stays correct
+// and needs no Array-specific case.
 
-var $Array$empty = { $: 'Array_elm_builtin', a: [] };
-var $Array$initialize = F2(function (n, f) {
+var _Array_shiftStep = 5;
+var _Array_bitMask = 31;
+var _Array_branchFactor = 32;
+function _Array_tailIndex(len) { return (len >>> _Array_shiftStep) << _Array_shiftStep; }
+
+// JsArray leaf/node helpers: copy-on-write over fixed-width plain JS arrays.
+function _JsArray_singleton(v) { return [v]; }
+function _JsArray_unsafeSet(i, v, a) {
+    var len = a.length, out = new Array(len);
+    for (var k = 0; k < len; k++) { out[k] = a[k]; }
+    out[i] = v;
+    return out;
+}
+function _JsArray_push(v, a) {
+    var len = a.length, out = new Array(len + 1);
+    for (var k = 0; k < len; k++) { out[k] = a[k]; }
+    out[len] = v;
+    return out;
+}
+function _JsArray_map(f, a) {
+    var len = a.length, out = new Array(len);
+    for (var k = 0; k < len; k++) { out[k] = f(a[k]); }
+    return out;
+}
+
+var $Array$empty = { $: 'Array_elm_builtin', a: 0, b: _Array_shiftStep, c: [], d: [] };
+var $Array$isEmpty = function (array) { return array.a === 0; };
+var $Array$length = function (array) { return array.a; };
+
+function _Array_getHelp(shift, index, tree) {
+    while (true) {
+        var node = tree[(index >>> shift) & _Array_bitMask];
+        if (node.$ === 'SubTree') { shift -= _Array_shiftStep; tree = node.a; continue; }
+        return node.a[index & _Array_bitMask]; // Leaf
+    }
+}
+var $Array$get = F2(function (index, array) {
+    if (index < 0 || index >= array.a) { return $Maybe$Nothing; }
+    if (index >= _Array_tailIndex(array.a)) { return $Maybe$Just(array.d[index & _Array_bitMask]); }
+    return $Maybe$Just(_Array_getHelp(array.b, index, array.c));
+});
+
+function _Array_setHelp(shift, index, value, tree) {
+    var pos = (index >>> shift) & _Array_bitMask;
+    var node = tree[pos];
+    if (node.$ === 'SubTree') {
+        return _JsArray_unsafeSet(pos,
+            { $: 'SubTree', a: _Array_setHelp(shift - _Array_shiftStep, index, value, node.a) }, tree);
+    }
+    return _JsArray_unsafeSet(pos,
+        { $: 'Leaf', a: _JsArray_unsafeSet(index & _Array_bitMask, value, node.a) }, tree);
+}
+var $Array$set = F3(function (index, value, array) {
+    if (index < 0 || index >= array.a) { return array; }
+    if (index >= _Array_tailIndex(array.a)) {
+        return { $: 'Array_elm_builtin', a: array.a, b: array.b, c: array.c,
+                 d: _JsArray_unsafeSet(index & _Array_bitMask, value, array.d) };
+    }
+    return { $: 'Array_elm_builtin', a: array.a, b: array.b,
+             c: _Array_setHelp(array.b, index, value, array.c), d: array.d };
+});
+
+function _Array_insertTailInTree(shift, index, tail, tree) {
+    var pos = (index >>> shift) & _Array_bitMask;
+    if (pos >= tree.length) {
+        if (shift === 5) { return _JsArray_push({ $: 'Leaf', a: tail }, tree); }
+        return _JsArray_push(
+            { $: 'SubTree', a: _Array_insertTailInTree(shift - _Array_shiftStep, index, tail, []) },
+            tree);
+    }
+    var value = tree[pos];
+    if (value.$ === 'SubTree') {
+        return _JsArray_unsafeSet(pos,
+            { $: 'SubTree', a: _Array_insertTailInTree(shift - _Array_shiftStep, index, tail, value.a) }, tree);
+    }
+    // Leaf: promote to a SubTree so the tail can be inserted below it.
+    return _JsArray_unsafeSet(pos,
+        { $: 'SubTree', a: _Array_insertTailInTree(shift - _Array_shiftStep, index, tail, _JsArray_singleton(value)) }, tree);
+}
+function _Array_unsafeReplaceTail(newTail, array) {
+    var newArrayLen = array.a + (newTail.length - array.d.length);
+    if (newTail.length === _Array_branchFactor) {
+        if ((newArrayLen >>> _Array_shiftStep) > (1 << array.b)) {
+            var newShift = array.b + _Array_shiftStep;
+            var newTree = _Array_insertTailInTree(newShift, array.a, newTail,
+                _JsArray_singleton({ $: 'SubTree', a: array.c }));
+            return { $: 'Array_elm_builtin', a: newArrayLen, b: newShift, c: newTree, d: [] };
+        }
+        return { $: 'Array_elm_builtin', a: newArrayLen, b: array.b,
+                 c: _Array_insertTailInTree(array.b, array.a, newTail, array.c), d: [] };
+    }
+    return { $: 'Array_elm_builtin', a: newArrayLen, b: array.b, c: array.c, d: newTail };
+}
+var $Array$push = F2(function (a, array) {
+    return _Array_unsafeReplaceTail(_JsArray_push(a, array.d), array);
+});
+
+// foldl/foldr walk tree (left/right) then tail — matching elm's element order.
+var $Array$foldl = F3(function (func, acc, array) {
+    function go(node) {
+        if (node.$ === 'SubTree') { var t = node.a; for (var i = 0; i < t.length; i++) { go(t[i]); } }
+        else { var v = node.a; for (var j = 0; j < v.length; j++) { acc = A2(func, v[j], acc); } }
+    }
+    var tree = array.c;
+    for (var i = 0; i < tree.length; i++) { go(tree[i]); }
+    var tail = array.d;
+    for (var k = 0; k < tail.length; k++) { acc = A2(func, tail[k], acc); }
+    return acc;
+});
+var $Array$foldr = F3(function (func, acc, array) {
+    var tail = array.d;
+    for (var k = tail.length - 1; k >= 0; k--) { acc = A2(func, tail[k], acc); }
+    function go(node) {
+        if (node.$ === 'SubTree') { var t = node.a; for (var i = t.length - 1; i >= 0; i--) { go(t[i]); } }
+        else { var v = node.a; for (var j = v.length - 1; j >= 0; j--) { acc = A2(func, v[j], acc); } }
+    }
+    var tree = array.c;
+    for (var i = tree.length - 1; i >= 0; i--) { go(tree[i]); }
+    return acc;
+});
+
+// Collect all elements into a plain JS array, in order.
+function _Array_toJsArray(array) {
     var out = [];
-    for (var i = 0; i < n; i++) { out.push(f(i)); }
-    return { $: 'Array_elm_builtin', a: out };
+    var tree = array.c;
+    function go(node) {
+        if (node.$ === 'SubTree') { var t = node.a; for (var i = 0; i < t.length; i++) { go(t[i]); } }
+        else { var v = node.a; for (var j = 0; j < v.length; j++) { out.push(v[j]); } }
+    }
+    for (var i = 0; i < tree.length; i++) { go(tree[i]); }
+    var tail = array.d;
+    for (var k = 0; k < tail.length; k++) { out.push(tail[k]); }
+    return out;
+}
+// Build a (canonical) array from a plain JS array via repeated push.
+function _Array_fromJsArray(items) {
+    var array = $Array$empty;
+    for (var i = 0; i < items.length; i++) { array = A2($Array$push, items[i], array); }
+    return array;
+}
+
+var $Array$initialize = F2(function (len, fn) {
+    if (len <= 0) { return $Array$empty; }
+    var array = $Array$empty;
+    for (var i = 0; i < len; i++) { array = A2($Array$push, fn(i), array); }
+    return array;
 });
-var $Array$repeat = F2(function (n, x) {
-    var out = [];
-    for (var i = 0; i < n; i++) { out.push(x); }
-    return { $: 'Array_elm_builtin', a: out };
+var $Array$repeat = F2(function (n, e) {
+    var array = $Array$empty;
+    for (var i = 0; i < n; i++) { array = A2($Array$push, e, array); }
+    return array;
 });
-var $Array$fromList = function (xs) { return { $: 'Array_elm_builtin', a: _List_toArray(xs) }; };
-var $Array$isEmpty = function (arr) { return arr.a.length === 0; };
-var $Array$length = function (arr) { return arr.a.length; };
-var $Array$get = F2(function (i, arr) {
-    return i >= 0 && i < arr.a.length ? $Maybe$Just(arr.a[i]) : $Maybe$Nothing;
-});
-var $Array$set = F3(function (i, x, arr) {
-    if (i < 0 || i >= arr.a.length) { return arr; }
-    var out = arr.a.slice();
-    out[i] = x;
-    return { $: 'Array_elm_builtin', a: out };
-});
-var $Array$push = F2(function (x, arr) {
-    var out = arr.a.slice();
-    out.push(x);
-    return { $: 'Array_elm_builtin', a: out };
-});
-var $Array$toList = function (arr) { return _List_fromArray(arr.a); };
-var $Array$toIndexedList = function (arr) {
-    return _List_fromArray(arr.a.map(function (x, i) { return { $: '#2', a: i, b: x }; }));
+var $Array$fromList = function (list) {
+    var array = $Array$empty;
+    for (var xs = list; xs.$ === '::'; xs = xs.b) { array = A2($Array$push, xs.a, array); }
+    return array;
 };
-var $Array$map = F2(function (f, arr) {
-    return { $: 'Array_elm_builtin', a: arr.a.map(function (x) { return f(x); }) };
+var $Array$toList = function (array) {
+    return _List_fromArray(_Array_toJsArray(array));
+};
+var $Array$toIndexedList = function (array) {
+    var items = _Array_toJsArray(array);
+    var list = _List_Nil;
+    for (var i = items.length - 1; i >= 0; i--) { list = _List_Cons({ $: '#2', a: i, b: items[i] }, list); }
+    return list;
+};
+var $Array$map = F2(function (func, array) {
+    function goNode(node) {
+        return node.$ === 'SubTree'
+            ? { $: 'SubTree', a: _JsArray_map(goNode, node.a) }
+            : { $: 'Leaf', a: _JsArray_map(func, node.a) };
+    }
+    return { $: 'Array_elm_builtin', a: array.a, b: array.b,
+             c: _JsArray_map(goNode, array.c), d: _JsArray_map(func, array.d) };
 });
-var $Array$indexedMap = F2(function (f, arr) {
-    return { $: 'Array_elm_builtin', a: arr.a.map(function (x, i) { return A2(f, i, x); }) };
+var $Array$indexedMap = F2(function (func, array) {
+    var items = _Array_toJsArray(array);
+    var out = new Array(items.length);
+    for (var i = 0; i < items.length; i++) { out[i] = A2(func, i, items[i]); }
+    return _Array_fromJsArray(out);
 });
-var $Array$foldl = F3(function (f, acc, arr) {
-    for (var i = 0; i < arr.a.length; i++) { acc = A2(f, arr.a[i], acc); }
-    return acc;
+var $Array$filter = F2(function (isGood, array) {
+    var items = _Array_toJsArray(array);
+    var out = [];
+    for (var i = 0; i < items.length; i++) { if (isGood(items[i])) { out.push(items[i]); } }
+    return _Array_fromJsArray(out);
 });
-var $Array$foldr = F3(function (f, acc, arr) {
-    for (var i = arr.a.length; i--;) { acc = A2(f, arr.a[i], acc); }
-    return acc;
+var $Array$append = F2(function (a, b) {
+    // Push b's elements onto a — O(len(b) * log n), never re-copying a. (Copying
+    // a whole would make repeated small appends O(n^2), the elm-flate hot path.)
+    var items = _Array_toJsArray(b);
+    var array = a;
+    for (var i = 0; i < items.length; i++) { array = A2($Array$push, items[i], array); }
+    return array;
 });
-var $Array$filter = F2(function (isGood, arr) {
-    return { $: 'Array_elm_builtin', a: arr.a.filter(function (x) { return isGood(x); }) };
-});
-var $Array$append = F2(function (a, b) { return { $: 'Array_elm_builtin', a: a.a.concat(b.a) }; });
-var $Array$slice = F3(function (from, to, arr) {
-    // Clamp both ends into [0, len] like elm — a negative index that underflows
-    // past 0 becomes 0 (not an offset-from-end); from > to yields empty.
-    var len = arr.a.length;
+var $Array$slice = F3(function (from, to, array) {
+    var len = array.a;
     from = from < 0 ? Math.max(len + from, 0) : Math.min(from, len);
     to = to < 0 ? Math.max(len + to, 0) : Math.min(to, len);
-    return { $: 'Array_elm_builtin', a: arr.a.slice(from, to) };
+    if (from >= to) { return $Array$empty; }
+    return _Array_fromJsArray(_Array_toJsArray(array).slice(from, to));
 });
 
 // BITWISE
@@ -1388,6 +1546,1102 @@ var $Bitwise$complement = function (a) { return ~a; };
 var $Bitwise$shiftLeftBy = F2(function (offset, a) { return a << offset; });
 var $Bitwise$shiftRightBy = F2(function (offset, a) { return a >> offset; });
 var $Bitwise$shiftRightZfBy = F2(function (offset, a) { return a >>> offset; });
+
+// LINEAR ALGEBRA (elm-explorations/linear-algebra Elm.Kernel.MJS) — pure
+// vector/matrix math (Float64Array), no GPU. Ported verbatim; elm's `__$`
+// record fields become alm's plain field names and `__Maybe_*` its Maybe.
+
+// Vector2
+
+var _MJS_v2 = F2(function(x, y) {
+    return new Float64Array([x, y]);
+});
+
+var _MJS_v2getX = function(a) {
+    return a[0];
+};
+
+var _MJS_v2getY = function(a) {
+    return a[1];
+};
+
+var _MJS_v2setX = F2(function(x, a) {
+    return new Float64Array([x, a[1]]);
+});
+
+var _MJS_v2setY = F2(function(y, a) {
+    return new Float64Array([a[0], y]);
+});
+
+var _MJS_v2toRecord = function(a) {
+    return { x: a[0], y: a[1] };
+};
+
+var _MJS_v2fromRecord = function(r) {
+    return new Float64Array([r.x, r.y]);
+};
+
+var _MJS_v2add = F2(function(a, b) {
+    var r = new Float64Array(2);
+    r[0] = a[0] + b[0];
+    r[1] = a[1] + b[1];
+    return r;
+});
+
+var _MJS_v2sub = F2(function(a, b) {
+    var r = new Float64Array(2);
+    r[0] = a[0] - b[0];
+    r[1] = a[1] - b[1];
+    return r;
+});
+
+var _MJS_v2negate = function(a) {
+    var r = new Float64Array(2);
+    r[0] = -a[0];
+    r[1] = -a[1];
+    return r;
+};
+
+var _MJS_v2direction = F2(function(a, b) {
+    var r = new Float64Array(2);
+    r[0] = a[0] - b[0];
+    r[1] = a[1] - b[1];
+    var im = 1.0 / _MJS_v2lengthLocal(r);
+    r[0] = r[0] * im;
+    r[1] = r[1] * im;
+    return r;
+});
+
+function _MJS_v2lengthLocal(a) {
+    return Math.sqrt(a[0] * a[0] + a[1] * a[1]);
+}
+var _MJS_v2length = _MJS_v2lengthLocal;
+
+var _MJS_v2lengthSquared = function(a) {
+    return a[0] * a[0] + a[1] * a[1];
+};
+
+var _MJS_v2distance = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    return Math.sqrt(dx * dx + dy * dy);
+});
+
+var _MJS_v2distanceSquared = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+});
+
+var _MJS_v2normalize = function(a) {
+    var r = new Float64Array(2);
+    var im = 1.0 / _MJS_v2lengthLocal(a);
+    r[0] = a[0] * im;
+    r[1] = a[1] * im;
+    return r;
+};
+
+var _MJS_v2scale = F2(function(k, a) {
+    var r = new Float64Array(2);
+    r[0] = a[0] * k;
+    r[1] = a[1] * k;
+    return r;
+});
+
+var _MJS_v2dot = F2(function(a, b) {
+    return a[0] * b[0] + a[1] * b[1];
+});
+
+// Vector3
+
+var _MJS_v3temp1Local = new Float64Array(3);
+var _MJS_v3temp2Local = new Float64Array(3);
+var _MJS_v3temp3Local = new Float64Array(3);
+
+var _MJS_v3 = F3(function(x, y, z) {
+    return new Float64Array([x, y, z]);
+});
+
+var _MJS_v3getX = function(a) {
+    return a[0];
+};
+
+var _MJS_v3getY = function(a) {
+    return a[1];
+};
+
+var _MJS_v3getZ = function(a) {
+    return a[2];
+};
+
+var _MJS_v3setX = F2(function(x, a) {
+    return new Float64Array([x, a[1], a[2]]);
+});
+
+var _MJS_v3setY = F2(function(y, a) {
+    return new Float64Array([a[0], y, a[2]]);
+});
+
+var _MJS_v3setZ = F2(function(z, a) {
+    return new Float64Array([a[0], a[1], z]);
+});
+
+var _MJS_v3toRecord = function(a) {
+    return { x: a[0], y: a[1], z: a[2] };
+};
+
+var _MJS_v3fromRecord = function(r) {
+    return new Float64Array([r.x, r.y, r.z]);
+};
+
+var _MJS_v3add = F2(function(a, b) {
+    var r = new Float64Array(3);
+    r[0] = a[0] + b[0];
+    r[1] = a[1] + b[1];
+    r[2] = a[2] + b[2];
+    return r;
+});
+
+function _MJS_v3subLocal(a, b, r) {
+    if (r === undefined) {
+        r = new Float64Array(3);
+    }
+    r[0] = a[0] - b[0];
+    r[1] = a[1] - b[1];
+    r[2] = a[2] - b[2];
+    return r;
+}
+var _MJS_v3sub = F2(_MJS_v3subLocal);
+
+var _MJS_v3negate = function(a) {
+    var r = new Float64Array(3);
+    r[0] = -a[0];
+    r[1] = -a[1];
+    r[2] = -a[2];
+    return r;
+};
+
+function _MJS_v3directionLocal(a, b, r) {
+    if (r === undefined) {
+        r = new Float64Array(3);
+    }
+    return _MJS_v3normalizeLocal(_MJS_v3subLocal(a, b, r), r);
+}
+var _MJS_v3direction = F2(_MJS_v3directionLocal);
+
+function _MJS_v3lengthLocal(a) {
+    return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+}
+var _MJS_v3length = _MJS_v3lengthLocal;
+
+var _MJS_v3lengthSquared = function(a) {
+    return a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+};
+
+var _MJS_v3distance = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    var dz = a[2] - b[2];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+});
+
+var _MJS_v3distanceSquared = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    var dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+});
+
+function _MJS_v3normalizeLocal(a, r) {
+    if (r === undefined) {
+        r = new Float64Array(3);
+    }
+    var im = 1.0 / _MJS_v3lengthLocal(a);
+    r[0] = a[0] * im;
+    r[1] = a[1] * im;
+    r[2] = a[2] * im;
+    return r;
+}
+var _MJS_v3normalize = _MJS_v3normalizeLocal;
+
+var _MJS_v3scale = F2(function(k, a) {
+    return new Float64Array([a[0] * k, a[1] * k, a[2] * k]);
+});
+
+var _MJS_v3dotLocal = function(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+};
+var _MJS_v3dot = F2(_MJS_v3dotLocal);
+
+function _MJS_v3crossLocal(a, b, r) {
+    if (r === undefined) {
+        r = new Float64Array(3);
+    }
+    r[0] = a[1] * b[2] - a[2] * b[1];
+    r[1] = a[2] * b[0] - a[0] * b[2];
+    r[2] = a[0] * b[1] - a[1] * b[0];
+    return r;
+}
+var _MJS_v3cross = F2(_MJS_v3crossLocal);
+
+var _MJS_v3mul4x4 = F2(function(m, v) {
+    var w;
+    var tmp = _MJS_v3temp1Local;
+    var r = new Float64Array(3);
+
+    tmp[0] = m[3];
+    tmp[1] = m[7];
+    tmp[2] = m[11];
+    w = _MJS_v3dotLocal(v, tmp) + m[15];
+    tmp[0] = m[0];
+    tmp[1] = m[4];
+    tmp[2] = m[8];
+    r[0] = (_MJS_v3dotLocal(v, tmp) + m[12]) / w;
+    tmp[0] = m[1];
+    tmp[1] = m[5];
+    tmp[2] = m[9];
+    r[1] = (_MJS_v3dotLocal(v, tmp) + m[13]) / w;
+    tmp[0] = m[2];
+    tmp[1] = m[6];
+    tmp[2] = m[10];
+    r[2] = (_MJS_v3dotLocal(v, tmp) + m[14]) / w;
+    return r;
+});
+
+// Vector4
+
+var _MJS_v4 = F4(function(x, y, z, w) {
+    return new Float64Array([x, y, z, w]);
+});
+
+var _MJS_v4getX = function(a) {
+    return a[0];
+};
+
+var _MJS_v4getY = function(a) {
+    return a[1];
+};
+
+var _MJS_v4getZ = function(a) {
+    return a[2];
+};
+
+var _MJS_v4getW = function(a) {
+    return a[3];
+};
+
+var _MJS_v4setX = F2(function(x, a) {
+    return new Float64Array([x, a[1], a[2], a[3]]);
+});
+
+var _MJS_v4setY = F2(function(y, a) {
+    return new Float64Array([a[0], y, a[2], a[3]]);
+});
+
+var _MJS_v4setZ = F2(function(z, a) {
+    return new Float64Array([a[0], a[1], z, a[3]]);
+});
+
+var _MJS_v4setW = F2(function(w, a) {
+    return new Float64Array([a[0], a[1], a[2], w]);
+});
+
+var _MJS_v4toRecord = function(a) {
+    return { x: a[0], y: a[1], z: a[2], w: a[3] };
+};
+
+var _MJS_v4fromRecord = function(r) {
+    return new Float64Array([r.x, r.y, r.z, r.w]);
+};
+
+var _MJS_v4add = F2(function(a, b) {
+    var r = new Float64Array(4);
+    r[0] = a[0] + b[0];
+    r[1] = a[1] + b[1];
+    r[2] = a[2] + b[2];
+    r[3] = a[3] + b[3];
+    return r;
+});
+
+var _MJS_v4sub = F2(function(a, b) {
+    var r = new Float64Array(4);
+    r[0] = a[0] - b[0];
+    r[1] = a[1] - b[1];
+    r[2] = a[2] - b[2];
+    r[3] = a[3] - b[3];
+    return r;
+});
+
+var _MJS_v4negate = function(a) {
+    var r = new Float64Array(4);
+    r[0] = -a[0];
+    r[1] = -a[1];
+    r[2] = -a[2];
+    r[3] = -a[3];
+    return r;
+};
+
+var _MJS_v4direction = F2(function(a, b) {
+    var r = new Float64Array(4);
+    r[0] = a[0] - b[0];
+    r[1] = a[1] - b[1];
+    r[2] = a[2] - b[2];
+    r[3] = a[3] - b[3];
+    var im = 1.0 / _MJS_v4lengthLocal(r);
+    r[0] = r[0] * im;
+    r[1] = r[1] * im;
+    r[2] = r[2] * im;
+    r[3] = r[3] * im;
+    return r;
+});
+
+function _MJS_v4lengthLocal(a) {
+    return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]);
+}
+var _MJS_v4length = _MJS_v4lengthLocal;
+
+var _MJS_v4lengthSquared = function(a) {
+    return a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3];
+};
+
+var _MJS_v4distance = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    var dz = a[2] - b[2];
+    var dw = a[3] - b[3];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz + dw * dw);
+});
+
+var _MJS_v4distanceSquared = F2(function(a, b) {
+    var dx = a[0] - b[0];
+    var dy = a[1] - b[1];
+    var dz = a[2] - b[2];
+    var dw = a[3] - b[3];
+    return dx * dx + dy * dy + dz * dz + dw * dw;
+});
+
+var _MJS_v4normalize = function(a) {
+    var r = new Float64Array(4);
+    var im = 1.0 / _MJS_v4lengthLocal(a);
+    r[0] = a[0] * im;
+    r[1] = a[1] * im;
+    r[2] = a[2] * im;
+    r[3] = a[3] * im;
+    return r;
+};
+
+var _MJS_v4scale = F2(function(k, a) {
+    var r = new Float64Array(4);
+    r[0] = a[0] * k;
+    r[1] = a[1] * k;
+    r[2] = a[2] * k;
+    r[3] = a[3] * k;
+    return r;
+});
+
+var _MJS_v4dot = F2(function(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+});
+
+// Matrix4
+
+var _MJS_m4x4temp1Local = new Float64Array(16);
+var _MJS_m4x4temp2Local = new Float64Array(16);
+
+var _MJS_m4x4identity = new Float64Array([
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, 0.0, 0.0, 1.0
+]);
+
+var _MJS_m4x4fromRecord = function(r) {
+    var m = new Float64Array(16);
+    m[0] = r.m11;
+    m[1] = r.m21;
+    m[2] = r.m31;
+    m[3] = r.m41;
+    m[4] = r.m12;
+    m[5] = r.m22;
+    m[6] = r.m32;
+    m[7] = r.m42;
+    m[8] = r.m13;
+    m[9] = r.m23;
+    m[10] = r.m33;
+    m[11] = r.m43;
+    m[12] = r.m14;
+    m[13] = r.m24;
+    m[14] = r.m34;
+    m[15] = r.m44;
+    return m;
+};
+
+var _MJS_m4x4toRecord = function(m) {
+    return {
+        m11: m[0], m21: m[1], m31: m[2], m41: m[3],
+        m12: m[4], m22: m[5], m32: m[6], m42: m[7],
+        m13: m[8], m23: m[9], m33: m[10], m43: m[11],
+        m14: m[12], m24: m[13], m34: m[14], m44: m[15]
+    };
+};
+
+var _MJS_m4x4inverse = function(m) {
+    var r = new Float64Array(16);
+
+    r[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] +
+        m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    r[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] -
+        m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    r[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] +
+        m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    r[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] -
+        m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    r[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] -
+        m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    r[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] +
+        m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    r[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] -
+        m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    r[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] +
+        m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    r[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] +
+        m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    r[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] -
+        m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    r[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] +
+        m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    r[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] -
+        m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    r[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] -
+        m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    r[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] +
+        m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    r[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] -
+        m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    r[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] +
+        m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+    var det = m[0] * r[0] + m[1] * r[4] + m[2] * r[8] + m[3] * r[12];
+
+    if (det === 0) {
+        return $Maybe$Nothing;
+    }
+
+    det = 1.0 / det;
+
+    for (var i = 0; i < 16; i = i + 1) {
+        r[i] = r[i] * det;
+    }
+
+    return $Maybe$Just(r);
+};
+
+var _MJS_m4x4inverseOrthonormal = function(m) {
+    var r = _MJS_m4x4transposeLocal(m);
+    var t = [m[12], m[13], m[14]];
+    r[3] = r[7] = r[11] = 0;
+    r[12] = -_MJS_v3dotLocal([r[0], r[4], r[8]], t);
+    r[13] = -_MJS_v3dotLocal([r[1], r[5], r[9]], t);
+    r[14] = -_MJS_v3dotLocal([r[2], r[6], r[10]], t);
+    return r;
+};
+
+function _MJS_m4x4makeFrustumLocal(left, right, bottom, top, znear, zfar) {
+    var r = new Float64Array(16);
+
+    r[0] = 2 * znear / (right - left);
+    r[1] = 0;
+    r[2] = 0;
+    r[3] = 0;
+    r[4] = 0;
+    r[5] = 2 * znear / (top - bottom);
+    r[6] = 0;
+    r[7] = 0;
+    r[8] = (right + left) / (right - left);
+    r[9] = (top + bottom) / (top - bottom);
+    r[10] = -(zfar + znear) / (zfar - znear);
+    r[11] = -1;
+    r[12] = 0;
+    r[13] = 0;
+    r[14] = -2 * zfar * znear / (zfar - znear);
+    r[15] = 0;
+
+    return r;
+}
+var _MJS_m4x4makeFrustum = F6(_MJS_m4x4makeFrustumLocal);
+
+var _MJS_m4x4makePerspective = F4(function(fovy, aspect, znear, zfar) {
+    var ymax = znear * Math.tan(fovy * Math.PI / 360.0);
+    var ymin = -ymax;
+    var xmin = ymin * aspect;
+    var xmax = ymax * aspect;
+
+    return _MJS_m4x4makeFrustumLocal(xmin, xmax, ymin, ymax, znear, zfar);
+});
+
+function _MJS_m4x4makeOrthoLocal(left, right, bottom, top, znear, zfar) {
+    var r = new Float64Array(16);
+
+    r[0] = 2 / (right - left);
+    r[1] = 0;
+    r[2] = 0;
+    r[3] = 0;
+    r[4] = 0;
+    r[5] = 2 / (top - bottom);
+    r[6] = 0;
+    r[7] = 0;
+    r[8] = 0;
+    r[9] = 0;
+    r[10] = -2 / (zfar - znear);
+    r[11] = 0;
+    r[12] = -(right + left) / (right - left);
+    r[13] = -(top + bottom) / (top - bottom);
+    r[14] = -(zfar + znear) / (zfar - znear);
+    r[15] = 1;
+
+    return r;
+}
+var _MJS_m4x4makeOrtho = F6(_MJS_m4x4makeOrthoLocal);
+
+var _MJS_m4x4makeOrtho2D = F4(function(left, right, bottom, top) {
+    return _MJS_m4x4makeOrthoLocal(left, right, bottom, top, -1, 1);
+});
+
+function _MJS_m4x4mulLocal(a, b) {
+    var r = new Float64Array(16);
+    var a11 = a[0];
+    var a21 = a[1];
+    var a31 = a[2];
+    var a41 = a[3];
+    var a12 = a[4];
+    var a22 = a[5];
+    var a32 = a[6];
+    var a42 = a[7];
+    var a13 = a[8];
+    var a23 = a[9];
+    var a33 = a[10];
+    var a43 = a[11];
+    var a14 = a[12];
+    var a24 = a[13];
+    var a34 = a[14];
+    var a44 = a[15];
+    var b11 = b[0];
+    var b21 = b[1];
+    var b31 = b[2];
+    var b41 = b[3];
+    var b12 = b[4];
+    var b22 = b[5];
+    var b32 = b[6];
+    var b42 = b[7];
+    var b13 = b[8];
+    var b23 = b[9];
+    var b33 = b[10];
+    var b43 = b[11];
+    var b14 = b[12];
+    var b24 = b[13];
+    var b34 = b[14];
+    var b44 = b[15];
+
+    r[0] = a11 * b11 + a12 * b21 + a13 * b31 + a14 * b41;
+    r[1] = a21 * b11 + a22 * b21 + a23 * b31 + a24 * b41;
+    r[2] = a31 * b11 + a32 * b21 + a33 * b31 + a34 * b41;
+    r[3] = a41 * b11 + a42 * b21 + a43 * b31 + a44 * b41;
+    r[4] = a11 * b12 + a12 * b22 + a13 * b32 + a14 * b42;
+    r[5] = a21 * b12 + a22 * b22 + a23 * b32 + a24 * b42;
+    r[6] = a31 * b12 + a32 * b22 + a33 * b32 + a34 * b42;
+    r[7] = a41 * b12 + a42 * b22 + a43 * b32 + a44 * b42;
+    r[8] = a11 * b13 + a12 * b23 + a13 * b33 + a14 * b43;
+    r[9] = a21 * b13 + a22 * b23 + a23 * b33 + a24 * b43;
+    r[10] = a31 * b13 + a32 * b23 + a33 * b33 + a34 * b43;
+    r[11] = a41 * b13 + a42 * b23 + a43 * b33 + a44 * b43;
+    r[12] = a11 * b14 + a12 * b24 + a13 * b34 + a14 * b44;
+    r[13] = a21 * b14 + a22 * b24 + a23 * b34 + a24 * b44;
+    r[14] = a31 * b14 + a32 * b24 + a33 * b34 + a34 * b44;
+    r[15] = a41 * b14 + a42 * b24 + a43 * b34 + a44 * b44;
+
+    return r;
+}
+var _MJS_m4x4mul = F2(_MJS_m4x4mulLocal);
+
+var _MJS_m4x4mulAffine = F2(function(a, b) {
+    var r = new Float64Array(16);
+    var a11 = a[0];
+    var a21 = a[1];
+    var a31 = a[2];
+    var a12 = a[4];
+    var a22 = a[5];
+    var a32 = a[6];
+    var a13 = a[8];
+    var a23 = a[9];
+    var a33 = a[10];
+    var a14 = a[12];
+    var a24 = a[13];
+    var a34 = a[14];
+
+    var b11 = b[0];
+    var b21 = b[1];
+    var b31 = b[2];
+    var b12 = b[4];
+    var b22 = b[5];
+    var b32 = b[6];
+    var b13 = b[8];
+    var b23 = b[9];
+    var b33 = b[10];
+    var b14 = b[12];
+    var b24 = b[13];
+    var b34 = b[14];
+
+    r[0] = a11 * b11 + a12 * b21 + a13 * b31;
+    r[1] = a21 * b11 + a22 * b21 + a23 * b31;
+    r[2] = a31 * b11 + a32 * b21 + a33 * b31;
+    r[3] = 0;
+    r[4] = a11 * b12 + a12 * b22 + a13 * b32;
+    r[5] = a21 * b12 + a22 * b22 + a23 * b32;
+    r[6] = a31 * b12 + a32 * b22 + a33 * b32;
+    r[7] = 0;
+    r[8] = a11 * b13 + a12 * b23 + a13 * b33;
+    r[9] = a21 * b13 + a22 * b23 + a23 * b33;
+    r[10] = a31 * b13 + a32 * b23 + a33 * b33;
+    r[11] = 0;
+    r[12] = a11 * b14 + a12 * b24 + a13 * b34 + a14;
+    r[13] = a21 * b14 + a22 * b24 + a23 * b34 + a24;
+    r[14] = a31 * b14 + a32 * b24 + a33 * b34 + a34;
+    r[15] = 1;
+
+    return r;
+});
+
+var _MJS_m4x4makeRotate = F2(function(angle, axis) {
+    var r = new Float64Array(16);
+    axis = _MJS_v3normalizeLocal(axis, _MJS_v3temp1Local);
+    var x = axis[0];
+    var y = axis[1];
+    var z = axis[2];
+    var c = Math.cos(angle);
+    var c1 = 1 - c;
+    var s = Math.sin(angle);
+
+    r[0] = x * x * c1 + c;
+    r[1] = y * x * c1 + z * s;
+    r[2] = z * x * c1 - y * s;
+    r[3] = 0;
+    r[4] = x * y * c1 - z * s;
+    r[5] = y * y * c1 + c;
+    r[6] = y * z * c1 + x * s;
+    r[7] = 0;
+    r[8] = x * z * c1 + y * s;
+    r[9] = y * z * c1 - x * s;
+    r[10] = z * z * c1 + c;
+    r[11] = 0;
+    r[12] = 0;
+    r[13] = 0;
+    r[14] = 0;
+    r[15] = 1;
+
+    return r;
+});
+
+var _MJS_m4x4rotate = F3(function(angle, axis, m) {
+    var r = new Float64Array(16);
+    var im = 1.0 / _MJS_v3lengthLocal(axis);
+    var x = axis[0] * im;
+    var y = axis[1] * im;
+    var z = axis[2] * im;
+    var c = Math.cos(angle);
+    var c1 = 1 - c;
+    var s = Math.sin(angle);
+    var xs = x * s;
+    var ys = y * s;
+    var zs = z * s;
+    var xyc1 = x * y * c1;
+    var xzc1 = x * z * c1;
+    var yzc1 = y * z * c1;
+    var t11 = x * x * c1 + c;
+    var t21 = xyc1 + zs;
+    var t31 = xzc1 - ys;
+    var t12 = xyc1 - zs;
+    var t22 = y * y * c1 + c;
+    var t32 = yzc1 + xs;
+    var t13 = xzc1 + ys;
+    var t23 = yzc1 - xs;
+    var t33 = z * z * c1 + c;
+    var m11 = m[0], m21 = m[1], m31 = m[2], m41 = m[3];
+    var m12 = m[4], m22 = m[5], m32 = m[6], m42 = m[7];
+    var m13 = m[8], m23 = m[9], m33 = m[10], m43 = m[11];
+    var m14 = m[12], m24 = m[13], m34 = m[14], m44 = m[15];
+
+    r[0] = m11 * t11 + m12 * t21 + m13 * t31;
+    r[1] = m21 * t11 + m22 * t21 + m23 * t31;
+    r[2] = m31 * t11 + m32 * t21 + m33 * t31;
+    r[3] = m41 * t11 + m42 * t21 + m43 * t31;
+    r[4] = m11 * t12 + m12 * t22 + m13 * t32;
+    r[5] = m21 * t12 + m22 * t22 + m23 * t32;
+    r[6] = m31 * t12 + m32 * t22 + m33 * t32;
+    r[7] = m41 * t12 + m42 * t22 + m43 * t32;
+    r[8] = m11 * t13 + m12 * t23 + m13 * t33;
+    r[9] = m21 * t13 + m22 * t23 + m23 * t33;
+    r[10] = m31 * t13 + m32 * t23 + m33 * t33;
+    r[11] = m41 * t13 + m42 * t23 + m43 * t33;
+    r[12] = m14,
+    r[13] = m24;
+    r[14] = m34;
+    r[15] = m44;
+
+    return r;
+});
+
+function _MJS_m4x4makeScale3Local(x, y, z) {
+    var r = new Float64Array(16);
+
+    r[0] = x;
+    r[1] = 0;
+    r[2] = 0;
+    r[3] = 0;
+    r[4] = 0;
+    r[5] = y;
+    r[6] = 0;
+    r[7] = 0;
+    r[8] = 0;
+    r[9] = 0;
+    r[10] = z;
+    r[11] = 0;
+    r[12] = 0;
+    r[13] = 0;
+    r[14] = 0;
+    r[15] = 1;
+
+    return r;
+}
+var _MJS_m4x4makeScale3 = F3(_MJS_m4x4makeScale3Local);
+
+var _MJS_m4x4makeScale = function(v) {
+    return _MJS_m4x4makeScale3Local(v[0], v[1], v[2]);
+};
+
+var _MJS_m4x4scale3 = F4(function(x, y, z, m) {
+    var r = new Float64Array(16);
+
+    r[0] = m[0] * x;
+    r[1] = m[1] * x;
+    r[2] = m[2] * x;
+    r[3] = m[3] * x;
+    r[4] = m[4] * y;
+    r[5] = m[5] * y;
+    r[6] = m[6] * y;
+    r[7] = m[7] * y;
+    r[8] = m[8] * z;
+    r[9] = m[9] * z;
+    r[10] = m[10] * z;
+    r[11] = m[11] * z;
+    r[12] = m[12];
+    r[13] = m[13];
+    r[14] = m[14];
+    r[15] = m[15];
+
+    return r;
+});
+
+var _MJS_m4x4scale = F2(function(v, m) {
+    var r = new Float64Array(16);
+    var x = v[0];
+    var y = v[1];
+    var z = v[2];
+
+    r[0] = m[0] * x;
+    r[1] = m[1] * x;
+    r[2] = m[2] * x;
+    r[3] = m[3] * x;
+    r[4] = m[4] * y;
+    r[5] = m[5] * y;
+    r[6] = m[6] * y;
+    r[7] = m[7] * y;
+    r[8] = m[8] * z;
+    r[9] = m[9] * z;
+    r[10] = m[10] * z;
+    r[11] = m[11] * z;
+    r[12] = m[12];
+    r[13] = m[13];
+    r[14] = m[14];
+    r[15] = m[15];
+
+    return r;
+});
+
+function _MJS_m4x4makeTranslate3Local(x, y, z) {
+    var r = new Float64Array(16);
+
+    r[0] = 1;
+    r[1] = 0;
+    r[2] = 0;
+    r[3] = 0;
+    r[4] = 0;
+    r[5] = 1;
+    r[6] = 0;
+    r[7] = 0;
+    r[8] = 0;
+    r[9] = 0;
+    r[10] = 1;
+    r[11] = 0;
+    r[12] = x;
+    r[13] = y;
+    r[14] = z;
+    r[15] = 1;
+
+    return r;
+}
+var _MJS_m4x4makeTranslate3 = F3(_MJS_m4x4makeTranslate3Local);
+
+var _MJS_m4x4makeTranslate = function(v) {
+    return _MJS_m4x4makeTranslate3Local(v[0], v[1], v[2]);
+};
+
+var _MJS_m4x4translate3 = F4(function(x, y, z, m) {
+    var r = new Float64Array(16);
+    var m11 = m[0];
+    var m21 = m[1];
+    var m31 = m[2];
+    var m41 = m[3];
+    var m12 = m[4];
+    var m22 = m[5];
+    var m32 = m[6];
+    var m42 = m[7];
+    var m13 = m[8];
+    var m23 = m[9];
+    var m33 = m[10];
+    var m43 = m[11];
+
+    r[0] = m11;
+    r[1] = m21;
+    r[2] = m31;
+    r[3] = m41;
+    r[4] = m12;
+    r[5] = m22;
+    r[6] = m32;
+    r[7] = m42;
+    r[8] = m13;
+    r[9] = m23;
+    r[10] = m33;
+    r[11] = m43;
+    r[12] = m11 * x + m12 * y + m13 * z + m[12];
+    r[13] = m21 * x + m22 * y + m23 * z + m[13];
+    r[14] = m31 * x + m32 * y + m33 * z + m[14];
+    r[15] = m41 * x + m42 * y + m43 * z + m[15];
+
+    return r;
+});
+
+var _MJS_m4x4translate = F2(function(v, m) {
+    var r = new Float64Array(16);
+    var x = v[0];
+    var y = v[1];
+    var z = v[2];
+    var m11 = m[0];
+    var m21 = m[1];
+    var m31 = m[2];
+    var m41 = m[3];
+    var m12 = m[4];
+    var m22 = m[5];
+    var m32 = m[6];
+    var m42 = m[7];
+    var m13 = m[8];
+    var m23 = m[9];
+    var m33 = m[10];
+    var m43 = m[11];
+
+    r[0] = m11;
+    r[1] = m21;
+    r[2] = m31;
+    r[3] = m41;
+    r[4] = m12;
+    r[5] = m22;
+    r[6] = m32;
+    r[7] = m42;
+    r[8] = m13;
+    r[9] = m23;
+    r[10] = m33;
+    r[11] = m43;
+    r[12] = m11 * x + m12 * y + m13 * z + m[12];
+    r[13] = m21 * x + m22 * y + m23 * z + m[13];
+    r[14] = m31 * x + m32 * y + m33 * z + m[14];
+    r[15] = m41 * x + m42 * y + m43 * z + m[15];
+
+    return r;
+});
+
+var _MJS_m4x4makeLookAt = F3(function(eye, center, up) {
+    var z = _MJS_v3directionLocal(eye, center, _MJS_v3temp1Local);
+    var x = _MJS_v3normalizeLocal(_MJS_v3crossLocal(up, z, _MJS_v3temp2Local), _MJS_v3temp2Local);
+    var y = _MJS_v3normalizeLocal(_MJS_v3crossLocal(z, x, _MJS_v3temp3Local), _MJS_v3temp3Local);
+    var tm1 = _MJS_m4x4temp1Local;
+    var tm2 = _MJS_m4x4temp2Local;
+
+    tm1[0] = x[0];
+    tm1[1] = y[0];
+    tm1[2] = z[0];
+    tm1[3] = 0;
+    tm1[4] = x[1];
+    tm1[5] = y[1];
+    tm1[6] = z[1];
+    tm1[7] = 0;
+    tm1[8] = x[2];
+    tm1[9] = y[2];
+    tm1[10] = z[2];
+    tm1[11] = 0;
+    tm1[12] = 0;
+    tm1[13] = 0;
+    tm1[14] = 0;
+    tm1[15] = 1;
+
+    tm2[0] = 1; tm2[1] = 0; tm2[2] = 0; tm2[3] = 0;
+    tm2[4] = 0; tm2[5] = 1; tm2[6] = 0; tm2[7] = 0;
+    tm2[8] = 0; tm2[9] = 0; tm2[10] = 1; tm2[11] = 0;
+    tm2[12] = -eye[0]; tm2[13] = -eye[1]; tm2[14] = -eye[2]; tm2[15] = 1;
+
+    return _MJS_m4x4mulLocal(tm1, tm2);
+});
+
+
+function _MJS_m4x4transposeLocal(m) {
+    var r = new Float64Array(16);
+
+    r[0] = m[0]; r[1] = m[4]; r[2] = m[8]; r[3] = m[12];
+    r[4] = m[1]; r[5] = m[5]; r[6] = m[9]; r[7] = m[13];
+    r[8] = m[2]; r[9] = m[6]; r[10] = m[10]; r[11] = m[14];
+    r[12] = m[3]; r[13] = m[7]; r[14] = m[11]; r[15] = m[15];
+
+    return r;
+}
+var _MJS_m4x4transpose = _MJS_m4x4transposeLocal;
+
+var _MJS_m4x4makeBasis = F3(function(vx, vy, vz) {
+    var r = new Float64Array(16);
+
+    r[0] = vx[0];
+    r[1] = vx[1];
+    r[2] = vx[2];
+    r[3] = 0;
+    r[4] = vy[0];
+    r[5] = vy[1];
+    r[6] = vy[2];
+    r[7] = 0;
+    r[8] = vz[0];
+    r[9] = vz[1];
+    r[10] = vz[2];
+    r[11] = 0;
+    r[12] = 0;
+    r[13] = 0;
+    r[14] = 0;
+    r[15] = 1;
+
+    return r;
+});
+
+// Kernel export aliases
+var $Elm$Kernel$MJS$m4x4fromRecord = _MJS_m4x4fromRecord;
+var $Elm$Kernel$MJS$m4x4identity = _MJS_m4x4identity;
+var $Elm$Kernel$MJS$m4x4inverse = _MJS_m4x4inverse;
+var $Elm$Kernel$MJS$m4x4inverseOrthonormal = _MJS_m4x4inverseOrthonormal;
+var $Elm$Kernel$MJS$m4x4makeBasis = _MJS_m4x4makeBasis;
+var $Elm$Kernel$MJS$m4x4makeFrustum = _MJS_m4x4makeFrustum;
+var $Elm$Kernel$MJS$m4x4makeFrustumLocal = _MJS_m4x4makeFrustumLocal;
+var $Elm$Kernel$MJS$m4x4makeLookAt = _MJS_m4x4makeLookAt;
+var $Elm$Kernel$MJS$m4x4makeOrtho = _MJS_m4x4makeOrtho;
+var $Elm$Kernel$MJS$m4x4makeOrtho2D = _MJS_m4x4makeOrtho2D;
+var $Elm$Kernel$MJS$m4x4makeOrthoLocal = _MJS_m4x4makeOrthoLocal;
+var $Elm$Kernel$MJS$m4x4makePerspective = _MJS_m4x4makePerspective;
+var $Elm$Kernel$MJS$m4x4makeRotate = _MJS_m4x4makeRotate;
+var $Elm$Kernel$MJS$m4x4makeScale = _MJS_m4x4makeScale;
+var $Elm$Kernel$MJS$m4x4makeScale3 = _MJS_m4x4makeScale3;
+var $Elm$Kernel$MJS$m4x4makeScale3Local = _MJS_m4x4makeScale3Local;
+var $Elm$Kernel$MJS$m4x4makeTranslate = _MJS_m4x4makeTranslate;
+var $Elm$Kernel$MJS$m4x4makeTranslate3 = _MJS_m4x4makeTranslate3;
+var $Elm$Kernel$MJS$m4x4makeTranslate3Local = _MJS_m4x4makeTranslate3Local;
+var $Elm$Kernel$MJS$m4x4mul = _MJS_m4x4mul;
+var $Elm$Kernel$MJS$m4x4mulAffine = _MJS_m4x4mulAffine;
+var $Elm$Kernel$MJS$m4x4mulLocal = _MJS_m4x4mulLocal;
+var $Elm$Kernel$MJS$m4x4rotate = _MJS_m4x4rotate;
+var $Elm$Kernel$MJS$m4x4scale = _MJS_m4x4scale;
+var $Elm$Kernel$MJS$m4x4scale3 = _MJS_m4x4scale3;
+var $Elm$Kernel$MJS$m4x4temp1Local = _MJS_m4x4temp1Local;
+var $Elm$Kernel$MJS$m4x4temp2Local = _MJS_m4x4temp2Local;
+var $Elm$Kernel$MJS$m4x4toRecord = _MJS_m4x4toRecord;
+var $Elm$Kernel$MJS$m4x4translate = _MJS_m4x4translate;
+var $Elm$Kernel$MJS$m4x4translate3 = _MJS_m4x4translate3;
+var $Elm$Kernel$MJS$m4x4transpose = _MJS_m4x4transpose;
+var $Elm$Kernel$MJS$m4x4transposeLocal = _MJS_m4x4transposeLocal;
+var $Elm$Kernel$MJS$v2 = _MJS_v2;
+var $Elm$Kernel$MJS$v2add = _MJS_v2add;
+var $Elm$Kernel$MJS$v2direction = _MJS_v2direction;
+var $Elm$Kernel$MJS$v2distance = _MJS_v2distance;
+var $Elm$Kernel$MJS$v2distanceSquared = _MJS_v2distanceSquared;
+var $Elm$Kernel$MJS$v2dot = _MJS_v2dot;
+var $Elm$Kernel$MJS$v2fromRecord = _MJS_v2fromRecord;
+var $Elm$Kernel$MJS$v2getX = _MJS_v2getX;
+var $Elm$Kernel$MJS$v2getY = _MJS_v2getY;
+var $Elm$Kernel$MJS$v2length = _MJS_v2length;
+var $Elm$Kernel$MJS$v2lengthLocal = _MJS_v2lengthLocal;
+var $Elm$Kernel$MJS$v2lengthSquared = _MJS_v2lengthSquared;
+var $Elm$Kernel$MJS$v2negate = _MJS_v2negate;
+var $Elm$Kernel$MJS$v2normalize = _MJS_v2normalize;
+var $Elm$Kernel$MJS$v2scale = _MJS_v2scale;
+var $Elm$Kernel$MJS$v2setX = _MJS_v2setX;
+var $Elm$Kernel$MJS$v2setY = _MJS_v2setY;
+var $Elm$Kernel$MJS$v2sub = _MJS_v2sub;
+var $Elm$Kernel$MJS$v2toRecord = _MJS_v2toRecord;
+var $Elm$Kernel$MJS$v3 = _MJS_v3;
+var $Elm$Kernel$MJS$v3add = _MJS_v3add;
+var $Elm$Kernel$MJS$v3cross = _MJS_v3cross;
+var $Elm$Kernel$MJS$v3crossLocal = _MJS_v3crossLocal;
+var $Elm$Kernel$MJS$v3direction = _MJS_v3direction;
+var $Elm$Kernel$MJS$v3directionLocal = _MJS_v3directionLocal;
+var $Elm$Kernel$MJS$v3distance = _MJS_v3distance;
+var $Elm$Kernel$MJS$v3distanceSquared = _MJS_v3distanceSquared;
+var $Elm$Kernel$MJS$v3dot = _MJS_v3dot;
+var $Elm$Kernel$MJS$v3dotLocal = _MJS_v3dotLocal;
+var $Elm$Kernel$MJS$v3fromRecord = _MJS_v3fromRecord;
+var $Elm$Kernel$MJS$v3getX = _MJS_v3getX;
+var $Elm$Kernel$MJS$v3getY = _MJS_v3getY;
+var $Elm$Kernel$MJS$v3getZ = _MJS_v3getZ;
+var $Elm$Kernel$MJS$v3length = _MJS_v3length;
+var $Elm$Kernel$MJS$v3lengthLocal = _MJS_v3lengthLocal;
+var $Elm$Kernel$MJS$v3lengthSquared = _MJS_v3lengthSquared;
+var $Elm$Kernel$MJS$v3mul4x4 = _MJS_v3mul4x4;
+var $Elm$Kernel$MJS$v3negate = _MJS_v3negate;
+var $Elm$Kernel$MJS$v3normalize = _MJS_v3normalize;
+var $Elm$Kernel$MJS$v3normalizeLocal = _MJS_v3normalizeLocal;
+var $Elm$Kernel$MJS$v3scale = _MJS_v3scale;
+var $Elm$Kernel$MJS$v3setX = _MJS_v3setX;
+var $Elm$Kernel$MJS$v3setY = _MJS_v3setY;
+var $Elm$Kernel$MJS$v3setZ = _MJS_v3setZ;
+var $Elm$Kernel$MJS$v3sub = _MJS_v3sub;
+var $Elm$Kernel$MJS$v3subLocal = _MJS_v3subLocal;
+var $Elm$Kernel$MJS$v3temp1Local = _MJS_v3temp1Local;
+var $Elm$Kernel$MJS$v3temp2Local = _MJS_v3temp2Local;
+var $Elm$Kernel$MJS$v3temp3Local = _MJS_v3temp3Local;
+var $Elm$Kernel$MJS$v3toRecord = _MJS_v3toRecord;
+var $Elm$Kernel$MJS$v4 = _MJS_v4;
+var $Elm$Kernel$MJS$v4add = _MJS_v4add;
+var $Elm$Kernel$MJS$v4direction = _MJS_v4direction;
+var $Elm$Kernel$MJS$v4distance = _MJS_v4distance;
+var $Elm$Kernel$MJS$v4distanceSquared = _MJS_v4distanceSquared;
+var $Elm$Kernel$MJS$v4dot = _MJS_v4dot;
+var $Elm$Kernel$MJS$v4fromRecord = _MJS_v4fromRecord;
+var $Elm$Kernel$MJS$v4getW = _MJS_v4getW;
+var $Elm$Kernel$MJS$v4getX = _MJS_v4getX;
+var $Elm$Kernel$MJS$v4getY = _MJS_v4getY;
+var $Elm$Kernel$MJS$v4getZ = _MJS_v4getZ;
+var $Elm$Kernel$MJS$v4length = _MJS_v4length;
+var $Elm$Kernel$MJS$v4lengthLocal = _MJS_v4lengthLocal;
+var $Elm$Kernel$MJS$v4lengthSquared = _MJS_v4lengthSquared;
+var $Elm$Kernel$MJS$v4negate = _MJS_v4negate;
+var $Elm$Kernel$MJS$v4normalize = _MJS_v4normalize;
+var $Elm$Kernel$MJS$v4scale = _MJS_v4scale;
+var $Elm$Kernel$MJS$v4setW = _MJS_v4setW;
+var $Elm$Kernel$MJS$v4setX = _MJS_v4setX;
+var $Elm$Kernel$MJS$v4setY = _MJS_v4setY;
+var $Elm$Kernel$MJS$v4setZ = _MJS_v4setZ;
+var $Elm$Kernel$MJS$v4sub = _MJS_v4sub;
+var $Elm$Kernel$MJS$v4toRecord = _MJS_v4toRecord;
 
 // VIRTUAL DOM
 
@@ -1838,7 +3092,7 @@ var $Json$Decode$oneOrMore = F2(function (toValue, decoder) {
 var $Json$Decode$array = function (decoder) {
     return _Json_decoder(function (v) {
         var r = $Json$Decode$list(decoder).run(v);
-        return r.ok ? _Json_ok({ $: 'Array_elm_builtin', a: _List_toArray(r.value) }) : r;
+        return r.ok ? _Json_ok($Array$fromList(r.value)) : r;
     });
 };
 var $Json$Decode$keyValuePairs = function (decoder) {
@@ -1996,7 +3250,7 @@ var $Json$Encode$list = F2(function (encodeItem, items) {
     return _List_toArray(items).map(function (x) { return encodeItem(x); });
 });
 var $Json$Encode$array = F2(function (encodeItem, arr) {
-    return arr.a.map(function (x) { return encodeItem(x); });
+    return _Array_toJsArray(arr).map(function (x) { return encodeItem(x); });
 });
 var $Json$Encode$set = F2(function (encodeItem, set) {
     return $Dict$keys(set.d) === undefined ? [] : _List_toArray($Dict$keys(set.d)).map(function (x) { return encodeItem(x); });
@@ -2102,6 +3356,19 @@ var $Process$sleep = function (ms) {
         setTimeout(function () { ok(_Utils_Tuple0); }, ms);
     });
 };
+
+// WEBGL TEXTURE (elm-explorations/webgl Elm.Kernel.Texture). `size` is pure —
+// it reads a loaded texture's dimensions. `load` needs a real WebGL/DOM context
+// (`new Image()` + `gl.texImage2D`), which node does not have, so it cannot run
+// headlessly. These entry points exist only so modules that reference
+// `WebGL.Texture` in type/data positions (e.g. mikaxyz/elm-gltf) can load; a
+// forked `load` task fails, exactly as it would under stock elm in node.
+var $Elm$Kernel$Texture$size = function (texture) {
+    return { $: '#2', a: texture.width, b: texture.height };
+};
+var $Elm$Kernel$Texture$load = F6(function (magnify, minify, hWrap, vWrap, flipY, url) {
+    return _Task(function (ok, err) { err(_Utils_Tuple0); });
+});
 
 var $Terminal$writeLine = function (s) { return { $: 'CmdWrite', s: s }; };
 
