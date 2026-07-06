@@ -1009,3 +1009,48 @@ leaf = Parser (\\i -> i + 1)\n\
 main = String.fromInt (run top 41)";
     assert_eq!(run(program), "42");
 }
+
+// Elm.Kernel.MJS — elm-explorations/linear-algebra runtime. The Math.Vector*
+// / Math.Matrix4 Elm modules live in a package the unit-test harness cannot
+// resolve, so this drives the ported `$Elm$Kernel$MJS$*` functions directly
+// inside the runtime prelude and pins their output to the values a stock-elm
+// build of the same operations produces (verified byte-for-byte).
+#[test]
+fn mjs_linear_algebra_kernel() {
+    let script = format!(
+        "{}\n\
+         var out = [];\n\
+         var a3 = A3($Elm$Kernel$MJS$v3, 1.0, 2.0, 3.0);\n\
+         var b3 = A3($Elm$Kernel$MJS$v3, 4.0, 5.0, 6.0);\n\
+         var n = $Elm$Kernel$MJS$v3normalize(a3);\n\
+         out.push($Elm$Kernel$MJS$v3getX(n) + ',' + $Elm$Kernel$MJS$v3getY(n) + ',' + $Elm$Kernel$MJS$v3getZ(n));\n\
+         out.push(String($Elm$Kernel$MJS$v3length(a3)));\n\
+         out.push(String(A2($Elm$Kernel$MJS$v3distance, a3, b3)));\n\
+         out.push(String(A2($Elm$Kernel$MJS$v3dot, a3, b3)));\n\
+         var c = A2($Elm$Kernel$MJS$v3cross, a3, b3);\n\
+         out.push($Elm$Kernel$MJS$v3getX(c) + ',' + $Elm$Kernel$MJS$v3getY(c) + ',' + $Elm$Kernel$MJS$v3getZ(c));\n\
+         var rot = A2($Elm$Kernel$MJS$m4x4makeRotate, 1.2345, A3($Elm$Kernel$MJS$v3, 0.3, 0.4, 0.5));\n\
+         var rn = $Elm$Kernel$MJS$m4x4toRecord(rot);\n\
+         out.push(rn.m11 + ',' + rn.m22 + ',' + rn.m33 + ',' + rn.m21);\n\
+         var persp = A4($Elm$Kernel$MJS$m4x4makePerspective, 45.0, 1.5, 0.1, 100.0);\n\
+         var mul = A2($Elm$Kernel$MJS$m4x4mul, rot, persp);\n\
+         var tr = A2($Elm$Kernel$MJS$v3mul4x4, mul, a3);\n\
+         out.push($Elm$Kernel$MJS$v3getX(tr) + ',' + $Elm$Kernel$MJS$v3getY(tr) + ',' + $Elm$Kernel$MJS$v3getZ(tr));\n\
+         var inv = $Elm$Kernel$MJS$m4x4inverse(persp);\n\
+         var im = $Elm$Kernel$MJS$m4x4toRecord(inv.a);\n\
+         out.push(im.m11 + ',' + im.m34);\n\
+         out.push(String($Elm$Kernel$MJS$v2length(A2($Elm$Kernel$MJS$v2, 3.0, 4.0))));\n\
+         out.push(String(A2($Elm$Kernel$MJS$v4dot, A4($Elm$Kernel$MJS$v4, 1.0, 2.0, 3.0, 4.0), A4($Elm$Kernel$MJS$v4, 5.0, 6.0, 7.0, 8.0))));\n\
+         console.log(out.join('|'));",
+        alm_compiler::generate::RUNTIME
+    );
+    let out = common::run_node(&script, alm_compiler::generate::RUNTIME);
+    assert_eq!(
+        out,
+        "0.2672612419124244,0.5345224838248488,0.8017837257372732|\
+         3.7416573867739413|5.196152422706632|32|-3,6,-3|\
+         0.4505943892964256,0.5443953472214261,0.6649965788392839,0.8282986518453248|\
+         1.3592938018696257,-1.462169205020312,-0.18658122328552051|\
+         0.6213203435596425,-1|5|70"
+    );
+}
