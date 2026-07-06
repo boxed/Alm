@@ -1112,6 +1112,11 @@ var $Maybe$map4 = F5(function (f, ma, mb, mc, md) {
         ? $Maybe$Just(A4(f, ma.a, mb.a, mc.a, md.a))
         : $Maybe$Nothing;
 });
+var $Maybe$map5 = F6(function (f, ma, mb, mc, md, me) {
+    return ma.$ === 'Just' && mb.$ === 'Just' && mc.$ === 'Just' && md.$ === 'Just' && me.$ === 'Just'
+        ? $Maybe$Just(A5(f, ma.a, mb.a, mc.a, md.a, me.a))
+        : $Maybe$Nothing;
+});
 
 // RESULT — extras
 
@@ -1935,19 +1940,51 @@ var $Json$Decode$decodeString = F2(function (decoder, str) {
     }
     return _Json_runDecoder(decoder, v);
 });
-var $Json$Decode$errorToString = function (error) {
+// Faithful port of elm/json's errorToString: accumulate a context path
+// (prepended, reversed at the leaf), render Failure/OneOf exactly as elm does
+// (note the nested-Failure introduction ends with 4 spaces, and oneOf errors
+// are indented via `indent`).
+function _Json_indentErr(str) { return str.split('\n').join('\n    '); }
+function _Json_errorToStringHelp(error, context) {
     switch (error.$) {
-        case 'Field':
-            return 'Problem with the value at .' + error.a + ':\n' + $Json$Decode$errorToString(error.b);
-        case 'Index':
-            return 'Problem with the value at [' + error.a + ']:\n' + $Json$Decode$errorToString(error.b);
+        case 'Field': {
+            var f = error.a;
+            var isSimple = f.length > 0 && /^[a-zA-Z]$/.test(f[0]) && /^[a-zA-Z0-9]*$/.test(f.slice(1));
+            var fieldName = isSimple ? '.' + f : "['" + f + "']";
+            return _Json_errorToStringHelp(error.b, [fieldName].concat(context));
+        }
+        case 'Index': {
+            return _Json_errorToStringHelp(error.b, ['[' + error.a + ']'].concat(context));
+        }
         case 'OneOf': {
             var errors = _List_toArray(error.a);
-            return 'All possibilities failed:\n' + errors.map($Json$Decode$errorToString).join('\n');
+            var path = context.slice().reverse().join('');
+            if (errors.length === 0) {
+                return 'Ran into a Json.Decode.oneOf with no possibilities' +
+                    (context.length === 0 ? '!' : ' at json' + path);
+            }
+            if (errors.length === 1) {
+                return _Json_errorToStringHelp(errors[0], context);
+            }
+            var starter = context.length === 0
+                ? 'Json.Decode.oneOf'
+                : 'The Json.Decode.oneOf at json' + path;
+            var parts = [starter + ' failed in the following ' + errors.length + ' ways:'];
+            for (var i = 0; i < errors.length; i++) {
+                parts.push('\n\n(' + (i + 1) + ') ' + _Json_indentErr($Json$Decode$errorToString(errors[i])));
+            }
+            return parts.join('\n\n');
         }
-        default:
-            return error.a + '\n\n' + JSON.stringify(error.b, null, 4);
+        default: {
+            var intro = context.length === 0
+                ? 'Problem with the given value:\n\n'
+                : 'Problem with the value at json' + context.slice().reverse().join('') + ':\n\n    ';
+            return intro + _Json_indentErr(A2($Json$Encode$encode, 4, error.b)) + '\n\n' + error.a;
+        }
     }
+}
+var $Json$Decode$errorToString = function (error) {
+    return _Json_errorToStringHelp(error, []);
 };
 
 var $Json$Encode$string = function (s) { return s; };

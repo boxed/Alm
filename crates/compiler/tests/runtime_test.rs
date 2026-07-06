@@ -114,7 +114,8 @@ fn json_error_rendering() {
 
         Err e ->
             Json.Decode.errorToString e"#);
-    assert!(oneof_error.contains("All possibilities failed"), "got: {}", oneof_error);
+    // Matches elm's wording: "The Json.Decode.oneOf … failed in the following N ways:".
+    assert!(oneof_error.contains("failed in the following 2 ways"), "got: {}", oneof_error);
 
     let syntax_error = run(r#"main =
     case Json.Decode.decodeString Json.Decode.int "{oops" of
