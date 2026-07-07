@@ -2263,3 +2263,26 @@ fn native_html_structural_equality() {
          \x20       ]\n",
     );
 }
+
+#[test]
+fn multi_arg_function_mapped_point_free() {
+    // `List.map` over a 2-argument function used point-free yields a list of
+    // partial closures (`List (Int -> Int)`), which are then each applied. The
+    // typed backend previously called the 2-ary function with a single argument
+    // (invalid IR) instead of building a partial closure. This is the bug that
+    // broke elm-explorations/test's `List.map predicateFromSelector selectors`.
+    assert_same(
+        "map_point_free_binary",
+        "module Test exposing (..)\n\
+         \n\
+         add : Int -> Int -> Int\n\
+         add a b = a + b\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       fns = List.map add [ 1, 2, 3 ]\n\
+         \x20   in\n\
+         \x20   Debug.toString (List.map (\\f -> f 10) fns)\n",
+    );
+}

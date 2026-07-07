@@ -3194,8 +3194,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .get(&name.to_string())
                     .ok_or_else(|| format!("typed backend: unknown function `{}`", name))?;
                 let np = f.count_params() as usize;
-                if np >= args.len() {
+                if np == args.len() {
                     return Ok(self.call_fn(f, args));
+                }
+                if np > args.len() {
+                    // Partial application: a multi-argument function passed
+                    // point-free to a higher-order kernel and applied to fewer
+                    // arguments than it names (e.g. `List.map predicateFromSelector
+                    // selectors`, where the 2-ary `predicateFromSelector` maps to
+                    // `List (ElmHtml -> Bool)`). Build a closure capturing the
+                    // supplied arguments rather than calling with too few.
+                    return Ok(self.gen_partial_app(f, args));
                 }
                 // Over-application: a point-free function (e.g. a bare
                 // constructor `unsignedInt8 = U8`) passed to a higher-order
