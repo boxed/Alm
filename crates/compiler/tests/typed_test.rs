@@ -1902,6 +1902,36 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn structural_equality_of_recursive_values() {
+    // A recursive type's layout uses `Ref` to break self-reference, and the
+    // layout-directed comparison bottomed out at `Ref` as pointer identity — so
+    // two structurally-equal but distinct recursive values (trees, linked
+    // lists, JSON:API resources) compared unequal. Equality is now type-directed
+    // with a memoized per-type helper: it compares in place (no allocation) and
+    // breaks recursion at the function level. Checks equal trees compare equal,
+    // unequal trees unequal, and a recursive value nested in a record.
+    assert_same(
+        "recursive_eq",
+        "module Test exposing (..)\n\
+         \n\
+         type Tree = Leaf Int | Node Tree Tree\n\
+         \n\
+         build : Int -> Tree\n\
+         build n =\n\
+         \x20   if n <= 0 then Leaf n else Node (build (n - 1)) (build (n - 1))\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   [ Debug.toString (build 4 == build 4)\n\
+         \x20   , Debug.toString (build 4 == Node (build 3) (Leaf 9))\n\
+         \x20   , Debug.toString ({ t = build 3, n = 1 } == { t = build 3, n = 1 })\n\
+         \x20   , Debug.toString (Just (build 3) == Just (build 3))\n\
+         \x20   ]\n\
+         \x20       |> String.join \"|\"\n",
+    );
+}
+
+#[test]
 fn string_trim_unicode_whitespace() {
     // Elm's `String.trim` delegates to JS `String.prototype.trim`, whose
     // whitespace set is wider than ASCII — it includes the non-breaking space

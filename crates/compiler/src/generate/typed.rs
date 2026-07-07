@@ -81,6 +81,11 @@ struct TypedCodegen<'ctx, 'l> {
     /// field reuses the same helper.
     box_fns: HashMap<String, FunctionValue<'ctx>>,
     unbox_fns: HashMap<String, FunctionValue<'ctx>>,
+    /// Memoized structural-equality helpers for recursive union types, keyed by
+    /// type. A recursive union needs a real recursive function (rather than
+    /// inline expansion) so codegen terminates; a self-referential field reuses
+    /// the same helper. Mirrors [`box_fns`]/[`unbox_fns`].
+    eq_fns: HashMap<String, FunctionValue<'ctx>>,
     locals: HashMap<String, BasicValueEnum<'ctx>>,
     cur_fn: Option<FunctionValue<'ctx>>,
     /// When emitting a self-tail-recursive function, its loop state: a mutable
@@ -171,6 +176,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             box_tramps: HashMap::new(),
             box_fns: HashMap::new(),
             unbox_fns: HashMap::new(),
+            eq_fns: HashMap::new(),
             locals: HashMap::new(),
             cur_fn: None,
             tco: None,
@@ -4179,7 +4185,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let layout = self.layouts.layout_of(&l.tipe);
         let lv = self.gen(l)?;
         let rv = self.gen(r)?;
-        let eq = self.equals_vals(lv, rv, &layout)?;
+        // A recursive type's layout contains `Ref` (the pointer that breaks
+        // self-reference); comparing such a value field-by-field on layout alone
+        // would reach a recursive occurrence as `Ref` and fall back to pointer
+        // identity. Compare by *type* instead — structurally and in place, with
+        // recursion broken at the function level by a memoized per-type helper
+        // (no allocation). Non-recursive types keep the direct layout path.
+        let eq = if layout_has_ref(&layout) {
+            self.equals_typed(lv, rv, &l.tipe)?
+        } else {
+            self.equals_vals(lv, rv, &layout)?
+        };
         Ok(if negate {
             self.builder.build_not(eq, "neq").unwrap().into()
         } else {
@@ -4365,6 +4381,228 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(after_bb);
         Ok(self.builder.build_load(i1_t, res, "listeq").unwrap().into_int_value())
+    }
+
+    /// Type-directed structural equality for a value whose layout contains a
+    /// `Ref` (a recursive type). It walks the value in place — no boxing — and
+    /// breaks recursion at the function level via [`get_eq_fn`], so comparing
+    /// two equal trees/records/JSON:API resources costs no allocation. Tuples,
+    /// records and lists recurse into their element/field *types* (so a
+    /// recursive occurrence dispatches on its real type, never bottoming out at
+    /// `Ref`); a union routes to its memoized helper.
+    fn equals_typed(
+        &mut self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        use crate::ast::canonical::Type;
+        let layout = self.layouts.layout_of(tipe);
+        if !layout_has_ref(&layout) {
+            // No recursion below here: the direct layout comparison is exact.
+            return self.equals_vals(a, b, &layout);
+        }
+        let i1_t = self.ctx.bool_type();
+        match &layout {
+            Layout::Tuple(_) => {
+                let subs: Vec<Type> = match tipe {
+                    Type::Tuple(x, y, z) => {
+                        let mut v = vec![(**x).clone(), (**y).clone()];
+                        if let Some(z) = z {
+                            v.push((**z).clone());
+                        }
+                        v
+                    }
+                    _ => return self.equals_vals(a, b, &layout),
+                };
+                let sa = a.into_struct_value();
+                let sb = b.into_struct_value();
+                let mut acc = i1_t.const_int(1, false);
+                for (i, st) in subs.iter().enumerate() {
+                    let fa = self.builder.build_extract_value(sa, i as u32, "a").unwrap();
+                    let fb = self.builder.build_extract_value(sb, i as u32, "b").unwrap();
+                    let e = self.equals_typed(fa, fb, st)?;
+                    acc = self.builder.build_and(acc, e, "and").unwrap();
+                }
+                Ok(acc)
+            }
+            Layout::Record(sorted) => {
+                let sorted = sorted.clone();
+                let field_types = match tipe {
+                    Type::Record(fs, _) => fs.clone(),
+                    _ => return self.equals_vals(a, b, &layout),
+                };
+                let sa = a.into_struct_value();
+                let sb = b.into_struct_value();
+                let mut acc = i1_t.const_int(1, false);
+                for (i, (fname, _)) in sorted.iter().enumerate() {
+                    let fty = field_types
+                        .iter()
+                        .find(|(n, _)| n == fname)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| format!("typed backend: == missing field `{}`", fname))?;
+                    let fa = self.builder.build_extract_value(sa, i as u32, "a").unwrap();
+                    let fb = self.builder.build_extract_value(sb, i as u32, "b").unwrap();
+                    let e = self.equals_typed(fa, fb, &fty)?;
+                    acc = self.builder.build_and(acc, e, "and").unwrap();
+                }
+                Ok(acc)
+            }
+            Layout::List(_) => {
+                let et = match tipe {
+                    Type::Type(_, _, args) if args.len() == 1 => args[0].clone(),
+                    _ => return self.equals_vals(a, b, &layout),
+                };
+                self.equals_lists_typed(a, b, &et)
+            }
+            Layout::Tagged(_) => {
+                let f = self.get_eq_fn(tipe)?;
+                let call = self.builder.build_call(f, &[a.into(), b.into()], "eqrec").unwrap();
+                Ok(call.try_as_basic_value().left().unwrap().into_int_value())
+            }
+            // A bare `Ref` here is a genuine phantom (e.g. the element type of an
+            // empty list, never actually compared): pointer identity as before.
+            _ => self.equals_vals(a, b, &layout),
+        }
+    }
+
+    /// List equality with a type-directed element comparison (the recursive
+    /// twin of [`equals_lists`]).
+    fn equals_lists_typed(
+        &mut self,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+        elem: &crate::ast::canonical::Type,
+    ) -> Result<inkwell::values::IntValue<'ctx>, String> {
+        let i1_t = self.ctx.bool_type();
+        let elem_layout = self.layouts.layout_of(elem);
+        let lena = self.list_len(a.into_pointer_value());
+        let lenb = self.list_len(b.into_pointer_value());
+        let ba = self.list_backing(a.into_pointer_value());
+        let bb = self.list_backing(b.into_pointer_value());
+        let len_eq = self.builder.build_int_compare(IntPredicate::EQ, lena, lenb, "leneq").unwrap();
+        let res = self.entry_alloca(i1_t.into(), "eqres");
+        self.builder.build_store(res, len_eq).unwrap();
+        let scan_bb = self.new_block("eqlt.scan");
+        let after_bb = self.new_block("eqlt.after");
+        self.builder.build_conditional_branch(len_eq, scan_bb, after_bb).unwrap();
+
+        self.builder.position_at_end(scan_bb);
+        let elem = elem.clone();
+        self.for_count(lena, |s, i| {
+            let av = s.list_load(ba, &elem_layout, i);
+            let bv = s.list_load(bb, &elem_layout, i);
+            let e = s.equals_typed(av, bv, &elem)?;
+            let cur = s.builder.build_load(i1_t, res, "cur").unwrap().into_int_value();
+            let and = s.builder.build_and(cur, e, "and").unwrap();
+            s.builder.build_store(res, and).unwrap();
+            Ok(())
+        })?;
+        self.builder.build_unconditional_branch(after_bb).unwrap();
+        self.builder.position_at_end(after_bb);
+        Ok(self.builder.build_load(i1_t, res, "listeq").unwrap().into_int_value())
+    }
+
+    /// A memoized recursive structural-equality helper `eq_T(a, b) -> i1` for a
+    /// (possibly recursive) tagged union, mirroring [`get_box_fn`]. Inserted
+    /// into the cache before its body is built, so a self-referential field
+    /// reuses it and codegen terminates.
+    fn get_eq_fn(
+        &mut self,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<FunctionValue<'ctx>, String> {
+        let key = format!("{:?}", tipe);
+        if let Some(f) = self.eq_fns.get(&key) {
+            return Ok(*f);
+        }
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let i1_t = self.ctx.bool_type();
+        let fname = format!("eq.{}", self.lam_id);
+        self.lam_id += 1;
+        let fty = i1_t.fn_type(&[ptr_t.into(), ptr_t.into()], false);
+        let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
+        self.eq_fns.insert(key, f);
+
+        let ctors = self
+            .layouts
+            .union_ctors(tipe)
+            .ok_or_else(|| "typed backend: unknown union in ==".to_string())?;
+
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
+        self.cur_fn = Some(f);
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        self.clear_loc();
+
+        let body = (|s: &mut Self| -> Result<(), String> {
+            let i32_t = s.ctx.i32_type();
+            let ptr_a = f.get_nth_param(0).unwrap().into_pointer_value();
+            let ptr_b = f.get_nth_param(1).unwrap().into_pointer_value();
+            let tag_a = s.builder.build_load(i32_t, ptr_a, "taga").unwrap().into_int_value();
+            let tag_b = s.builder.build_load(i32_t, ptr_b, "tagb").unwrap().into_int_value();
+            let teq = s.builder.build_int_compare(IntPredicate::EQ, tag_a, tag_b, "teq").unwrap();
+            let sw_bb = s.new_block("eqf.sw");
+            let false_bb = s.new_block("eqf.false");
+            let merge = s.new_block("eqf.end");
+            s.builder.build_conditional_branch(teq, sw_bb, false_bb).unwrap();
+
+            let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+                Vec::new();
+            s.builder.position_at_end(false_bb);
+            s.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((i1_t.const_zero().into(), false_bb));
+
+            s.builder.position_at_end(sw_bb);
+            let var_blocks: Vec<_> = (0..ctors.len())
+                .map(|k| s.new_block(&format!("eqf.v{}", k)))
+                .collect();
+            let cases: Vec<_> = var_blocks
+                .iter()
+                .enumerate()
+                .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+                .collect();
+            s.builder.build_switch(tag_a, false_bb, &cases).unwrap();
+
+            for (k, bb) in var_blocks.iter().enumerate() {
+                s.builder.position_at_end(*bb);
+                let (_, field_types) = &ctors[k];
+                let field_layouts: Vec<Layout> =
+                    field_types.iter().map(|t| s.layouts.layout_of(t)).collect();
+                let sty = s.ctor_struct(&field_layouts);
+                let mut acc = i1_t.const_int(1, false);
+                for (i, fty) in field_types.iter().enumerate() {
+                    let fap = s.builder.build_struct_gep(sty, ptr_a, (i + 1) as u32, "fa").unwrap();
+                    let fa = s.builder.build_load(s.llvm_type(&field_layouts[i]), fap, "fav").unwrap();
+                    let fbp = s.builder.build_struct_gep(sty, ptr_b, (i + 1) as u32, "fb").unwrap();
+                    let fb = s.builder.build_load(s.llvm_type(&field_layouts[i]), fbp, "fbv").unwrap();
+                    let e = s.equals_typed(fa, fb, fty)?;
+                    acc = s.builder.build_and(acc, e, "and").unwrap();
+                }
+                let end = s.builder.get_insert_block().unwrap();
+                s.builder.build_unconditional_branch(merge).unwrap();
+                incoming.push((acc.into(), end));
+            }
+
+            s.builder.position_at_end(merge);
+            let phi = s.builder.build_phi(i1_t, "eqf").unwrap();
+            for (v, bb) in &incoming {
+                phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+            }
+            s.builder.build_return(Some(&phi.as_basic_value())).unwrap();
+            Ok(())
+        })(self);
+
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        body?;
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        self.restore_loc(saved_loc);
+        Ok(f)
     }
 
     /// Short-circuiting `&&` / `||`: the right operand is only evaluated when
@@ -5677,6 +5915,23 @@ fn tail_has_self_call(expr: &TypedExpr, mangled: &str, nparams: usize) -> bool {
             .iter()
             .any(|(_, b)| tail_has_self_call(b, mangled, nparams)),
         TypedKind::Let(_, body) => tail_has_self_call(body, mangled, nparams),
+        _ => false,
+    }
+}
+
+/// Whether a layout contains a `Ref` anywhere — i.e. the type is recursive (or
+/// carries an unresolved variable). Such a value cannot be compared field by
+/// field in the typed representation, because a recursive occurrence surfaces
+/// as `Ref` and would be compared by pointer identity; it is boxed and compared
+/// structurally by the runtime instead. Terminates: `layout_of` breaks
+/// recursion with `Ref`, so the layout tree is finite.
+fn layout_has_ref(l: &Layout) -> bool {
+    match l {
+        Layout::Ref => true,
+        Layout::List(e) => layout_has_ref(e),
+        Layout::Tuple(elems) => elems.iter().any(layout_has_ref),
+        Layout::Record(fields) => fields.iter().any(|(_, fl)| layout_has_ref(fl)),
+        Layout::Tagged(variants) => variants.iter().flatten().any(layout_has_ref),
         _ => false,
     }
 }
