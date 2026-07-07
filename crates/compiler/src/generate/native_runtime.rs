@@ -2062,6 +2062,23 @@ unsafe extern "C" fn string_pad_right(n: u64, c: u64, s: u64) -> u64 {
     }
     mkstr(out.into_bytes())
 }
+unsafe extern "C" fn string_pad(n: u64, c: u64, s: u64) -> u64 {
+    // `pad n char string`: center, extra padding on the right for an odd
+    // deficit — `repeat (ceil half) c ++ string ++ repeat (floor half) c`.
+    let ch = char::from_u32(as_int(c) as u32).unwrap_or(' ');
+    let deficit = (as_int(n) - sstr(s).chars().count() as i64).max(0);
+    let left = (deficit + 1) / 2;
+    let right = deficit / 2;
+    let mut out = String::new();
+    for _ in 0..left {
+        out.push(ch);
+    }
+    out.push_str(sstr(s));
+    for _ in 0..right {
+        out.push(ch);
+    }
+    mkstr(out.into_bytes())
+}
 unsafe extern "C" fn string_map(f: u64, s: u64) -> u64 {
     let mut out = String::new();
     for ch in sstr(s).chars() {
@@ -5150,6 +5167,7 @@ kernel_fns! {
     G_STRING_TRIM "$String$trim" string_trim, 1;
     G_STRING_TRIMLEFT "$String$trimLeft" string_trim_left, 1;
     G_STRING_TRIMRIGHT "$String$trimRight" string_trim_right, 1;
+    G_STRING_PAD "$String$pad" string_pad, 3;
     G_STRING_PADLEFT "$String$padLeft" string_pad_left, 3;
     G_STRING_PADRIGHT "$String$padRight" string_pad_right, 3;
     G_STRING_MAP "$String$map" string_map, 2;
