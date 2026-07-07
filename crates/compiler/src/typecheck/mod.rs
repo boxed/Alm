@@ -580,9 +580,47 @@ impl Checker<'_> {
             if self.node_types.contains_key(&region) {
                 continue;
             }
+            // Defer a node whose type still mentions a variable free in the
+            // environment (e.g. an outer lambda parameter not yet resolved by
+            // the enclosing application/annotation). Freezing it here would
+            // capture that variable as a bare `Var` — for a `comparable`/
+            // `appendable` parameter that later resolves to a concrete type,
+            // that stale variable would drive the wrong (boxed) layout. An
+            // enclosing scope, where the variable is resolved (or properly
+            // quantified), zonks it instead.
+            if !env_free.is_empty() {
+                let mut seen = HashSet::new();
+                if self.var_touches(var, env_free, &mut seen) {
+                    continue;
+                }
+            }
             let tipe = self.variable_to_type(var, env_free, state);
             self.node_types.insert(region, tipe);
         }
+    }
+
+    /// Whether `var`'s structure transitively reaches any variable in `targets`.
+    fn var_touches(
+        &mut self,
+        var: Variable,
+        targets: &HashSet<Variable>,
+        seen: &mut HashSet<Variable>,
+    ) -> bool {
+        let root = self.pool.find(var);
+        if targets.contains(&root) {
+            return true;
+        }
+        if !seen.insert(root) {
+            return false;
+        }
+        if let Content::Structure(flat) = self.pool.content(root) {
+            for child in types::flat_children(&flat) {
+                if self.var_touches(child, targets, seen) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Generalize a definition's inferred type and, with the very same

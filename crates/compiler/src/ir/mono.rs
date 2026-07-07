@@ -314,11 +314,28 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
                 match_type(c1, c2, subst);
             }
         }
-        (Record(f1, _), Record(f2, _)) => {
+        (Record(f1, ext1), Record(f2, _)) => {
             for (name, t1) in f1 {
                 if let Some((_, t2)) = f2.iter().find(|(n, _)| n == name) {
                     match_type(t1, t2, subst);
                 }
+            }
+            // A row variable (`{ r | field : t }`) stands for the concrete
+            // record's fields not named explicitly here. Bind it so the open
+            // record specializes to the full closed record — otherwise the
+            // typed backend would lay it out with only the mentioned fields and
+            // read subsequent fields at the wrong struct offsets.
+            if let Some(ext) = ext1 {
+                let named: std::collections::HashSet<&Name> =
+                    f1.iter().map(|(n, _)| n).collect();
+                let extra: Vec<(Name, can::Type)> = f2
+                    .iter()
+                    .filter(|(n, _)| !named.contains(n))
+                    .cloned()
+                    .collect();
+                subst
+                    .entry(ext.clone())
+                    .or_insert_with(|| Record(extra, None));
             }
         }
         _ => {}
@@ -731,13 +748,30 @@ fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type 
             name.clone(),
             args.iter().map(|a| apply_subst(subst, a)).collect(),
         ),
-        Record(fields, ext) => Record(
-            fields
+        Record(fields, ext) => {
+            let mut new_fields: Vec<(Name, can::Type)> = fields
                 .iter()
                 .map(|(n, t)| (n.clone(), apply_subst(subst, t)))
-                .collect(),
-            ext.clone(),
-        ),
+                .collect();
+            // Expand a bound row variable into the record's remaining fields, so
+            // a specialized open record becomes the full closed record its
+            // concrete layout requires.
+            let mut new_ext = ext.clone();
+            if let Some(x) = ext {
+                if let Some(Record(extra, extra_ext)) = subst.get(x) {
+                    let present: std::collections::HashSet<&Name> =
+                        new_fields.iter().map(|(n, _)| n).collect();
+                    let extra: Vec<(Name, can::Type)> = extra
+                        .iter()
+                        .filter(|(n, _)| !present.contains(n))
+                        .map(|(n, t)| (n.clone(), apply_subst(subst, t)))
+                        .collect();
+                    new_fields.extend(extra);
+                    new_ext = extra_ext.clone();
+                }
+            }
+            Record(new_fields, new_ext)
+        }
         Tuple(a, b, c) => Tuple(
             Box::new(apply_subst(subst, a)),
             Box::new(apply_subst(subst, b)),
