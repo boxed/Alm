@@ -399,6 +399,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ),
             Some(Linkage::External),
         );
+        // DEBUG arity checker (only emitted under ALM_ARITY_CHECK).
+        self.module.add_function(
+            "alm_dbg_reg",
+            self.ctx.void_type().fn_type(&[i64_t.into(), self.ctx.i32_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "alm_dbg_check",
+            self.ctx.void_type().fn_type(&[i64_t.into(), self.ctx.i32_type().into()], false),
+            Some(Linkage::External),
+        );
         // Effect kernels (TEA): all take/return uniform words.
         for (name, arity) in [
             ("platform_worker", 1),
@@ -1472,6 +1483,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         self.restore_loc(saved_loc);
 
+        self.emit_arity_reg(lifted);
         Ok(self
             .build_closure_value(lifted.as_global_value().as_pointer_value(), &[w])
             .into())
@@ -4416,6 +4428,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.restore_loc(saved_loc);
 
         let capture_vals: Vec<BasicValueEnum> = captures.iter().map(|(_, v)| *v).collect();
+        self.emit_arity_reg(lifted);
         Ok(self
             .build_closure_value(lifted.as_global_value().as_pointer_value(), &capture_vals)
             .into())
@@ -4480,6 +4493,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // function it returns to.
         self.restore_loc(saved_loc);
 
+        self.emit_arity_reg(wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), applied)
             .into()
     }
@@ -4514,6 +4528,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         raw
     }
 
+    /// DEBUG: register a closure wrapper's true param count (env + args) at
+    /// creation, under ALM_ARITY_CHECK. Emitted in the caller's current block.
+    fn emit_arity_reg(&self, wrapper: FunctionValue<'ctx>) {
+        if std::env::var("ALM_ARITY_CHECK").is_err() {
+            return;
+        }
+        let f = self.module.get_function("alm_dbg_reg").unwrap();
+        let fnptr = self
+            .builder
+            .build_ptr_to_int(wrapper.as_global_value().as_pointer_value(), self.ctx.i64_type(), "fpi")
+            .unwrap();
+        let arity = self.ctx.i32_type().const_int(wrapper.count_params() as u64, false);
+        self.builder.build_call(f, &[fnptr.into(), arity.into()], "").unwrap();
+    }
+
     /// Apply a closure value to already-evaluated arguments (saturated).
     fn apply_closure(
         &self,
@@ -4528,6 +4557,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .build_load(ptr_t, closure, "fnptr")
             .unwrap()
             .into_pointer_value();
+        if std::env::var("ALM_ARITY_CHECK").is_ok() {
+            let f = self.module.get_function("alm_dbg_check").unwrap();
+            let fpi = self.builder.build_ptr_to_int(fn_ptr, self.ctx.i64_type(), "fpc").unwrap();
+            let argc = self.ctx.i32_type().const_int((args.len() + 1) as u64, false);
+            self.builder.build_call(f, &[fpi.into(), argc.into()], "").unwrap();
+        }
         let ret_ty = self.llvm_type(result_layout);
         let mut ptypes: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
         ptypes.extend(
@@ -4653,6 +4688,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         self.restore_loc(saved_loc);
 
+        self.emit_arity_reg(wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &caps)
             .into()
     }
@@ -4672,6 +4708,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         tipe: &crate::ast::canonical::Type,
     ) -> inkwell::values::PointerValue<'ctx> {
         if let Some(w) = self.wrappers.get(mangled) {
+            let w = *w;
+            self.emit_arity_reg(w);
             return self.build_closure_value(w.as_global_value().as_pointer_value(), &[]);
         }
         let compiled = self.functions[mangled].count_params() as usize;
@@ -4725,6 +4763,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // function it returns to.
         self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
+        self.emit_arity_reg(wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
     }
 
@@ -4792,6 +4831,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
+        self.emit_arity_reg(wrapper);
         self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
     }
 

@@ -1902,6 +1902,33 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn point_free_local_function_in_higher_order_kernel() {
+    // A local `let` function that is point-free in its last argument --
+    // `prepend x = List.append [x]`, whose type is `Int -> List Int -> List Int`
+    // but which declares only one parameter -- must be eta-normalized to its
+    // full type arity, exactly as top-level functions are. `List.foldl` calls
+    // its function with one argument per arrow (two here); a compiled arity of
+    // one made the fold apply `prepend` with more arguments than it had
+    // parameters, reading past the closure. This is the arity mismatch that
+    // segfaulted elm-explorations/test's `Test.Internal.duplicatedName`
+    // (`insertOrFail newName = Result.andThen (...)`, folded over test labels),
+    // crashing every native-typed run of a package with a `describe` block.
+    assert_same(
+        "point_free_local_in_hof",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       prepend : Int -> List Int -> List Int\n\
+         \x20       prepend x =\n\
+         \x20           List.append [ x ]\n\
+         \x20   in\n\
+         \x20   Debug.toString (List.foldl prepend [] [ 1, 2, 3 ])\n",
+    );
+}
+
+#[test]
 fn partial_record_alias_constructor() {
     // A record type-alias used as a constructor and *partially* applied
     // (`succeed (T inc) |> andMap ...`, the elm/json-extra andMap idiom) must

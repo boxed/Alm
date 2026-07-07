@@ -820,17 +820,23 @@ impl Specializer<'_> {
         subst: &HashMap<Name, can::Type>,
     ) -> TypedLetDecl {
         match decl {
-            can::LetDecl::Def(def) => TypedLetDecl::Def {
-                name: def.name.value.clone(),
-                params: self.local_params(def, subst),
-                body: self.expr(&def.body, subst),
-            },
+            can::LetDecl::Def(def) => {
+                let (params, body) = self.local_def_params_body(def, subst);
+                TypedLetDecl::Def {
+                    name: def.name.value.clone(),
+                    params,
+                    body,
+                }
+            }
             can::LetDecl::Recursive(defs) => TypedLetDecl::Recursive(
                 defs.iter()
-                    .map(|def| TypedLetDecl::Def {
-                        name: def.name.value.clone(),
-                        params: self.local_params(def, subst),
-                        body: self.expr(&def.body, subst),
+                    .map(|def| {
+                        let (params, body) = self.local_def_params_body(def, subst);
+                        TypedLetDecl::Def {
+                            name: def.name.value.clone(),
+                            params,
+                            body,
+                        }
                     })
                     .collect(),
             ),
@@ -947,8 +953,7 @@ impl Specializer<'_> {
             let g_sub = apply_subst(subst, &poly.generic);
             let mut subst_i = subst.clone();
             match_type(&g_sub, &ty, &mut subst_i);
-            let params = self.local_params(poly.def, &subst_i);
-            let spec_body = self.expr(&poly.def.body, &subst_i);
+            let (params, spec_body) = self.local_def_params_body(poly.def, &subst_i);
             {
                 let mut masked = std::collections::HashSet::new();
                 scan_local_uses(&spec_body, &poly_names, &mut masked, &mut queue);
@@ -1006,32 +1011,68 @@ impl Specializer<'_> {
     /// function type (captured at `def.name.region` by the checker), applying
     /// the enclosing substitution. Falls back to `Unit` when the type is
     /// unavailable or under-applied (a non-function value binding).
-    fn local_params(
+    /// Peel a local definition's declared parameters off its (substituted)
+    /// recorded function type and eta-normalize the shortfall.
+    ///
+    /// If the type has more arrows than the definition has parameters -- a
+    /// point-free local such as `insertOrFail newName = Result.andThen (...)`
+    /// whose type is `String -> Result -> Result` -- append one synthetic
+    /// parameter per uncovered arrow and apply the body to them, so the
+    /// compiled arity equals the type's arrow count. This mirrors the
+    /// top-level eta-normalization in `specialize_project`. Higher-order
+    /// kernels (`List.foldl`, `List.concatMap`, ...) and closure application
+    /// pass one argument per arrow; a compiled shortfall would apply the local
+    /// with more arguments than it has parameters and read past the closure
+    /// (previously a memory-corrupting arity mismatch).
+    fn local_def_params_body(
         &self,
         def: &can::Def,
         subst: &HashMap<Name, can::Type>,
-    ) -> Vec<(can::Pattern, can::Type)> {
+    ) -> (Vec<(can::Pattern, can::Type)>, TypedExpr) {
         let mut remaining = self
             .ctx
             .node_types
             .get(&def.name.region)
             .map(|t| apply_subst(subst, t));
-        def.args
-            .iter()
-            .map(|arg| {
-                let ty = match remaining.take() {
-                    Some(can::Type::Lambda(a, b)) => {
-                        remaining = Some(*b);
-                        *a
-                    }
-                    other => {
-                        remaining = other;
-                        can::Type::Unit
-                    }
-                };
-                (arg.clone(), ty)
-            })
-            .collect()
+        let mut params: Vec<(can::Pattern, can::Type)> = Vec::new();
+        for arg in &def.args {
+            let ty = match remaining.take() {
+                Some(can::Type::Lambda(a, b)) => {
+                    remaining = Some(*b);
+                    *a
+                }
+                other => {
+                    remaining = other;
+                    can::Type::Unit
+                }
+            };
+            params.push((arg.clone(), ty));
+        }
+        let mut body = self.expr(&def.body, subst);
+        let mut idx = 0u32;
+        while let Some(can::Type::Lambda(a, b)) = remaining {
+            let pname = Name::from(format!(
+                "_etl_{}_{}_{}",
+                def.name.region.start.row, def.name.region.start.col, idx
+            ));
+            let pat = Located::new(def.name.region, can::Pattern_::Var(pname.clone()));
+            params.push((pat, (*a).clone()));
+            body = TypedExpr {
+                tipe: (*b).clone(),
+                kind: TypedKind::Call(
+                    Box::new(body),
+                    vec![TypedExpr {
+                        tipe: (*a).clone(),
+                        kind: TypedKind::Local(pname),
+                        region: def.name.region,
+                    }],
+                ),
+                region: def.name.region,
+            };
+            remaining = Some(*b);
+            idx += 1;
+        }
+        (params, body)
     }
 }
 

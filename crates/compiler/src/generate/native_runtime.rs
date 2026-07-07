@@ -688,6 +688,34 @@ pub unsafe extern "C" fn rt_closure(
     })
 }
 
+// --- DEBUG: closure arity checker (only wired when the typed backend is
+// built with ALM_ARITY_CHECK set). Registers each closure wrapper's true LLVM
+// parameter count at creation and verifies it at every typed application, to
+// catch a closure of one arity being invoked through a slot of another. ---
+static mut ARITY_MAP: Option<std::collections::HashMap<usize, u32>> = None;
+
+#[no_mangle]
+pub unsafe extern "C" fn alm_dbg_reg(fnptr: u64, arity: u32) {
+    let m = ARITY_MAP.get_or_insert_with(std::collections::HashMap::new);
+    m.insert(fnptr as usize, arity);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn alm_dbg_check(fnptr: u64, argc: u32) {
+    if let Some(m) = &*std::ptr::addr_of!(ARITY_MAP) {
+        if let Some(&ar) = m.get(&(fnptr as usize)) {
+            if ar != argc {
+                eprintln!(
+                    "\n=== ARITY MISMATCH: fnptr={:#x} registered={} called_with={} ===",
+                    fnptr, ar, argc
+                );
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+                std::process::abort();
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_closure_set(closure: u64, i: i32, value: u64) {
     if let Value::Closure { args, .. } = deref_mut(closure) {
