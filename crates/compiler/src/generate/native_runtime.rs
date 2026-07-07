@@ -189,6 +189,11 @@ pub enum JsonValue {
     JStr(Vec<u8>),
     JArray(Vec<JsonValue>),
     JObject(Vec<(Vec<u8>, JsonValue)>),
+    /// An opaque embedded Elm value word (a closure, decoder, or other value)
+    /// carried inside a JSON tree. Not producible by JSON parsing or encoding —
+    /// used only by `HtmlAsJson`, which reflects the virtual dom (with its live
+    /// event decoders and `map` taggers) into the JSON shape Test.Html decodes.
+    Elm(u64),
 }
 
 /// A reified decoder. Word fields point to other `Value::Decoder`s or to
@@ -1253,6 +1258,9 @@ fn json_eq(a: &JsonValue, b: &JsonValue) -> bool {
                         .map_or(false, |(_, v2)| json_eq(v, v2))
                 })
         }
+        // Embedded Elm values (HtmlAsJson taggers/decoders): same notion of
+        // equality as any function/opaque value — by the underlying word.
+        (Elm(x), Elm(y)) => unsafe { value_eq(*x, *y) },
         _ => false,
     }
 }
@@ -2486,6 +2494,7 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
 
 fn debug_json(out: &mut String, j: &JsonValue) {
     match j {
+        JsonValue::Elm(_) => out.push_str("<internals>"),
         JsonValue::Null => out.push_str("<internal>"),
         JsonValue::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
         JsonValue::Number(n) => {
@@ -4880,6 +4889,9 @@ fn json_number_str(n: f64) -> String {
 }
 fn json_write(jv: &JsonValue, indent: usize, depth: usize, out: &mut String) {
     match jv {
+        // An embedded Elm value has no JSON serialization (it is never encoded;
+        // HtmlAsJson trees are decoded, not stringified). Emit null defensively.
+        JsonValue::Elm(_) => out.push_str("null"),
         JsonValue::Null => out.push_str("null"),
         JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         JsonValue::Number(n) => out.push_str(&json_number_str(*n)),
@@ -5526,6 +5538,289 @@ unsafe extern "C" fn events_on_check1(to_msg: u64) -> u64 {
     event(b"change", mk_decoder(Decoder::Map(to_msg, target_field(b"checked", Decoder::Bool))), 0)
 }
 
+// --- HtmlAsJson: reflect the native vdom into the elm/virtual-dom JSON shape
+// that elm-explorations/test's Test.Html decoders read (the Rust twin of
+// runtime.js's `_HtmlAsJson_*`). Node kinds map to `$`: 0 text, 1 node, 2 keyed,
+// 4 tagger; facts bucket into a0 (events), a1 (styles), a3 (attributes), a4
+// (namespaced attributes), plain properties at top level, merged classes under
+// `className`. Live leaves (event decoders, `map` taggers) ride along as
+// `JsonValue::Elm`, recovered by eventHandler/taggerFunction.
+
+fn jfield(key: &[u8], v: JsonValue) -> (Vec<u8>, JsonValue) {
+    (key.to_vec(), v)
+}
+
+unsafe fn jstr_of(w: u64) -> JsonValue {
+    JsonValue::JStr(str_slice(w).to_vec())
+}
+
+// A DOM property / attribute value as JSON, keeping non-string values (bools,
+// numbers, wrapped Json.Value) faithful and carrying anything else opaquely.
+unsafe fn val_to_json(w: u64) -> JsonValue {
+    if is_int(w) {
+        return JsonValue::Number(int_val(w) as f64);
+    }
+    match deref(w) {
+        Value::Str(s) => JsonValue::JStr(s.clone()),
+        Value::Bool(b) => JsonValue::Bool(*b),
+        Value::Float(f) => JsonValue::Number(*f),
+        Value::Json(j) => j.clone(),
+        _ => JsonValue::Elm(w),
+    }
+}
+
+fn add_class(classes: &mut Option<Vec<u8>>, v: &[u8]) {
+    match classes {
+        None => *classes = Some(v.to_vec()),
+        Some(c) => {
+            c.push(b' ');
+            c.extend_from_slice(v);
+        }
+    }
+}
+
+/// The descendant count `.b` of an already-translated node (0 when absent, e.g.
+/// text nodes), so parents can sum `1 + countOf(child)` like the JS translator.
+fn json_count_of(v: &JsonValue) -> f64 {
+    if let JsonValue::JObject(fs) = v {
+        for (k, val) in fs {
+            if k == b"b" {
+                if let JsonValue::Number(n) = val {
+                    return *n;
+                }
+            }
+        }
+    }
+    0.0
+}
+
+// _HtmlAsJson_handler: an AEvent → the `VirtualDom.Handler` union value the
+// event carries. In JS a union and a `{$:tag,a:x}` object share a shape, so the
+// JS translator emits a plain object; natively a union is a real `Value::Ctor`,
+// so we build one (embedded opaquely) — `eventHandler` hands it back and
+// Test.Html pattern-matches it. Ctor indices match VirtualDom.Handler's order:
+// Normal 0, MayStopPropagation 1, MayPreventDefault 2, Custom 3.
+unsafe fn html_handler(attr: u64) -> JsonValue {
+    let decoder = ctor_get(attr, 1);
+    let (name, index): (&[u8], u32) = match int_val(ctor_get(attr, 2)) {
+        3 => (b"Custom\0", 3),
+        1 => (b"MayStopPropagation\0", 1),
+        2 => (b"MayPreventDefault\0", 2),
+        _ => (b"Normal\0", 0),
+    };
+    JsonValue::Elm(ctor1(name.as_ptr(), index, decoder))
+}
+
+// _HtmlAsJson_facts.
+unsafe fn html_facts(attrs: u64) -> JsonValue {
+    let mut styles: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    let mut string_attrs: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    let mut ns_attrs: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    let mut events: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    let mut props: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    let mut classes: Option<Vec<u8>> = None;
+    for &a in &to_vec(attrs) {
+        if let Value::Ctor { index, arg0, rest, .. } = deref(a) {
+            let key = *arg0;
+            match *index {
+                AI_STYLE => styles.push((str_slice(key).to_vec(), jstr_of(rest[0]))),
+                AI_ATTR => {
+                    if rest[1] != nothing() {
+                        ns_attrs.push((
+                            str_slice(key).to_vec(),
+                            JsonValue::JObject(vec![
+                                jfield(b"o", jstr_of(rest[0])),
+                                jfield(b"f", jstr_of(ctor_get(rest[1], 0))),
+                            ]),
+                        ));
+                    } else if str_is(key, b"class") {
+                        add_class(&mut classes, str_slice(rest[0]));
+                    } else {
+                        string_attrs.push((str_slice(key).to_vec(), jstr_of(rest[0])));
+                    }
+                }
+                AI_PROP => {
+                    if str_is(key, b"className") {
+                        add_class(&mut classes, str_slice(rest[0]));
+                    } else {
+                        props.push((str_slice(key).to_vec(), val_to_json(rest[0])));
+                    }
+                }
+                AI_EVENT => events.push((
+                    str_slice(key).to_vec(),
+                    JsonValue::JObject(vec![jfield(b"a", html_handler(a))]),
+                )),
+                _ => {}
+            }
+        }
+    }
+    let mut facts: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    if !events.is_empty() {
+        facts.push(jfield(b"a0", JsonValue::JObject(events)));
+    }
+    if !styles.is_empty() {
+        facts.push(jfield(b"a1", JsonValue::JObject(styles)));
+    }
+    if !string_attrs.is_empty() {
+        facts.push(jfield(b"a3", JsonValue::JObject(string_attrs)));
+    }
+    if !ns_attrs.is_empty() {
+        facts.push(jfield(b"a4", JsonValue::JObject(ns_attrs)));
+    }
+    facts.extend(props);
+    if let Some(c) = classes {
+        facts.push(jfield(b"className", JsonValue::JStr(c)));
+    }
+    JsonValue::JObject(facts)
+}
+
+unsafe fn html_element_obj(
+    tag_num: f64,
+    tag: u64,
+    attrs: u64,
+    kids: Vec<JsonValue>,
+    count: f64,
+    ns: u64,
+) -> JsonValue {
+    let mut fields = vec![
+        jfield(b"$", JsonValue::Number(tag_num)),
+        jfield(b"c", jstr_of(tag)),
+        jfield(b"d", html_facts(attrs)),
+        jfield(b"e", JsonValue::JArray(kids)),
+        jfield(b"b", JsonValue::Number(count)),
+    ];
+    // `f` (namespace) only for namespaced nodes; a normal node omits it, which
+    // the decoder reads the same as JS's `f: undefined` (a missing field).
+    if ns != nothing() {
+        fields.push(jfield(b"f", jstr_of(ctor_get(ns, 0))));
+    }
+    JsonValue::JObject(fields)
+}
+
+// _HtmlAsJson_translate.
+unsafe fn html_translate(node: u64) -> JsonValue {
+    let index = match deref(node) {
+        Value::Ctor { index, .. } => *index,
+        _ => return JsonValue::Null,
+    };
+    match index {
+        VI_TEXT => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::Number(0.0)),
+            jfield(b"a", jstr_of(ctor_get(node, 0))),
+        ]),
+        VI_MAP => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::Number(4.0)),
+            jfield(
+                b"j",
+                JsonValue::JObject(vec![jfield(b"a", JsonValue::Elm(ctor_get(node, 0)))]),
+            ),
+            jfield(b"k", html_translate(ctor_get(node, 1))),
+        ]),
+        VI_KEYED => {
+            let mut e: Vec<JsonValue> = Vec::new();
+            let mut count = 0.0;
+            for &pair in &to_vec(ctor_get(node, 2)) {
+                let kt = html_translate(tuple_second(pair));
+                count += 1.0 + json_count_of(&kt);
+                e.push(JsonValue::JObject(vec![
+                    jfield(b"a", jstr_of(tuple_first(pair))),
+                    jfield(b"b", kt),
+                ]));
+            }
+            html_element_obj(2.0, ctor_get(node, 0), ctor_get(node, 1), e, count, ctor_get(node, 3))
+        }
+        VI_NODE => {
+            let mut e: Vec<JsonValue> = Vec::new();
+            let mut count = 0.0;
+            for &kid in &to_vec(ctor_get(node, 2)) {
+                let kt = html_translate(kid);
+                count += 1.0 + json_count_of(&kt);
+                e.push(kt);
+            }
+            html_element_obj(1.0, ctor_get(node, 0), ctor_get(node, 1), e, count, ctor_get(node, 3))
+        }
+        _ => JsonValue::Null,
+    }
+}
+
+// _HtmlAsJson_attribute.
+unsafe fn html_attribute(attr: u64) -> JsonValue {
+    let (index, key, rest) = match deref(attr) {
+        Value::Ctor { index, arg0, rest, .. } => (*index, *arg0, rest),
+        _ => return JsonValue::Null,
+    };
+    match index {
+        AI_STYLE => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::JStr(b"a1".to_vec())),
+            jfield(b"n", jstr_of(key)),
+            jfield(b"o", jstr_of(rest[0])),
+        ]),
+        AI_PROP => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::JStr(b"a2".to_vec())),
+            jfield(b"n", jstr_of(key)),
+            jfield(b"o", JsonValue::JObject(vec![jfield(b"a", val_to_json(rest[0]))])),
+        ]),
+        AI_EVENT => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::JStr(b"a0".to_vec())),
+            jfield(b"n", jstr_of(key)),
+            jfield(
+                b"o",
+                JsonValue::JObject(vec![
+                    jfield(b"a", JsonValue::Elm(rest[0])),
+                    jfield(b"opts", JsonValue::Number(int_val(rest[1]) as f64)),
+                ]),
+            ),
+        ]),
+        AI_ATTR if rest[1] != nothing() => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::JStr(b"a4".to_vec())),
+            jfield(b"n", jstr_of(key)),
+            jfield(
+                b"o",
+                JsonValue::JObject(vec![
+                    jfield(b"o", jstr_of(rest[0])),
+                    jfield(b"f", jstr_of(ctor_get(rest[1], 0))),
+                ]),
+            ),
+        ]),
+        AI_ATTR => JsonValue::JObject(vec![
+            jfield(b"$", JsonValue::JStr(b"a3".to_vec())),
+            jfield(b"n", jstr_of(key)),
+            jfield(b"o", jstr_of(rest[0])),
+        ]),
+        _ => JsonValue::Null,
+    }
+}
+
+/// Read an object field and hand back the embedded Elm value it carries
+/// (eventHandler/taggerFunction recover the live decoder / tagger from the
+/// reflected JSON). A non-Elm field is re-wrapped as a `Json.Value`.
+unsafe fn json_get_elm_field(w: u64, key: &[u8]) -> u64 {
+    if let Value::Json(JsonValue::JObject(fs)) = deref(w) {
+        for (k, v) in fs {
+            if k.as_slice() == key {
+                return match v {
+                    JsonValue::Elm(e) => *e,
+                    other => mk_json(other.clone()),
+                };
+            }
+        }
+    }
+    mk_json(JsonValue::Null)
+}
+
+unsafe extern "C" fn html_to_json(html: u64) -> u64 {
+    mk_json(html_translate(html))
+}
+unsafe extern "C" fn html_attribute_to_json(attr: u64) -> u64 {
+    mk_json(html_attribute(attr))
+}
+unsafe extern "C" fn html_event_handler(h: u64) -> u64 {
+    json_get_elm_field(h, b"a")
+}
+unsafe extern "C" fn html_tagger_function(t: u64) -> u64 {
+    json_get_elm_field(t, b"a")
+}
+
 // Per-tag / per-attribute globals whose DOM key is baked into a closure
 // capture — the native twin of runtime.js's `var $Html$div = _VDom_node('div')`
 // etc. Each entry: an ident, its exported mangled symbol, and the closure
@@ -5541,6 +5836,8 @@ macro_rules! baked_globals {
 }
 
 baked_globals! {
+    G_HTMLKEYED_UL "$Html$Keyed$ul" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ul".to_vec())]);
+    G_HTMLKEYED_OL "$Html$Keyed$ol" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ol".to_vec())]);
     G_HTMLTAG_DIV "$Html$div" = closure(vdom_node3 as *const (), 3, &[mkstr(b"div".to_vec())]);
     G_HTMLTAG_SPAN "$Html$span" = closure(vdom_node3 as *const (), 3, &[mkstr(b"span".to_vec())]);
     G_HTMLTAG_P "$Html$p" = closure(vdom_node3 as *const (), 3, &[mkstr(b"p".to_vec())]);
@@ -5759,6 +6056,12 @@ kernel_fns! {
     G_HTMLEV_ONSUBMIT "$Html$Events$onSubmit" events_on_submit1, 1;
     G_HTMLEV_ONINPUT "$Html$Events$onInput" events_on_input1, 1;
     G_HTMLEV_ONCHECK "$Html$Events$onCheck" events_on_check1, 1;
+
+    // Test.Html introspection: reflect the vdom to elm/virtual-dom JSON.
+    G_HTMLASJSON_TOJSON "$Elm$Kernel$HtmlAsJson$toJson" html_to_json, 1;
+    G_HTMLASJSON_ATTRTOJSON "$Elm$Kernel$HtmlAsJson$attributeToJson" html_attribute_to_json, 1;
+    G_HTMLASJSON_EVENTHANDLER "$Elm$Kernel$HtmlAsJson$eventHandler" html_event_handler, 1;
+    G_HTMLASJSON_TAGGERFN "$Elm$Kernel$HtmlAsJson$taggerFunction" html_tagger_function, 1;
 
     G_REGEX_FROMSTRINGWITH "$Elm$Kernel$Regex$fromStringWith" regex_from_string_with, 2;
     G_REGEX_CONTAINS "$Elm$Kernel$Regex$contains" regex_contains, 2;
