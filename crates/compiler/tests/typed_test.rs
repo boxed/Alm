@@ -2023,6 +2023,34 @@ fn local_row_polymorphic_record_access() {
 }
 
 #[test]
+fn function_identity_survives_uniform_roundtrip() {
+    // A function stored in a uniform container (Dict) is boxed; reading it back
+    // unboxes it. box∘unbox must preserve identity so the round-tripped
+    // function still compares equal to the original (Elm's `==` on functions is
+    // reference equality) — the case that kept Evelios/elm-markov's encode/decode
+    // roundtrip failing (its model embeds a comparator function). Compared
+    // through a Dict so equality goes via the runtime's value_eq.
+    assert_same(
+        "fn_roundtrip_identity",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         bump : Int -> Int\n\
+         bump x =\n\
+         \x20   x + 1\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       got =\n\
+         \x20           Dict.get 0 (Dict.fromList [ ( 0, bump ) ])\n\
+         \x20   in\n\
+         \x20   Debug.toString (Dict.singleton 1 got == Dict.singleton 1 (Just bump))\n",
+    );
+}
+
+#[test]
 fn equality_of_values_containing_a_shared_function() {
     // Elm's `==` short-circuits to `true` for the same function reference, so a
     // data structure that embeds a function (here a `Dict` value) compares equal

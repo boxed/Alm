@@ -432,6 +432,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             self.ctx.void_type().fn_type(&[i64_t.into(), self.ctx.i32_type().into()], false),
             Some(Linkage::External),
         );
+        // Closure box/unbox identity: register a box trampoline; recover the
+        // original typed closure when unboxing one.
+        self.module.add_function(
+            "alm_reg_box_tramp",
+            self.ctx.void_type().fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "alm_recover_boxed",
+            i64_t.fn_type(&[i64_t.into()], false),
+            Some(Linkage::External),
+        );
         // Effect kernels (TEA): all take/return uniform words.
         for (name, arity) in [
             ("platform_worker", 1),
@@ -1454,7 +1466,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             tramp
         };
 
-        // Build the uniform closure capturing the typed closure pointer.
+        // Build the uniform closure capturing the typed closure pointer, and
+        // register the trampoline so `unbox_closure` can recover this exact
+        // typed closure — box∘unbox is then identity (a function that round-
+        // trips through the uniform representation stays the same value).
+        let tramp_word = self
+            .builder
+            .build_ptr_to_int(tramp.as_global_value().as_pointer_value(), i64_t, "tw")
+            .unwrap();
+        let reg_fn = self.module.get_function("alm_reg_box_tramp").unwrap();
+        self.builder.build_call(reg_fn, &[tramp_word.into()], "").unwrap();
         let closure_word = self
             .builder
             .build_ptr_to_int(val.into_pointer_value(), i64_t, "cw")
@@ -1567,9 +1588,35 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.restore_loc(saved_loc);
 
         self.emit_arity_reg(lifted);
-        Ok(self
-            .build_closure_value(lifted.as_global_value().as_pointer_value(), &[w])
-            .into())
+        // If `w` is a closure that `box_closure` produced, recover the original
+        // typed closure instead of wrapping it again — so box∘unbox is identity
+        // and a round-tripped function keeps its identity (Elm's `==` on
+        // functions is reference equality). Otherwise wrap the uniform closure.
+        let recovered = self
+            .call_named("alm_recover_boxed", &[w])
+            .into_int_value();
+        let is_rec = self
+            .builder
+            .build_int_compare(IntPredicate::NE, recovered, i64_t.const_zero(), "isrec")
+            .unwrap();
+        let rec_bb = self.new_block("unbox.recover");
+        let wrap_bb = self.new_block("unbox.wrap");
+        let cont_bb = self.new_block("unbox.cont");
+        self.builder.build_conditional_branch(is_rec, rec_bb, wrap_bb).unwrap();
+
+        self.builder.position_at_end(rec_bb);
+        let rec_ptr = self.builder.build_int_to_ptr(recovered, ptr_t, "recptr").unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+
+        self.builder.position_at_end(wrap_bb);
+        let wrapped = self.build_closure_value(lifted.as_global_value().as_pointer_value(), &[w]);
+        let wrap_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+
+        self.builder.position_at_end(cont_bb);
+        let phi = self.builder.build_phi(ptr_t, "unboxed").unwrap();
+        phi.add_incoming(&[(&rec_ptr, rec_bb), (&wrapped, wrap_end)]);
+        Ok(phi.as_basic_value())
     }
 
     fn box_list(

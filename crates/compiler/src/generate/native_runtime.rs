@@ -716,6 +716,44 @@ pub unsafe extern "C" fn alm_dbg_check(fnptr: u64, argc: u32) {
     }
 }
 
+static mut BOX_TRAMPS: Option<std::collections::HashSet<usize>> = None;
+
+/// Register a `box_closure` trampoline's function pointer so `unbox_closure`
+/// can recognize a boxed typed closure and recover the original — making
+/// box∘unbox identity-preserving (a function that round-trips through the
+/// uniform representation stays the same value, so `==` on it still matches
+/// Elm's reference equality).
+#[no_mangle]
+pub unsafe extern "C" fn alm_reg_box_tramp(fnptr: u64) {
+    BOX_TRAMPS
+        .get_or_insert_with(std::collections::HashSet::new)
+        .insert(fnptr as usize);
+}
+
+/// If `w` is a uniform closure produced by `box_closure` (its function is a
+/// registered trampoline), return the original captured typed-closure word;
+/// otherwise 0.
+#[no_mangle]
+pub unsafe extern "C" fn alm_recover_boxed(w: u64) -> u64 {
+    if is_int(w) {
+        return 0;
+    }
+    if let Value::Closure { func, applied, args, .. } = deref(w) {
+        // Only a *freshly* boxed closure — exactly its captured typed-closure
+        // word, no user arguments applied yet (`applied == 1`). One that has
+        // since been partially applied carries extra args that recovering the
+        // original would drop, so leave it to be wrapped normally.
+        if *applied == 1 {
+            if let Some(set) = &*std::ptr::addr_of!(BOX_TRAMPS) {
+                if set.contains(&(*func as usize)) {
+                    return args[0];
+                }
+            }
+        }
+    }
+    0
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rt_closure_set(closure: u64, i: i32, value: u64) {
     if let Value::Closure { args, .. } = deref_mut(closure) {
