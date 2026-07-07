@@ -69,6 +69,12 @@ struct TypedCodegen<'ctx, 'l> {
     unbox_fns: HashMap<String, FunctionValue<'ctx>>,
     locals: HashMap<String, BasicValueEnum<'ctx>>,
     cur_fn: Option<FunctionValue<'ctx>>,
+    /// When emitting a self-tail-recursive function, its loop state: a mutable
+    /// slot per parameter and the loop header block. A tail self-call stores the
+    /// new arguments into the slots and branches back to the header instead of
+    /// calling — turning unbounded tail recursion into a loop (as Elm's own JS
+    /// backend does), so it runs in constant stack.
+    tco: Option<TcoState<'ctx>>,
     blk: usize,
     lam_id: usize,
     /// Monotonic counter for fresh variable names introduced when desugaring
@@ -88,6 +94,16 @@ struct TypedCodegen<'ctx, 'l> {
     /// returns a bogus empty node when the location is unset. Helpers that
     /// switch to another LLVM function save and restore this.
     cur_loc: Option<DILocation<'ctx>>,
+}
+
+#[derive(Clone)]
+struct TcoState<'ctx> {
+    /// The mangled name of the function whose tail self-calls loop.
+    mangled: String,
+    /// One mutable slot per parameter: `(name, alloca, llvm type)`.
+    slots: Vec<(String, inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+    /// The loop header block a tail self-call branches back to.
+    header: inkwell::basic_block::BasicBlock<'ctx>,
 }
 
 impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
@@ -141,6 +157,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             unbox_fns: HashMap::new(),
             locals: HashMap::new(),
             cur_fn: None,
+            tco: None,
             blk: 0,
             lam_id: 0,
             fresh_id: 0,
@@ -686,11 +703,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             (f.params.as_slice(), &f.body)
         };
 
-        for (i, (pattern, _)) in params.iter().enumerate() {
-            if let Some(name) = simple_param_name(pattern) {
-                self.locals
-                    .insert(name, fv.get_nth_param(i as u32).unwrap());
-            } else {
+        for (_, (pattern, _)) in params.iter().enumerate() {
+            if simple_param_name(pattern).is_none() {
                 return Err(format!(
                     "typed backend: unsupported parameter pattern in `{}`",
                     f.original
@@ -699,8 +713,130 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let entry = self.ctx.append_basic_block(fv, "entry");
         self.builder.position_at_end(entry);
+        // Clear any location left over from the previously-emitted function, so
+        // the loop-slot allocas (and any entry-block scratch positioned before
+        // them) carry no foreign scope.
+        self.clear_loc();
+
+        // A self-tail-recursive function loops instead of recursing: give each
+        // parameter a mutable slot, and let `gen_tail` turn a tail self-call
+        // into "store new args, branch to header" (constant stack).
+        let mangled = f.mangled.to_string();
+        if !params.is_empty() && tail_has_self_call(body, &mangled, params.len()) {
+            let mut slots = Vec::with_capacity(params.len());
+            for (i, (pattern, ty)) in params.iter().enumerate() {
+                let name = simple_param_name(pattern).unwrap();
+                let lty = self.llvm_type(&self.layouts.layout_of(ty));
+                let slot = self.builder.build_alloca(lty, &name).unwrap();
+                self.builder
+                    .build_store(slot, fv.get_nth_param(i as u32).unwrap())
+                    .unwrap();
+                slots.push((name, slot, lty));
+            }
+            let header = self.new_block("tail.header");
+            self.builder.build_unconditional_branch(header).unwrap();
+            self.builder.position_at_end(header);
+            for (name, slot, lty) in &slots {
+                let v = self.builder.build_load(*lty, *slot, name).unwrap();
+                self.locals.insert(name.clone(), v);
+            }
+            self.tco = Some(TcoState {
+                mangled,
+                slots,
+                header,
+            });
+            let r = self.gen_tail(body);
+            self.tco = None;
+            return r;
+        }
+
+        for (i, (pattern, _)) in params.iter().enumerate() {
+            let name = simple_param_name(pattern).unwrap();
+            self.locals.insert(name, fv.get_nth_param(i as u32).unwrap());
+        }
         let value = self.gen(body)?;
         self.builder.build_return(Some(&value)).unwrap();
+        Ok(())
+    }
+
+    /// Generate an expression in tail position within a self-tail-recursive
+    /// function. Every path terminates its block: a tail self-call stores the
+    /// new arguments and branches to the loop header; anything else evaluates
+    /// and returns. `if`/`case`/`let` recurse into their tail sub-expressions.
+    fn gen_tail(&mut self, expr: &TypedExpr) -> Result<(), String> {
+        self.set_loc(expr.region);
+        let tco = self.tco.clone();
+        match &expr.kind {
+            TypedKind::Call(func, args) => {
+                if let (Some(tco), TypedKind::Global(n)) = (&tco, &func.kind) {
+                    if n.to_string() == tco.mangled && args.len() == tco.slots.len() {
+                        let mut vals = Vec::with_capacity(args.len());
+                        for a in args {
+                            vals.push(self.gen(a)?);
+                        }
+                        for ((_, slot, _), v) in tco.slots.iter().zip(vals) {
+                            self.builder.build_store(*slot, v).unwrap();
+                        }
+                        self.builder.build_unconditional_branch(tco.header).unwrap();
+                        return Ok(());
+                    }
+                }
+                let v = self.gen(expr)?;
+                self.builder.build_return(Some(&v)).unwrap();
+                Ok(())
+            }
+            TypedKind::If(branches, otherwise) => {
+                for (cond, then) in branches {
+                    let cv = self.gen(cond)?.into_int_value();
+                    let then_bb = self.new_block("if.then");
+                    let else_bb = self.new_block("if.else");
+                    self.builder
+                        .build_conditional_branch(cv, then_bb, else_bb)
+                        .unwrap();
+                    self.builder.position_at_end(then_bb);
+                    self.gen_tail(then)?;
+                    self.builder.position_at_end(else_bb);
+                }
+                self.gen_tail(otherwise)
+            }
+            TypedKind::Case(scrutinee, branches) => self.gen_case_tail(scrutinee, branches),
+            TypedKind::Let(decls, body) => {
+                self.bind_let_decls(decls)?;
+                self.gen_tail(body)
+            }
+            _ => {
+                let v = self.gen(expr)?;
+                self.builder.build_return(Some(&v)).unwrap();
+                Ok(())
+            }
+        }
+    }
+
+    /// The tail-position variant of [`gen_case`]: each matched branch is
+    /// generated in tail position (returning or looping) rather than feeding a
+    /// join phi.
+    fn gen_case_tail(
+        &mut self,
+        scrutinee: &TypedExpr,
+        branches: &[(crate::ast::canonical::Pattern, TypedExpr)],
+    ) -> Result<(), String> {
+        let subject = self.gen(scrutinee)?;
+        let subject_layout = self.layouts.layout_of(&scrutinee.tipe);
+        let mut matched_all = false;
+        for (pattern, body) in branches {
+            let fail = self.new_block("case.next");
+            let refutable = self.match_pattern(pattern, subject, &subject_layout, fail)?;
+            self.gen_tail(body)?;
+            self.builder.position_at_end(fail);
+            if !refutable {
+                self.builder.build_unreachable().unwrap();
+                matched_all = true;
+                break;
+            }
+        }
+        if !matched_all {
+            self.builder.build_unreachable().unwrap();
+        }
         Ok(())
     }
 
@@ -1599,6 +1735,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             TypedKind::Float(f) => Ok(self.ctx.f64_type().const_float(*f).into()),
             TypedKind::Str(s) => self.gen_string(s),
+            // A character literal is its Unicode scalar in an i32 (the `Char`
+            // layout).
+            TypedKind::Chr(c) => Ok(self.ctx.i32_type().const_int(*c as u64, false).into()),
             TypedKind::Unit => Ok(self.ctx.i64_type().const_zero().into()),
             TypedKind::Local(name) => self
                 .locals
@@ -1701,10 +1840,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let result_layout = self.layouts.layout_of(&field_ty);
                 self.gen_closure(&params, &body, &result_layout)
             }
-            other => Err(format!(
-                "typed backend: unsupported expression {:?}",
-                std::mem::discriminant(other)
-            )),
         }
     }
 
@@ -1784,19 +1919,43 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .left()
                 .unwrap()
                 .into_pointer_value();
-            let ret_layout = self.layouts.layout_of(&whole.tipe);
-            return Ok(self.apply_closure(closure, &evaled[np..], &ret_layout));
+            // The closure returned by the point-free (or under-arity) function
+            // has the callee's type with its `np` compiled parameters peeled
+            // off. Apply the remaining arguments with currying so an
+            // under-saturated application builds a partial closure rather than
+            // calling with too few arguments.
+            let mut closure_ty = func.tipe.clone();
+            for _ in 0..np {
+                match closure_ty {
+                    crate::ast::canonical::Type::Lambda(_, r) => closure_ty = *r,
+                    _ => break,
+                }
+            }
+            return Ok(self.apply_closure_curried(closure, &evaled[np..], &closure_ty));
+        }
+
+        // A directly-applied lambda literal — including a *partial* application
+        // (fewer arguments than the lambda's parameters, e.g. the `\f (a,b) ->
+        // f a b` half of a composed function applied to one argument). Route it
+        // through `apply_fn_expr`, which inlines a saturated lambda and builds a
+        // partial-application closure when under-applied.
+        if let TypedKind::Lambda(..) = &func.kind {
+            let mut argv = Vec::with_capacity(args.len());
+            for arg in args {
+                argv.push(self.gen(arg)?);
+            }
+            return self.apply_fn_expr(func, &argv);
         }
 
         // Otherwise the callee is a closure value (a function-typed local,
-        // the result of another call, a field, …): apply it indirectly.
+        // the result of another call, a field, …): apply it indirectly, with
+        // currying so an under-saturated application builds a partial closure.
         let closure = self.gen(func)?.into_pointer_value();
         let mut argv = Vec::with_capacity(args.len());
         for arg in args {
             argv.push(self.gen(arg)?);
         }
-        let ret_layout = self.layouts.layout_of(&whole.tipe);
-        Ok(self.apply_closure(closure, &argv, &ret_layout))
+        Ok(self.apply_closure_curried(closure, &argv, &func.tipe))
     }
 
     /// Build a data-carrying constructor: allocate `{tag, fields}` on the
@@ -1865,6 +2024,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         decls: &[crate::ir::mono::TypedLetDecl],
         body: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.bind_let_decls(decls)?;
+        self.gen(body)
+    }
+
+    /// Bind a `let` block's declarations into the local scope (shared by
+    /// [`gen_let`] and the tail-position path).
+    fn bind_let_decls(&mut self, decls: &[crate::ir::mono::TypedLetDecl]) -> Result<(), String> {
         use crate::ir::mono::TypedLetDecl::*;
         for decl in decls {
             match decl {
@@ -1887,7 +2053,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Recursive(group) => self.gen_rec_group(group)?,
             }
         }
-        self.gen(body)
+        Ok(())
     }
 
     /// Generate a group of mutually-recursive local definitions. A singleton
@@ -1912,11 +2078,231 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             [Def { params, .. }] if params.is_empty() => Err(
                 "typed backend: recursive local value bindings are not supported".to_string(),
             ),
-            _ => Err(
-                "typed backend: mutually-recursive local functions are not supported yet"
-                    .to_string(),
-            ),
+            _ => self.gen_mutual_rec_group(group),
         }
+    }
+
+    /// Generate a group of N mutually-recursive local functions. Each member is
+    /// lifted to a function `lam_i(env, params...)`. Every member's closure
+    /// environment carries one slot for *every* member of the group (so any
+    /// member can reach any other), followed by that member's external
+    /// captures. The closures are heap-allocated first and their group slots
+    /// backpatched with the other members' pointers afterwards — an
+    /// allocate-then-backpatch that ties the mutual-recursion knot.
+    fn gen_mutual_rec_group(
+        &mut self,
+        group: &[crate::ir::mono::TypedLetDecl],
+    ) -> Result<(), String> {
+        use crate::ir::mono::TypedLetDecl::Def;
+        let n = group.len();
+
+        // Group member names, in a fixed order that indexes every env's slots.
+        let mut names: Vec<String> = Vec::with_capacity(n);
+        for d in group {
+            match d {
+                Def { name, params, .. } if !params.is_empty() => names.push(name.to_string()),
+                Def { .. } => {
+                    return Err("typed backend: mutually-recursive local value bindings are \
+                                not supported"
+                        .to_string())
+                }
+                _ => {
+                    return Err(
+                        "typed backend: unexpected non-function in a recursive group".to_string()
+                    )
+                }
+            }
+        }
+
+        struct Member<'ctx> {
+            name: String,
+            params: Vec<(crate::ast::canonical::Pattern, crate::ast::canonical::Type)>,
+            body: TypedExpr,
+            param_names: Vec<String>,
+            externals: Vec<(String, BasicValueEnum<'ctx>)>,
+            result_layout: Layout,
+        }
+
+        // Gather each member, desugaring destructuring parameters and computing
+        // the external captures (free variables that are neither parameters nor
+        // group members) against the *current* locals.
+        let mut members: Vec<Member<'ctx>> = Vec::with_capacity(n);
+        for d in group {
+            let Def { name, params, body } = d else { unreachable!() };
+            let (params, body) = if params.iter().any(|(p, _)| simple_param_name(p).is_none()) {
+                desugar_destructuring_params(&mut self.fresh_id, params, body)
+            } else {
+                (params.clone(), body.clone())
+            };
+            let mut param_names = Vec::with_capacity(params.len());
+            for (p, _) in &params {
+                match simple_param_name(p) {
+                    Some(nm) => param_names.push(nm),
+                    None => {
+                        return Err("typed backend: destructuring parameters in a \
+                                    mutually-recursive group are not supported"
+                            .to_string())
+                    }
+                }
+            }
+            let mut bound: std::collections::HashSet<String> =
+                param_names.iter().cloned().collect();
+            for g in &names {
+                bound.insert(g.clone());
+            }
+            let mut refs = Vec::new();
+            free_vars(&body, &mut bound, &mut refs);
+            let externals: Vec<(String, BasicValueEnum<'ctx>)> = refs
+                .iter()
+                .filter_map(|nm| self.locals.get(nm).map(|v| (nm.clone(), *v)))
+                .collect();
+            let result_layout = self.layouts.layout_of(&body.tipe);
+            members.push(Member {
+                name: name.to_string(),
+                params,
+                body,
+                param_names,
+                externals,
+                result_layout,
+            });
+        }
+
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+
+        // The closure struct type of each member: {fn_ptr, group slots.., external
+        // capture types..}. Group slots are all pointers.
+        let clos_tys: Vec<inkwell::types::StructType<'ctx>> = members
+            .iter()
+            .map(|m| {
+                let mut fields: Vec<BasicTypeEnum> = vec![ptr_t.into()];
+                for _ in 0..n {
+                    fields.push(ptr_t.into());
+                }
+                for (_, v) in &m.externals {
+                    fields.push(v.get_type());
+                }
+                self.ctx.struct_type(&fields, false)
+            })
+            .collect();
+
+        // Phase 1: emit each member's lifted function body.
+        let mut lifted_fns: Vec<FunctionValue<'ctx>> = Vec::with_capacity(n);
+        for (i, m) in members.iter().enumerate() {
+            let clos_ty = clos_tys[i];
+            let ret_ty = self.llvm_type(&m.result_layout);
+            let mut fn_params: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+            for (_, t) in &m.params {
+                fn_params.push(self.llvm_type(&self.layouts.layout_of(t)).into());
+            }
+            let fn_ty = ret_ty.fn_type(&fn_params, false);
+            let fname = format!("lam.{}", self.lam_id);
+            self.lam_id += 1;
+            let lifted = self.module.add_function(&fname, fn_ty, Some(Linkage::Internal));
+            lifted_fns.push(lifted);
+
+            let saved_locals = std::mem::take(&mut self.locals);
+            let saved_fn = self.cur_fn;
+            let saved_block = self.builder.get_insert_block();
+            let saved_loc = self.cur_loc;
+            self.cur_fn = Some(lifted);
+            let entry = self.ctx.append_basic_block(lifted, "entry");
+            self.builder.position_at_end(entry);
+            if let Some(file) = self.cur_file {
+                let line = m.body.region.start.row;
+                let sp = self.di_builder.create_function(
+                    file.as_debug_info_scope(),
+                    &fname,
+                    Some(&fname),
+                    file,
+                    line,
+                    self.di_subroutine,
+                    true,
+                    true,
+                    line,
+                    DIFlags::ZERO,
+                    true,
+                );
+                lifted.set_subprogram(sp);
+            }
+            self.clear_loc();
+
+            let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
+            // Bind every group member from its env slot (a closure pointer).
+            for (j, gname) in names.iter().enumerate() {
+                let fp = self
+                    .builder
+                    .build_struct_gep(clos_ty, env, (j + 1) as u32, "grp")
+                    .unwrap();
+                let v = self.builder.build_load(ptr_t, fp, gname).unwrap();
+                self.locals.insert(gname.clone(), v);
+            }
+            // Bind the external captures.
+            for (k, (extname, extval)) in m.externals.iter().enumerate() {
+                let fp = self
+                    .builder
+                    .build_struct_gep(clos_ty, env, (n + k + 1) as u32, "capp")
+                    .unwrap();
+                let v = self.builder.build_load(extval.get_type(), fp, extname).unwrap();
+                self.locals.insert(extname.clone(), v);
+            }
+            // Bind the parameters.
+            for (idx, pn) in m.param_names.iter().enumerate() {
+                let val = lifted.get_nth_param((idx + 1) as u32).unwrap();
+                self.locals.insert(pn.clone(), val);
+            }
+
+            let body_result = self.gen(&m.body);
+            self.locals = saved_locals;
+            self.cur_fn = saved_fn;
+            let ret = body_result?;
+            self.builder.build_return(Some(&ret)).unwrap();
+            if let Some(b) = saved_block {
+                self.builder.position_at_end(b);
+            }
+            self.restore_loc(saved_loc);
+        }
+
+        // Phase 2: allocate the closures, store fn pointers and external
+        // captures, then backpatch the group slots with the sibling pointers.
+        let alloc = self.module.get_function("alm_alloc").unwrap();
+        let mut raws: Vec<inkwell::values::PointerValue<'ctx>> = Vec::with_capacity(n);
+        for (i, m) in members.iter().enumerate() {
+            let clos_ty = clos_tys[i];
+            let raw = self
+                .builder
+                .build_call(alloc, &[clos_ty.size_of().unwrap().into()], "rclos")
+                .unwrap()
+                .try_as_basic_value()
+                .left()
+                .unwrap()
+                .into_pointer_value();
+            let f0 = self.builder.build_struct_gep(clos_ty, raw, 0, "fnp").unwrap();
+            self.builder
+                .build_store(f0, lifted_fns[i].as_global_value().as_pointer_value())
+                .unwrap();
+            for (k, (_, extval)) in m.externals.iter().enumerate() {
+                let fp = self
+                    .builder
+                    .build_struct_gep(clos_ty, raw, (n + k + 1) as u32, "cap")
+                    .unwrap();
+                self.builder.build_store(fp, *extval).unwrap();
+            }
+            raws.push(raw);
+        }
+        for i in 0..n {
+            let clos_ty = clos_tys[i];
+            for j in 0..n {
+                let fp = self
+                    .builder
+                    .build_struct_gep(clos_ty, raws[i], (j + 1) as u32, "grpp")
+                    .unwrap();
+                self.builder.build_store(fp, raws[j]).unwrap();
+            }
+        }
+        for (i, m) in members.iter().enumerate() {
+            self.locals.insert(m.name.clone(), raws[i].into());
+        }
+        Ok(())
     }
 
     fn gen_tuple(
@@ -2060,6 +2446,38 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                         .build_extract_value(sv, idx as u32, "field")
                         .unwrap();
                     self.locals.insert(located.value.to_string(), elem);
+                }
+                Ok(())
+            }
+            Unit => Ok(()),
+            // An irrefutable single-constructor destructure `let (Ctor a b) = e`
+            // (e.g. unwrapping a newtype-style union such as `Fuzzer f`): read
+            // the constructor's fields out of the heap block and bind them.
+            Ctor(_, _, ctor, args) => {
+                if args.is_empty() {
+                    return Ok(());
+                }
+                let Layout::Tagged(variants) = layout else {
+                    return Err(
+                        "typed backend: constructor destructure on non-tagged value".to_string(),
+                    );
+                };
+                let field_layouts = variants
+                    .get(ctor.index as usize)
+                    .cloned()
+                    .ok_or_else(|| format!("typed backend: bad ctor index for `{}`", ctor.name))?;
+                let struct_ty = self.ctor_struct(&field_layouts);
+                let ptr = value.into_pointer_value();
+                for (i, argpat) in args.iter().enumerate() {
+                    let fp = self
+                        .builder
+                        .build_struct_gep(struct_ty, ptr, (i + 1) as u32, "fp")
+                        .unwrap();
+                    let v = self
+                        .builder
+                        .build_load(self.llvm_type(&field_layouts[i]), fp, "fld")
+                        .unwrap();
+                    self.bind_pattern(argpat, v, &field_layouts[i])?;
                 }
                 Ok(())
             }
@@ -2548,23 +2966,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 // with its own parameters, then apply the returned closure to
                 // the rest.
                 let closure = self.call_fn(f, &args[..np]).into_pointer_value();
-                let mut t = func.tipe.clone();
-                for _ in 0..args.len() {
-                    match t {
-                        crate::ast::canonical::Type::Lambda(_, r) => t = *r,
+                let mut closure_ty = func.tipe.clone();
+                for _ in 0..np {
+                    match closure_ty {
+                        crate::ast::canonical::Type::Lambda(_, r) => closure_ty = *r,
                         _ => break,
                     }
                 }
-                let ret_layout = self.layouts.layout_of(&t);
-                Ok(self.apply_closure(closure, &args[np..], &ret_layout))
+                Ok(self.apply_closure_curried(closure, &args[np..], &closure_ty))
             }
             TypedKind::Lambda(params, body) => {
-                if params.len() != args.len() {
-                    return Err(
-                        "typed backend: partially-applied lambda in a kernel is not supported"
-                            .to_string(),
-                    );
-                }
                 // Desugar destructuring parameters into fresh vars + a case-matched
                 // body, mirroring `gen_closure`, so an inlined lambda accepts unit,
                 // constructor, tuple and record parameters.
@@ -2579,6 +2990,60 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     } else {
                         (params.as_slice(), body.as_ref())
                     };
+                if args.len() < params.len() {
+                    // Partial application of a lambda literal in a kernel (e.g.
+                    // `List.map (\a b c -> ...) xs` applies the 3-param lambda to
+                    // one element, yielding a 2-param closure). Bind the supplied
+                    // parameters as locals, then build a closure over the
+                    // remaining parameters with the same body — the just-bound
+                    // parameters are captured as free variables, exactly like any
+                    // other closure environment.
+                    let mut saved: Vec<(String, Option<BasicValueEnum<'ctx>>)> = Vec::new();
+                    for ((pat, _), val) in params.iter().zip(args) {
+                        match simple_param_name(pat) {
+                            Some(n) => {
+                                saved.push((n.clone(), self.locals.get(&n).copied()));
+                                self.locals.insert(n, *val);
+                            }
+                            None => {
+                                return Err(
+                                    "typed backend: destructuring lambda parameters are not \
+                                     supported in kernels yet"
+                                        .to_string(),
+                                )
+                            }
+                        }
+                    }
+                    // The ultimate result type: peel one arrow per lambda param.
+                    let mut t = func.tipe.clone();
+                    for _ in 0..params.len() {
+                        match t {
+                            crate::ast::canonical::Type::Lambda(_, r) => t = *r,
+                            _ => break,
+                        }
+                    }
+                    let ret_layout = self.layouts.layout_of(&t);
+                    let result = self.gen_closure(&params[args.len()..], body, &ret_layout);
+                    for (n, old) in saved {
+                        match old {
+                            Some(v) => {
+                                self.locals.insert(n, v);
+                            }
+                            None => {
+                                self.locals.remove(&n);
+                            }
+                        }
+                    }
+                    return result;
+                }
+                if params.len() != args.len() {
+                    return Err(format!(
+                        "typed backend: over-applied lambda in a kernel is not supported \
+                         (params={}, args={})",
+                        params.len(),
+                        args.len(),
+                    ));
+                }
                 let mut saved: Vec<(String, Option<BasicValueEnum<'ctx>>)> = Vec::new();
                 for ((pat, _), val) in params.iter().zip(args) {
                     match simple_param_name(pat) {
@@ -2609,19 +3074,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Ok(v)
             }
             _ => {
-                // A closure value (e.g. a function-typed parameter): peel the
-                // function type by the number of arguments to get the result
-                // layout, then apply indirectly.
+                // A closure value (e.g. a function-typed parameter): apply it
+                // indirectly, with currying so an under-saturated application
+                // builds a partial closure rather than calling with too few
+                // arguments.
                 let closure = self.gen(func)?.into_pointer_value();
-                let mut t = func.tipe.clone();
-                for _ in 0..args.len() {
-                    match t {
-                        crate::ast::canonical::Type::Lambda(_, r) => t = *r,
-                        _ => break,
-                    }
-                }
-                let ret_layout = self.layouts.layout_of(&t);
-                Ok(self.apply_closure(closure, args, &ret_layout))
+                Ok(self.apply_closure_curried(closure, args, &func.tipe))
             }
         }
     }
@@ -2741,6 +3199,28 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .into_float_value()
     }
 
+    /// Call a binary f64 LLVM intrinsic (e.g. `llvm.pow.f64`), declaring it on
+    /// first use.
+    fn call_f64_intrinsic2(
+        &self,
+        name: &str,
+        x: inkwell::values::FloatValue<'ctx>,
+        y: inkwell::values::FloatValue<'ctx>,
+    ) -> inkwell::values::FloatValue<'ctx> {
+        let f = self.module.get_function(name).unwrap_or_else(|| {
+            let f64 = self.ctx.f64_type();
+            self.module
+                .add_function(name, f64.fn_type(&[f64.into(), f64.into()], false), None)
+        });
+        self.builder
+            .build_call(f, &[x.into(), y.into()], "intr2")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_float_value()
+    }
+
     /// `String.join sep xs` — concatenate the string list head-first with the
     /// separator between elements.
     fn kernel_string_join(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
@@ -2816,24 +3296,58 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(self.builder.build_select(above, hi, low_clamped, "clamp").unwrap())
     }
 
-    /// `min`/`max` on Int or Float — a comparison and select.
+    /// `min`/`max` on any `comparable`. Int/Float compare inline; other
+    /// comparables (strings, or a value left with an unresolved `comparable`
+    /// layout that is carried as the uniform runtime word) route through the
+    /// runtime's generic comparison, then select.
     fn kernel_min_max(
         &mut self,
         args: &[TypedExpr],
         is_min: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        let lay = self.layouts.layout_of(&args[0].tipe);
         let a = self.gen(&args[0])?;
         let b = self.gen(&args[1])?;
-        let cond = if matches!(self.layouts.layout_of(&args[0].tipe), Layout::Float) {
-            let pred = if is_min { FloatPredicate::OLT } else { FloatPredicate::OGT };
-            self.builder
-                .build_float_compare(pred, a.into_float_value(), b.into_float_value(), "mm")
-                .unwrap()
-        } else {
-            let pred = if is_min { IntPredicate::SLT } else { IntPredicate::SGT };
-            self.builder
-                .build_int_compare(pred, a.into_int_value(), b.into_int_value(), "mm")
-                .unwrap()
+        let cond = match lay {
+            Layout::Float => {
+                let pred = if is_min { FloatPredicate::OLT } else { FloatPredicate::OGT };
+                self.builder
+                    .build_float_compare(pred, a.into_float_value(), b.into_float_value(), "mm")
+                    .unwrap()
+            }
+            ref l if l.is_scalar() => {
+                let pred = if is_min { IntPredicate::SLT } else { IntPredicate::SGT };
+                self.builder
+                    .build_int_compare(pred, a.into_int_value(), b.into_int_value(), "mm")
+                    .unwrap()
+            }
+            // Comparables carried as the uniform runtime word: an unresolved
+            // `comparable` (Ref, a word bit-cast to a pointer), a heap string,
+            // or an opaque word. Recover the word and use the runtime compare.
+            Layout::Ref | Layout::Str | Layout::Opaque => {
+                let i64_t = self.ctx.i64_type();
+                let to_word = |v: BasicValueEnum<'ctx>| -> BasicValueEnum<'ctx> {
+                    if v.is_pointer_value() {
+                        self.builder
+                            .build_ptr_to_int(v.into_pointer_value(), i64_t, "w")
+                            .unwrap()
+                            .into()
+                    } else {
+                        v
+                    }
+                };
+                let aw = to_word(a);
+                let bw = to_word(b);
+                let sym = if is_min { "rt_lt" } else { "rt_gt" };
+                let cmp = self.call_named(sym, &[aw, bw]);
+                self.call_named("rt_is_true", &[cmp]).into_int_value()
+            }
+            other => {
+                return Err(format!(
+                    "typed backend: min/max on layout {:?} is not supported",
+                    other
+                ))
+            }
         };
         Ok(self.builder.build_select(cond, a, b, "minmax").unwrap())
     }
@@ -3017,10 +3531,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     /// (scalar elements only), short-circuiting on the first match.
     fn kernel_list_member(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let elem = self.elem_layout(&args[1].tipe)?;
-        if !elem.is_scalar() {
-            return Err("typed backend: List.member is only supported on scalar elements".to_string());
-        }
-        let is_float = matches!(elem, Layout::Float);
         let target = self.gen(&args[0])?;
         let list = self.gen(&args[1])?.into_pointer_value();
         let len = self.list_len(list);
@@ -3045,15 +3555,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(body_bb);
         let head = self.list_load(backing, &elem, i);
-        let eq = if is_float {
-            self.builder
-                .build_float_compare(FloatPredicate::OEQ, head.into_float_value(), target.into_float_value(), "eq")
-                .unwrap()
-        } else {
-            self.builder
-                .build_int_compare(IntPredicate::EQ, head.into_int_value(), target.into_int_value(), "eq")
-                .unwrap()
-        };
+        let eq = self.equals_vals(head, target, &elem)?;
         self.builder.build_conditional_branch(eq, found_bb, cont_bb).unwrap();
 
         self.builder.position_at_end(cont_bb);
@@ -4017,6 +4519,115 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .unwrap()
     }
 
+    /// Apply a closure value, respecting currying. A closure of type
+    /// `T1 -> .. -> Tn -> R` (R not a function) is a flat n-ary closure — it
+    /// must be called with all `n` arguments at once. When fewer are supplied
+    /// (e.g. `fuzz pair desc`, where the point-free `fuzz` yields a 3-ary
+    /// closure applied to 2 arguments), build a partial-application closure for
+    /// the rest instead of under-saturating the call (which would read garbage
+    /// arguments and return a corrupt value). More arguments than arrows means
+    /// the result is itself a closure applied further.
+    fn apply_closure_curried(
+        &mut self,
+        closure: inkwell::values::PointerValue<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+        closure_ty: &crate::ast::canonical::Type,
+    ) -> BasicValueEnum<'ctx> {
+        use crate::ast::canonical::Type;
+        let mut arg_tys: Vec<Type> = Vec::new();
+        let mut t = closure_ty.clone();
+        while let Type::Lambda(a, b) = t {
+            arg_tys.push(*a);
+            t = *b;
+        }
+        let arity = arg_tys.len();
+        if arity == 0 || args.len() == arity {
+            let ret_layout = self.layouts.layout_of(&t);
+            return self.apply_closure(closure, args, &ret_layout);
+        }
+        if args.len() < arity {
+            let remaining_layouts: Vec<Layout> = arg_tys[args.len()..]
+                .iter()
+                .map(|t| self.layouts.layout_of(t))
+                .collect();
+            let final_layout = self.layouts.layout_of(&t);
+            return self.build_partial_closure(closure, args, &remaining_layouts, &final_layout);
+        }
+        // Over-application: saturate this closure, then apply the rest to the
+        // closure it returns.
+        let ret_layout = self.layouts.layout_of(&t);
+        let mid = self
+            .apply_closure(closure, &args[..arity], &ret_layout)
+            .into_pointer_value();
+        self.apply_closure_curried(mid, &args[arity..], &t)
+    }
+
+    /// Build a partial-application closure over a closure *value*: capture the
+    /// original closure plus the already-supplied arguments in a wrapper that
+    /// takes the remaining arguments and applies the original to all of them.
+    fn build_partial_closure(
+        &mut self,
+        closure: inkwell::values::PointerValue<'ctx>,
+        applied: &[BasicValueEnum<'ctx>],
+        remaining_layouts: &[Layout],
+        final_layout: &Layout,
+    ) -> BasicValueEnum<'ctx> {
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // Captures: [original closure, applied args...].
+        let mut caps: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(applied.len() + 1);
+        caps.push(closure.into());
+        caps.extend_from_slice(applied);
+        let mut clos_fields: Vec<BasicTypeEnum> = vec![ptr_t.into()];
+        for c in &caps {
+            clos_fields.push(c.get_type());
+        }
+        let clos_ty = self.ctx.struct_type(&clos_fields, false);
+
+        // Wrapper: (env, remaining...) -> final result.
+        let mut wparams: Vec<BasicMetadataTypeEnum> = vec![ptr_t.into()];
+        for l in remaining_layouts {
+            wparams.push(self.llvm_type(l).into());
+        }
+        let ret_ty = self.llvm_type(final_layout);
+        let wty = ret_ty.fn_type(&wparams, false);
+        let wname = format!("pap.{}", self.lam_id);
+        self.lam_id += 1;
+        let wrapper = self.module.add_function(&wname, wty, Some(Linkage::Internal));
+
+        let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
+        let entry = self.ctx.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+        self.clear_loc();
+        let env = wrapper.get_nth_param(0).unwrap().into_pointer_value();
+        let origp = self.builder.build_struct_gep(clos_ty, env, 1, "origp").unwrap();
+        let orig = self
+            .builder
+            .build_load(ptr_t, origp, "orig")
+            .unwrap()
+            .into_pointer_value();
+        let mut all: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        for (i, a) in applied.iter().enumerate() {
+            let fp = self
+                .builder
+                .build_struct_gep(clos_ty, env, (i + 2) as u32, "ap")
+                .unwrap();
+            all.push(self.builder.build_load(a.get_type(), fp, "apv").unwrap());
+        }
+        for j in 0..remaining_layouts.len() {
+            all.push(wrapper.get_nth_param((j + 1) as u32).unwrap());
+        }
+        let result = self.apply_closure(orig, &all, final_layout);
+        self.builder.build_return(Some(&result)).unwrap();
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        self.restore_loc(saved_loc);
+
+        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &caps)
+            .into()
+    }
+
     /// A closure wrapping a named function used as a first-class value: an
     /// env-ignoring trampoline `wrap(env, args...) = f(args...)`, cached.
     ///
@@ -4178,9 +4789,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         r: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let layout = self.layouts.layout_of(&l.tipe);
-        // Comparisons on boxed values (strings) must compare contents, not the
-        // pointer words — route through the runtime's value comparison.
-        if matches!(layout, Layout::Str) {
+        // Ordering comparisons on comparables carried as the uniform runtime
+        // word — strings, an unresolved `comparable` (Ref, a word bit-cast to a
+        // pointer), or an opaque word — must compare contents, not the raw
+        // machine value. Route through the runtime's value comparison.
+        if matches!(layout, Layout::Str | Layout::Ref | Layout::Opaque) {
             let sym = match op {
                 "==" => "rt_eq",
                 "/=" => "rt_neq",
@@ -4188,11 +4801,29 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 "<=" => "rt_le",
                 ">" => "rt_gt",
                 ">=" => "rt_ge",
-                _ => return Err(format!("typed backend: `{}` is not supported on strings", op)),
+                _ => {
+                    return Err(format!(
+                        "typed backend: `{}` is not supported on layout {:?}",
+                        op, layout
+                    ))
+                }
             };
+            let i64_t = self.ctx.i64_type();
             let lv = self.gen(l)?;
             let rv = self.gen(r)?;
-            let cmp = self.call_named(sym, &[lv, rv]);
+            // Recover the uniform word from a Ref pointer; strings/opaques are
+            // already the word.
+            let to_word = |v: BasicValueEnum<'ctx>| -> BasicValueEnum<'ctx> {
+                if v.is_pointer_value() {
+                    self.builder
+                        .build_ptr_to_int(v.into_pointer_value(), i64_t, "w")
+                        .unwrap()
+                        .into()
+                } else {
+                    v
+                }
+            };
+            let cmp = self.call_named(sym, &[to_word(lv), to_word(rv)]);
             return Ok(self.call_named("rt_is_true", &[cmp]));
         }
         let is_float = matches!(layout, Layout::Float);
@@ -4206,6 +4837,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 "-" => b.build_float_sub(x, y, "f").unwrap().into(),
                 "*" => b.build_float_mul(x, y, "f").unwrap().into(),
                 "/" => b.build_float_div(x, y, "f").unwrap().into(),
+                "^" => self.call_f64_intrinsic2("llvm.pow.f64", x, y).into(),
                 "==" => cmp_f(b, FloatPredicate::OEQ, x, y),
                 "/=" => cmp_f(b, FloatPredicate::ONE, x, y),
                 "<" => cmp_f(b, FloatPredicate::OLT, x, y),
@@ -4222,6 +4854,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 "-" => b.build_int_sub(x, y, "i").unwrap().into(),
                 "*" => b.build_int_mul(x, y, "i").unwrap().into(),
                 "//" => b.build_int_signed_div(x, y, "i").unwrap().into(),
+                // Integer exponentiation matches the JS backend's `Math.pow`:
+                // compute in f64 and truncate back to i64.
+                "^" => {
+                    let f64t = self.ctx.f64_type();
+                    let xf = b.build_signed_int_to_float(x, f64t, "xf").unwrap();
+                    let yf = b.build_signed_int_to_float(y, f64t, "yf").unwrap();
+                    let rf = self.call_f64_intrinsic2("llvm.pow.f64", xf, yf);
+                    b.build_float_to_signed_int(rf, self.ctx.i64_type(), "powi")
+                        .unwrap()
+                        .into()
+                }
                 "==" => cmp_i(b, IntPredicate::EQ, x, y),
                 "/=" => cmp_i(b, IntPredicate::NE, x, y),
                 "<" => cmp_i(b, IntPredicate::SLT, x, y),
@@ -4270,8 +4913,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(phi.as_basic_value())
     }
 
-    /// `case` on a scalar scrutinee (Int/Char), with literal patterns and a
-    /// variable/wildcard catch-all. Compiles to a test chain feeding a phi.
+    /// Compile a `case`. Each branch is matched as a short-circuiting decision
+    /// tree: [`match_pattern`] emits the shape/literal tests, branching to the
+    /// next branch on any mismatch — including *nested* refutable sub-patterns
+    /// (e.g. `(Just x, _)`, `[ a, 0 ]`, `Ok (n :: _)`) — and binds the pattern's
+    /// variables along the matched path. Branch results feed a phi at the join.
     fn gen_case(
         &mut self,
         scrutinee: &TypedExpr,
@@ -4287,34 +4933,25 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let mut matched_all = false;
 
         for (pattern, body) in branches {
-            match self.pattern_test(pattern, subject, &subject_layout)? {
-                None => {
-                    // Irrefutable: always matches; bind and stop.
-                    self.bind_case_pattern(pattern, subject, &subject_layout)?;
-                    let v = self.gen(body)?;
-                    incoming.push((v, self.builder.get_insert_block().unwrap()));
-                    self.builder.build_unconditional_branch(merge).unwrap();
-                    matched_all = true;
-                    break;
-                }
-                Some(cond) => {
-                    let then_bb = self.new_block("case.then");
-                    let else_bb = self.new_block("case.else");
-                    self.builder
-                        .build_conditional_branch(cond, then_bb, else_bb)
-                        .unwrap();
-                    self.builder.position_at_end(then_bb);
-                    self.bind_case_pattern(pattern, subject, &subject_layout)?;
-                    let v = self.gen(body)?;
-                    incoming.push((v, self.builder.get_insert_block().unwrap()));
-                    self.builder.build_unconditional_branch(merge).unwrap();
-                    self.builder.position_at_end(else_bb);
-                }
+            // On mismatch the tests jump to `fail`, where the next branch is
+            // compiled; on a full match the builder falls through with the
+            // pattern's variables bound.
+            let fail = self.new_block("case.next");
+            let refutable = self.match_pattern(pattern, subject, &subject_layout, fail)?;
+            let v = self.gen(body)?;
+            incoming.push((v, self.builder.get_insert_block().unwrap()));
+            self.builder.build_unconditional_branch(merge).unwrap();
+            self.builder.position_at_end(fail);
+            if !refutable {
+                // The branch always matches; its `fail` block is unreachable.
+                self.builder.build_unreachable().unwrap();
+                matched_all = true;
+                break;
             }
         }
 
-        // Elm case-expressions are exhaustive; if the source had no explicit
-        // catch-all the final else is unreachable.
+        // Elm case-expressions are exhaustive; falling past the last refutable
+        // branch is unreachable.
         if !matched_all {
             self.builder.build_unreachable().unwrap();
         }
@@ -4327,160 +4964,238 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(phi.as_basic_value())
     }
 
-    /// The condition under which a pattern matches `subject`, or `None` if the
-    /// pattern is irrefutable (always matches).
-    fn pattern_test(
+    /// Branch to a fresh continuation block when `cond` holds, else to `fail`,
+    /// then position the builder in the continuation. Used to thread pattern
+    /// tests: a mismatch drops through to the next `case` branch.
+    fn branch_or_fail(
         &mut self,
-        pattern: &crate::ast::canonical::Pattern,
-        subject: BasicValueEnum<'ctx>,
-        layout: &Layout,
-    ) -> Result<Option<inkwell::values::IntValue<'ctx>>, String> {
-        use crate::ast::canonical::Pattern_::*;
-        let eq_i = |b: &inkwell::builder::Builder<'ctx>, x, y| {
-            b.build_int_compare(IntPredicate::EQ, x, y, "casetest").unwrap()
-        };
-        Ok(match &pattern.value {
-            // Irrefutable: variables, wildcards, and (top-level) unit/tuple/record
-            // patterns always match. Nested refutable sub-patterns inside a tuple
-            // or record are still unsupported (see below), but the destructuring
-            // itself happens at bind time.
-            Var(_) | Anything | Unit | Tuple(..) | Record(_) => None,
-            Alias(inner, _) => self.pattern_test(inner, subject, layout)?,
-            Int(n) => Some(eq_i(
-                &self.builder,
-                subject.into_int_value(),
-                self.ctx.i64_type().const_int(*n as u64, true),
-            )),
-            Chr(c) => Some(eq_i(
-                &self.builder,
-                subject.into_int_value(),
-                self.ctx.i32_type().const_int(*c as u64, false),
-            )),
-            // Empty-list pattern: length is zero.
-            List(elems) if elems.is_empty() => {
-                let len = self.list_len(subject.into_pointer_value());
-                Some(
-                    self.builder
-                        .build_int_compare(IntPredicate::EQ, len, self.ctx.i64_type().const_zero(), "isnil")
-                        .unwrap(),
-                )
-            }
-            // Cons pattern: length is non-zero.
-            Cons(_, _) => {
-                let len = self.list_len(subject.into_pointer_value());
-                Some(
-                    self.builder
-                        .build_int_compare(IntPredicate::NE, len, self.ctx.i64_type().const_zero(), "iscons")
-                        .unwrap(),
-                )
-            }
-            Ctor(_, _, ctor, _) => match layout {
-                Layout::Bool => Some(eq_i(
-                    &self.builder,
-                    subject.into_int_value(),
-                    self.ctx
-                        .bool_type()
-                        .const_int((ctor.name.as_str() == "True") as u64, false),
-                )),
-                Layout::Enum(_) => Some(eq_i(
-                    &self.builder,
-                    subject.into_int_value(),
-                    self.ctx.i32_type().const_int(ctor.index as u64, false),
-                )),
-                Layout::Tagged(_) => {
-                    // Load the tag from the front of the heap block.
-                    let tag = self
-                        .builder
-                        .build_load(self.ctx.i32_type(), subject.into_pointer_value(), "tag")
-                        .unwrap()
-                        .into_int_value();
-                    Some(eq_i(
-                        &self.builder,
-                        tag,
-                        self.ctx.i32_type().const_int(ctor.index as u64, false),
-                    ))
-                }
-                other => {
-                    return Err(format!(
-                        "typed backend: case on layout {:?} is not supported yet",
-                        other
-                    ))
-                }
-            },
-            _ => {
-                return Err(
-                    "typed backend: unsupported case pattern (nested refutable patterns \
-                     are not compiled yet)"
-                        .to_string(),
-                )
-            }
-        })
+        cond: inkwell::values::IntValue<'ctx>,
+        fail: inkwell::basic_block::BasicBlock<'ctx>,
+    ) {
+        let cont = self.new_block("case.cont");
+        self.builder
+            .build_conditional_branch(cond, cont, fail)
+            .unwrap();
+        self.builder.position_at_end(cont);
     }
 
-    /// Bind the variables a pattern introduces, given a successful match.
-    /// Called while positioned in the matched branch.
-    fn bind_case_pattern(
+    /// Compile a pattern match: emit the tests deciding whether `value`
+    /// matches `pattern`, branching to `fail` on any mismatch, and bind the
+    /// pattern's variables along the successful path. Descends into aggregate
+    /// patterns (tuples, records, lists, cons cells, constructors) so nested
+    /// refutable sub-patterns are tested too; each shape test is emitted before
+    /// the sub-values it guards are read, so extraction is always well-defined.
+    /// Returns whether the pattern was refutable (emitted a branch to `fail`).
+    fn match_pattern(
         &mut self,
         pattern: &crate::ast::canonical::Pattern,
-        subject: BasicValueEnum<'ctx>,
+        value: BasicValueEnum<'ctx>,
         layout: &Layout,
-    ) -> Result<(), String> {
+        fail: inkwell::basic_block::BasicBlock<'ctx>,
+    ) -> Result<bool, String> {
         use crate::ast::canonical::Pattern_::*;
         match &pattern.value {
-            Unit => Ok(()),
-            Var(_) | Anything | Tuple(..) | Record(_) => {
-                self.bind_pattern(pattern, subject, layout)
+            Var(name) => {
+                self.locals.insert(name.to_string(), value);
+                Ok(false)
             }
+            Anything | Unit => Ok(false),
             Alias(inner, name) => {
-                self.locals.insert(name.value.to_string(), subject);
-                self.bind_case_pattern(inner, subject, layout)
+                self.locals.insert(name.value.to_string(), value);
+                self.match_pattern(inner, value, layout, fail)
             }
-            Int(_) | Chr(_) => Ok(()),
-            List(elems) if elems.is_empty() => Ok(()),
+            Int(n) => {
+                let cond = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        value.into_int_value(),
+                        self.ctx.i64_type().const_int(*n as u64, true),
+                        "casei",
+                    )
+                    .unwrap();
+                self.branch_or_fail(cond, fail);
+                Ok(true)
+            }
+            Chr(c) => {
+                let cond = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        value.into_int_value(),
+                        self.ctx.i32_type().const_int(*c as u64, false),
+                        "casec",
+                    )
+                    .unwrap();
+                self.branch_or_fail(cond, fail);
+                Ok(true)
+            }
+            Str(s) => {
+                let lit = self.gen_string(s)?;
+                let eq = self.call_named("rt_eq", &[value, lit]);
+                let cond = self.call_named("rt_is_true", &[eq]).into_int_value();
+                self.branch_or_fail(cond, fail);
+                Ok(true)
+            }
+            Tuple(a, b, rest) => {
+                let Layout::Tuple(elem_layouts) = layout else {
+                    return Err("typed backend: tuple pattern on non-tuple value".to_string());
+                };
+                let sv = value.into_struct_value();
+                let parts: Vec<&crate::ast::canonical::Pattern> = std::iter::once(a.as_ref())
+                    .chain(std::iter::once(b.as_ref()))
+                    .chain(rest.iter())
+                    .collect();
+                let mut refutable = false;
+                for (i, p) in parts.into_iter().enumerate() {
+                    let elem = self.builder.build_extract_value(sv, i as u32, "elt").unwrap();
+                    refutable |= self.match_pattern(p, elem, &elem_layouts[i], fail)?;
+                }
+                Ok(refutable)
+            }
+            Record(field_names) => {
+                let Layout::Record(fields) = layout else {
+                    return Err("typed backend: record pattern on non-record value".to_string());
+                };
+                let sv = value.into_struct_value();
+                // Record patterns bind field names; they carry no sub-patterns.
+                for located in field_names {
+                    let idx = fields
+                        .iter()
+                        .position(|(n, _)| n.as_str() == located.value.as_str())
+                        .ok_or_else(|| {
+                            format!("typed backend: record has no field `{}`", located.value)
+                        })?;
+                    let elem = self
+                        .builder
+                        .build_extract_value(sv, idx as u32, "field")
+                        .unwrap();
+                    self.locals.insert(located.value.to_string(), elem);
+                }
+                Ok(false)
+            }
+            List(elems) => {
+                let Layout::List(elem_layout) = layout else {
+                    return Err("typed backend: list pattern on non-list value".to_string());
+                };
+                let list = value.into_pointer_value();
+                let len = self.list_len(list);
+                let want = self.ctx.i64_type().const_int(elems.len() as u64, false);
+                let cond = self
+                    .builder
+                    .build_int_compare(IntPredicate::EQ, len, want, "listlen")
+                    .unwrap();
+                self.branch_or_fail(cond, fail);
+                // Elements are stored reversed: element k is data[len - 1 - k].
+                let backing = self.list_backing(list);
+                let n = elems.len();
+                for (k, p) in elems.iter().enumerate() {
+                    let idx = self.ctx.i64_type().const_int((n - 1 - k) as u64, false);
+                    let elem = self.list_load(backing, elem_layout, idx);
+                    self.match_pattern(p, elem, elem_layout, fail)?;
+                }
+                Ok(true)
+            }
             Cons(head, tail) => {
-                let Layout::List(elem) = layout else {
+                let Layout::List(elem_layout) = layout else {
                     return Err("typed backend: cons pattern on non-list value".to_string());
                 };
-                let list = subject.into_pointer_value();
+                let list = value.into_pointer_value();
                 let len = self.list_len(list);
+                let cond = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        len,
+                        self.ctx.i64_type().const_zero(),
+                        "iscons",
+                    )
+                    .unwrap();
+                self.branch_or_fail(cond, fail);
+                // Head is data[len - 1]; tail shares the backing with length len - 1.
                 let backing = self.list_backing(list);
-                // Head is the last element (reversed storage): data[len - 1].
                 let one = self.ctx.i64_type().const_int(1, false);
                 let last = self.builder.build_int_sub(len, one, "last").unwrap();
-                let head_val = self.list_load(backing, elem, last);
-                self.bind_pattern(head, head_val, elem)?;
-                // Tail shares the backing with length len - 1.
+                let head_val = self.list_load(backing, elem_layout, last);
+                self.match_pattern(head, head_val, elem_layout, fail)?;
                 let tail_val = self.make_list(last, backing);
-                self.bind_pattern(tail, tail_val.into(), layout)?;
-                Ok(())
+                self.match_pattern(tail, tail_val.into(), layout, fail)?;
+                Ok(true)
             }
-            Ctor(_, _, ctor, args) => {
-                if args.is_empty() {
-                    return Ok(());
-                }
-                let Layout::Tagged(variants) = layout else {
-                    return Err("typed backend: constructor pattern on non-tagged value".to_string());
-                };
-                let field_layouts = variants
-                    .get(ctor.index as usize)
-                    .cloned()
-                    .ok_or_else(|| format!("typed backend: bad ctor index for `{}`", ctor.name))?;
-                let struct_ty = self.ctor_struct(&field_layouts);
-                let ptr = subject.into_pointer_value();
-                for (i, argpat) in args.iter().enumerate() {
-                    let fp = self
+            Ctor(_, _, ctor, args) => match layout {
+                Layout::Bool => {
+                    let cond = self
                         .builder
-                        .build_struct_gep(struct_ty, ptr, (i + 1) as u32, "fp")
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            value.into_int_value(),
+                            self.ctx
+                                .bool_type()
+                                .const_int((ctor.name.as_str() == "True") as u64, false),
+                            "casebool",
+                        )
                         .unwrap();
-                    let val = self
-                        .builder
-                        .build_load(self.llvm_type(&field_layouts[i]), fp, "fld")
-                        .unwrap();
-                    self.bind_pattern(argpat, val, &field_layouts[i])?;
+                    self.branch_or_fail(cond, fail);
+                    Ok(true)
                 }
-                Ok(())
-            }
-            _ => Err("typed backend: unsupported case pattern".to_string()),
+                Layout::Enum(_) => {
+                    let cond = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            value.into_int_value(),
+                            self.ctx.i32_type().const_int(ctor.index as u64, false),
+                            "caseenum",
+                        )
+                        .unwrap();
+                    self.branch_or_fail(cond, fail);
+                    Ok(true)
+                }
+                Layout::Tagged(variants) => {
+                    let ptr = value.into_pointer_value();
+                    let tag = self
+                        .builder
+                        .build_load(self.ctx.i32_type(), ptr, "tag")
+                        .unwrap()
+                        .into_int_value();
+                    let cond = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            tag,
+                            self.ctx.i32_type().const_int(ctor.index as u64, false),
+                            "casetag",
+                        )
+                        .unwrap();
+                    self.branch_or_fail(cond, fail);
+                    // The tag matched: this constructor's fields are now in scope.
+                    if !args.is_empty() {
+                        let field_layouts = variants
+                            .get(ctor.index as usize)
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!("typed backend: bad ctor index for `{}`", ctor.name)
+                            })?;
+                        let struct_ty = self.ctor_struct(&field_layouts);
+                        for (i, argpat) in args.iter().enumerate() {
+                            let fp = self
+                                .builder
+                                .build_struct_gep(struct_ty, ptr, (i + 1) as u32, "fp")
+                                .unwrap();
+                            let v = self
+                                .builder
+                                .build_load(self.llvm_type(&field_layouts[i]), fp, "fld")
+                                .unwrap();
+                            self.match_pattern(argpat, v, &field_layouts[i], fail)?;
+                        }
+                    }
+                    Ok(true)
+                }
+                other => Err(format!(
+                    "typed backend: case on layout {:?} is not supported yet",
+                    other
+                )),
+            },
         }
     }
 
@@ -4661,6 +5376,29 @@ fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String>
 /// Collect the free variables of an expression: `Local` references not bound
 /// by a binder within it. `bound` starts with the enclosing lambda's
 /// parameters. Order-preserving and de-duplicated.
+/// Whether `expr` contains, in tail position, a saturated call to the
+/// function `mangled` (arity `nparams`). Tail positions are the branches of
+/// `if`/`case` and the body of `let`; anything else is not a tail call.
+fn tail_has_self_call(expr: &TypedExpr, mangled: &str, nparams: usize) -> bool {
+    match &expr.kind {
+        TypedKind::Call(func, args) => {
+            matches!(&func.kind, TypedKind::Global(n) if n.as_str() == mangled)
+                && args.len() == nparams
+        }
+        TypedKind::If(branches, otherwise) => {
+            branches
+                .iter()
+                .any(|(_, b)| tail_has_self_call(b, mangled, nparams))
+                || tail_has_self_call(otherwise, mangled, nparams)
+        }
+        TypedKind::Case(_, branches) => branches
+            .iter()
+            .any(|(_, b)| tail_has_self_call(b, mangled, nparams)),
+        TypedKind::Let(_, body) => tail_has_self_call(body, mangled, nparams),
+        _ => false,
+    }
+}
+
 fn free_vars(expr: &TypedExpr, bound: &mut std::collections::HashSet<String>, out: &mut Vec<String>) {
     match &expr.kind {
         TypedKind::Local(name) => {

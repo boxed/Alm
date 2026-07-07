@@ -1424,3 +1424,203 @@ fn toplevel_pattern_param() {
          main = String.fromInt (unwrap (Id 42))\n",
     );
 }
+
+#[test]
+fn partial_app_in_kernel() {
+    // A multi-parameter lambda applied to fewer arguments by a kernel
+    // (`List.map` applies a 3-param lambda to one element) yields a partial
+    // closure, later saturated.
+    assert_same(
+        "partial_app_kernel",
+        "module Test exposing (..)\n\
+         \n\
+         main : Int\n\
+         main =\n\
+         \x20   let fs = List.map (\\a b c -> a + b + c) [ 1, 2, 3 ]\n\
+         \x20   in List.foldl (\\g acc -> acc + g 10 20) 0 fs\n",
+    );
+}
+
+#[test]
+fn mutually_recursive_local_functions() {
+    assert_same(
+        "mutual_rec",
+        "module Test exposing (..)\n\
+         \n\
+         classify : Int -> String\n\
+         classify n =\n\
+         \x20   let\n\
+         \x20       isEven x = if x == 0 then True else isOdd (x - 1)\n\
+         \x20       isOdd x = if x == 0 then False else isEven (x - 1)\n\
+         \x20   in\n\
+         \x20   if isEven n then \"even\" else \"odd\"\n\
+         \n\
+         main : String\n\
+         main = classify 10 ++ \",\" ++ classify 7\n",
+    );
+}
+
+#[test]
+fn nested_refutable_tuple_pattern() {
+    assert_same(
+        "nested_tuple_pat",
+        "module Test exposing (..)\n\
+         \n\
+         describe : ( Maybe Int, Int ) -> String\n\
+         describe p =\n\
+         \x20   case p of\n\
+         \x20       ( Just x, 0 ) -> \"jz\" ++ String.fromInt x\n\
+         \x20       ( Just x, _ ) -> \"j\" ++ String.fromInt x\n\
+         \x20       ( Nothing, n ) -> \"n\" ++ String.fromInt n\n\
+         \n\
+         main : String\n\
+         main = describe ( Just 5, 0 ) ++ describe ( Just 7, 9 ) ++ describe ( Nothing, 3 )\n",
+    );
+}
+
+#[test]
+fn nonempty_list_and_cons_alias_patterns() {
+    assert_same(
+        "list_cons_pat",
+        "module Test exposing (..)\n\
+         \n\
+         scanr1 : List Int -> List Int\n\
+         scanr1 xs_ =\n\
+         \x20   case xs_ of\n\
+         \x20       [] -> []\n\
+         \x20       [ x ] -> [ x * 100 ]\n\
+         \x20       x :: xs ->\n\
+         \x20           case scanr1 xs of\n\
+         \x20               (q :: _) as qs -> (x + q) :: qs\n\
+         \x20               [] -> []\n\
+         \n\
+         main : String\n\
+         main = String.join \",\" (List.map String.fromInt (scanr1 [ 1, 2, 3 ]))\n",
+    );
+}
+
+#[test]
+fn char_literal_value() {
+    assert_same(
+        "char_lit",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main = String.fromChar 'Z'\n",
+    );
+}
+
+#[test]
+fn min_max_on_strings() {
+    assert_same(
+        "min_max_str",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main = min \"banana\" \"apple\" ++ \"|\" ++ max \"banana\" \"apple\"\n",
+    );
+}
+
+#[test]
+fn exponent_operator() {
+    assert_same(
+        "exponent",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (2 ^ 10) ++ \"|\" ++ String.fromFloat (2.0 ^ 0.5)\n",
+    );
+}
+
+#[test]
+fn list_member_strings() {
+    assert_same(
+        "list_member_str",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let ok = List.member \"b\" [ \"a\", \"b\", \"c\" ]\n\
+         \x20       no = List.member \"z\" [ \"a\", \"b\", \"c\" ]\n\
+         \x20   in (if ok then \"y\" else \"n\") ++ (if no then \"y\" else \"n\")\n",
+    );
+}
+
+#[test]
+fn constructor_let_destructure() {
+    assert_same(
+        "ctor_destructure",
+        "module Test exposing (..)\n\
+         \n\
+         type Wrapper = Wrapper Int String\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let (Wrapper n s) = Wrapper 42 \"hi\"\n\
+         \x20   in s ++ String.fromInt n\n",
+    );
+}
+
+#[test]
+fn row_polymorphic_record_field() {
+    // A helper with no annotation is row-polymorphic in the record; the
+    // concrete record must still lay out with all its fields.
+    assert_same(
+        "row_poly_record",
+        "module Test exposing (..)\n\
+         \n\
+         type alias Runner = { labels : List String, run : () -> Int }\n\
+         \n\
+         runners : List Runner\n\
+         runners =\n\
+         \x20   [ { labels = [ \"a\" ], run = \\() -> 10 }\n\
+         \x20   , { labels = [ \"b\", \"c\" ], run = \\() -> 20 }\n\
+         \x20   ]\n\
+         \n\
+         sumRuns rs = List.foldl (\\r acc -> acc + r.run ()) 0 rs\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (sumRuns runners)\n",
+    );
+}
+
+#[test]
+fn point_free_composition_partial_application() {
+    // `(\\f (a,b) -> f a b) >> g` composed and applied — the left operand is a
+    // multi-parameter lambda applied to one argument (partial), and `g` is a
+    // point-free / partially-applied function. Mirrors elm-test's `fuzz2`.
+    assert_same(
+        "point_free_compose",
+        "module Test exposing (..)\n\
+         \n\
+         mk : Int -> (( Int, Int ) -> Int) -> Int\n\
+         mk k g = k + g ( 1, 2 )\n\
+         \n\
+         combine : Int -> (Int -> Int -> Int) -> Int\n\
+         combine k = (\\f ( a, b ) -> f a b) >> mk k\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (combine 100 (\\a b -> a + b))\n",
+    );
+}
+
+#[test]
+fn deep_tail_recursion_with_allocation() {
+    // A self-tail-recursive function must run in constant stack (the backend
+    // compiles the tail self-call to a loop), even when its body allocates —
+    // the heap allocation blocks LLVM's own tail-call elimination, so the
+    // explicit tail-loop is required.
+    assert_same(
+        "deep_tail_rec_alloc",
+        "module Test exposing (..)\n\
+         \n\
+         countDown : Int -> List Int -> Int\n\
+         countDown n acc =\n\
+         \x20   if n == 0 then List.length acc\n\
+         \x20   else countDown (n - 1) (n :: acc)\n\
+         \n\
+         main : String\n\
+         main = String.fromInt (countDown 200000 [])\n",
+    );
+}
