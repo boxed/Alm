@@ -906,11 +906,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         branches: &[(crate::ast::canonical::Pattern, TypedExpr)],
     ) -> Result<(), String> {
         let subject = self.gen(scrutinee)?;
-        let subject_layout = self.layouts.layout_of(&scrutinee.tipe);
         let mut matched_all = false;
         for (pattern, body) in branches {
             let fail = self.new_block("case.next");
-            let refutable = self.match_pattern(pattern, subject, &subject_layout, fail)?;
+            let refutable = self.match_pattern(pattern, subject, &scrutinee.tipe, fail)?;
             self.gen_tail(body)?;
             self.builder.position_at_end(fail);
             if !refutable {
@@ -5445,7 +5444,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         whole: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let subject = self.gen(scrutinee)?;
-        let subject_layout = self.layouts.layout_of(&scrutinee.tipe);
         let result_ty = self.llvm_type(&self.layouts.layout_of(&whole.tipe));
         let merge = self.new_block("case.end");
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
@@ -5457,7 +5455,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // compiled; on a full match the builder falls through with the
             // pattern's variables bound.
             let fail = self.new_block("case.next");
-            let refutable = self.match_pattern(pattern, subject, &subject_layout, fail)?;
+            let refutable = self.match_pattern(pattern, subject, &scrutinee.tipe, fail)?;
             let v = self.gen(body)?;
             incoming.push((v, self.builder.get_insert_block().unwrap()));
             self.builder.build_unconditional_branch(merge).unwrap();
@@ -5510,10 +5508,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         &mut self,
         pattern: &crate::ast::canonical::Pattern,
         value: BasicValueEnum<'ctx>,
-        layout: &Layout,
+        tipe: &crate::ast::canonical::Type,
         fail: inkwell::basic_block::BasicBlock<'ctx>,
     ) -> Result<bool, String> {
         use crate::ast::canonical::Pattern_::*;
+        // Type-directed: the layout is derived here, but sub-patterns recurse on
+        // their *types*, so a constructor field of a recursive type (whose
+        // layout is `Ref`) is still matched against the concrete union rather
+        // than bottoming out at `Ref`. Mirrors `equals_typed`.
+        let layout = self.layouts.layout_of(tipe);
         match &pattern.value {
             Var(name) => {
                 self.locals.insert(name.to_string(), value);
@@ -5522,7 +5525,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Anything | Unit => Ok(false),
             Alias(inner, name) => {
                 self.locals.insert(name.value.to_string(), value);
-                self.match_pattern(inner, value, layout, fail)
+                self.match_pattern(inner, value, tipe, fail)
             }
             Int(n) => {
                 let cond = self
@@ -5558,8 +5561,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Ok(true)
             }
             Tuple(a, b, rest) => {
-                let Layout::Tuple(elem_layouts) = layout else {
-                    return Err("typed backend: tuple pattern on non-tuple value".to_string());
+                use crate::ast::canonical::Type;
+                let sub_types: Vec<Type> = match tipe {
+                    Type::Tuple(x, y, z) => {
+                        let mut v = vec![(**x).clone(), (**y).clone()];
+                        if let Some(z) = z {
+                            v.push((**z).clone());
+                        }
+                        v
+                    }
+                    _ => return Err("typed backend: tuple pattern on non-tuple value".to_string()),
                 };
                 let sv = value.into_struct_value();
                 let parts: Vec<&crate::ast::canonical::Pattern> = std::iter::once(a.as_ref())
@@ -5569,12 +5580,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let mut refutable = false;
                 for (i, p) in parts.into_iter().enumerate() {
                     let elem = self.builder.build_extract_value(sv, i as u32, "elt").unwrap();
-                    refutable |= self.match_pattern(p, elem, &elem_layouts[i], fail)?;
+                    refutable |= self.match_pattern(p, elem, &sub_types[i], fail)?;
                 }
                 Ok(refutable)
             }
             Record(field_names) => {
-                let Layout::Record(fields) = layout else {
+                let Layout::Record(fields) = &layout else {
                     return Err("typed backend: record pattern on non-record value".to_string());
                 };
                 let sv = value.into_struct_value();
@@ -5595,9 +5606,14 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Ok(false)
             }
             List(elems) => {
-                let Layout::List(elem_layout) = layout else {
+                use crate::ast::canonical::Type;
+                let (Layout::List(elem_layout), Type::Type(_, _, targs)) = (&layout, tipe) else {
                     return Err("typed backend: list pattern on non-list value".to_string());
                 };
+                let elem_layout = (**elem_layout).clone();
+                let elem_type = targs.first().cloned().ok_or_else(|| {
+                    "typed backend: list pattern on a list type without an element".to_string()
+                })?;
                 let list = value.into_pointer_value();
                 let len = self.list_len(list);
                 let want = self.ctx.i64_type().const_int(elems.len() as u64, false);
@@ -5611,15 +5627,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let n = elems.len();
                 for (k, p) in elems.iter().enumerate() {
                     let idx = self.ctx.i64_type().const_int((n - 1 - k) as u64, false);
-                    let elem = self.list_load(backing, elem_layout, idx);
-                    self.match_pattern(p, elem, elem_layout, fail)?;
+                    let elem = self.list_load(backing, &elem_layout, idx);
+                    self.match_pattern(p, elem, &elem_type, fail)?;
                 }
                 Ok(true)
             }
             Cons(head, tail) => {
-                let Layout::List(elem_layout) = layout else {
+                use crate::ast::canonical::Type;
+                let (Layout::List(elem_layout), Type::Type(_, _, targs)) = (&layout, tipe) else {
                     return Err("typed backend: cons pattern on non-list value".to_string());
                 };
+                let elem_layout = (**elem_layout).clone();
+                let elem_type = targs.first().cloned().ok_or_else(|| {
+                    "typed backend: cons pattern on a list type without an element".to_string()
+                })?;
                 let list = value.into_pointer_value();
                 let len = self.list_len(list);
                 let cond = self
@@ -5636,13 +5657,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let backing = self.list_backing(list);
                 let one = self.ctx.i64_type().const_int(1, false);
                 let last = self.builder.build_int_sub(len, one, "last").unwrap();
-                let head_val = self.list_load(backing, elem_layout, last);
-                self.match_pattern(head, head_val, elem_layout, fail)?;
+                let head_val = self.list_load(backing, &elem_layout, last);
+                self.match_pattern(head, head_val, &elem_type, fail)?;
                 let tail_val = self.make_list(last, backing);
-                self.match_pattern(tail, tail_val.into(), layout, fail)?;
+                self.match_pattern(tail, tail_val.into(), tipe, fail)?;
                 Ok(true)
             }
-            Ctor(_, _, ctor, args) => match layout {
+            Ctor(_, _, ctor, args) => match &layout {
                 Layout::Bool => {
                     let cond = self
                         .builder
@@ -5671,7 +5692,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     self.branch_or_fail(cond, fail);
                     Ok(true)
                 }
-                Layout::Tagged(variants) => {
+                // A data-carrying union is a heap `{tag, fields}`. `Ref` is the
+                // same representation reached through a recursive occurrence
+                // (its layout was broken to `Ref`); both dispatch identically,
+                // recovering the constructors' field *types* from the concrete
+                // union type so field sub-patterns keep their type as they
+                // recurse. This is what lets `case` match a recursive field.
+                Layout::Tagged(_) | Layout::Ref => {
+                    let ctors = self.layouts.union_ctors(tipe).ok_or_else(|| {
+                        format!("typed backend: case on non-union type for `{}`", ctor.name)
+                    })?;
                     let ptr = value.into_pointer_value();
                     let tag = self
                         .builder
@@ -5688,14 +5718,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                         )
                         .unwrap();
                     self.branch_or_fail(cond, fail);
-                    // The tag matched: this constructor's fields are now in scope.
+                    // The tag matched: bind this constructor's fields.
                     if !args.is_empty() {
-                        let field_layouts = variants
+                        let field_types = ctors
                             .get(ctor.index as usize)
-                            .cloned()
+                            .map(|(_, fts)| fts.clone())
                             .ok_or_else(|| {
                                 format!("typed backend: bad ctor index for `{}`", ctor.name)
                             })?;
+                        let field_layouts: Vec<Layout> =
+                            field_types.iter().map(|t| self.layouts.layout_of(t)).collect();
                         let struct_ty = self.ctor_struct(&field_layouts);
                         for (i, argpat) in args.iter().enumerate() {
                             let fp = self
@@ -5706,7 +5738,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                                 .builder
                                 .build_load(self.llvm_type(&field_layouts[i]), fp, "fld")
                                 .unwrap();
-                            self.match_pattern(argpat, v, &field_layouts[i], fail)?;
+                            self.match_pattern(argpat, v, &field_types[i], fail)?;
                         }
                     }
                     Ok(true)

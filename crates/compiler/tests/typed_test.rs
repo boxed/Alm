@@ -1902,6 +1902,47 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn nested_pattern_match_on_recursive_field() {
+    // Pattern-matching a constructor whose field is the recursive type itself
+    // (e.g. `Node (Node _ _) _`) reaches that field at `Ref` layout (recursion
+    // is broken with a pointer). match_pattern was layout-directed and bailed
+    // with \"case on layout Ref is not supported\"; it is now type-directed and
+    // recovers the constructors' field types from the concrete union, so a
+    // nested pattern on a recursive field matches. Exercises a deep nested
+    // match plus a `::` on a recursive-typed list element.
+    assert_same(
+        "recursive_case",
+        "module Test exposing (..)\n\
+         \n\
+         type Tree = Leaf Int | Node Tree Tree\n\
+         \n\
+         build : Int -> Tree\n\
+         build n =\n\
+         \x20   if n <= 0 then Leaf n else Node (build (n - 1)) (build (n - 1))\n\
+         \n\
+         describe : Tree -> String\n\
+         describe t =\n\
+         \x20   case t of\n\
+         \x20       Node (Node _ _) (Leaf x) ->\n\
+         \x20           \"nn-leaf \" ++ String.fromInt x\n\
+         \n\
+         \x20       Node (Leaf a) _ ->\n\
+         \x20           \"nleaf \" ++ String.fromInt a\n\
+         \n\
+         \x20       Node _ _ ->\n\
+         \x20           \"node\"\n\
+         \n\
+         \x20       Leaf n ->\n\
+         \x20           \"leaf \" ++ String.fromInt n\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   [ describe (build 0), describe (build 1), describe (build 2), describe (build 3) ]\n\
+         \x20       |> String.join \"|\"\n",
+    );
+}
+
+#[test]
 fn structural_equality_of_recursive_values() {
     // A recursive type's layout uses `Ref` to break self-reference, and the
     // layout-directed comparison bottomed out at `Ref` as pointer identity — so
