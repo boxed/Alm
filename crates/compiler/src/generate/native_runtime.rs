@@ -1787,6 +1787,34 @@ fn char_byte(s: &str, idx: usize) -> usize {
     s.char_indices().nth(idx).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+/// Byte offset of the `cp`-th codepoint in a UTF-8 byte slice, clamped to the
+/// slice length. The byte-slice twin of [`char_byte`], used by the elm/parser
+/// primitives whose offsets are codepoint indices (so they stay consistent
+/// with `String.slice`, which is codepoint-based). O(cp); parser inputs are
+/// short or ASCII in practice.
+fn cp_byte(s: &[u8], cp: usize) -> usize {
+    let mut o = 0;
+    let mut n = 0;
+    while n < cp && o < s.len() {
+        let (_, len) = decode_char(s, o);
+        o += len;
+        n += 1;
+    }
+    o
+}
+
+/// Number of codepoints in a UTF-8 byte slice.
+fn cp_count(s: &[u8]) -> usize {
+    let mut o = 0;
+    let mut n = 0;
+    while o < s.len() {
+        let (_, len) = decode_char(s, o);
+        o += len;
+        n += 1;
+    }
+    n
+}
+
 unsafe fn slice_cp(p: u64, mut start: i64, mut end: i64) -> u64 {
     let s = sstr(p);
     let len = s.chars().count() as i64;
@@ -4397,20 +4425,26 @@ unsafe extern "C" fn parser_is_sub_string(
     col: u64,
     big: u64,
 ) -> u64 {
+    // Offsets are CODEPOINT indices (consistent with `String.slice`, which
+    // elm/parser's `getChompedString` uses): a byte-offset scheme would slice
+    // the wrong substring for multi-byte input. `char_byte` maps the codepoint
+    // offset to a byte position; the returned offset is again a codepoint index.
     let s = str_slice(small);
     let b = str_slice(big);
-    let mut o = int_val(offset) as usize;
+    let co = int_val(offset) as usize;
+    let mut bo = cp_byte(b, co);
+    let mut new_co = co;
     let mut r = int_val(row);
     let mut c = int_val(col);
-    let mut good = o + s.len() <= b.len();
     let mut si = 0usize;
-    while good && si < s.len() {
-        if o >= b.len() {
+    let mut good = true;
+    while si < s.len() {
+        if bo >= b.len() {
             good = false;
             break;
         }
         let (sc, sl) = decode_char(s, si);
-        let (bc, bl) = decode_char(b, o);
+        let (bc, bl) = decode_char(b, bo);
         if sc != bc {
             good = false;
             break;
@@ -4421,67 +4455,80 @@ unsafe extern "C" fn parser_is_sub_string(
         } else {
             c += 1;
         }
-        o += bl;
+        bo += bl;
         si += sl;
+        new_co += 1;
     }
-    triple(rt_int(if good { o as i64 } else { -1 }), rt_int(r), rt_int(c))
+    triple(rt_int(if good { new_co as i64 } else { -1 }), rt_int(r), rt_int(c))
 }
 
+// All parser offsets below are CODEPOINT indices (see `parser_is_sub_string`):
+// `char_byte` maps a codepoint offset to a byte position; digits/ASCII are one
+// byte each so the codepoint offset advances by the number matched.
 unsafe extern "C" fn parser_is_sub_char(predicate: u64, offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
-    let o = int_val(offset) as usize;
-    if s.len() <= o {
+    let co = int_val(offset) as usize;
+    let bo = cp_byte(s, co);
+    if s.len() <= bo {
         return rt_int(-1);
     }
-    let (cp, len) = decode_char(s, o);
+    let (cp, _len) = decode_char(s, bo);
     if !rt_is_true(ap1(predicate, alloc(Value::Char(cp)))) {
         return rt_int(-1);
     }
     if cp == 0x0A {
         rt_int(-2)
     } else {
-        rt_int((o + len) as i64)
+        rt_int((co + 1) as i64)
     }
 }
 
 unsafe extern "C" fn parser_is_ascii_code(code: u64, offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
-    let o = int_val(offset) as usize;
-    let byte = if o < s.len() { s[o] as i64 } else { -1 };
+    let bo = cp_byte(s, int_val(offset) as usize);
+    let byte = if bo < s.len() { s[bo] as i64 } else { -1 };
     rt_bool(byte == int_val(code))
 }
 
 unsafe extern "C" fn parser_chomp_base10(offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
-    let mut o = int_val(offset) as usize;
-    while o < s.len() && (0x30..=0x39).contains(&s[o]) {
-        o += 1;
+    let co = int_val(offset) as usize;
+    let mut bo = cp_byte(s, co);
+    let mut n = co;
+    while bo < s.len() && (0x30..=0x39).contains(&s[bo]) {
+        bo += 1;
+        n += 1;
     }
-    rt_int(o as i64)
+    rt_int(n as i64)
 }
 
 unsafe extern "C" fn parser_consume_base(base: u64, offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
     let base = int_val(base);
-    let mut o = int_val(offset) as usize;
+    let co = int_val(offset) as usize;
+    let mut bo = cp_byte(s, co);
+    let mut n = co;
     let mut total: i64 = 0;
-    while o < s.len() {
-        let digit = s[o] as i64 - 0x30;
+    while bo < s.len() {
+        let digit = s[bo] as i64 - 0x30;
         if digit < 0 || base <= digit {
             break;
         }
         total = base * total + digit;
-        o += 1;
+        bo += 1;
+        n += 1;
     }
-    pair(rt_int(o as i64), rt_int(total))
+    pair(rt_int(n as i64), rt_int(total))
 }
 
 unsafe extern "C" fn parser_consume_base16(offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
-    let mut o = int_val(offset) as usize;
+    let co = int_val(offset) as usize;
+    let mut bo = cp_byte(s, co);
+    let mut n = co;
     let mut total: i64 = 0;
-    while o < s.len() {
-        let code = s[o];
+    while bo < s.len() {
+        let code = s[bo];
         let d = match code {
             0x30..=0x39 => (code - 0x30) as i64,
             0x41..=0x46 => (code - 55) as i64,
@@ -4489,9 +4536,10 @@ unsafe extern "C" fn parser_consume_base16(offset: u64, string: u64) -> u64 {
             _ => break,
         };
         total = 16 * total + d;
-        o += 1;
+        bo += 1;
+        n += 1;
     }
-    pair(rt_int(o as i64), rt_int(total))
+    pair(rt_int(n as i64), rt_int(total))
 }
 
 unsafe extern "C" fn parser_find_sub_string(
@@ -4501,27 +4549,34 @@ unsafe extern "C" fn parser_find_sub_string(
     col: u64,
     big: u64,
 ) -> u64 {
+    // Codepoint offsets (see `parser_is_sub_string`). Find `small` by bytes,
+    // then report the match position as a codepoint offset.
     let s = str_slice(small);
     let b = str_slice(big);
     let o0 = int_val(offset) as usize;
-    // Byte `indexOf` of `small` in `big` from `o0`.
-    let new_offset: i64 = if s.is_empty() {
-        o0.min(b.len()) as i64
-    } else if o0 <= b.len() {
-        b[o0..]
+    let bo0 = cp_byte(b, o0);
+    let bmatch: i64 = if s.is_empty() {
+        bo0.min(b.len()) as i64
+    } else if bo0 <= b.len() {
+        b[bo0..]
             .windows(s.len())
             .position(|w| w == s)
-            .map(|p| (o0 + p) as i64)
+            .map(|p| (bo0 + p) as i64)
             .unwrap_or(-1)
     } else {
         -1
     };
-    let target = if new_offset < 0 {
+    let new_offset: i64 = if bmatch < 0 {
+        -1
+    } else {
+        (o0 + cp_count(&b[bo0..bmatch as usize])) as i64
+    };
+    let target = if bmatch < 0 {
         b.len()
     } else {
-        new_offset as usize + s.len()
+        bmatch as usize + s.len()
     };
-    let mut o = o0;
+    let mut o = bo0;
     let mut r = int_val(row);
     let mut c = int_val(col);
     while o < target {
