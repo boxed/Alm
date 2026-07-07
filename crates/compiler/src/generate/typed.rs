@@ -2086,6 +2086,85 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.gen(body)
     }
 
+    /// Whether a closed `let` value is worth memoizing: recomputing it does real
+    /// allocation or work. True when the result is a heap structure (list,
+    /// string, record, union, dict/array, closure) or the body calls a function
+    /// or builds an aggregate — as opposed to a scalar leaf that LLVM folds and
+    /// that the memo load/branch would only slow down.
+    fn allocating_const(&self, expr: &TypedExpr) -> bool {
+        use crate::ir::mono::TypedKind::*;
+        if matches!(
+            &expr.kind,
+            Str(_) | Ctor(..) | List(_) | Call(..) | Case(..) | Record(_) | Tuple(..) | Update(..)
+        ) {
+            return true;
+        }
+        // A pipe/compose is a `Binop` in the IR; judge it (and any other node)
+        // by whether it yields a heap-allocated value worth caching.
+        matches!(
+            self.layouts.layout_of(&expr.tipe),
+            Layout::List(_)
+                | Layout::Str
+                | Layout::Record(_)
+                | Layout::Tagged(_)
+                | Layout::Ref
+                | Layout::Opaque
+                | Layout::Closure
+        )
+    }
+
+    /// Compute a closed (argument-independent) `let` value at most once for the
+    /// whole program, caching it in a module global behind a "done" flag — the
+    /// same memoization as a top-level nullary value, applied to a constant
+    /// found inside a function. The body runs on the first execution and every
+    /// later one loads the cached value. Sound only for closed bodies (checked
+    /// by the caller): they reference no locals, so the cached value is valid
+    /// for every call.
+    fn emit_hoisted_const(&mut self, body: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
+        let ret_ty = self.llvm_type(&self.layouts.layout_of(&body.tipe));
+        let id = self.lam_id;
+        self.lam_id += 1;
+        let memo = self.module.add_global(ret_ty, None, &format!("hoist.{}$memo", id));
+        memo.set_initializer(&ret_ty.const_zero());
+        memo.set_linkage(Linkage::Internal);
+        let bool_t = self.ctx.bool_type();
+        let done = self.module.add_global(bool_t, None, &format!("hoist.{}$done", id));
+        done.set_initializer(&bool_t.const_zero());
+        done.set_linkage(Linkage::Internal);
+
+        let cached_bb = self.new_block("hoist.cached");
+        let compute_bb = self.new_block("hoist.compute");
+        let cont_bb = self.new_block("hoist.cont");
+        let done_v = self
+            .builder
+            .build_load(bool_t, done.as_pointer_value(), "hdone")
+            .unwrap()
+            .into_int_value();
+        self.builder
+            .build_conditional_branch(done_v, cached_bb, compute_bb)
+            .unwrap();
+
+        self.builder.position_at_end(cached_bb);
+        let cv = self.builder.build_load(ret_ty, memo.as_pointer_value(), "hmemo").unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+        let cached_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(compute_bb);
+        // The body is closed, so it needs no enclosing locals.
+        let val = self.gen(body)?;
+        self.builder.build_store(memo.as_pointer_value(), val).unwrap();
+        self.builder
+            .build_store(done.as_pointer_value(), bool_t.const_int(1, false))
+            .unwrap();
+        self.builder.build_unconditional_branch(cont_bb).unwrap();
+        let compute_end = self.builder.get_insert_block().unwrap();
+
+        self.builder.position_at_end(cont_bb);
+        let phi = self.builder.build_phi(ret_ty, "hoisted").unwrap();
+        phi.add_incoming(&[(&cv, cached_end), (&val, compute_end)]);
+        Ok(phi.as_basic_value())
+    }
+
     /// Bind a `let` block's declarations into the local scope (shared by
     /// [`gen_let`] and the tail-position path).
     fn bind_let_decls(&mut self, decls: &[crate::ir::mono::TypedLetDecl]) -> Result<(), String> {
@@ -2093,8 +2172,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         for decl in decls {
             match decl {
                 Def { name, params, body } if params.is_empty() => {
-                    let v = self.gen(body)?;
-                    self.locals.insert(name.to_string(), v);
+                    // A `let` value whose right-hand side references none of the
+                    // enclosing function's arguments (or any local) is a
+                    // constant relative to every call — the same generalization
+                    // as a top-level nullary value, but reached inside a
+                    // function. If it also allocates (builds a structure or
+                    // calls a function), computing it on every call — every loop
+                    // iteration, even — is wasteful and, under the non-freeing
+                    // allocator, unbounded. Hoist it to a memoized global so the
+                    // work happens at most once for the whole program. (A closed
+                    // scalar/leaf is left inline: LLVM folds it and the memo
+                    // machinery would only add overhead.)
+                    if self.allocating_const(body) && is_closed(body) {
+                        let v = self.emit_hoisted_const(body)?;
+                        self.locals.insert(name.to_string(), v);
+                    } else {
+                        let v = self.gen(body)?;
+                        self.locals.insert(name.to_string(), v);
+                    }
                 }
                 // A non-recursive local function `let f x = e`: closure-convert
                 // it like a lambda (capturing outer locals) and bind the closure.
@@ -5529,6 +5624,16 @@ fn tail_has_self_call(expr: &TypedExpr, mangled: &str, nparams: usize) -> bool {
         TypedKind::Let(_, body) => tail_has_self_call(body, mangled, nparams),
         _ => false,
     }
+}
+
+/// Whether an expression references no local variables at all — i.e. it is a
+/// compile-time constant relative to any enclosing function's arguments,
+/// depending only on top-level values, kernels, and literals. Used to decide
+/// whether a `let` binding can be hoisted to a memoized global.
+fn is_closed(expr: &TypedExpr) -> bool {
+    let mut out = Vec::new();
+    free_vars(expr, &mut std::collections::HashSet::new(), &mut out);
+    out.is_empty()
 }
 
 fn free_vars(expr: &TypedExpr, bound: &mut std::collections::HashSet<String>, out: &mut Vec<String>) {

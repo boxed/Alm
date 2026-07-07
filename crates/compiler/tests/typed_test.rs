@@ -1902,6 +1902,38 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn hoisted_closed_local_constant() {
+    // A `let` value inside a function whose right-hand side depends on none of
+    // the function's arguments is a constant relative to every call. The typed
+    // backend hoists such a closed, allocating binding to a memoized global so
+    // it is built once, not per call (or per loop iteration) — the same
+    // generalization as a top-level CAF, reached inside a function. Here the
+    // lookup `table` is closed inside `lookup`, which is applied across a list;
+    // this checks the hoisted value stays correct. (The performance/memory win
+    // — rebuilding the table every call vs once — is the point, but only the
+    // result is observable in a differential test.)
+    assert_same(
+        "hoisted_closed_local",
+        "module Test exposing (..)\n\
+         \n\
+         import Array exposing (Array)\n\
+         \n\
+         lookup : Int -> Int\n\
+         lookup i =\n\
+         \x20   let\n\
+         \x20       table : Array Int\n\
+         \x20       table =\n\
+         \x20           List.range 0 20 |> List.map (\\x -> x * x) |> Array.fromList\n\
+         \x20   in\n\
+         \x20   Array.get (modBy 21 i) table |> Maybe.withDefault 0\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   List.range 0 50 |> List.map lookup |> List.sum |> String.fromInt\n",
+    );
+}
+
+#[test]
 fn memoized_top_level_constant() {
     // A top-level nullary value (a CAF) is an Elm constant, evaluated once.
     // The typed backend memoizes it behind a module global so referencing it
