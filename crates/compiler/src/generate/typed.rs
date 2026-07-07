@@ -4324,11 +4324,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let variants = variants.clone();
                 self.equals_tagged(a, b, &variants)
             }
-            // An opaque boxed reference (e.g. the phantom element type of an
-            // empty list): fall back to pointer identity. This code is only
-            // reached for values that are genuinely opaque; for `[] == []` the
-            // element comparison is generated but never executed.
-            Layout::Ref => {
+            // A function value, or an opaque boxed reference (e.g. the phantom
+            // element type of an empty list): pointer identity. Elm's `==` on
+            // functions is reference equality (it errors on non-equal
+            // functions); references to the same function are canonical (a
+            // shared global, and box/unbox preserves identity), so pointer
+            // equality gives the reference-equal answer and, unlike Elm,
+            // gracefully returns `False` rather than crashing otherwise — which
+            // also lets a value that merely *contains* a function be compared
+            // (e.g. a lazy list, or a model carrying a comparator).
+            Layout::Ref | Layout::Closure => {
                 let i64_t = self.ctx.i64_type();
                 let ai = self
                     .builder
