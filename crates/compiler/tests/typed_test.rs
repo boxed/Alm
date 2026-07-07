@@ -1902,6 +1902,41 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn boxed_closure_arity_above_twelve() {
+    // A function with many parameters, boxed as a uniform closure and applied
+    // through the uniform path (here via a `Dict` value slot), calls the
+    // runtime `call_fn` with arity = params + 1 (the captured-closure word that
+    // `box_closure`'s trampoline prepends). A 12-parameter function therefore
+    // needs `call_fn(13)`; the runtime originally capped at 12 and crashed with
+    // "function arity too large" (Holmusk/swagger-decoder's 12-field record
+    // decoders). `call_fn` now handles up to 32 and the stack argument buffers
+    // are sized to match.
+    assert_same(
+        "boxed_closure_arity_13",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         add12 : Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int\n\
+         add12 a b c d e f g h i j k l =\n\
+         \x20   a + b + c + d + e + f + g + h + i + j + k + l\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       d =\n\
+         \x20           Dict.fromList [ ( \"f\", add12 ) ]\n\
+         \x20   in\n\
+         \x20   case Dict.get \"f\" d of\n\
+         \x20       Just fn ->\n\
+         \x20           String.fromInt (fn 1 2 3 4 5 6 7 8 9 10 11 12)\n\
+         \n\
+         \x20       Nothing ->\n\
+         \x20           \"no\"\n",
+    );
+}
+
+#[test]
 fn point_free_local_function_in_higher_order_kernel() {
     // A local `let` function that is point-free in its last argument --
     // `prepend x = List.append [x]`, whose type is `Int -> List Int -> List Int`

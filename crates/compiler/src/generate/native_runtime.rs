@@ -907,6 +907,26 @@ type Fn12 = unsafe extern "C" fn(
     u64, u64, u64, u64, u64, u64, u64, u64,
     u64, u64, u64, u64,
 ) -> u64;
+type Fn13 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn14 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn15 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn16 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn17 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn18 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn19 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn20 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn21 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn22 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn23 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn24 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn25 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn26 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn27 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn28 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn29 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn30 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn31 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
+type Fn32 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64;
 
 #[inline]
 unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
@@ -924,7 +944,27 @@ unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
         10 => (transmute::<_, Fn10>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9]),
         11 => (transmute::<_, Fn11>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]),
         12 => (transmute::<_, Fn12>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]),
-        _ => crash!("function arity too large (max 12 for now)"),
+        13 => (transmute::<_, Fn13>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12]),
+        14 => (transmute::<_, Fn14>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13]),
+        15 => (transmute::<_, Fn15>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14]),
+        16 => (transmute::<_, Fn16>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]),
+        17 => (transmute::<_, Fn17>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16]),
+        18 => (transmute::<_, Fn18>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17]),
+        19 => (transmute::<_, Fn19>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18]),
+        20 => (transmute::<_, Fn20>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19]),
+        21 => (transmute::<_, Fn21>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20]),
+        22 => (transmute::<_, Fn22>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21]),
+        23 => (transmute::<_, Fn23>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22]),
+        24 => (transmute::<_, Fn24>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23]),
+        25 => (transmute::<_, Fn25>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24]),
+        26 => (transmute::<_, Fn26>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25]),
+        27 => (transmute::<_, Fn27>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26]),
+        28 => (transmute::<_, Fn28>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26], a[27]),
+        29 => (transmute::<_, Fn29>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26], a[27], a[28]),
+        30 => (transmute::<_, Fn30>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26], a[27], a[28], a[29]),
+        31 => (transmute::<_, Fn31>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26], a[27], a[28], a[29], a[30]),
+        32 => (transmute::<_, Fn32>(func))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15], a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23], a[24], a[25], a[26], a[27], a[28], a[29], a[30], a[31]),
+        _ => crash!("function arity too large (max 32)"),
     }
 }
 
@@ -943,7 +983,7 @@ pub unsafe extern "C" fn rt_apply(mut f: u64, n: i32, mut args: *const u64) -> u
         // Build the argument list on the stack — closure application is
         // extremely hot, so this must not allocate. Arity is bounded by
         // call_fn's max (12).
-        let mut all: [u64; 16] = [0u64; 16];
+        let mut all: [u64; 32] = [0u64; 32];
         if let Value::Closure { args: caps, .. } = deref(f) {
             all[..applied].copy_from_slice(&caps[..applied]);
         }
@@ -965,7 +1005,7 @@ pub unsafe extern "C" fn rt_apply(mut f: u64, n: i32, mut args: *const u64) -> u
 /// (`List.map`/`foldl`/…) instead of calling the general `rt_apply`.
 #[inline(always)]
 unsafe fn ap1(f: u64, a: u64) -> u64 {
-    let mut all: [u64; 16] = [0u64; 16];
+    let mut all: [u64; 32] = [0u64; 32];
     let (func, arity) = match deref(f) {
         Value::Closure { func, arity, applied, args } => {
             let (func, arity, applied) = (*func, *arity as usize, *applied as usize);
@@ -983,7 +1023,7 @@ unsafe fn ap1(f: u64, a: u64) -> u64 {
 
 #[inline(always)]
 unsafe fn ap2(f: u64, a: u64, b: u64) -> u64 {
-    let mut all: [u64; 16] = [0u64; 16];
+    let mut all: [u64; 32] = [0u64; 32];
     let (func, arity) = match deref(f) {
         Value::Closure { func, arity, applied, args } => {
             let (func, arity, applied) = (*func, *arity as usize, *applied as usize);
