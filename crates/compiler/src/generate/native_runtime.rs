@@ -3545,6 +3545,65 @@ unsafe extern "C" fn random_pair_gen(ga: u64, gb: u64, seed: u64) -> u64 {
     )
 }
 
+// `Random.weighted (w0, v0) [ (w1, v1), .. ]` — pick a value with probability
+// proportional to |weight|, mirroring `_Random_weighted` in runtime.js: draw a
+// float in `[0, total)` and walk the cumulative weights.
+unsafe extern "C" fn random_weighted(first: u64, others: u64) -> u64 {
+    let mut total = num(rt_tuple_item(first, 0)).abs();
+    for p in to_vec(others) {
+        total += num(rt_tuple_item(p, 0)).abs();
+    }
+    let float_gen = random_float(rt_float(0.0), rt_float(total));
+    let picker = closure(random_weighted_pick as *const (), 3, &[first, others]);
+    random_map(picker, float_gen)
+}
+unsafe extern "C" fn random_weighted_pick(first: u64, others: u64, countdown: u64) -> u64 {
+    let c = num(countdown);
+    let mut acc = num(rt_tuple_item(first, 0)).abs();
+    if c <= acc {
+        return rt_tuple_item(first, 1);
+    }
+    let os = to_vec(others);
+    for p in &os {
+        acc += num(rt_tuple_item(*p, 0)).abs();
+        if c <= acc {
+            return rt_tuple_item(*p, 1);
+        }
+    }
+    match os.last() {
+        Some(p) => rt_tuple_item(*p, 1),
+        None => rt_tuple_item(first, 1),
+    }
+}
+
+// `Random.uniform v0 [ v1, .. ]` — each value equally likely; a weighted pick
+// with every weight equal to 1.
+unsafe extern "C" fn random_uniform(head: u64, rest: u64) -> u64 {
+    let vals = to_vec(rest);
+    let n = (1 + vals.len()) as f64;
+    let float_gen = random_float(rt_float(0.0), rt_float(n));
+    let picker = closure(random_uniform_pick as *const (), 3, &[head, rest]);
+    random_map(picker, float_gen)
+}
+unsafe extern "C" fn random_uniform_pick(head: u64, rest: u64, countdown: u64) -> u64 {
+    let c = num(countdown);
+    let mut acc = 1.0;
+    if c <= acc {
+        return head;
+    }
+    let rs = to_vec(rest);
+    for v in &rs {
+        acc += 1.0;
+        if c <= acc {
+            return *v;
+        }
+    }
+    match rs.last() {
+        Some(v) => *v,
+        None => head,
+    }
+}
+
 unsafe extern "C" fn random_list(n: u64, g: u64) -> u64 {
     mk_generator(closure(random_list_gen as *const (), 3, &[n, g]))
 }
@@ -3773,6 +3832,8 @@ kernel_fns! {
     G_RANDOM_INT "$Random$int" random_int, 2;
     G_RANDOM_FLOAT "$Random$float" random_float, 2;
     G_RANDOM_CONSTANT "$Random$constant" random_constant, 1;
+    G_RANDOM_WEIGHTED "$Random$weighted" random_weighted, 2;
+    G_RANDOM_UNIFORM "$Random$uniform" random_uniform, 2;
     G_RANDOM_MAP "$Random$map" random_map, 2;
     G_RANDOM_MAP2 "$Random$map2" random_map2, 3;
     G_RANDOM_MAP3 "$Random$map3" random_map3, 4;
