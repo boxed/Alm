@@ -4818,11 +4818,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         r: &TypedExpr,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let layout = self.layouts.layout_of(&l.tipe);
-        // Ordering comparisons on comparables carried as the uniform runtime
-        // word — strings, an unresolved `comparable` (Ref, a word bit-cast to a
-        // pointer), or an opaque word — must compare contents, not the raw
-        // machine value. Route through the runtime's value comparison.
-        if matches!(layout, Layout::Str | Layout::Ref | Layout::Opaque) {
+        // Comparisons on comparables that are not a single scalar register must
+        // compare contents, not the raw machine value: strings and unresolved
+        // `comparable`/opaque words (already uniform), and the compound
+        // comparables tuples and lists (elm allows ordering these), which we box
+        // to the uniform representation so the runtime does the structural
+        // lexicographic comparison. Route through the runtime's value ops.
+        if matches!(
+            layout,
+            Layout::Str | Layout::Ref | Layout::Opaque | Layout::Tuple(_) | Layout::List(_)
+        ) {
             let sym = match op {
                 "==" => "rt_eq",
                 "/=" => "rt_neq",
@@ -4838,21 +4843,33 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 }
             };
             let i64_t = self.ctx.i64_type();
+            let compound = matches!(layout, Layout::Tuple(_) | Layout::List(_));
             let lv = self.gen(l)?;
             let rv = self.gen(r)?;
-            // Recover the uniform word from a Ref pointer; strings/opaques are
-            // already the word.
-            let to_word = |v: BasicValueEnum<'ctx>| -> BasicValueEnum<'ctx> {
-                if v.is_pointer_value() {
-                    self.builder
-                        .build_ptr_to_int(v.into_pointer_value(), i64_t, "w")
-                        .unwrap()
-                        .into()
-                } else {
-                    v
-                }
+            // Compound comparables (tuple/list) are unboxed structs; box them to
+            // the uniform value. Strings/opaques are already the word; a Ref is a
+            // pointer whose word is its address.
+            let lw = if compound {
+                self.box_value(lv, &l.tipe)?
+            } else if lv.is_pointer_value() {
+                self.builder
+                    .build_ptr_to_int(lv.into_pointer_value(), i64_t, "w")
+                    .unwrap()
+                    .into()
+            } else {
+                lv
             };
-            let cmp = self.call_named(sym, &[to_word(lv), to_word(rv)]);
+            let rw = if compound {
+                self.box_value(rv, &r.tipe)?
+            } else if rv.is_pointer_value() {
+                self.builder
+                    .build_ptr_to_int(rv.into_pointer_value(), i64_t, "w")
+                    .unwrap()
+                    .into()
+            } else {
+                rv
+            };
+            let cmp = self.call_named(sym, &[lw, rw]);
             return Ok(self.call_named("rt_is_true", &[cmp]));
         }
         let is_float = matches!(layout, Layout::Float);

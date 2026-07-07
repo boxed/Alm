@@ -634,13 +634,49 @@ impl Specializer<'_> {
                 TypedKind::List(items.iter().map(|e| self.expr(e, subst)).collect())
             }
             Negate(inner) => TypedKind::Negate(Box::new(self.expr(inner, subst))),
-            Binop(op, home, func, l, r) => TypedKind::Binop(
-                op.clone(),
-                home.clone(),
-                func.clone(),
-                Box::new(self.expr(l, subst)),
-                Box::new(self.expr(r, subst)),
-            ),
+            Binop(op, home, func, l, r) => {
+                let lt = self.expr(l, subst);
+                let rt = self.expr(r, subst);
+                if is_native_binop(op.as_str()) {
+                    TypedKind::Binop(
+                        op.clone(),
+                        home.clone(),
+                        func.clone(),
+                        Box::new(lt),
+                        Box::new(rt),
+                    )
+                } else {
+                    // A custom operator (e.g. elm/parser's `|=`, `|.`) is sugar
+                    // for applying its resolving function to both operands. The
+                    // typed backend's `gen_binop` only knows the numeric and
+                    // comparison built-ins, so lower everything else to a plain
+                    // call — which also lets the specializer discover the
+                    // operator's function like any other reference.
+                    let func_ty = can::Type::Lambda(
+                        Box::new(lt.tipe.clone()),
+                        Box::new(can::Type::Lambda(
+                            Box::new(rt.tipe.clone()),
+                            Box::new(tipe.clone()),
+                        )),
+                    );
+                    let callee_kind = if self.project.contains_key(home) {
+                        self.sink.borrow_mut().push(Instance {
+                            module: home.clone(),
+                            name: func.clone(),
+                            tipe: func_ty.clone(),
+                        });
+                        TypedKind::Global(mangle(home, func, &func_ty))
+                    } else {
+                        TypedKind::Foreign(home.clone(), func.clone())
+                    };
+                    let callee = TypedExpr {
+                        tipe: func_ty,
+                        kind: callee_kind,
+                        region: expr.region,
+                    };
+                    TypedKind::Call(Box::new(callee), vec![lt, rt])
+                }
+            }
             Lambda(args, body) => {
                 // The lambda node's type is arg1 -> .. -> argN -> body; peel
                 // it to type each parameter.
@@ -994,6 +1030,34 @@ fn type_has_free_tyvar(tipe: &can::Type) -> bool {
         Record(fields, _) => fields.iter().any(|(_, t)| type_has_free_tyvar(t)),
         Unit => false,
     }
+}
+
+/// Operators the typed backend generates inline (pipes, composition, cons,
+/// append, boolean, equality, and the numeric/ordering built-ins). Any other
+/// operator is a library-defined function and is lowered to a plain call.
+fn is_native_binop(op: &str) -> bool {
+    matches!(
+        op,
+        "|>" | "<|"
+            | "<<"
+            | ">>"
+            | "::"
+            | "++"
+            | "&&"
+            | "||"
+            | "=="
+            | "/="
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "//"
+            | "^"
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+    )
 }
 
 /// The mangled name of a local specialization: the source name plus its

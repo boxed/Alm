@@ -1851,3 +1851,25 @@ fn unit_equality() {
          \x20       [ d (() == ()), d (() /= ()), d (( (), 1 ) == ( (), 1 )), d ([ () ] == [ () ]) ]\n",
     );
 }
+
+#[test]
+fn custom_infix_operator() {
+    // A library-defined operator (like elm/parser's `|=`/`|.`) is not one of
+    // the typed backend's built-in binops; it must lower to a plain call of its
+    // resolving function. Previously such an operator reached gen_binop and
+    // crashed trying to read a non-numeric operand as an integer.
+    assert_same(
+        "custom_infix_operator",
+        "module Test exposing (..)\n\
+         \n\
+         infix left 5 (|+|) = combine\n\
+         \n\
+         combine : Int -> Int -> Int\n\
+         combine a b =\n\
+         \x20   a * 10 + b\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString ( 1 |+| 2 |+| 3, 5 |+| 0 )\n",
+    );
+}
