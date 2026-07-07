@@ -729,6 +729,52 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // them) carry no foreign scope.
         self.clear_loc();
 
+        // A top-level nullary value is an Elm constant: referentially
+        // transparent and, per Elm's evaluation model, computed once. But a
+        // top-level value compiles to a 0-argument function that every
+        // reference calls, so its body would re-run on every use. For a heap
+        // value — e.g. a lookup `Array`/`Dict` built via `Array.fromList` and
+        // consulted in a hot loop — that rebuilds the whole structure on each
+        // access, which under the non-freeing bump allocator grows without
+        // bound (16 GB on elm-secret-sharing's GF256 tables). Memoize it: a
+        // module global caches the computed value behind a "done" flag, so the
+        // body runs at most once. Sound because Elm forbids value-level
+        // self-reference, so nullary values form a DAG (no memo cycle).
+        if params.is_empty() {
+            let ret_ty = self.llvm_type(&self.layouts.layout_of(&body.tipe));
+            let memo = self.module.add_global(ret_ty, None, &format!("{}$memo", f.mangled));
+            memo.set_initializer(&ret_ty.const_zero());
+            memo.set_linkage(Linkage::Internal);
+            let bool_t = self.ctx.bool_type();
+            let done = self.module.add_global(bool_t, None, &format!("{}$done", f.mangled));
+            done.set_initializer(&bool_t.const_zero());
+            done.set_linkage(Linkage::Internal);
+
+            let cached_bb = self.new_block("memo.cached");
+            let compute_bb = self.new_block("memo.compute");
+            let done_v = self
+                .builder
+                .build_load(bool_t, done.as_pointer_value(), "done")
+                .unwrap()
+                .into_int_value();
+            self.builder
+                .build_conditional_branch(done_v, cached_bb, compute_bb)
+                .unwrap();
+
+            self.builder.position_at_end(cached_bb);
+            let cv = self.builder.build_load(ret_ty, memo.as_pointer_value(), "memov").unwrap();
+            self.builder.build_return(Some(&cv)).unwrap();
+
+            self.builder.position_at_end(compute_bb);
+            let value = self.gen(body)?;
+            self.builder.build_store(memo.as_pointer_value(), value).unwrap();
+            self.builder
+                .build_store(done.as_pointer_value(), bool_t.const_int(1, false))
+                .unwrap();
+            self.builder.build_return(Some(&value)).unwrap();
+            return Ok(());
+        }
+
         // A self-tail-recursive function loops instead of recursing: give each
         // parameter a mutable slot, and let `gen_tail` turn a tail self-call
         // into "store new args, branch to header" (constant stack).

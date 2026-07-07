@@ -1902,6 +1902,33 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn memoized_top_level_constant() {
+    // A top-level nullary value (a CAF) is an Elm constant, evaluated once.
+    // The typed backend memoizes it behind a module global so referencing it
+    // many times does not recompute it (which for a heap value like this
+    // lookup array would rebuild the whole structure per access and, under the
+    // non-freeing bump allocator, grow without bound — the elm-secret-sharing
+    // GF256-tables OOM). This checks the memoized value stays correct across
+    // repeated references in a fold.
+    assert_same(
+        "memoized_caf",
+        "module Test exposing (..)\n\
+         \n\
+         import Array exposing (Array)\n\
+         \n\
+         table : Array Int\n\
+         table =\n\
+         \x20   List.range 0 20 |> List.map (\\x -> x * x) |> Array.fromList\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   List.range 0 100\n\
+         \x20       |> List.foldl (\\i acc -> acc + (Array.get (modBy 21 i) table |> Maybe.withDefault 0)) 0\n\
+         \x20       |> String.fromInt\n",
+    );
+}
+
+#[test]
 fn boxed_closure_arity_above_twelve() {
     // A function with many parameters, boxed as a uniform closure and applied
     // through the uniform path (here via a `Dict` value slot), calls the
