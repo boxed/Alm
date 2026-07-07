@@ -1133,6 +1133,30 @@ pub unsafe extern "C" fn rt_neg(a: u64) -> u64 {
 // EQUALITY AND ORDERING
 
 #[inline]
+/// Structural equality of two JSON trees, matching how JS `==`
+/// (`_Utils_eq`) compares the raw values a `Json.*.Value` wraps: arrays
+/// element-wise, objects by key/value with keys matched by name (order
+/// independent).
+fn json_eq(a: &JsonValue, b: &JsonValue) -> bool {
+    use JsonValue::*;
+    match (a, b) {
+        (Null, Null) => true,
+        (Bool(x), Bool(y)) => x == y,
+        (Number(x), Number(y)) => x == y,
+        (JStr(x), JStr(y)) => x == y,
+        (JArray(x), JArray(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| json_eq(p, q)),
+        (JObject(x), JObject(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(k, v)| {
+                    y.iter()
+                        .find(|(k2, _)| k2 == k)
+                        .map_or(false, |(_, v2)| json_eq(v, v2))
+                })
+        }
+        _ => false,
+    }
+}
+
 unsafe fn value_eq(a: u64, b: u64) -> bool {
     // Numbers first: this also handles a polymorphic-literal Int flowing
     // into a Float comparison (immediate int vs boxed float).
@@ -1151,6 +1175,10 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Unit, Value::Unit) => true,
         (Value::Str(x), Value::Str(y)) => x == y,
+        // `Json.Encode.Value`/`Json.Decode.Value` wrap raw JS values in Elm, so
+        // `==` compares them structurally (deep-equal, with object keys matched
+        // by name regardless of order — matching JS `_Utils_eq`).
+        (Value::Json(x), Value::Json(y)) => json_eq(x, y),
         (Value::List { .. }, Value::List { .. }) => {
             let (x, y) = (list_store(a), list_store(b));
             x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
