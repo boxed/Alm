@@ -2,6 +2,7 @@
 //! resolution against the environment.
 
 use super::*;
+use crate::reporting::annotation::Position;
 
 pub(super) fn canonicalize_value(env: &mut Env, value: &src::Value) -> CResult<can::Def> {
     let annotation = match &value.type_annotation {
@@ -369,13 +370,27 @@ fn record_alias_ctor(
     if field_names.is_empty() {
         return Some(can::Expr_::Record(vec![]));
     }
+    // Every synthesized node must get a DISTINCT region: the type checker keys
+    // inferred node types by region, so if the lambda, the record, and each
+    // field-value var all reused the constructor's single region they would
+    // clobber each other in `node_types` (e.g. a field's `number` type would
+    // overwrite the record's type), corrupting the typed/native backend's
+    // layout resolution. Nudge `end.col` by a per-node index to keep the
+    // reported span near the constructor while making each region unique.
+    let bump = |k: u32| {
+        Region::new(
+            region.start,
+            Position::new(region.end.row, region.end.col.saturating_add(k)),
+        )
+    };
     let args: Vec<can::Pattern> = field_names
         .iter()
         .enumerate()
         .map(|(i, _)| {
-            Located::new(region, can::Pattern_::Var(Name::from(format!("_r{}", i))))
+            Located::new(bump(1 + i as u32), can::Pattern_::Var(Name::from(format!("_r{}", i))))
         })
         .collect();
+    let n = field_names.len() as u32;
     let fields: Vec<(Located<Name>, can::Expr)> = field_names
         .iter()
         .enumerate()
@@ -383,7 +398,7 @@ fn record_alias_ctor(
             (
                 Located::new(region, field.clone()),
                 Located::new(
-                    region,
+                    bump(2 + n + i as u32),
                     can::Expr_::VarLocal(Name::from(format!("_r{}", i))),
                 ),
             )
@@ -391,7 +406,7 @@ fn record_alias_ctor(
         .collect();
     Some(can::Expr_::Lambda(
         args,
-        Box::new(Located::new(region, can::Expr_::Record(fields))),
+        Box::new(Located::new(bump(1 + n), can::Expr_::Record(fields))),
     ))
 }
 

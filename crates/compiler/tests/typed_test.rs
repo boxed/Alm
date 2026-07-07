@@ -1669,3 +1669,32 @@ fn polymorphic_local_used_at_two_types() {
          \x20   Debug.toString ( isJust (Just 3), isJust (Just 1.5), isJust Nothing )\n",
     );
 }
+
+#[test]
+fn record_alias_constructors() {
+    // A record type-alias used as a constructor (`User 10`) desugars to a
+    // synthesized lambda/record/field-var tree. Those nodes must each get a
+    // distinct region so the type checker's region-keyed `node_types` does not
+    // clobber the record's type with a field's (e.g. an unresolved `number`),
+    // which previously corrupted the typed backend's record layout. Exercises a
+    // single-field ctor, a multi-field ctor with a nested record-ctor argument,
+    // and a ctor used as a first-class function.
+    assert_same(
+        "record_alias_constructors",
+        "module Test exposing (..)\n\
+         \n\
+         type alias User =\n\
+         \x20   { age : Int }\n\
+         \n\
+         type alias UserWithCity =\n\
+         \x20   { user : User, city : String }\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString\n\
+         \x20       ( User 10\n\
+         \x20       , UserWithCity (User 42) \"paris\"\n\
+         \x20       , List.map (\\n -> User n) [ 1, 2, 3 ]\n\
+         \x20       )\n",
+    );
+}
