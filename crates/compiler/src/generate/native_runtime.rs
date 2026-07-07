@@ -108,6 +108,57 @@ pub enum Value {
     /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
     /// runtime's `DataView`; `encode` fills one, `read_*` read from it.
     Bytes(Vec<u8>),
+    /// A `Json.Encode.Value` / `Json.Decode.Value` — an opaque JSON tree. In
+    /// the JS runtime these are raw JS values; natively they are this tree.
+    Json(JsonValue),
+    /// A `Json.Decode.Decoder a` — reified as data and run by `run_decoder`,
+    /// avoiding a closure per combinator. Sub-decoders and functions are held
+    /// as uniform value words.
+    Decoder(Decoder),
+}
+
+/// A JSON value tree. Object fields keep insertion order (as `JSON.stringify`
+/// does), matching the JS runtime's object-key iteration.
+#[derive(Clone)]
+pub enum JsonValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    JStr(Vec<u8>),
+    JArray(Vec<JsonValue>),
+    JObject(Vec<(Vec<u8>, JsonValue)>),
+}
+
+/// A reified decoder. Word fields point to other `Value::Decoder`s or to
+/// uniform closures/values, interpreted by [`run_decoder`].
+pub enum Decoder {
+    Str,
+    Int,
+    Float,
+    Bool,
+    /// `Json.Decode.value` — yield the raw JSON unchanged.
+    JsonVal,
+    /// `null fallback` — succeed with `fallback` on JSON null.
+    Null(u64),
+    Succeed(u64),
+    Fail(Vec<u8>),
+    Field(Vec<u8>, u64),
+    Index(usize, u64),
+    List(u64),
+    Array(u64),
+    KeyValuePairs(u64),
+    Dict(u64),
+    Maybe(u64),
+    OneOf(Vec<u64>),
+    OneOrMore(u64, u64),
+    /// `map f d`.
+    Map(u64, u64),
+    /// `map2..map8 f d1 d2..` — run each decoder on the same value, then apply
+    /// the curried `f` to the results in order.
+    MapMany(u64, Vec<u64>),
+    AndThen(u64, u64),
+    /// `lazy thunk` — force `thunk ()` to a decoder, then run it.
+    Lazy(u64),
 }
 
 /// A list's backing store, shared by a list and its tails. `rc` counts how
@@ -2150,6 +2201,63 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             out.push_str(&bytes.len().to_string());
             out.push_str(" bytes>");
         }
+        // A decoder is opaque; a JSON value renders as the JS backend does when
+        // Debug.toString hits a raw JS value (arrays as numeric-key objects,
+        // null as `<internal>`, object keys sorted) — see debug_json.
+        Value::Decoder(_) => out.push_str("<internals>"),
+        Value::Json(j) => debug_json(out, j),
+    }
+}
+
+fn debug_json(out: &mut String, j: &JsonValue) {
+    match j {
+        JsonValue::Null => out.push_str("<internal>"),
+        JsonValue::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+        JsonValue::Number(n) => {
+            if n.is_finite() && n.fract() == 0.0 {
+                out.push_str(&(*n as i64).to_string());
+            } else {
+                out.push_str(&fmt_float(*n));
+            }
+        }
+        JsonValue::JStr(b) => {
+            // SAFETY-free: debug_string only reads the bytes.
+            unsafe { debug_string(out, b, false) }
+        }
+        JsonValue::JArray(items) => {
+            if items.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push_str("{ ");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&i.to_string());
+                out.push_str(" = ");
+                debug_json(out, item);
+            }
+            out.push_str(" }");
+        }
+        JsonValue::JObject(fields) => {
+            if fields.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            let mut sorted: Vec<&(Vec<u8>, JsonValue)> = fields.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            out.push_str("{ ");
+            for (i, (k, v)) in sorted.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&String::from_utf8_lossy(k));
+                out.push_str(" = ");
+                debug_json(out, v);
+            }
+            out.push_str(" }");
+        }
     }
 }
 
@@ -3660,6 +3768,767 @@ unsafe extern "C" fn test_run_thunk(thunk: u64) -> u64 {
     res_ok(ap1(thunk, unit()))
 }
 
+// JSON — Json.Decode / Json.Encode, ported from the JS runtime's `_Json_*`.
+// `Json.Encode.Value` and `Json.Decode.Value` are the same opaque JSON tree
+// (`Value::Json`); a `Decoder` is reified data run by `run_decoder`, so no
+// closure is allocated per combinator. The decode `Error` type is
+// `Field String Error | Index Int Error | OneOf (List Error) | Failure String Value`
+// (constructor indices 0..3, matching elm/json's declaration order).
+
+unsafe fn mk_json(j: JsonValue) -> u64 {
+    alloc(Value::Json(j))
+}
+unsafe fn as_json<'a>(w: u64) -> &'a JsonValue {
+    match deref(w) {
+        Value::Json(j) => j,
+        _ => crash!("expected a Json value"),
+    }
+}
+unsafe fn mk_decoder(d: Decoder) -> u64 {
+    alloc(Value::Decoder(d))
+}
+
+unsafe fn json_err_failure(msg: &str, jv: &JsonValue) -> u64 {
+    ctor(
+        b"Failure\0".as_ptr(),
+        3,
+        vec![mkstr(msg.as_bytes().to_vec()), mk_json(jv.clone())],
+    )
+}
+unsafe fn json_err_expecting(what: &str, jv: &JsonValue) -> u64 {
+    json_err_failure(&format!("Expecting {}", what), jv)
+}
+unsafe fn json_err_field(name: &[u8], inner: u64) -> u64 {
+    ctor(b"Field\0".as_ptr(), 0, vec![mkstr(name.to_vec()), inner])
+}
+unsafe fn json_err_index(i: usize, inner: u64) -> u64 {
+    ctor(b"Index\0".as_ptr(), 1, vec![rt_int(i as i64), inner])
+}
+unsafe fn json_err_oneof(errs: &[u64]) -> u64 {
+    ctor(b"OneOf\0".as_ptr(), 2, vec![list_from_slice(errs)])
+}
+
+/// Interpret a reified decoder against a JSON value. `Ok` carries the decoded
+/// Elm value word; `Err` carries an `Error` value word.
+unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
+    let dec = match deref(dec_w) {
+        Value::Decoder(d) => d,
+        _ => crash!("expected a Decoder"),
+    };
+    match dec {
+        Decoder::Str => match jv {
+            JsonValue::JStr(b) => Ok(mkstr(b.clone())),
+            _ => Err(json_err_expecting("a STRING", jv)),
+        },
+        Decoder::Int => match jv {
+            JsonValue::Number(n) if n.is_finite() && n.fract() == 0.0 => Ok(rt_int(*n as i64)),
+            _ => Err(json_err_expecting("an INT", jv)),
+        },
+        Decoder::Float => match jv {
+            JsonValue::Number(n) => Ok(rt_float(*n)),
+            _ => Err(json_err_expecting("a FLOAT", jv)),
+        },
+        Decoder::Bool => match jv {
+            JsonValue::Bool(b) => Ok(rt_bool(*b)),
+            _ => Err(json_err_expecting("a BOOL", jv)),
+        },
+        Decoder::JsonVal => Ok(mk_json(jv.clone())),
+        Decoder::Null(fallback) => match jv {
+            JsonValue::Null => Ok(*fallback),
+            _ => Err(json_err_expecting("null", jv)),
+        },
+        Decoder::Succeed(v) => Ok(*v),
+        Decoder::Fail(msg) => Err(json_err_failure(std::str::from_utf8(msg).unwrap_or(""), jv)),
+        Decoder::Field(name, sub) => match jv {
+            JsonValue::JObject(fields) => {
+                match fields.iter().find(|(k, _)| k == name) {
+                    Some((_, val)) => match run_decoder(*sub, val) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(json_err_field(name, e)),
+                    },
+                    None => Err(json_err_expecting(
+                        &format!(
+                            "an OBJECT with a field named `{}`",
+                            String::from_utf8_lossy(name)
+                        ),
+                        jv,
+                    )),
+                }
+            }
+            _ => Err(json_err_expecting(
+                &format!(
+                    "an OBJECT with a field named `{}`",
+                    String::from_utf8_lossy(name)
+                ),
+                jv,
+            )),
+        },
+        Decoder::Index(i, sub) => match jv {
+            JsonValue::JArray(items) => {
+                if *i >= items.len() {
+                    Err(json_err_expecting(
+                        &format!(
+                            "a LONGER array. Need index {} but only see {} entries",
+                            i,
+                            items.len()
+                        ),
+                        jv,
+                    ))
+                } else {
+                    match run_decoder(*sub, &items[*i]) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(json_err_index(*i, e)),
+                    }
+                }
+            }
+            _ => Err(json_err_expecting("an ARRAY", jv)),
+        },
+        Decoder::List(sub) => match jv {
+            JsonValue::JArray(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for (i, item) in items.iter().enumerate() {
+                    match run_decoder(*sub, item) {
+                        Ok(v) => out.push(v),
+                        Err(e) => return Err(json_err_index(i, e)),
+                    }
+                }
+                Ok(list_from_slice(&out))
+            }
+            _ => Err(json_err_expecting("a LIST", jv)),
+        },
+        Decoder::Array(sub) => {
+            let list = run_decoder(mk_decoder_ref(Decoder::List(*sub)), jv)?;
+            Ok(array_from_list(list))
+        }
+        Decoder::KeyValuePairs(sub) => match jv {
+            JsonValue::JObject(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (k, val) in fields {
+                    match run_decoder(*sub, val) {
+                        Ok(v) => out.push(pair(mkstr(k.clone()), v)),
+                        Err(e) => return Err(json_err_field(k, e)),
+                    }
+                }
+                Ok(list_from_slice(&out))
+            }
+            _ => Err(json_err_expecting("an OBJECT", jv)),
+        },
+        Decoder::Dict(sub) => {
+            let pairs = run_decoder(mk_decoder_ref(Decoder::KeyValuePairs(*sub)), jv)?;
+            Ok(dict_from_list(pairs))
+        }
+        Decoder::Maybe(sub) => match run_decoder(*sub, jv) {
+            Ok(v) => Ok(just(v)),
+            Err(_) => Ok(nothing()),
+        },
+        Decoder::OneOf(decs) => {
+            let mut errs = Vec::with_capacity(decs.len());
+            for d in decs {
+                match run_decoder(*d, jv) {
+                    Ok(v) => return Ok(v),
+                    Err(e) => errs.push(e),
+                }
+            }
+            Err(json_err_oneof(&errs))
+        }
+        Decoder::OneOrMore(to_value, sub) => {
+            let list = run_decoder(mk_decoder_ref(Decoder::List(*sub)), jv)?;
+            let arr = to_vec(list);
+            if arr.is_empty() {
+                Err(json_err_expecting(
+                    "a JSON ARRAY with at least ONE element",
+                    jv,
+                ))
+            } else {
+                Ok(ap2(*to_value, arr[0], list_from_slice(&arr[1..])))
+            }
+        }
+        Decoder::Map(f, sub) => {
+            let v = run_decoder(*sub, jv)?;
+            Ok(ap1(*f, v))
+        }
+        Decoder::MapMany(f, decs) => {
+            let mut result = *f;
+            for d in decs {
+                let v = run_decoder(*d, jv)?;
+                result = ap1(result, v);
+            }
+            Ok(result)
+        }
+        Decoder::AndThen(f, sub) => {
+            let v = run_decoder(*sub, jv)?;
+            run_decoder(ap1(*f, v), jv)
+        }
+        Decoder::Lazy(thunk) => run_decoder(ap1(*thunk, unit()), jv),
+    }
+}
+
+// `run_decoder` needs to run freshly-built sub-decoders (array/dict reuse
+// list/keyValuePairs); allocate them so a `&JsonValue` borrow is not held.
+unsafe fn mk_decoder_ref(d: Decoder) -> u64 {
+    mk_decoder(d)
+}
+
+unsafe fn run_to_result(dec_w: u64, jv: &JsonValue) -> u64 {
+    match run_decoder(dec_w, jv) {
+        Ok(v) => res_ok(v),
+        Err(e) => res_err(e),
+    }
+}
+
+// --- decoder combinators (values) ---
+unsafe extern "C" fn json_null(fallback: u64) -> u64 {
+    mk_decoder(Decoder::Null(fallback))
+}
+unsafe extern "C" fn json_succeed(x: u64) -> u64 {
+    mk_decoder(Decoder::Succeed(x))
+}
+unsafe extern "C" fn json_fail(msg: u64) -> u64 {
+    mk_decoder(Decoder::Fail(str_bytes(msg)))
+}
+unsafe extern "C" fn json_field(name: u64, dec: u64) -> u64 {
+    mk_decoder(Decoder::Field(str_bytes(name), dec))
+}
+unsafe extern "C" fn json_at(path: u64, dec: u64) -> u64 {
+    // Fold right: at [a,b] d == field a (field b d).
+    let names = to_vec(path);
+    let mut result = dec;
+    for &n in names.iter().rev() {
+        result = mk_decoder(Decoder::Field(str_bytes(n), result));
+    }
+    result
+}
+unsafe extern "C" fn json_index(i: u64, dec: u64) -> u64 {
+    mk_decoder(Decoder::Index(int_val(i) as usize, dec))
+}
+unsafe extern "C" fn json_list_dec(dec: u64) -> u64 {
+    mk_decoder(Decoder::List(dec))
+}
+unsafe extern "C" fn json_array_dec(dec: u64) -> u64 {
+    mk_decoder(Decoder::Array(dec))
+}
+unsafe extern "C" fn json_key_value_pairs(dec: u64) -> u64 {
+    mk_decoder(Decoder::KeyValuePairs(dec))
+}
+unsafe extern "C" fn json_dict_dec(dec: u64) -> u64 {
+    mk_decoder(Decoder::Dict(dec))
+}
+unsafe extern "C" fn json_maybe(dec: u64) -> u64 {
+    mk_decoder(Decoder::Maybe(dec))
+}
+unsafe extern "C" fn json_nullable(dec: u64) -> u64 {
+    // oneOf [ null Nothing, map Just decoder ].
+    let null_branch = mk_decoder(Decoder::Null(nothing()));
+    let just_branch = mk_decoder(Decoder::Map(closure(json_just as *const (), 1, &[]), dec));
+    mk_decoder(Decoder::OneOf(vec![null_branch, just_branch]))
+}
+unsafe extern "C" fn json_just(v: u64) -> u64 {
+    just(v)
+}
+unsafe extern "C" fn json_one_of(decoders: u64) -> u64 {
+    mk_decoder(Decoder::OneOf(to_vec(decoders)))
+}
+unsafe extern "C" fn json_one_or_more(to_value: u64, dec: u64) -> u64 {
+    mk_decoder(Decoder::OneOrMore(to_value, dec))
+}
+unsafe extern "C" fn json_lazy(thunk: u64) -> u64 {
+    mk_decoder(Decoder::Lazy(thunk))
+}
+unsafe extern "C" fn json_map(f: u64, dec: u64) -> u64 {
+    mk_decoder(Decoder::Map(f, dec))
+}
+unsafe extern "C" fn json_map2(f: u64, a: u64, b: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b]))
+}
+unsafe extern "C" fn json_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c]))
+}
+unsafe extern "C" fn json_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d]))
+}
+unsafe extern "C" fn json_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e]))
+}
+unsafe extern "C" fn json_map6(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64, g: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g]))
+}
+unsafe extern "C" fn json_map7(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64, g: u64, h: u64) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g, h]))
+}
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn json_map8(
+    f: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    g: u64,
+    h: u64,
+    i: u64,
+) -> u64 {
+    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g, h, i]))
+}
+unsafe extern "C" fn json_and_then(f: u64, dec: u64) -> u64 {
+    mk_decoder(Decoder::AndThen(f, dec))
+}
+unsafe extern "C" fn json_decode_value(dec: u64, value: u64) -> u64 {
+    run_to_result(dec, as_json(value))
+}
+unsafe extern "C" fn json_decode_string(dec: u64, s: u64) -> u64 {
+    let bytes = str_bytes(s);
+    match json_parse(&bytes) {
+        Ok(jv) => run_to_result(dec, &jv),
+        Err(msg) => res_err(json_err_failure(
+            &format!("This is not valid JSON! {}", msg),
+            &JsonValue::JStr(bytes),
+        )),
+    }
+}
+
+/// `str_bytes` reads a String value's UTF-8 bytes.
+unsafe fn str_bytes(w: u64) -> Vec<u8> {
+    match deref(w) {
+        Value::Str(b) => b.clone(),
+        _ => crash!("expected a String"),
+    }
+}
+
+// --- errorToString (faithful port of elm/json) ---
+fn json_indent_err(s: &str) -> String {
+    s.replace('\n', "\n    ")
+}
+unsafe fn error_to_string_help(err: u64, context: &[String]) -> String {
+    let (idx, name) = match deref(err) {
+        Value::Ctor { index, name, .. } => (*index, cname(*name)),
+        _ => return String::new(),
+    };
+    match name {
+        "Field" => {
+            let f = String::from_utf8_lossy(&str_bytes(ctor_get(err, 0))).to_string();
+            let simple = !f.is_empty()
+                && f.as_bytes()[0].is_ascii_alphabetic()
+                && f.bytes().skip(1).all(|c| c.is_ascii_alphanumeric());
+            let field_name = if simple {
+                format!(".{}", f)
+            } else {
+                format!("['{}']", f)
+            };
+            let mut ctx = vec![field_name];
+            ctx.extend_from_slice(context);
+            error_to_string_help(ctor_get(err, 1), &ctx)
+        }
+        "Index" => {
+            let i = int_val(ctor_get(err, 0));
+            let mut ctx = vec![format!("[{}]", i)];
+            ctx.extend_from_slice(context);
+            error_to_string_help(ctor_get(err, 1), &ctx)
+        }
+        "OneOf" => {
+            let errors = to_vec(ctor_get(err, 0));
+            let path: String = context.iter().rev().cloned().collect();
+            if errors.is_empty() {
+                return if context.is_empty() {
+                    "Ran into a Json.Decode.oneOf with no possibilities!".to_string()
+                } else {
+                    format!("Ran into a Json.Decode.oneOf with no possibilities at json{}", path)
+                };
+            }
+            if errors.len() == 1 {
+                return error_to_string_help(errors[0], context);
+            }
+            let starter = if context.is_empty() {
+                "Json.Decode.oneOf".to_string()
+            } else {
+                format!("The Json.Decode.oneOf at json{}", path)
+            };
+            let mut parts = vec![format!(
+                "{} failed in the following {} ways:",
+                starter,
+                errors.len()
+            )];
+            for (i, &e) in errors.iter().enumerate() {
+                parts.push(format!(
+                    "\n\n({}) {}",
+                    i + 1,
+                    json_indent_err(&error_to_string_help(e, &[]))
+                ));
+            }
+            parts.join("\n\n")
+        }
+        _ => {
+            // Failure.
+            let _ = idx;
+            let msg = String::from_utf8_lossy(&str_bytes(ctor_get(err, 0))).to_string();
+            let value_json = as_json(ctor_get(err, 1));
+            let rendered = json_serialize(value_json, 4);
+            let intro = if context.is_empty() {
+                "Problem with the given value:\n\n".to_string()
+            } else {
+                let path: String = context.iter().rev().cloned().collect();
+                format!("Problem with the value at json{}:\n\n    ", path)
+            };
+            format!("{}{}\n\n{}", intro, json_indent_err(&rendered), msg)
+        }
+    }
+}
+unsafe extern "C" fn json_error_to_string(err: u64) -> u64 {
+    mkstr(error_to_string_help(err, &[]).into_bytes())
+}
+
+// --- encoders (produce Value::Json) ---
+unsafe extern "C" fn encode_string(s: u64) -> u64 {
+    mk_json(JsonValue::JStr(str_bytes(s)))
+}
+unsafe extern "C" fn encode_int(n: u64) -> u64 {
+    mk_json(JsonValue::Number(int_val(n) as f64))
+}
+unsafe extern "C" fn encode_float(n: u64) -> u64 {
+    mk_json(JsonValue::Number(num(n)))
+}
+unsafe extern "C" fn encode_bool(b: u64) -> u64 {
+    mk_json(JsonValue::Bool(rt_is_true(b)))
+}
+unsafe extern "C" fn encode_list(f: u64, items: u64) -> u64 {
+    let arr: Vec<JsonValue> = to_vec(items)
+        .into_iter()
+        .map(|x| as_json(ap1(f, x)).clone())
+        .collect();
+    mk_json(JsonValue::JArray(arr))
+}
+unsafe extern "C" fn encode_array(f: u64, arr: u64) -> u64 {
+    let words = match deref(arr) {
+        Value::Array(els) => els.clone(),
+        _ => Vec::new(),
+    };
+    let out: Vec<JsonValue> = words.into_iter().map(|x| as_json(ap1(f, x)).clone()).collect();
+    mk_json(JsonValue::JArray(out))
+}
+unsafe extern "C" fn encode_set(f: u64, set: u64) -> u64 {
+    let words = match deref(set) {
+        Value::Set(els) => els.clone(),
+        _ => Vec::new(),
+    };
+    let out: Vec<JsonValue> = words.into_iter().map(|x| as_json(ap1(f, x)).clone()).collect();
+    mk_json(JsonValue::JArray(out))
+}
+unsafe extern "C" fn encode_object(pairs: u64) -> u64 {
+    let mut out: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+    for p in to_vec(pairs) {
+        let key = str_bytes(rt_tuple_item(p, 0));
+        let val = as_json(rt_tuple_item(p, 1)).clone();
+        // Last write wins for a duplicate key, matching JS object assignment.
+        if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = val;
+        } else {
+            out.push((key, val));
+        }
+    }
+    mk_json(JsonValue::JObject(out))
+}
+unsafe extern "C" fn encode_dict(to_key: u64, to_value: u64, dict: u64) -> u64 {
+    let entries = match deref(dict) {
+        Value::Dict(pairs) => pairs.clone(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<(Vec<u8>, JsonValue)> = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let key = str_bytes(ap1(to_key, k));
+        let val = as_json(ap1(to_value, v)).clone();
+        if let Some(slot) = out.iter_mut().find(|(kk, _)| *kk == key) {
+            slot.1 = val;
+        } else {
+            out.push((key, val));
+        }
+    }
+    mk_json(JsonValue::JObject(out))
+}
+unsafe extern "C" fn encode_encode(indent: u64, value: u64) -> u64 {
+    mkstr(json_serialize(as_json(value), int_val(indent) as usize).into_bytes())
+}
+
+// --- JSON serializer, matching JSON.stringify(value, null, indent) ---
+fn json_serialize(jv: &JsonValue, indent: usize) -> String {
+    let mut out = String::new();
+    json_write(jv, indent, 0, &mut out);
+    out
+}
+fn json_number_str(n: f64) -> String {
+    if !n.is_finite() {
+        return "null".to_string();
+    }
+    if n == 0.0 {
+        return "0".to_string(); // normalizes -0
+    }
+    fmt_float(n)
+}
+fn json_write(jv: &JsonValue, indent: usize, depth: usize, out: &mut String) {
+    match jv {
+        JsonValue::Null => out.push_str("null"),
+        JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        JsonValue::Number(n) => out.push_str(&json_number_str(*n)),
+        JsonValue::JStr(s) => json_str_utf8(s, out),
+        JsonValue::JArray(items) => {
+            if items.is_empty() {
+                out.push_str("[]");
+                return;
+            }
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_newline_indent(indent, depth + 1, out);
+                json_write(item, indent, depth + 1, out);
+            }
+            json_newline_indent(indent, depth, out);
+            out.push(']');
+        }
+        JsonValue::JObject(fields) => {
+            if fields.is_empty() {
+                out.push_str("{}");
+                return;
+            }
+            out.push('{');
+            for (i, (k, v)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_newline_indent(indent, depth + 1, out);
+                json_str_utf8(k, out);
+                out.push(':');
+                if indent > 0 {
+                    out.push(' ');
+                }
+                json_write(v, indent, depth + 1, out);
+            }
+            json_newline_indent(indent, depth, out);
+            out.push('}');
+        }
+    }
+}
+fn json_newline_indent(indent: usize, depth: usize, out: &mut String) {
+    if indent > 0 {
+        out.push('\n');
+        for _ in 0..indent * depth {
+            out.push(' ');
+        }
+    }
+}
+// Write a UTF-8 byte string as a JSON string literal (escaping ASCII controls
+// and quotes; multi-byte UTF-8 sequences pass through verbatim).
+fn json_str_utf8(s: &[u8], out: &mut String) {
+    out.push('"');
+    let text = String::from_utf8_lossy(s);
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+// --- JSON parser (for decodeString) ---
+struct JsonParser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+impl<'a> JsonParser<'a> {
+    fn ws(&mut self) {
+        while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\t' | b'\n' | b'\r') {
+            self.i += 1;
+        }
+    }
+    fn value(&mut self) -> Result<JsonValue, String> {
+        self.ws();
+        if self.i >= self.b.len() {
+            return Err("Unexpected end of JSON input".to_string());
+        }
+        match self.b[self.i] {
+            b'{' => self.object(),
+            b'[' => self.array(),
+            b'"' => Ok(JsonValue::JStr(self.string()?)),
+            b't' => self.lit(b"true", JsonValue::Bool(true)),
+            b'f' => self.lit(b"false", JsonValue::Bool(false)),
+            b'n' => self.lit(b"null", JsonValue::Null),
+            b'-' | b'0'..=b'9' => self.number(),
+            c => Err(format!("Unexpected token {} in JSON", c as char)),
+        }
+    }
+    fn lit(&mut self, word: &[u8], v: JsonValue) -> Result<JsonValue, String> {
+        if self.b[self.i..].starts_with(word) {
+            self.i += word.len();
+            Ok(v)
+        } else {
+            Err("Unexpected token in JSON".to_string())
+        }
+    }
+    fn number(&mut self) -> Result<JsonValue, String> {
+        let start = self.i;
+        if self.i < self.b.len() && self.b[self.i] == b'-' {
+            self.i += 1;
+        }
+        while self.i < self.b.len()
+            && matches!(self.b[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+        {
+            self.i += 1;
+        }
+        let text = std::str::from_utf8(&self.b[start..self.i]).unwrap_or("");
+        text.parse::<f64>()
+            .map(JsonValue::Number)
+            .map_err(|_| format!("Invalid number: {}", text))
+    }
+    fn string(&mut self) -> Result<Vec<u8>, String> {
+        self.i += 1; // opening quote
+        let mut out = Vec::new();
+        while self.i < self.b.len() {
+            let c = self.b[self.i];
+            match c {
+                b'"' => {
+                    self.i += 1;
+                    return Ok(out);
+                }
+                b'\\' => {
+                    self.i += 1;
+                    if self.i >= self.b.len() {
+                        return Err("Unterminated string".to_string());
+                    }
+                    match self.b[self.i] {
+                        b'"' => out.push(b'"'),
+                        b'\\' => out.push(b'\\'),
+                        b'/' => out.push(b'/'),
+                        b'b' => out.push(0x08),
+                        b'f' => out.push(0x0c),
+                        b'n' => out.push(b'\n'),
+                        b'r' => out.push(b'\r'),
+                        b't' => out.push(b'\t'),
+                        b'u' => {
+                            let cp = self.hex4()?;
+                            let scalar = if (0xD800..=0xDBFF).contains(&cp) {
+                                // High surrogate: expect a following \uXXXX low surrogate.
+                                if self.b[self.i + 1..].starts_with(b"\\u") {
+                                    self.i += 2; // consume "\\u" for the low half (i is at 'u' of high)
+                                    let lo = self.hex4()?;
+                                    0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                                } else {
+                                    cp
+                                }
+                            } else {
+                                cp
+                            };
+                            let ch = char::from_u32(scalar).unwrap_or('\u{fffd}');
+                            let mut buf = [0u8; 4];
+                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        }
+                        other => return Err(format!("Invalid escape: \\{}", other as char)),
+                    }
+                    self.i += 1;
+                }
+                _ => {
+                    out.push(c);
+                    self.i += 1;
+                }
+            }
+        }
+        Err("Unterminated string".to_string())
+    }
+    fn hex4(&mut self) -> Result<u32, String> {
+        // self.i points at 'u'; read the next 4 hex digits.
+        if self.i + 4 >= self.b.len() {
+            return Err("Invalid \\u escape".to_string());
+        }
+        let hex = std::str::from_utf8(&self.b[self.i + 1..self.i + 5]).unwrap_or("");
+        let v = u32::from_str_radix(hex, 16).map_err(|_| "Invalid \\u escape".to_string())?;
+        self.i += 4;
+        Ok(v)
+    }
+    fn array(&mut self) -> Result<JsonValue, String> {
+        self.i += 1; // [
+        let mut out = Vec::new();
+        self.ws();
+        if self.i < self.b.len() && self.b[self.i] == b']' {
+            self.i += 1;
+            return Ok(JsonValue::JArray(out));
+        }
+        loop {
+            out.push(self.value()?);
+            self.ws();
+            if self.i >= self.b.len() {
+                return Err("Unterminated array".to_string());
+            }
+            match self.b[self.i] {
+                b',' => {
+                    self.i += 1;
+                }
+                b']' => {
+                    self.i += 1;
+                    return Ok(JsonValue::JArray(out));
+                }
+                c => return Err(format!("Unexpected token {} in array", c as char)),
+            }
+        }
+    }
+    fn object(&mut self) -> Result<JsonValue, String> {
+        self.i += 1; // {
+        let mut out: Vec<(Vec<u8>, JsonValue)> = Vec::new();
+        self.ws();
+        if self.i < self.b.len() && self.b[self.i] == b'}' {
+            self.i += 1;
+            return Ok(JsonValue::JObject(out));
+        }
+        loop {
+            self.ws();
+            if self.i >= self.b.len() || self.b[self.i] != b'"' {
+                return Err("Expected string key in object".to_string());
+            }
+            let key = self.string()?;
+            self.ws();
+            if self.i >= self.b.len() || self.b[self.i] != b':' {
+                return Err("Expected ':' in object".to_string());
+            }
+            self.i += 1;
+            let val = self.value()?;
+            // Last key wins, matching JSON.parse.
+            if let Some(slot) = out.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = val;
+            } else {
+                out.push((key, val));
+            }
+            self.ws();
+            if self.i >= self.b.len() {
+                return Err("Unterminated object".to_string());
+            }
+            match self.b[self.i] {
+                b',' => {
+                    self.i += 1;
+                }
+                b'}' => {
+                    self.i += 1;
+                    return Ok(JsonValue::JObject(out));
+                }
+                c => return Err(format!("Unexpected token {} in object", c as char)),
+            }
+        }
+    }
+}
+fn json_parse(bytes: &[u8]) -> Result<JsonValue, String> {
+    let mut p = JsonParser { b: bytes, i: 0 };
+    let v = p.value()?;
+    p.ws();
+    if p.i != bytes.len() {
+        return Err("Unexpected trailing characters".to_string());
+    }
+    Ok(v)
+}
+
 // KERNEL VALUE TABLE — the globals the generated code imports.
 
 macro_rules! kernel_fns {
@@ -3958,6 +4827,45 @@ kernel_fns! {
     G_ARRAY_INDEXEDMAP "$Array$indexedMap" array_indexed_map, 2;
     G_ARRAY_FILTER "$Array$filter" array_filter, 2;
     G_ARRAY_SLICE "$Array$slice" array_slice, 3;
+
+    G_JSOND_NULL "$Json$Decode$null" json_null, 1;
+    G_JSOND_SUCCEED "$Json$Decode$succeed" json_succeed, 1;
+    G_JSOND_FAIL "$Json$Decode$fail" json_fail, 1;
+    G_JSOND_FIELD "$Json$Decode$field" json_field, 2;
+    G_JSOND_AT "$Json$Decode$at" json_at, 2;
+    G_JSOND_INDEX "$Json$Decode$index" json_index, 2;
+    G_JSOND_LIST "$Json$Decode$list" json_list_dec, 1;
+    G_JSOND_ARRAY "$Json$Decode$array" json_array_dec, 1;
+    G_JSOND_KEYVALUEPAIRS "$Json$Decode$keyValuePairs" json_key_value_pairs, 1;
+    G_JSOND_DICT "$Json$Decode$dict" json_dict_dec, 1;
+    G_JSOND_MAYBE "$Json$Decode$maybe" json_maybe, 1;
+    G_JSOND_NULLABLE "$Json$Decode$nullable" json_nullable, 1;
+    G_JSOND_ONEOF "$Json$Decode$oneOf" json_one_of, 1;
+    G_JSOND_ONEORMORE "$Json$Decode$oneOrMore" json_one_or_more, 2;
+    G_JSOND_LAZY "$Json$Decode$lazy" json_lazy, 1;
+    G_JSOND_MAP "$Json$Decode$map" json_map, 2;
+    G_JSOND_MAP2 "$Json$Decode$map2" json_map2, 3;
+    G_JSOND_MAP3 "$Json$Decode$map3" json_map3, 4;
+    G_JSOND_MAP4 "$Json$Decode$map4" json_map4, 5;
+    G_JSOND_MAP5 "$Json$Decode$map5" json_map5, 6;
+    G_JSOND_MAP6 "$Json$Decode$map6" json_map6, 7;
+    G_JSOND_MAP7 "$Json$Decode$map7" json_map7, 8;
+    G_JSOND_MAP8 "$Json$Decode$map8" json_map8, 9;
+    G_JSOND_ANDTHEN "$Json$Decode$andThen" json_and_then, 2;
+    G_JSOND_DECODEVALUE "$Json$Decode$decodeValue" json_decode_value, 2;
+    G_JSOND_DECODESTRING "$Json$Decode$decodeString" json_decode_string, 2;
+    G_JSOND_ERRORTOSTRING "$Json$Decode$errorToString" json_error_to_string, 1;
+
+    G_JSONE_STRING "$Json$Encode$string" encode_string, 1;
+    G_JSONE_INT "$Json$Encode$int" encode_int, 1;
+    G_JSONE_FLOAT "$Json$Encode$float" encode_float, 1;
+    G_JSONE_BOOL "$Json$Encode$bool" encode_bool, 1;
+    G_JSONE_LIST "$Json$Encode$list" encode_list, 2;
+    G_JSONE_ARRAY "$Json$Encode$array" encode_array, 2;
+    G_JSONE_SET "$Json$Encode$set" encode_set, 2;
+    G_JSONE_OBJECT "$Json$Encode$object" encode_object, 1;
+    G_JSONE_DICT "$Json$Encode$dict" encode_dict, 3;
+    G_JSONE_ENCODE "$Json$Encode$encode" encode_encode, 2;
 }
 
 kernel_vals! {
@@ -3974,6 +4882,12 @@ kernel_vals! {
     G_RANDOM_MININT "$Random$minInt";
     G_RANDOM_MAXINT "$Random$maxInt";
     G_RANDOM_INDEPENDENTSEED "$Random$independentSeed";
+    G_JSOND_STRING "$Json$Decode$string";
+    G_JSOND_INT "$Json$Decode$int";
+    G_JSOND_FLOAT "$Json$Decode$float";
+    G_JSOND_BOOL "$Json$Decode$bool";
+    G_JSOND_VALUE "$Json$Decode$value";
+    G_JSONE_NULL "$Json$Encode$null";
 }
 
 unsafe fn runtime_init() {
@@ -4006,6 +4920,12 @@ unsafe fn runtime_init() {
     G_RANDOM_MAXINT.set(rt_int(2147483647));
     G_RANDOM_INDEPENDENTSEED
         .set(mk_generator(closure(random_independent_seed_gen as *const (), 1, &[])));
+    G_JSOND_STRING.set(mk_decoder(Decoder::Str));
+    G_JSOND_INT.set(mk_decoder(Decoder::Int));
+    G_JSOND_FLOAT.set(mk_decoder(Decoder::Float));
+    G_JSOND_BOOL.set(mk_decoder(Decoder::Bool));
+    G_JSOND_VALUE.set(mk_decoder(Decoder::JsonVal));
+    G_JSONE_NULL.set(mk_json(JsonValue::Null));
 }
 
 // THE EVENT LOOP — the Rust twin of runtime.js's _Platform_initialize for

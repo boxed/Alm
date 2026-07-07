@@ -1758,3 +1758,45 @@ fn composition_and_partial_arity_normalization() {
          \x20   Debug.toString ( composed 3 10, partial 10 100 )\n",
     );
 }
+
+#[test]
+fn json_decode_and_encode() {
+    // The native runtime implements Json.Decode/Json.Encode (reified decoders +
+    // a JSON parser/serializer). Exercise decodeString through a map3 record
+    // decoder, round-trip encode (compact + errorToString path), and a decode
+    // failure — all must match the JS backend byte for byte.
+    assert_same(
+        "json_decode_and_encode",
+        "module Test exposing (..)\n\
+         \n\
+         import Json.Decode as D\n\
+         import Json.Encode as E\n\
+         \n\
+         type alias Rec =\n\
+         \x20   { name : String, age : Int, tags : List String }\n\
+         \n\
+         decoder : D.Decoder Rec\n\
+         decoder =\n\
+         \x20   D.map3 Rec\n\
+         \x20       (D.field \"name\" D.string)\n\
+         \x20       (D.field \"age\" D.int)\n\
+         \x20       (D.field \"tags\" (D.list D.string))\n\
+         \n\
+         enc : Rec -> E.Value\n\
+         enc r =\n\
+         \x20   E.object [ ( \"name\", E.string r.name ), ( \"age\", E.int r.age ), ( \"tags\", E.list E.string r.tags ) ]\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       decoded = D.decodeString decoder \"{\\\"name\\\":\\\"Ann\\\",\\\"age\\\":30,\\\"tags\\\":[\\\"a\\\",\\\"b\\\"]}\"\n\
+         \x20       reEncoded = case decoded of\n\
+         \x20           Ok r -> E.encode 0 (enc r)\n\
+         \x20           Err e -> D.errorToString e\n\
+         \x20       failMsg = case D.decodeString (D.field \"age\" D.string) \"{\\\"age\\\":1}\" of\n\
+         \x20           Ok _ -> \"?\"\n\
+         \x20           Err e -> D.errorToString e\n\
+         \x20   in\n\
+         \x20   String.join \"|\" [ Debug.toString decoded, reEncoded, failMsg, Debug.toString (D.decodeString (D.list D.int) \"[1,2,3]\") ]\n",
+    );
+}
