@@ -4080,6 +4080,33 @@ unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
                     )),
                 }
             }
+            // In JS a JSON array is an object, so `field name` delegates to
+            // `name in array`: `field "length"` reads the array's length and a
+            // numeric field name indexes it. Elm code relies on this (e.g. a
+            // `requireLength` combinator decoding `field "length" int`).
+            JsonValue::JArray(items) => {
+                let picked = if name == b"length" {
+                    Some(JsonValue::Number(items.len() as f64))
+                } else {
+                    std::str::from_utf8(name)
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|i| items.get(i).cloned())
+                };
+                match picked {
+                    Some(val) => match run_decoder(*sub, &val) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(json_err_field(name, e)),
+                    },
+                    None => Err(json_err_expecting(
+                        &format!(
+                            "an OBJECT with a field named `{}`",
+                            String::from_utf8_lossy(name)
+                        ),
+                        jv,
+                    )),
+                }
+            }
             _ => Err(json_err_expecting(
                 &format!(
                     "an OBJECT with a field named `{}`",
