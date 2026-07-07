@@ -756,7 +756,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // module global caches the computed value behind a "done" flag, so the
         // body runs at most once. Sound because Elm forbids value-level
         // self-reference, so nullary values form a DAG (no memo cycle).
-        if params.is_empty() {
+        //
+        // Only worth it when the body allocates or calls (same guard as the
+        // in-function hoist): a scalar/leaf constant is cheap to recompute and
+        // LLVM folds it, whereas the memo would emit two globals + a branch and
+        // block constant propagation for anything the optimizer can't prove
+        // constant through the cache.
+        if params.is_empty() && self.allocating_const(body) {
             let ret_ty = self.llvm_type(&self.layouts.layout_of(&body.tipe));
             let memo = self.module.add_global(ret_ty, None, &format!("{}$memo", f.mangled));
             memo.set_initializer(&ret_ty.const_zero());
