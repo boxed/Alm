@@ -596,10 +596,7 @@ impl Specializer<'_> {
                     .collect(),
                 Box::new(self.expr(otherwise, subst)),
             ),
-            Let(decls, body) => TypedKind::Let(
-                decls.iter().map(|d| self.let_decl(d, subst)).collect(),
-                Box::new(self.expr(body, subst)),
-            ),
+            Let(decls, body) => self.spec_let(decls, body, subst),
             Case(scrutinee, branches) => TypedKind::Case(
                 Box::new(self.expr(scrutinee, subst)),
                 branches
@@ -663,6 +660,160 @@ impl Specializer<'_> {
         }
     }
 
+    /// Specialize a `let` block.
+    ///
+    /// A local `let` function that is *polymorphic in the enclosing context*
+    /// (its recorded type still has a free type variable after the enclosing
+    /// substitution) cannot be laid out concretely from a single copy: its
+    /// parameters would fall back to the boxed `Ref` layout while call sites
+    /// pass concrete unboxed values. So such a function is specialized *per
+    /// use-site type*, exactly as top-level functions are — one copy per
+    /// distinct concrete instantiation, each with concrete parameter/return
+    /// layouts — and every reference is routed to the matching copy by name.
+    ///
+    /// Monomorphic locals (and any local whose type is already concrete here)
+    /// keep the ordinary single-copy behaviour.
+    fn spec_let(
+        &self,
+        decls: &[can::LetDecl],
+        body: &can::Expr,
+        subst: &HashMap<Name, can::Type>,
+    ) -> TypedKind {
+        // Identify the polymorphic-in-context local *functions* in this block:
+        // name -> (definition, its generic recorded type, whether recursive).
+        struct PolyLocal<'a> {
+            def: &'a can::Def,
+            generic: can::Type,
+            recursive: bool,
+        }
+        let mut polys: HashMap<Name, PolyLocal> = HashMap::new();
+        let mut poly_index: HashMap<usize, Name> = HashMap::new();
+        for (i, decl) in decls.iter().enumerate() {
+            let (def, recursive) = match decl {
+                can::LetDecl::Def(def) if !def.args.is_empty() => (def, false),
+                can::LetDecl::Recursive(defs) if defs.len() == 1 && !defs[0].args.is_empty() => {
+                    (&defs[0], true)
+                }
+                _ => continue,
+            };
+            let Some(generic) = self.ctx.node_types.get(&def.name.region) else {
+                continue;
+            };
+            if type_has_free_tyvar(&apply_subst(subst, generic)) {
+                poly_index.insert(i, def.name.value.clone());
+                polys.insert(
+                    def.name.value.clone(),
+                    PolyLocal {
+                        def,
+                        generic: generic.clone(),
+                        recursive,
+                    },
+                );
+            }
+        }
+
+        // No polymorphic locals: ordinary specialization.
+        if polys.is_empty() {
+            return TypedKind::Let(
+                decls.iter().map(|d| self.let_decl(d, subst)).collect(),
+                Box::new(self.expr(body, subst)),
+            );
+        }
+
+        let poly_names: std::collections::HashSet<Name> = polys.keys().cloned().collect();
+
+        // Produce the non-poly decls (in place, keyed by index) and the body.
+        let mut nonpoly: HashMap<usize, TypedLetDecl> = HashMap::new();
+        for (i, decl) in decls.iter().enumerate() {
+            if poly_index.contains_key(&i) {
+                continue;
+            }
+            nonpoly.insert(i, self.let_decl(decl, subst));
+        }
+        let mut body_t = self.expr(body, subst);
+
+        // Fixpoint: discover every concrete instantiation of each poly local,
+        // building one specialized copy per distinct type. Seed from the body
+        // and the non-poly decls; each specialized body is scanned in turn so
+        // recursion and poly-to-poly calls are covered.
+        let mut queue: Vec<(Name, can::Type)> = Vec::new();
+        {
+            let mut masked = std::collections::HashSet::new();
+            scan_local_uses(&body_t, &poly_names, &mut masked, &mut queue);
+            for d in nonpoly.values() {
+                scan_decl_uses(d, &poly_names, &mut queue);
+            }
+        }
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut spec_decls: HashMap<String, TypedLetDecl> = HashMap::new();
+        let mut per_name: HashMap<Name, Vec<Name>> = HashMap::new();
+        let mut qi = 0;
+        while qi < queue.len() {
+            let (name, ty) = queue[qi].clone();
+            qi += 1;
+            let mangled = mangle_local(&name, &ty);
+            if !seen.insert(mangled.to_string()) {
+                continue;
+            }
+            let poly = &polys[&name];
+            let g_sub = apply_subst(subst, &poly.generic);
+            let mut subst_i = subst.clone();
+            match_type(&g_sub, &ty, &mut subst_i);
+            let params = self.local_params(poly.def, &subst_i);
+            let spec_body = self.expr(&poly.def.body, &subst_i);
+            {
+                let mut masked = std::collections::HashSet::new();
+                scan_local_uses(&spec_body, &poly_names, &mut masked, &mut queue);
+            }
+            let inner = TypedLetDecl::Def {
+                name: mangled.clone(),
+                params,
+                body: spec_body,
+            };
+            let decl = if poly.recursive {
+                TypedLetDecl::Recursive(vec![inner])
+            } else {
+                inner
+            };
+            spec_decls.insert(mangled.to_string(), decl);
+            per_name.entry(name).or_default().push(mangled);
+        }
+
+        // Assemble the output decls, preserving the original order: each poly
+        // local expands in place into its specialized copies; a poly local with
+        // no discovered use falls back to the ordinary single copy.
+        let mut out_decls: Vec<TypedLetDecl> = Vec::new();
+        let mut specialized: std::collections::HashSet<Name> = std::collections::HashSet::new();
+        for (i, decl) in decls.iter().enumerate() {
+            match poly_index.get(&i) {
+                Some(name) => match per_name.get(name) {
+                    Some(mangleds) if !mangleds.is_empty() => {
+                        specialized.insert(name.clone());
+                        for m in mangleds {
+                            out_decls.push(spec_decls.remove(m.as_str()).unwrap());
+                        }
+                    }
+                    _ => out_decls.push(self.let_decl(decl, subst)),
+                },
+                None => out_decls.push(nonpoly.remove(&i).unwrap()),
+            }
+        }
+
+        // Route every use of a specialized local to the copy for its concrete
+        // type. `emitted` guards against rewriting to a copy that (defensively)
+        // does not exist.
+        let emitted: std::collections::HashSet<String> = seen;
+        {
+            let mut masked = std::collections::HashSet::new();
+            rewrite_local_uses(&mut body_t, &specialized, &emitted, &mut masked);
+        }
+        for d in out_decls.iter_mut() {
+            rewrite_decl_uses(d, &specialized, &emitted);
+        }
+
+        TypedKind::Let(out_decls, Box::new(body_t))
+    }
+
     /// Peel a `let`-bound definition's parameter types off its recorded
     /// function type (captured at `def.name.region` by the checker), applying
     /// the enclosing substitution. Falls back to `Unit` when the type is
@@ -693,6 +844,325 @@ impl Specializer<'_> {
                 (arg.clone(), ty)
             })
             .collect()
+    }
+}
+
+/// Whether a type still carries a free type variable that would drive a boxed
+/// (`Ref`) layout. A `number` variable is excluded: it defaults to `Int`
+/// consistently, so it needs no per-use specialization.
+fn type_has_free_tyvar(tipe: &can::Type) -> bool {
+    use can::Type::*;
+    match tipe {
+        Var(n) => !n.as_str().starts_with("number"),
+        Lambda(a, b) => type_has_free_tyvar(a) || type_has_free_tyvar(b),
+        Type(_, _, args) => args.iter().any(type_has_free_tyvar),
+        Tuple(a, b, c) => {
+            type_has_free_tyvar(a)
+                || type_has_free_tyvar(b)
+                || c.as_ref().map_or(false, |c| type_has_free_tyvar(c))
+        }
+        Record(fields, _) => fields.iter().any(|(_, t)| type_has_free_tyvar(t)),
+        Unit => false,
+    }
+}
+
+/// The mangled name of a local specialization: the source name plus its
+/// concrete type, mirroring [`mangle`] for top-level functions.
+fn mangle_local(name: &Name, tipe: &can::Type) -> Name {
+    Name::from(format!("{}${}", name, mangle_type(tipe)))
+}
+
+/// The names a pattern binds (used to detect shadowing of a specialized local).
+fn pattern_bound_names(pattern: &can::Pattern, out: &mut Vec<Name>) {
+    use can::Pattern_::*;
+    match &pattern.value {
+        Var(name) => out.push(name.clone()),
+        Alias(inner, name) => {
+            pattern_bound_names(inner, out);
+            out.push(name.value.clone());
+        }
+        Record(fields) => out.extend(fields.iter().map(|f| f.value.clone())),
+        Tuple(a, b, rest) => {
+            pattern_bound_names(a, out);
+            pattern_bound_names(b, out);
+            rest.iter().for_each(|p| pattern_bound_names(p, out));
+        }
+        Ctor(_, _, _, args) => args.iter().for_each(|p| pattern_bound_names(p, out)),
+        List(items) => items.iter().for_each(|p| pattern_bound_names(p, out)),
+        Cons(h, t) => {
+            pattern_bound_names(h, out);
+            pattern_bound_names(t, out);
+        }
+        Anything | Unit | Chr(_) | Str(_) | Int(_) => {}
+    }
+}
+
+/// The names a `let` block's declarations bind at block scope (def names and
+/// destructure-pattern names) — the set an inner block shadows.
+fn decl_bound_names(decls: &[TypedLetDecl], out: &mut Vec<Name>) {
+    for decl in decls {
+        match decl {
+            TypedLetDecl::Def { name, .. } => out.push(name.clone()),
+            TypedLetDecl::Recursive(defs) => decl_bound_names(defs, out),
+            TypedLetDecl::Destruct(pattern, _) => pattern_bound_names(pattern, out),
+        }
+    }
+}
+
+/// Run `f` with the poly-local names bound by `binders` masked (shadowed) in
+/// `masked`, restoring the mask afterwards.
+fn with_masked<R>(
+    binders: &[Name],
+    poly: &std::collections::HashSet<Name>,
+    masked: &mut std::collections::HashSet<Name>,
+    f: impl FnOnce(&mut std::collections::HashSet<Name>) -> R,
+) -> R {
+    let added: Vec<Name> = binders
+        .iter()
+        .filter(|n| poly.contains(*n) && masked.insert((*n).clone()))
+        .cloned()
+        .collect();
+    let r = f(masked);
+    for n in added {
+        masked.remove(&n);
+    }
+    r
+}
+
+/// Collect uses of any poly-local `name` in a typed expression as
+/// `(name, concrete type at the use)`, skipping references shadowed by an
+/// inner binder that rebinds the name.
+fn scan_local_uses(
+    e: &TypedExpr,
+    poly: &std::collections::HashSet<Name>,
+    masked: &mut std::collections::HashSet<Name>,
+    out: &mut Vec<(Name, can::Type)>,
+) {
+    use TypedKind::*;
+    match &e.kind {
+        Local(n) => {
+            if poly.contains(n) && !masked.contains(n) {
+                out.push((n.clone(), e.tipe.clone()));
+            }
+        }
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Global(_) | Foreign(..) | Ctor(..)
+        | Accessor(_) => {}
+        Negate(x) | Access(x, _) => scan_local_uses(x, poly, masked, out),
+        List(xs) => xs.iter().for_each(|x| scan_local_uses(x, poly, masked, out)),
+        Binop(_, _, _, l, r) => {
+            scan_local_uses(l, poly, masked, out);
+            scan_local_uses(r, poly, masked, out);
+        }
+        Call(f, args) => {
+            scan_local_uses(f, poly, masked, out);
+            args.iter().for_each(|a| scan_local_uses(a, poly, masked, out));
+        }
+        If(branches, otherwise) => {
+            for (c, b) in branches {
+                scan_local_uses(c, poly, masked, out);
+                scan_local_uses(b, poly, masked, out);
+            }
+            scan_local_uses(otherwise, poly, masked, out);
+        }
+        Update(r, fields) => {
+            scan_local_uses(r, poly, masked, out);
+            fields.iter().for_each(|(_, v)| scan_local_uses(v, poly, masked, out));
+        }
+        Record(fields) => fields.iter().for_each(|(_, v)| scan_local_uses(v, poly, masked, out)),
+        Tuple(a, b, c) => {
+            scan_local_uses(a, poly, masked, out);
+            scan_local_uses(b, poly, masked, out);
+            if let Some(c) = c {
+                scan_local_uses(c, poly, masked, out);
+            }
+        }
+        Lambda(params, body) => {
+            let mut binders = Vec::new();
+            for (p, _) in params {
+                pattern_bound_names(p, &mut binders);
+            }
+            with_masked(&binders, poly, masked, |m| scan_local_uses(body, poly, m, out));
+        }
+        Case(scrut, branches) => {
+            scan_local_uses(scrut, poly, masked, out);
+            for (p, b) in branches {
+                let mut binders = Vec::new();
+                pattern_bound_names(p, &mut binders);
+                with_masked(&binders, poly, masked, |m| scan_local_uses(b, poly, m, out));
+            }
+        }
+        Let(decls, body) => {
+            let mut binders = Vec::new();
+            decl_bound_names(decls, &mut binders);
+            with_masked(&binders, poly, masked, |m| {
+                for d in decls {
+                    scan_decl_uses_masked(d, poly, m, out);
+                }
+                scan_local_uses(body, poly, m, out);
+            });
+        }
+    }
+}
+
+/// Scan a decl's sub-expressions for poly-local uses (top-level entry; the
+/// block's own binders are assumed already masked by the caller).
+fn scan_decl_uses(
+    decl: &TypedLetDecl,
+    poly: &std::collections::HashSet<Name>,
+    out: &mut Vec<(Name, can::Type)>,
+) {
+    let mut masked = std::collections::HashSet::new();
+    scan_decl_uses_masked(decl, poly, &mut masked, out);
+}
+
+fn scan_decl_uses_masked(
+    decl: &TypedLetDecl,
+    poly: &std::collections::HashSet<Name>,
+    masked: &mut std::collections::HashSet<Name>,
+    out: &mut Vec<(Name, can::Type)>,
+) {
+    match decl {
+        TypedLetDecl::Def { params, body, .. } => {
+            let mut binders = Vec::new();
+            for (p, _) in params {
+                pattern_bound_names(p, &mut binders);
+            }
+            with_masked(&binders, poly, masked, |m| scan_local_uses(body, poly, m, out));
+        }
+        TypedLetDecl::Recursive(defs) => {
+            for d in defs {
+                scan_decl_uses_masked(d, poly, masked, out);
+            }
+        }
+        TypedLetDecl::Destruct(_, value) => scan_local_uses(value, poly, masked, out),
+    }
+}
+
+/// Rewrite every use of a specialized local to the mangled copy for the use's
+/// concrete type, respecting shadowing. `emitted` is the set of copies that
+/// actually exist; a use whose copy is missing is left untouched.
+fn rewrite_local_uses(
+    e: &mut TypedExpr,
+    specialized: &std::collections::HashSet<Name>,
+    emitted: &std::collections::HashSet<String>,
+    masked: &mut std::collections::HashSet<Name>,
+) {
+    use TypedKind::*;
+    let tipe = e.tipe.clone();
+    match &mut e.kind {
+        Local(n) => {
+            if specialized.contains(n) && !masked.contains(n) {
+                let m = mangle_local(n, &tipe);
+                if emitted.contains(m.as_str()) {
+                    *n = m;
+                }
+            }
+        }
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Global(_) | Foreign(..) | Ctor(..)
+        | Accessor(_) => {}
+        Negate(x) | Access(x, _) => rewrite_local_uses(x, specialized, emitted, masked),
+        List(xs) => xs
+            .iter_mut()
+            .for_each(|x| rewrite_local_uses(x, specialized, emitted, masked)),
+        Binop(_, _, _, l, r) => {
+            rewrite_local_uses(l, specialized, emitted, masked);
+            rewrite_local_uses(r, specialized, emitted, masked);
+        }
+        Call(f, args) => {
+            rewrite_local_uses(f, specialized, emitted, masked);
+            args.iter_mut()
+                .for_each(|a| rewrite_local_uses(a, specialized, emitted, masked));
+        }
+        If(branches, otherwise) => {
+            for (c, b) in branches.iter_mut() {
+                rewrite_local_uses(c, specialized, emitted, masked);
+                rewrite_local_uses(b, specialized, emitted, masked);
+            }
+            rewrite_local_uses(otherwise, specialized, emitted, masked);
+        }
+        Update(r, fields) => {
+            rewrite_local_uses(r, specialized, emitted, masked);
+            fields
+                .iter_mut()
+                .for_each(|(_, v)| rewrite_local_uses(v, specialized, emitted, masked));
+        }
+        Record(fields) => fields
+            .iter_mut()
+            .for_each(|(_, v)| rewrite_local_uses(v, specialized, emitted, masked)),
+        Tuple(a, b, c) => {
+            rewrite_local_uses(a, specialized, emitted, masked);
+            rewrite_local_uses(b, specialized, emitted, masked);
+            if let Some(c) = c {
+                rewrite_local_uses(c, specialized, emitted, masked);
+            }
+        }
+        Lambda(params, body) => {
+            let mut binders = Vec::new();
+            for (p, _) in params.iter() {
+                pattern_bound_names(p, &mut binders);
+            }
+            with_masked(&binders, specialized, masked, |m| {
+                rewrite_local_uses(body, specialized, emitted, m)
+            });
+        }
+        Case(scrut, branches) => {
+            rewrite_local_uses(scrut, specialized, emitted, masked);
+            for (p, b) in branches.iter_mut() {
+                let mut binders = Vec::new();
+                pattern_bound_names(p, &mut binders);
+                with_masked(&binders, specialized, masked, |m| {
+                    rewrite_local_uses(b, specialized, emitted, m)
+                });
+            }
+        }
+        Let(decls, body) => {
+            let mut binders = Vec::new();
+            decl_bound_names(decls, &mut binders);
+            with_masked(&binders, specialized, masked, |m| {
+                for d in decls.iter_mut() {
+                    rewrite_decl_uses_masked(d, specialized, emitted, m);
+                }
+                rewrite_local_uses(body, specialized, emitted, m);
+            });
+        }
+    }
+}
+
+/// Rewrite uses within a decl. The decl's own recursive name is intentionally
+/// *not* masked: a self-reference must route to this same specialized copy.
+fn rewrite_decl_uses(
+    decl: &mut TypedLetDecl,
+    specialized: &std::collections::HashSet<Name>,
+    emitted: &std::collections::HashSet<String>,
+) {
+    let mut masked = std::collections::HashSet::new();
+    rewrite_decl_uses_masked(decl, specialized, emitted, &mut masked);
+}
+
+fn rewrite_decl_uses_masked(
+    decl: &mut TypedLetDecl,
+    specialized: &std::collections::HashSet<Name>,
+    emitted: &std::collections::HashSet<String>,
+    masked: &mut std::collections::HashSet<Name>,
+) {
+    match decl {
+        TypedLetDecl::Def { params, body, .. } => {
+            let mut binders = Vec::new();
+            for (p, _) in params.iter() {
+                pattern_bound_names(p, &mut binders);
+            }
+            with_masked(&binders, specialized, masked, |m| {
+                rewrite_local_uses(body, specialized, emitted, m)
+            });
+        }
+        TypedLetDecl::Recursive(defs) => {
+            for d in defs {
+                rewrite_decl_uses_masked(d, specialized, emitted, masked);
+            }
+        }
+        TypedLetDecl::Destruct(_, value) => {
+            rewrite_local_uses(value, specialized, emitted, masked)
+        }
     }
 }
 

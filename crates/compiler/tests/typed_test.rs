@@ -1624,3 +1624,48 @@ fn deep_tail_recursion_with_allocation() {
          main = String.fromInt (countDown 200000 [])\n",
     );
 }
+
+#[test]
+fn polymorphic_local_manipulates_payload() {
+    // A polymorphic local `let` function whose payload flows unboxed through a
+    // kernel (concatMap) must be specialized per use-site so its parameters get
+    // the concrete unboxed layout, not a boxed Ref. permutations of [1,2,3].
+    assert_same(
+        "poly_local_payload",
+        "module Test exposing (..)\n\
+         \n\
+         select : List a -> List ( a, List a )\n\
+         select xs =\n\
+         \x20   case xs of\n\
+         \x20       [] -> []\n\
+         \x20       x :: rest -> ( x, rest ) :: List.map (\\( y, ys ) -> ( y, x :: ys )) (select rest)\n\
+         \n\
+         perm : List a -> List (List a)\n\
+         perm xs_ =\n\
+         \x20   case xs_ of\n\
+         \x20       [] -> [ [] ]\n\
+         \x20       xs -> let f ( y, ys ) = List.map ((::) y) (perm ys) in List.concatMap f (select xs)\n\
+         \n\
+         main : String\n\
+         main = Debug.toString (perm [ 1, 2, 3 ])\n",
+    );
+}
+
+#[test]
+fn polymorphic_local_used_at_two_types() {
+    // A polymorphic local used at two distinct concrete types must be
+    // specialized once per type (isJust-style).
+    assert_same(
+        "poly_local_two_types",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       isJust m = case m of\n\
+         \x20           Just _ -> True\n\
+         \x20           Nothing -> False\n\
+         \x20   in\n\
+         \x20   Debug.toString ( isJust (Just 3), isJust (Just 1.5), isJust Nothing )\n",
+    );
+}
