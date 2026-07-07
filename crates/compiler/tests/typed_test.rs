@@ -1902,6 +1902,34 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn local_row_polymorphic_record_access() {
+    // A record's fields are laid out sorted by name, so the offset of a field
+    // depends on the *full* field set. A row-polymorphic function
+    // (`{ r | ... } -> ...`) must therefore be specialized to the concrete
+    // record at each use site, or its field accesses read the offsets of the
+    // partial (open) field set. Top-level functions were specialized, but a
+    // *local* `let`-bound row-polymorphic function was not — its open-record
+    // parameter was treated as monomorphic, so `loc.startRow` read a
+    // neighbouring field (a pointer) as an Int (elm-csv's `errorToString`).
+    // Here `mid` sorts between `lo` and `zz`, so the extra fields shift its
+    // offset; the local `get` must still read `mid`, not its neighbour.
+    assert_same(
+        "local_row_poly_access",
+        "module Test exposing (..)\n\
+         \n\
+         type Tag = Tag String\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       get loc =\n\
+         \x20           String.fromInt loc.mid ++ \"/\" ++ String.fromInt loc.lo\n\
+         \x20   in\n\
+         \x20   get { lo = 3, mid = 7, zz = 99, tag = Tag \"x\" }\n",
+    );
+}
+
+#[test]
 fn equality_of_values_containing_a_shared_function() {
     // Elm's `==` short-circuits to `true` for the same function reference, so a
     // data structure that embeds a function (here a `Dict` value) compares equal

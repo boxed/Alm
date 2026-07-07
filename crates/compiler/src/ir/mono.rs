@@ -1090,7 +1090,15 @@ fn type_has_free_tyvar(tipe: &can::Type) -> bool {
                 || type_has_free_tyvar(b)
                 || c.as_ref().map_or(false, |c| type_has_free_tyvar(c))
         }
-        Record(fields, _) => fields.iter().any(|(_, t)| type_has_free_tyvar(t)),
+        // An open record `{ a | field : T, .. }` carries a free row variable
+        // (the extension `a`). It is genuinely polymorphic: its concrete field
+        // set — and therefore the sorted field offsets a record access compiles
+        // to — depends on what `a` resolves to at each use site. A local
+        // function with such a parameter must be specialized per use-site (like
+        // any polymorphic local); otherwise its accesses read fields at the
+        // offsets of the partial (open) field set instead of the concrete
+        // record's, returning the wrong field.
+        Record(fields, ext) => ext.is_some() || fields.iter().any(|(_, t)| type_has_free_tyvar(t)),
         Unit => false,
     }
 }
