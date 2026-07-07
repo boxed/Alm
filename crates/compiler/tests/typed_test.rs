@@ -1698,3 +1698,29 @@ fn record_alias_constructors() {
          \x20       )\n",
     );
 }
+
+#[test]
+fn nested_and_point_free_lambdas_through_hof() {
+    // A closure's compiled arity must equal its type's total arrow count so a
+    // higher-order caller that passes one argument per arrow does not read past
+    // the closure's parameters. A directly-nested lambda (`\_ -> \b -> b + 1`)
+    // must flatten to two parameters, and a point-free tail (`\_ -> identity`)
+    // must eta-expand -- both previously returned garbage when applied with two
+    // arguments at once.
+    assert_same(
+        "nested_point_free_lambdas",
+        "module Test exposing (..)\n\
+         \n\
+         apply2 : (a -> b -> c) -> a -> b -> c\n\
+         apply2 f x y =\n\
+         \x20   f x y\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString\n\
+         \x20       ( apply2 (\\_ b -> b + 1) 5 10\n\
+         \x20       , apply2 (\\_ -> \\b -> b + 1) 5 10\n\
+         \x20       , apply2 (\\_ -> identity) 5 99\n\
+         \x20       )\n",
+    );
+}

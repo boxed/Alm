@@ -21,6 +21,7 @@ use std::collections::HashMap;
 
 use crate::ast::canonical as can;
 use crate::data::Name;
+use crate::reporting::annotation::Located;
 use crate::reporting::Region;
 
 /// One concrete instance of a top-level function: the module it lives in, its
@@ -583,7 +584,62 @@ impl Specializer<'_> {
                         }
                     }
                 }
-                TypedKind::Lambda(params, Box::new(self.expr(body, subst)))
+                let mut body_expr = self.expr(body, subst);
+                // A closure's compiled arity must equal its type's total arrow
+                // count: whoever applies it (see `apply_closure_curried`) passes
+                // one argument per arrow, so a closure carrying fewer parameters
+                // than arrows would read past its arguments and return garbage.
+                //
+                // (1) Flatten directly-nested lambdas -- `\a -> \b -> e` becomes
+                //     `\a b -> e` -- exactly as Elm collapses curried lambdas.
+                //     Only syntactic nesting is merged; a `let`/`if` between the
+                //     arrows leaves the inner lambda in place, preserving when
+                //     its body runs.
+                while let TypedKind::Lambda(inner_params, inner_body) = body_expr.kind {
+                    params.extend(inner_params);
+                    body_expr = *inner_body;
+                }
+                // (2) Eta-expand any arrows the parameters do not yet cover --
+                //     point-free tails such as `\_ -> identity` -- by applying
+                //     the body to fresh parameters. Pure, so semantics-preserving.
+                let mut covered = tipe.clone();
+                for _ in 0..params.len() {
+                    match covered {
+                        can::Type::Lambda(_, b) => covered = *b,
+                        other => {
+                            covered = other;
+                            break;
+                        }
+                    }
+                }
+                let mut eta_args: Vec<TypedExpr> = Vec::new();
+                let mut idx = 0u32;
+                while let can::Type::Lambda(a, b) = covered {
+                    let pname = Name::from(format!(
+                        "_eta{}_{}_{}",
+                        expr.region.start.row, expr.region.start.col, idx
+                    ));
+                    let pat = Located::new(
+                        expr.region,
+                        can::Pattern_::Var(pname.clone()),
+                    );
+                    params.push((pat, (*a).clone()));
+                    eta_args.push(TypedExpr {
+                        tipe: (*a).clone(),
+                        kind: TypedKind::Local(pname),
+                        region: expr.region,
+                    });
+                    covered = *b;
+                    idx += 1;
+                }
+                if !eta_args.is_empty() {
+                    body_expr = TypedExpr {
+                        tipe: covered,
+                        kind: TypedKind::Call(Box::new(body_expr), eta_args),
+                        region: expr.region,
+                    };
+                }
+                TypedKind::Lambda(params, Box::new(body_expr))
             }
             Call(func, args) => TypedKind::Call(
                 Box::new(self.expr(func, subst)),
