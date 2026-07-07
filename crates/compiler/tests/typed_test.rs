@@ -1900,3 +1900,36 @@ fn point_free_polymorphic_let_binding() {
          \x20   Debug.toString ( sorted [ 3, 1, 2, 1, 3 ], sorted [ 5, 2, 5 ] )\n",
     );
 }
+
+#[test]
+fn partial_record_alias_constructor() {
+    // A record type-alias used as a constructor and *partially* applied
+    // (`succeed (T inc) |> andMap ...`, the elm/json-extra andMap idiom) must
+    // be typed as a function, not the full record. The synthesized desugaring
+    // nodes' regions previously collided with the enclosing application node's
+    // region in node_types, so the partial application read as the full record
+    // -- a closure then boxed as a record (compile panic) or applied as a
+    // non-function (runtime crash). Exercises a 3-field record built field by
+    // field through a partial constructor.
+    assert_same(
+        "partial_record_alias_ctor",
+        "module Test exposing (..)\n\
+         \n\
+         andMap : Maybe a -> Maybe (a -> b) -> Maybe b\n\
+         andMap =\n\
+         \x20   Maybe.map2 (|>)\n\
+         \n\
+         type alias T =\n\
+         \x20   { inc : List Int, x : String, y : String }\n\
+         \n\
+         build : List Int -> Maybe T\n\
+         build inc =\n\
+         \x20   Just (T inc)\n\
+         \x20       |> andMap (Just \"a\")\n\
+         \x20       |> andMap (Just \"b\")\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString (build [ 1, 2 ])\n",
+    );
+}

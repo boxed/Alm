@@ -375,12 +375,20 @@ fn record_alias_ctor(
     // field-value var all reused the constructor's single region they would
     // clobber each other in `node_types` (e.g. a field's `number` type would
     // overwrite the record's type), corrupting the typed/native backend's
-    // layout resolution. Nudge `end.col` by a per-node index to keep the
-    // reported span near the constructor while making each region unique.
+    // layout resolution.
+    //
+    // The synthesized region must also not collide with any REAL node. A small
+    // nudge to `end.col` is unsafe: the enclosing application `Ctor arg` spans
+    // from the constructor through its argument and can end at exactly that
+    // column, so a nudged synthesized node would clobber the application's type
+    // (a partial application `Ctor arg` then reads as the full record instead of
+    // a function). Put the synthesized end row far past any real source line so
+    // these keys can never coincide with a real node, and index them for
+    // mutual uniqueness.
     let bump = |k: u32| {
         Region::new(
             region.start,
-            Position::new(region.end.row, region.end.col.saturating_add(k)),
+            Position::new(1_000_000 + k, region.end.col),
         )
     };
     let args: Vec<can::Pattern> = field_names
