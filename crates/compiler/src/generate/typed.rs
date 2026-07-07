@@ -4011,6 +4011,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         layout: &Layout,
     ) -> Result<inkwell::values::IntValue<'ctx>, String> {
         match layout {
+            // Unit has a single inhabitant, so `() == ()` is always true.
+            Layout::Unit => Ok(self.ctx.bool_type().const_int(1, false)),
             Layout::Int | Layout::Char | Layout::Bool | Layout::Enum(_) => Ok(self
                 .builder
                 .build_int_compare(IntPredicate::EQ, a.into_int_value(), b.into_int_value(), "eq")

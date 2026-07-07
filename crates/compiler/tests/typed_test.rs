@@ -1832,3 +1832,22 @@ fn time_civil_date_math() {
          \x20       ]\n",
     );
 }
+
+#[test]
+fn unit_equality() {
+    // Unit has one inhabitant, so `() == ()` is always true; equality on Unit
+    // (directly, nested in a tuple, and in a list) must match the JS backend.
+    assert_same(
+        "unit_equality",
+        "module Test exposing (..)\n\
+         \n\
+         d : a -> String\n\
+         d =\n\
+         \x20   Debug.toString\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \"|\"\n\
+         \x20       [ d (() == ()), d (() /= ()), d (( (), 1 ) == ( (), 1 )), d ([ () ] == [ () ]) ]\n",
+    );
+}
