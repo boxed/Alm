@@ -4204,6 +4204,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     /// Recursively test two values of a given layout for equality, yielding an
     /// i1.
+    /// Reinterpret a value as the uniform i64 word: a pointer becomes its
+    /// address (the word a heap value carries), an integer word passes through.
+    /// Used where a string/opaque value may arrive boxed (as a pointer) or
+    /// unboxed (as the word).
+    fn as_word(&self, v: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
+        if v.is_pointer_value() {
+            self.builder
+                .build_ptr_to_int(v.into_pointer_value(), self.ctx.i64_type(), "word")
+                .unwrap()
+                .into()
+        } else {
+            v
+        }
+    }
+
     fn equals_vals(
         &mut self,
         a: BasicValueEnum<'ctx>,
@@ -4222,7 +4237,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .build_float_compare(FloatPredicate::OEQ, a.into_float_value(), b.into_float_value(), "eq")
                 .unwrap()),
             Layout::Str | Layout::Opaque => {
-                let cmp = self.call_named("rt_eq", &[a, b]);
+                // Both are uniform words, but a string/opaque value that flowed
+                // through a `Ref`-layout slot (a polymorphic field/container)
+                // arrives as a pointer whose address *is* that word. Coerce
+                // either operand to the integer word before comparing, so a
+                // boxed and an unboxed occurrence of the same value compare
+                // equal (and the runtime call is well-typed).
+                let aw = self.as_word(a);
+                let bw = self.as_word(b);
+                let cmp = self.call_named("rt_eq", &[aw, bw]);
                 Ok(self.call_named("rt_is_true", &[cmp]).into_int_value())
             }
             Layout::Tuple(elems) => {
