@@ -4190,6 +4190,197 @@ unsafe fn str_bytes(w: u64) -> Vec<u8> {
     }
 }
 
+/// A String's UTF-8 bytes, borrowed (values are never freed, so 'a is sound).
+unsafe fn str_slice<'a>(w: u64) -> &'a [u8] {
+    match deref(w) {
+        Value::Str(b) => b,
+        _ => crash!("expected a String"),
+    }
+}
+
+// PARSER — Elm.Kernel.Parser string-scanning primitives (elm/parser), ported
+// from the JS runtime. Offsets are opaque to Elm code (only these primitives
+// interpret them), so they are byte offsets into the UTF-8 string here, while
+// row/col count characters (Unicode scalars) — self-consistent, and identical
+// to the JS backend for ASCII input.
+
+unsafe fn triple(a: u64, b: u64, c: u64) -> u64 {
+    alloc(Value::Tuple(vec![a, b, c]))
+}
+
+/// Decode the UTF-8 scalar at byte `o` and its byte length. Assumes valid
+/// UTF-8 with `o` on a leading byte and enough bytes following.
+fn decode_char(b: &[u8], o: usize) -> (u32, usize) {
+    let c0 = b[o];
+    if c0 < 0x80 {
+        (c0 as u32, 1)
+    } else if c0 >> 5 == 0b110 {
+        (((c0 as u32 & 0x1F) << 6) | (b[o + 1] as u32 & 0x3F), 2)
+    } else if c0 >> 4 == 0b1110 {
+        (
+            ((c0 as u32 & 0x0F) << 12)
+                | ((b[o + 1] as u32 & 0x3F) << 6)
+                | (b[o + 2] as u32 & 0x3F),
+            3,
+        )
+    } else {
+        (
+            ((c0 as u32 & 0x07) << 18)
+                | ((b[o + 1] as u32 & 0x3F) << 12)
+                | ((b[o + 2] as u32 & 0x3F) << 6)
+                | (b[o + 3] as u32 & 0x3F),
+            4,
+        )
+    }
+}
+
+unsafe extern "C" fn parser_is_sub_string(
+    small: u64,
+    offset: u64,
+    row: u64,
+    col: u64,
+    big: u64,
+) -> u64 {
+    let s = str_slice(small);
+    let b = str_slice(big);
+    let mut o = int_val(offset) as usize;
+    let mut r = int_val(row);
+    let mut c = int_val(col);
+    let mut good = o + s.len() <= b.len();
+    let mut si = 0usize;
+    while good && si < s.len() {
+        if o >= b.len() {
+            good = false;
+            break;
+        }
+        let (sc, sl) = decode_char(s, si);
+        let (bc, bl) = decode_char(b, o);
+        if sc != bc {
+            good = false;
+            break;
+        }
+        if sc == 0x0A {
+            r += 1;
+            c = 1;
+        } else {
+            c += 1;
+        }
+        o += bl;
+        si += sl;
+    }
+    triple(rt_int(if good { o as i64 } else { -1 }), rt_int(r), rt_int(c))
+}
+
+unsafe extern "C" fn parser_is_sub_char(predicate: u64, offset: u64, string: u64) -> u64 {
+    let s = str_slice(string);
+    let o = int_val(offset) as usize;
+    if s.len() <= o {
+        return rt_int(-1);
+    }
+    let (cp, len) = decode_char(s, o);
+    if !rt_is_true(ap1(predicate, alloc(Value::Char(cp)))) {
+        return rt_int(-1);
+    }
+    if cp == 0x0A {
+        rt_int(-2)
+    } else {
+        rt_int((o + len) as i64)
+    }
+}
+
+unsafe extern "C" fn parser_is_ascii_code(code: u64, offset: u64, string: u64) -> u64 {
+    let s = str_slice(string);
+    let o = int_val(offset) as usize;
+    let byte = if o < s.len() { s[o] as i64 } else { -1 };
+    rt_bool(byte == int_val(code))
+}
+
+unsafe extern "C" fn parser_chomp_base10(offset: u64, string: u64) -> u64 {
+    let s = str_slice(string);
+    let mut o = int_val(offset) as usize;
+    while o < s.len() && (0x30..=0x39).contains(&s[o]) {
+        o += 1;
+    }
+    rt_int(o as i64)
+}
+
+unsafe extern "C" fn parser_consume_base(base: u64, offset: u64, string: u64) -> u64 {
+    let s = str_slice(string);
+    let base = int_val(base);
+    let mut o = int_val(offset) as usize;
+    let mut total: i64 = 0;
+    while o < s.len() {
+        let digit = s[o] as i64 - 0x30;
+        if digit < 0 || base <= digit {
+            break;
+        }
+        total = base * total + digit;
+        o += 1;
+    }
+    pair(rt_int(o as i64), rt_int(total))
+}
+
+unsafe extern "C" fn parser_consume_base16(offset: u64, string: u64) -> u64 {
+    let s = str_slice(string);
+    let mut o = int_val(offset) as usize;
+    let mut total: i64 = 0;
+    while o < s.len() {
+        let code = s[o];
+        let d = match code {
+            0x30..=0x39 => (code - 0x30) as i64,
+            0x41..=0x46 => (code - 55) as i64,
+            0x61..=0x66 => (code - 87) as i64,
+            _ => break,
+        };
+        total = 16 * total + d;
+        o += 1;
+    }
+    pair(rt_int(o as i64), rt_int(total))
+}
+
+unsafe extern "C" fn parser_find_sub_string(
+    small: u64,
+    offset: u64,
+    row: u64,
+    col: u64,
+    big: u64,
+) -> u64 {
+    let s = str_slice(small);
+    let b = str_slice(big);
+    let o0 = int_val(offset) as usize;
+    // Byte `indexOf` of `small` in `big` from `o0`.
+    let new_offset: i64 = if s.is_empty() {
+        o0.min(b.len()) as i64
+    } else if o0 <= b.len() {
+        b[o0..]
+            .windows(s.len())
+            .position(|w| w == s)
+            .map(|p| (o0 + p) as i64)
+            .unwrap_or(-1)
+    } else {
+        -1
+    };
+    let target = if new_offset < 0 {
+        b.len()
+    } else {
+        new_offset as usize + s.len()
+    };
+    let mut o = o0;
+    let mut r = int_val(row);
+    let mut c = int_val(col);
+    while o < target {
+        let (cp, len) = decode_char(b, o);
+        if cp == 0x0A {
+            c = 1;
+            r += 1;
+        } else {
+            c += 1;
+        }
+        o += len;
+    }
+    triple(rt_int(new_offset), rt_int(r), rt_int(c))
+}
+
 // --- errorToString (faithful port of elm/json) ---
 fn json_indent_err(s: &str) -> String {
     s.replace('\n', "\n    ")
@@ -4971,6 +5162,14 @@ kernel_fns! {
     G_JSONE_OBJECT "$Json$Encode$object" encode_object, 1;
     G_JSONE_DICT "$Json$Encode$dict" encode_dict, 3;
     G_JSONE_ENCODE "$Json$Encode$encode" encode_encode, 2;
+
+    G_PARSER_ISSUBSTRING "$Elm$Kernel$Parser$isSubString" parser_is_sub_string, 5;
+    G_PARSER_ISSUBCHAR "$Elm$Kernel$Parser$isSubChar" parser_is_sub_char, 3;
+    G_PARSER_ISASCIICODE "$Elm$Kernel$Parser$isAsciiCode" parser_is_ascii_code, 3;
+    G_PARSER_CHOMPBASE10 "$Elm$Kernel$Parser$chompBase10" parser_chomp_base10, 2;
+    G_PARSER_CONSUMEBASE "$Elm$Kernel$Parser$consumeBase" parser_consume_base, 3;
+    G_PARSER_CONSUMEBASE16 "$Elm$Kernel$Parser$consumeBase16" parser_consume_base16, 2;
+    G_PARSER_FINDSUBSTRING "$Elm$Kernel$Parser$findSubString" parser_find_sub_string, 5;
 }
 
 kernel_vals! {
