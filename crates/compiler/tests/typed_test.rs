@@ -1800,3 +1800,35 @@ fn json_decode_and_encode() {
          \x20   String.join \"|\" [ Debug.toString decoded, reEncoded, failMsg, Debug.toString (D.decodeString (D.list D.int) \"[1,2,3]\") ]\n",
     );
 }
+
+#[test]
+fn time_civil_date_math() {
+    // The native runtime implements elm/time's civil-date math (toYear/toMonth/
+    // toDay/toWeekday/toHour/toMinute/toSecond/toMillis + customZone offsets).
+    // Exercise a UTC instant, an offset zone, and a pre-epoch (negative ms)
+    // instant; all must match the JS backend.
+    assert_same(
+        "time_civil_date_math",
+        "module Test exposing (..)\n\
+         \n\
+         import Time\n\
+         \n\
+         d : a -> String\n\
+         d =\n\
+         \x20   Debug.toString\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       t = Time.millisToPosix 1719792645123\n\
+         \x20       z = Time.utc\n\
+         \x20       east = Time.customZone 120 []\n\
+         \x20   in\n\
+         \x20   String.join \"|\"\n\
+         \x20       [ d (Time.toYear z t), d (Time.toMonth z t), d (Time.toDay z t)\n\
+         \x20       , d (Time.toWeekday z t), d (Time.toHour z t), d (Time.toMinute z t)\n\
+         \x20       , d (Time.toSecond z t), d (Time.toMillis z t), d (Time.toHour east t)\n\
+         \x20       , d (Time.toYear z (Time.millisToPosix -1)), d (Time.toMonth z (Time.millisToPosix -1))\n\
+         \x20       ]\n",
+    );
+}

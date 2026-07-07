@@ -2415,6 +2415,102 @@ unsafe extern "C" fn time_posix_to_millis(p: u64) -> u64 {
     rt_ctor_arg(p, 0)
 }
 
+// Time civil-date math — a port of elm/time's Elm.Kernel.Time / Time.elm.
+// `Zone` is `Zone Int (List { start : Int, offset : Int })`; `Posix` is
+// `Posix Int` (milliseconds).
+
+/// `Math.floor(n / d)`; every divisor here is positive so div_euclid is floor.
+fn time_floored_div(n: i64, d: i64) -> i64 {
+    n.div_euclid(d)
+}
+
+struct Civil {
+    year: i64,
+    month: i64,
+    day: i64,
+}
+// Ported verbatim from _Time_toCivil; JS `| 0` is truncation toward zero,
+// which Rust integer `/` matches for the non-negative operands used here.
+fn time_to_civil(minutes: i64) -> Civil {
+    let raw_day = time_floored_div(minutes, 1440) + 719468;
+    let era = (if raw_day >= 0 { raw_day } else { raw_day - 146096 }) / 146097;
+    let day_of_era = raw_day - era * 146097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    Civil {
+        year: year + if month <= 2 { 1 } else { 0 },
+        month,
+        day: day_of_year - (153 * mp + 2) / 5 + 1,
+    }
+}
+
+unsafe fn time_adjusted_minutes(zone: u64, posix: u64) -> i64 {
+    let ms = int_val(rt_ctor_arg(posix, 0));
+    let posix_minutes = time_floored_div(ms, 60000);
+    // First era whose start is before now wins; otherwise the base offset.
+    for era in to_vec(rt_ctor_arg(zone, 1)) {
+        let start = int_val(rt_access(era, b"start\0".as_ptr()));
+        if start < posix_minutes {
+            return posix_minutes + int_val(rt_access(era, b"offset\0".as_ptr()));
+        }
+    }
+    posix_minutes + int_val(rt_ctor_arg(zone, 0))
+}
+
+unsafe extern "C" fn time_custom_zone(offset: u64, eras: u64) -> u64 {
+    ctor(b"Zone\0".as_ptr(), 0, vec![offset, eras])
+}
+unsafe extern "C" fn time_to_year(zone: u64, posix: u64) -> u64 {
+    rt_int(time_to_civil(time_adjusted_minutes(zone, posix)).year)
+}
+unsafe extern "C" fn time_to_month(zone: u64, posix: u64) -> u64 {
+    // Month = Jan | Feb | .. | Dec (indices 0..11); civil month is 1..12.
+    const NAMES: [&[u8]; 12] = [
+        b"Jan\0", b"Feb\0", b"Mar\0", b"Apr\0", b"May\0", b"Jun\0", b"Jul\0", b"Aug\0", b"Sep\0",
+        b"Oct\0", b"Nov\0", b"Dec\0",
+    ];
+    let idx = (time_to_civil(time_adjusted_minutes(zone, posix)).month - 1) as u32;
+    ctor(NAMES[idx as usize].as_ptr(), idx, Vec::new())
+}
+unsafe extern "C" fn time_to_day(zone: u64, posix: u64) -> u64 {
+    rt_int(time_to_civil(time_adjusted_minutes(zone, posix)).day)
+}
+unsafe extern "C" fn time_to_hour(zone: u64, posix: u64) -> u64 {
+    rt_int(time_floored_div(time_adjusted_minutes(zone, posix), 60).rem_euclid(24))
+}
+unsafe extern "C" fn time_to_minute(zone: u64, posix: u64) -> u64 {
+    rt_int(time_adjusted_minutes(zone, posix).rem_euclid(60))
+}
+unsafe extern "C" fn time_to_second(_zone: u64, posix: u64) -> u64 {
+    let ms = int_val(rt_ctor_arg(posix, 0));
+    rt_int(time_floored_div(ms, 1000).rem_euclid(60))
+}
+unsafe extern "C" fn time_to_millis(_zone: u64, posix: u64) -> u64 {
+    rt_int(int_val(rt_ctor_arg(posix, 0)).rem_euclid(1000))
+}
+unsafe extern "C" fn time_to_weekday(zone: u64, posix: u64) -> u64 {
+    // JS indexes ['Thu','Fri','Sat','Sun','Mon','Tue','Wed'] by
+    // modBy 7 (flooredDiv adjMinutes 1440); map each to the elm Weekday index
+    // (Mon | Tue | Wed | Thu | Fri | Sat | Sun == 0..6).
+    const TABLE: [(&[u8], u32); 7] = [
+        (b"Thu\0", 3),
+        (b"Fri\0", 4),
+        (b"Sat\0", 5),
+        (b"Sun\0", 6),
+        (b"Mon\0", 0),
+        (b"Tue\0", 1),
+        (b"Wed\0", 2),
+    ];
+    let adj = time_adjusted_minutes(zone, posix);
+    let wi = time_floored_div(adj, 1440).rem_euclid(7) as usize;
+    let (name, idx) = TABLE[wi];
+    ctor(name.as_ptr(), idx, Vec::new())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cmd_batch(cmds: u64) -> u64 {
     ctor(b"CmdBatch\0".as_ptr(), CT_BATCH, vec![cmds])
@@ -4730,6 +4826,15 @@ kernel_fns! {
     G_TIME_EVERY "$Time$every" time_every, 2;
     G_TIME_MILLISTOPOSIX "$Time$millisToPosix" time_millis_to_posix, 1;
     G_TIME_POSIXTOMILLIS "$Time$posixToMillis" time_posix_to_millis, 1;
+    G_TIME_CUSTOMZONE "$Time$customZone" time_custom_zone, 2;
+    G_TIME_TOYEAR "$Time$toYear" time_to_year, 2;
+    G_TIME_TOMONTH "$Time$toMonth" time_to_month, 2;
+    G_TIME_TODAY "$Time$toDay" time_to_day, 2;
+    G_TIME_TOWEEKDAY "$Time$toWeekday" time_to_weekday, 2;
+    G_TIME_TOHOUR "$Time$toHour" time_to_hour, 2;
+    G_TIME_TOMINUTE "$Time$toMinute" time_to_minute, 2;
+    G_TIME_TOSECOND "$Time$toSecond" time_to_second, 2;
+    G_TIME_TOMILLIS "$Time$toMillis" time_to_millis, 2;
 
     G_PLATFORM_WORKER "$Platform$worker" platform_worker, 1;
     G_PLATFORM_CMD_BATCH "$Platform$Cmd$batch" cmd_batch, 1;
