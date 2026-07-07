@@ -115,7 +115,69 @@ pub enum Value {
     /// avoiding a closure per combinator. Sub-decoders and functions are held
     /// as uniform value words.
     Decoder(Decoder),
+    /// A compiled `Regex.Regex` — an opaque pointer into the `alm-regex` glue
+    /// (`fancy-regex`). Never freed (bump-allocator model).
+    Regex(*const core::ffi::c_void),
 }
+
+// Native: the elm/regex engine lives in the `alm-regex` glue, linked into each
+// program. On wasm that glue is not linked, so provide aborting/empty stubs to
+// keep the wasm runtime self-contained — `fromStringWith` there yields `null`,
+// so regex degrades to "never compiles" (unsupported on wasm for now).
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" {
+    fn alm_rx_compile(pat: *const u8, plen: usize, ci: bool, ml: bool) -> *const core::ffi::c_void;
+    fn alm_rx_contains(re: *const core::ffi::c_void, txt: *const u8, tlen: usize) -> i32;
+    fn alm_rx_find(
+        re: *const core::ffi::c_void,
+        txt: *const u8,
+        tlen: usize,
+        limit: i64,
+        out_len: *mut usize,
+    ) -> *mut i64;
+    fn alm_rx_split(
+        re: *const core::ffi::c_void,
+        txt: *const u8,
+        tlen: usize,
+        limit: i64,
+        out_len: *mut usize,
+    ) -> *mut i64;
+    fn alm_rx_free(ptr: *mut i64, len: usize);
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn alm_rx_compile(_: *const u8, _: usize, _: bool, _: bool) -> *const core::ffi::c_void {
+    core::ptr::null()
+}
+#[cfg(target_arch = "wasm32")]
+unsafe fn alm_rx_contains(_: *const core::ffi::c_void, _: *const u8, _: usize) -> i32 {
+    0
+}
+#[cfg(target_arch = "wasm32")]
+unsafe fn alm_rx_find(
+    _: *const core::ffi::c_void,
+    _: *const u8,
+    _: usize,
+    _: i64,
+    out_len: *mut usize,
+) -> *mut i64 {
+    *out_len = 0;
+    core::ptr::null_mut()
+}
+#[cfg(target_arch = "wasm32")]
+unsafe fn alm_rx_split(
+    re: *const core::ffi::c_void,
+    txt: *const u8,
+    tlen: usize,
+    limit: i64,
+    out_len: *mut usize,
+) -> *mut i64 {
+    let _ = (re, txt, tlen, limit);
+    *out_len = 0;
+    core::ptr::null_mut()
+}
+#[cfg(target_arch = "wasm32")]
+unsafe fn alm_rx_free(_: *mut i64, _: usize) {}
 
 /// A JSON value tree. Object fields keep insertion order (as `JSON.stringify`
 /// does), matching the JS runtime's object-key iteration.
@@ -2374,6 +2436,7 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             }
         }
         Value::Closure { .. } => out.push_str("<function>"),
+        Value::Regex(_) => out.push_str("<internals>"),
         Value::Dict(pairs) => {
             out.push_str("Dict.fromList [");
             for (i, (k, val)) in pairs.iter().enumerate() {
@@ -5099,7 +5162,160 @@ macro_rules! kernel_vals {
     };
 }
 
+// --- elm/regex kernels (engine via the alm-regex glue) ---
+
+unsafe fn regex_ptr(re: u64) -> *const core::ffi::c_void {
+    match deref(re) {
+        Value::Regex(p) => *p,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Slice `s` to the codepoint range `[cstart, cend)` as a new string value.
+unsafe fn str_char_slice(s: &str, cstart: i64, cend: i64) -> u64 {
+    let bs = char_byte(s, cstart.max(0) as usize);
+    let be = char_byte(s, cend.max(0) as usize);
+    mkstr(s.as_bytes()[bs..be].to_vec())
+}
+
+unsafe extern "C" fn regex_from_string_with(options: u64, string: u64) -> u64 {
+    let ci = rt_is_true(rt_access(options, b"caseInsensitive ".as_ptr()));
+    let ml = rt_is_true(rt_access(options, b"multiline ".as_ptr()));
+    let s = str_slice(string);
+    let p = alm_rx_compile(s.as_ptr(), s.len(), ci, ml);
+    if p.is_null() {
+        nothing()
+    } else {
+        just(alloc(Value::Regex(p)))
+    }
+}
+
+unsafe extern "C" fn regex_contains(re: u64, string: u64) -> u64 {
+    let p = regex_ptr(re);
+    if p.is_null() {
+        return rt_bool(false);
+    }
+    let s = str_slice(string);
+    rt_bool(alm_rx_contains(p, s.as_ptr(), s.len()) != 0)
+}
+
+/// Build an elm `Match` record from the flat find buffer at `buf[i..]`,
+/// returning `(record, next_i)`. `num` is the 1-based match ordinal.
+unsafe fn build_match(s: &str, buf: &[i64], mut i: usize, num: i64) -> (u64, usize) {
+    let mstart = buf[i];
+    let mend = buf[i + 1];
+    let ngroups = buf[i + 2] as usize;
+    i += 3;
+    let match_str = str_char_slice(s, mstart, mend);
+    let mut gvals: Vec<u64> = Vec::with_capacity(ngroups);
+    for _ in 0..ngroups {
+        let gs = buf[i];
+        let ge = buf[i + 1];
+        i += 2;
+        gvals.push(if gs < 0 { nothing() } else { just(str_char_slice(s, gs, ge)) });
+    }
+    let mut subs = nil();
+    for mv in gvals.into_iter().rev() {
+        subs = cons(mv, subs);
+    }
+    // Record fields in sorted-by-name order: index, match, number, submatches.
+    let rec = rt_record_new(4);
+    rt_record_set(rec, 0, b"index ".as_ptr(), mk_int(mstart));
+    rt_record_set(rec, 1, b"match ".as_ptr(), match_str);
+    rt_record_set(rec, 2, b"number ".as_ptr(), mk_int(num));
+    rt_record_set(rec, 3, b"submatches ".as_ptr(), subs);
+    (rec, i)
+}
+
+unsafe extern "C" fn regex_find_at_most(limit: u64, re: u64, string: u64) -> u64 {
+    let p = regex_ptr(re);
+    if p.is_null() {
+        return nil();
+    }
+    let s = str_slice(string);
+    let ss = std::str::from_utf8_unchecked(s);
+    let mut out_len = 0usize;
+    let buf_ptr = alm_rx_find(p, s.as_ptr(), s.len(), int_val(limit), &mut out_len);
+    let buf = std::slice::from_raw_parts(buf_ptr, out_len);
+    let nmatches = buf[0];
+    let mut recs: Vec<u64> = Vec::with_capacity(nmatches as usize);
+    let mut i = 1usize;
+    for k in 0..nmatches {
+        let (rec, ni) = build_match(ss, buf, i, k + 1);
+        recs.push(rec);
+        i = ni;
+    }
+    alm_rx_free(buf_ptr, out_len);
+    let mut lst = nil();
+    for rec in recs.into_iter().rev() {
+        lst = cons(rec, lst);
+    }
+    lst
+}
+
+unsafe extern "C" fn regex_split_at_most(limit: u64, re: u64, string: u64) -> u64 {
+    let p = regex_ptr(re);
+    if p.is_null() {
+        return cons(string, nil());
+    }
+    let s = str_slice(string);
+    let ss = std::str::from_utf8_unchecked(s);
+    let mut out_len = 0usize;
+    let buf_ptr = alm_rx_split(p, s.as_ptr(), s.len(), int_val(limit), &mut out_len);
+    let buf = std::slice::from_raw_parts(buf_ptr, out_len);
+    let npieces = buf[0];
+    let mut pieces: Vec<u64> = Vec::with_capacity(npieces as usize);
+    let mut i = 1usize;
+    for _ in 0..npieces {
+        pieces.push(str_char_slice(ss, buf[i], buf[i + 1]));
+        i += 2;
+    }
+    alm_rx_free(buf_ptr, out_len);
+    let mut lst = nil();
+    for pc in pieces.into_iter().rev() {
+        lst = cons(pc, lst);
+    }
+    lst
+}
+
+unsafe extern "C" fn regex_replace_at_most(limit: u64, re: u64, replacer: u64, string: u64) -> u64 {
+    let p = regex_ptr(re);
+    let s = str_slice(string);
+    if p.is_null() {
+        return string;
+    }
+    let ss = std::str::from_utf8_unchecked(s);
+    let mut out_len = 0usize;
+    let buf_ptr = alm_rx_find(p, s.as_ptr(), s.len(), int_val(limit), &mut out_len);
+    let buf = std::slice::from_raw_parts(buf_ptr, out_len);
+    let nmatches = buf[0];
+    let mut result: Vec<u8> = Vec::new();
+    let mut last_char = 0i64;
+    let mut i = 1usize;
+    for k in 0..nmatches {
+        let mstart = buf[i];
+        let mend = buf[i + 1];
+        let (rec, ni) = build_match(ss, buf, i, k + 1);
+        i = ni;
+        let bs = char_byte(ss, last_char.max(0) as usize);
+        let be = char_byte(ss, mstart.max(0) as usize);
+        result.extend_from_slice(&s[bs..be]);
+        let repl = ap1(replacer, rec);
+        result.extend_from_slice(str_slice(repl));
+        last_char = mend;
+    }
+    let bs = char_byte(ss, last_char.max(0) as usize);
+    result.extend_from_slice(&s[bs..]);
+    alm_rx_free(buf_ptr, out_len);
+    mkstr(result)
+}
+
 kernel_fns! {
+    G_REGEX_FROMSTRINGWITH "$Elm$Kernel$Regex$fromStringWith" regex_from_string_with, 2;
+    G_REGEX_CONTAINS "$Elm$Kernel$Regex$contains" regex_contains, 2;
+    G_REGEX_FINDATMOST "$Elm$Kernel$Regex$findAtMost" regex_find_at_most, 3;
+    G_REGEX_SPLITATMOST "$Elm$Kernel$Regex$splitAtMost" regex_split_at_most, 3;
+    G_REGEX_REPLACEATMOST "$Elm$Kernel$Regex$replaceAtMost" regex_replace_at_most, 4;
     G_BASICS_IDENTITY "$Basics$identity" basics_identity, 1;
     G_BASICS_ALWAYS "$Basics$always" basics_always, 2;
     G_BASICS_NOT "$Basics$not" basics_not, 1;
@@ -5459,6 +5675,8 @@ kernel_vals! {
     G_JSOND_BOOL "$Json$Decode$bool";
     G_JSOND_VALUE "$Json$Decode$value";
     G_JSONE_NULL "$Json$Encode$null";
+    G_REGEX_NEVER "$Elm$Kernel$Regex$never";
+    G_REGEX_INFINITY "$Elm$Kernel$Regex$infinity";
 }
 
 unsafe fn runtime_init() {
@@ -5497,6 +5715,17 @@ unsafe fn runtime_init() {
     G_JSOND_BOOL.set(mk_decoder(Decoder::Bool));
     G_JSOND_VALUE.set(mk_decoder(Decoder::JsonVal));
     G_JSONE_NULL.set(mk_json(JsonValue::Null));
+    // `Regex.never`: a pattern that can never match (`.^` — a char followed by
+    // start-of-input). `infinity`: the `Int` limit meaning "all" for
+    // find/replace/split (any value larger than a string's match count).
+    let never_pat = b".^";
+    G_REGEX_NEVER.set(alloc(Value::Regex(alm_rx_compile(
+        never_pat.as_ptr(),
+        never_pat.len(),
+        false,
+        false,
+    ))));
+    G_REGEX_INFINITY.set(mk_int(i32::MAX as i64));
 }
 
 // THE EVENT LOOP — the Rust twin of runtime.js's _Platform_initialize for

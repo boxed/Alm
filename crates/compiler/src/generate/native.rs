@@ -35,6 +35,11 @@ use crate::ir::{Branch, Expr, Function, PrimOp, Program, Step, Test};
 /// backend's embedded `runtime.js`.
 pub const RUNTIME_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_runtime.a"));
 
+/// The regex engine glue (`fancy-regex` behind a C ABI), as a single
+/// relocatable object with everything but the `alm_rx_*` entry points
+/// localized, so its private `std` doesn't clash with the runtime's at link.
+pub const REGEX_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_regex.o"));
+
 /// The same runtime as optimized LLVM bitcode. Merged into each program
 /// module (as `available_externally`) so LLVM can inline the runtime's hot
 /// primitives into generated code; the real symbols still come from the
@@ -194,9 +199,12 @@ pub(crate) fn finish<'ctx>(
     match target {
         Target::Native => {
             // The C compiler driver is used purely as a linker — no C is compiled.
+            // The regex glue object resolves the elm/regex kernels' engine.
+            let regex = build_dir.join("regex.o");
+            std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
             run_linker(
                 "cc",
-                &[&object, &runtime, Path::new("-o"), output],
+                &[&object, &runtime, &regex, Path::new("-o"), output],
             )
         }
         Target::Wasm => {

@@ -57,6 +57,69 @@ fn main() {
         .unwrap_or_else(|_| "/opt/homebrew/opt/llvm@16".to_string());
     println!("cargo:rustc-env=ALM_WASM_LD={}/bin/wasm-ld", llvm_prefix);
     println!("cargo:rustc-env=ALM_DWARFDUMP={}/bin/llvm-dwarfdump", llvm_prefix);
+
+    // Regex glue: a sibling crate that wraps `fancy-regex` behind a C ABI, so
+    // the elm/regex kernels have a real engine without vendoring one into the
+    // single-file runtime. It has crate dependencies, so it's built with cargo
+    // (host default toolchain — it needs no LLVM-16 bitcode, only a linkable
+    // archive) into an isolated target dir to avoid contending with the outer
+    // build's lock. The `.a` is embedded and linked into native programs.
+    build_regex_glue(&out_dir);
+}
+
+fn build_regex_glue(out_dir: &PathBuf) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let glue_src = manifest_dir.join("../alm-regex/src/lib.rs");
+    println!("cargo:rerun-if-changed={}", glue_src.display());
+    let rx_target = out_dir.join("rxbuild");
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = Command::new(cargo)
+        .args(["build", "--release", "-p", "alm-regex", "--target-dir"])
+        .arg(&rx_target)
+        // Match the runtime's `panic=abort`: a panic must never unwind across
+        // the C ABI, and it drops std's unwinding symbols (`_rust_eh_personality`)
+        // that would otherwise clash with the runtime archive's std at link.
+        .env("RUSTFLAGS", "-C panic=abort")
+        .status()
+        .unwrap_or_else(|e| panic!("building alm-regex glue: {e}"));
+    assert!(status.success(), "building the alm-regex glue crate failed");
+
+    // The glue archive statically bundles its own `std` (and `fancy-regex`),
+    // which would collide with the runtime archive's `std` at link
+    // (`_rust_eh_personality`, allocator shims, …). Merge the glue's objects
+    // into ONE relocatable object and localize every symbol except the C entry
+    // points (`ld -r -exported_symbols_list`), so its private `std` copy is
+    // self-contained and only `alm_rx_*` is visible to the final link.
+    let glue_a = rx_target.join("release/libalm_regex.a");
+    let merge_dir = out_dir.join("rxmerge");
+    let _ = std::fs::remove_dir_all(&merge_dir);
+    std::fs::create_dir_all(&merge_dir).unwrap();
+    let ar_ok = Command::new("ar")
+        .current_dir(&merge_dir)
+        .arg("x")
+        .arg(&glue_a)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ar_ok, "extracting the regex glue archive failed");
+    let exports = merge_dir.join("exports.txt");
+    std::fs::write(
+        &exports,
+        "_alm_rx_compile\n_alm_rx_contains\n_alm_rx_find\n_alm_rx_split\n_alm_rx_free\n",
+    )
+    .unwrap();
+    let objs: Vec<PathBuf> = std::fs::read_dir(&merge_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "o").unwrap_or(false))
+        .collect();
+    let merged = out_dir.join("libalm_regex.o");
+    let mut cmd = Command::new("ld");
+    cmd.arg("-r").arg("-exported_symbols_list").arg(&exports);
+    cmd.args(&objs);
+    cmd.arg("-o").arg(&merged);
+    let ld_ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+    assert!(ld_ok, "ld -r merge of the regex glue failed");
 }
 
 fn run(cmd: &str, args: &[&str]) -> String {

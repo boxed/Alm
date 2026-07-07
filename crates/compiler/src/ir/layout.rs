@@ -180,6 +180,10 @@ impl LayoutCtx {
             // runtime word (a heap byte buffer) instead, like other opaque
             // platform types.
             ("Bytes", "Bytes") => return Layout::Opaque,
+            // `Regex` is `type Regex = Regex` but is really a wrapped engine
+            // handle produced by the kernel, not a tag — carry it as the
+            // uniform word (like `Bytes`).
+            ("Regex", "Regex") => return Layout::Opaque,
             _ => {}
         }
 

@@ -1,0 +1,11 @@
+[package]
+name = "alm-regex"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "alm_regex"
+crate-type = ["staticlib"]
+
+[dependencies]
+fancy-regex = "0.13"

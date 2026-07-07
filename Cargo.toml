@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/compiler", "crates/alm"]
+members = ["crates/compiler", "crates/alm", "crates/alm-regex"]
 
 [workspace.package]
 version = "0.1.0"
