@@ -2231,3 +2231,35 @@ fn partial_record_alias_constructor() {
          \x20   Debug.toString (build [ 1, 2 ])\n",
     );
 }
+
+#[test]
+fn native_html_structural_equality() {
+    // elm/html values are ordinary comparable data in the native backend
+    // (constructors, no event handlers), matching how elm-explorations/test
+    // packages like ChristophP/elm-mark and FordLabs/elm-star-rating compare
+    // built `Html`/`Attribute` values with `Expect.equal`. Exercises text/node
+    // equality, child inequality, the className merge (`_VDom_organize`), and
+    // attribute equality — all against the JS backend.
+    assert_same(
+        "native_html_eq",
+        "module Test exposing (..)\n\
+         \n\
+         import Html exposing (div, text, mark)\n\
+         import Html.Attributes exposing (class, style)\n\
+         \n\
+         b : Bool -> String\n\
+         b x = if x then \"T\" else \"F\"\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.concat\n\
+         \x20       [ b (text \"a\" == text \"a\")\n\
+         \x20       , b (text \"a\" == text \"b\")\n\
+         \x20       , b (mark [] [ text \"x\" ] == mark [] [ text \"x\" ])\n\
+         \x20       , b (div [ class \"a\", class \"b\" ] [] == div [ class \"a b\" ] [])\n\
+         \x20       , b ([ style \"o\" \"1\" ] == [ style \"o\" \"1\" ])\n\
+         \x20       , b (class \"a\" == class \"a\")\n\
+         \x20       , b (div [] [ text \"a\" ] == div [] [ text \"b\" ])\n\
+         \x20       ]\n",
+    );
+}

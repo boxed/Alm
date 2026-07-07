@@ -5310,7 +5310,456 @@ unsafe extern "C" fn regex_replace_at_most(limit: u64, re: u64, replacer: u64, s
     mkstr(result)
 }
 
+// --- elm/html + elm/virtual-dom (the Rust twin of runtime.js's _VDom_*) ---
+//
+// Virtual-dom nodes and attributes are ordinary tagged `Value::Ctor`s, so the
+// generic structural `value_eq` compares them exactly as elm's `==` compares
+// the plain objects `runtime.js` builds (Html without event handlers is
+// comparable in elm, and elm-explorations/test relies on it). Each node kind
+// and attribute kind gets a distinct constructor index — `value_eq` keys on
+// index, so the indices must not collide across kinds. There is no renderer:
+// native programs build and compare virtual dom, they do not mount it.
+
+const NS_SVG: &[u8] = b"http://www.w3.org/2000/svg";
+
+const VI_TEXT: u32 = 0;
+const VI_NODE: u32 = 1;
+const VI_KEYED: u32 = 2;
+const VI_MAP: u32 = 4;
+const AI_ATTR: u32 = 10;
+const AI_PROP: u32 = 11;
+const AI_STYLE: u32 = 12;
+const AI_EVENT: u32 = 13;
+
+unsafe fn str_is(w: u64, lit: &[u8]) -> bool {
+    !is_int(w) && matches!(deref(w), Value::Str(s) if s.as_slice() == lit)
+}
+
+/// `a ++ " " ++ b` for two class strings (no leading space when `a` is empty),
+/// mirroring elm/virtual-dom's className merge.
+unsafe fn join_class(a: u64, b: u64) -> u64 {
+    let mut s = str_slice(a).to_vec();
+    if !s.is_empty() {
+        s.push(b' ');
+    }
+    s.extend_from_slice(str_slice(b));
+    mkstr(s)
+}
+
+/// Merge repeated `className` properties / `class` attributes on one node into
+/// a single space-joined value, like elm/virtual-dom's `_VirtualDom_organizeFacts`
+/// (runtime.js `_VDom_organize`) — so `div [ class "a", class "b" ]` compares
+/// equal to `div [ class "a b" ]`.
+unsafe fn vdom_organize(attrs: u64) -> u64 {
+    let items = to_vec(attrs);
+    let mut props = 0usize;
+    let mut raws = 0usize;
+    for &a in &items {
+        if let Value::Ctor { index, arg0, rest, .. } = deref(a) {
+            if *index == AI_PROP && str_is(*arg0, b"className") {
+                props += 1;
+            } else if *index == AI_ATTR && str_is(*arg0, b"class") && rest[1] == nothing() {
+                raws += 1;
+            }
+        }
+    }
+    if props < 2 && raws < 2 {
+        return attrs;
+    }
+    let mut out: Vec<u64> = Vec::with_capacity(items.len());
+    let mut prop_at: isize = -1;
+    let mut raw_at: isize = -1;
+    for &a in &items {
+        match deref(a) {
+            Value::Ctor { index, arg0, rest, .. }
+                if *index == AI_PROP && str_is(*arg0, b"className") =>
+            {
+                if prop_at < 0 {
+                    prop_at = out.len() as isize;
+                    out.push(a);
+                } else {
+                    let merged = join_class(ctor_get(out[prop_at as usize], 1), rest[0]);
+                    out[prop_at as usize] =
+                        ctor(b"AProp\0".as_ptr(), AI_PROP, vec![*arg0, merged]);
+                }
+            }
+            Value::Ctor { index, arg0, rest, .. }
+                if *index == AI_ATTR && str_is(*arg0, b"class") && rest[1] == nothing() =>
+            {
+                if raw_at < 0 {
+                    raw_at = out.len() as isize;
+                    out.push(a);
+                } else {
+                    let merged = join_class(ctor_get(out[raw_at as usize], 1), rest[0]);
+                    out[raw_at as usize] =
+                        ctor(b"AAttr\0".as_ptr(), AI_ATTR, vec![*arg0, merged, nothing()]);
+                }
+            }
+            _ => out.push(a),
+        }
+    }
+    list_from_slice(&out)
+}
+
+unsafe fn vnode(tag: u64, attrs: u64, kids: u64, ns: u64) -> u64 {
+    ctor(b"VNode\0".as_ptr(), VI_NODE, vec![tag, vdom_organize(attrs), kids, ns])
+}
+
+// text : String -> Html msg
+unsafe extern "C" fn vdom_text1(text: u64) -> u64 {
+    ctor(b"VText\0".as_ptr(), VI_TEXT, vec![text])
+}
+// node : String -> List (Attribute msg) -> List (Html msg) -> Html msg
+unsafe extern "C" fn vdom_node3(tag: u64, attrs: u64, kids: u64) -> u64 {
+    vnode(tag, attrs, kids, nothing())
+}
+// Svg.node — same, in the SVG namespace.
+unsafe extern "C" fn vdom_node_ns3(tag: u64, attrs: u64, kids: u64) -> u64 {
+    vnode(tag, attrs, kids, just(mkstr(NS_SVG.to_vec())))
+}
+// VirtualDom.nodeNS : String -> String -> ... (namespace supplied by caller)
+unsafe extern "C" fn vdom_node_ns4(ns: u64, tag: u64, attrs: u64, kids: u64) -> u64 {
+    vnode(tag, attrs, kids, just(ns))
+}
+// map : (a -> msg) -> Html a -> Html msg
+unsafe extern "C" fn vdom_map2(f: u64, node: u64) -> u64 {
+    ctor(b"VMap\0".as_ptr(), VI_MAP, vec![f, node])
+}
+// Keyed.node : String -> List (Attribute msg) -> List ( String, Html msg ) -> Html msg
+unsafe extern "C" fn vdom_keyed3(tag: u64, attrs: u64, kids: u64) -> u64 {
+    ctor(b"VKeyed\0".as_ptr(), VI_KEYED, vec![tag, vdom_organize(attrs), kids, nothing()])
+}
+unsafe extern "C" fn vdom_keyed_ns4(ns: u64, tag: u64, attrs: u64, kids: u64) -> u64 {
+    ctor(b"VKeyed\0".as_ptr(), VI_KEYED, vec![tag, vdom_organize(attrs), kids, just(ns)])
+}
+
+// Attribute builders. `attr_property2`/`attr_attribute2` also back the
+// per-attribute helpers (`class`, `href`, …) with the DOM key pre-applied.
+unsafe extern "C" fn attr_style2(key: u64, val: u64) -> u64 {
+    ctor(b"AStyle\0".as_ptr(), AI_STYLE, vec![key, val])
+}
+unsafe extern "C" fn attr_attribute2(key: u64, val: u64) -> u64 {
+    ctor(b"AAttr\0".as_ptr(), AI_ATTR, vec![key, val, nothing()])
+}
+unsafe extern "C" fn attr_property2(key: u64, val: u64) -> u64 {
+    ctor(b"AProp\0".as_ptr(), AI_PROP, vec![key, val])
+}
+// Int-valued attributes render to a string attribute (String.fromInt n).
+unsafe extern "C" fn attr_int_str2(key: u64, n: u64) -> u64 {
+    ctor(b"AAttr\0".as_ptr(), AI_ATTR, vec![key, string_from_int(n), nothing()])
+}
+// `autocomplete : Bool -> Attribute` is a string property "on"/"off" in elm.
+unsafe extern "C" fn attr_autocomplete1(b: u64) -> u64 {
+    let v = if rt_is_true(b) { b"on".to_vec() } else { b"off".to_vec() };
+    ctor(b"AProp\0".as_ptr(), AI_PROP, vec![mkstr(b"autocomplete".to_vec()), mkstr(v)])
+}
+// classList : List ( String, Bool ) -> Attribute — the `True` names, space-joined.
+unsafe extern "C" fn attr_class_list1(pairs: u64) -> u64 {
+    let mut names: Vec<u8> = Vec::new();
+    for &pair in &to_vec(pairs) {
+        if rt_is_true(tuple_second(pair)) {
+            if !names.is_empty() {
+                names.push(b' ');
+            }
+            names.extend_from_slice(str_slice(tuple_first(pair)));
+        }
+    }
+    ctor(b"AProp\0".as_ptr(), AI_PROP, vec![mkstr(b"className".to_vec()), mkstr(names)])
+}
+// Attributes.map : (a -> msg) -> Attribute a -> Attribute msg. Only events
+// carry the msg; everything else is msg-agnostic and passes through.
+unsafe extern "C" fn attr_map2(f: u64, attr: u64) -> u64 {
+    match deref(attr) {
+        Value::Ctor { index, arg0, rest, .. } if *index == AI_EVENT => {
+            let dec = mk_decoder(Decoder::Map(f, rest[0]));
+            ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![*arg0, dec, rest[1]])
+        }
+        _ => attr,
+    }
+}
+
+// Events. `opts` is a tag: 0 normal, 1 stopPropagation, 2 preventDefault,
+// 3 custom (mirrors runtime.js's option object; native never dispatches, so
+// only the built value's shape matters).
+unsafe fn event(name: &[u8], decoder: u64, opts: i64) -> u64 {
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![mkstr(name.to_vec()), decoder, mk_int(opts)])
+}
+unsafe fn on_msg(name: &[u8], msg: u64) -> u64 {
+    event(name, mk_decoder(Decoder::Succeed(msg)), 0)
+}
+// `e.target.value` / `e.target.checked` decoders (as elm's targetValue/Checked).
+unsafe fn target_field(field: &[u8], leaf: Decoder) -> u64 {
+    mk_decoder(Decoder::Field(
+        b"target".to_vec(),
+        mk_decoder(Decoder::Field(field.to_vec(), mk_decoder(leaf))),
+    ))
+}
+unsafe extern "C" fn events_on2(name: u64, decoder: u64) -> u64 {
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![name, decoder, mk_int(0)])
+}
+unsafe extern "C" fn events_stop_on2(name: u64, decoder: u64) -> u64 {
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![name, decoder, mk_int(1)])
+}
+unsafe extern "C" fn events_prevent_on2(name: u64, decoder: u64) -> u64 {
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![name, decoder, mk_int(2)])
+}
+unsafe extern "C" fn events_custom2(name: u64, decoder: u64) -> u64 {
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![name, decoder, mk_int(3)])
+}
+unsafe extern "C" fn events_on_click1(msg: u64) -> u64 { on_msg(b"click", msg) }
+unsafe extern "C" fn events_on_dblclick1(msg: u64) -> u64 { on_msg(b"dblclick", msg) }
+unsafe extern "C" fn events_on_mousedown1(msg: u64) -> u64 { on_msg(b"mousedown", msg) }
+unsafe extern "C" fn events_on_mouseup1(msg: u64) -> u64 { on_msg(b"mouseup", msg) }
+unsafe extern "C" fn events_on_mouseenter1(msg: u64) -> u64 { on_msg(b"mouseenter", msg) }
+unsafe extern "C" fn events_on_mouseleave1(msg: u64) -> u64 { on_msg(b"mouseleave", msg) }
+unsafe extern "C" fn events_on_mouseover1(msg: u64) -> u64 { on_msg(b"mouseover", msg) }
+unsafe extern "C" fn events_on_mouseout1(msg: u64) -> u64 { on_msg(b"mouseout", msg) }
+unsafe extern "C" fn events_on_blur1(msg: u64) -> u64 { on_msg(b"blur", msg) }
+unsafe extern "C" fn events_on_focus1(msg: u64) -> u64 { on_msg(b"focus", msg) }
+unsafe extern "C" fn events_on_submit1(msg: u64) -> u64 {
+    event(b"submit", mk_decoder(Decoder::Succeed(msg)), 2)
+}
+unsafe extern "C" fn events_on_input1(to_msg: u64) -> u64 {
+    event(b"input", mk_decoder(Decoder::Map(to_msg, target_field(b"value", Decoder::Str))), 0)
+}
+unsafe extern "C" fn events_on_check1(to_msg: u64) -> u64 {
+    event(b"change", mk_decoder(Decoder::Map(to_msg, target_field(b"checked", Decoder::Bool))), 0)
+}
+
+// Per-tag / per-attribute globals whose DOM key is baked into a closure
+// capture — the native twin of runtime.js's `var $Html$div = _VDom_node('div')`
+// etc. Each entry: an ident, its exported mangled symbol, and the closure
+// value to initialize it with. Mirrors the tables walked in `generate::mod`
+// (HTML_TAGS / HTML_*_ATTRS); keep them in sync.
+macro_rules! baked_globals {
+    ($( $id:ident $sym:literal = $init:expr ; )*) => {
+        $( #[export_name = $sym] static $id: Global = Global::NULL; )*
+        unsafe fn init_baked_globals() {
+            $( $id.set($init); )*
+        }
+    };
+}
+
+baked_globals! {
+    G_HTMLTAG_DIV "$Html$div" = closure(vdom_node3 as *const (), 3, &[mkstr(b"div".to_vec())]);
+    G_HTMLTAG_SPAN "$Html$span" = closure(vdom_node3 as *const (), 3, &[mkstr(b"span".to_vec())]);
+    G_HTMLTAG_P "$Html$p" = closure(vdom_node3 as *const (), 3, &[mkstr(b"p".to_vec())]);
+    G_HTMLTAG_A "$Html$a" = closure(vdom_node3 as *const (), 3, &[mkstr(b"a".to_vec())]);
+    G_HTMLTAG_IMG "$Html$img" = closure(vdom_node3 as *const (), 3, &[mkstr(b"img".to_vec())]);
+    G_HTMLTAG_BR "$Html$br" = closure(vdom_node3 as *const (), 3, &[mkstr(b"br".to_vec())]);
+    G_HTMLTAG_HR "$Html$hr" = closure(vdom_node3 as *const (), 3, &[mkstr(b"hr".to_vec())]);
+    G_HTMLTAG_PRE "$Html$pre" = closure(vdom_node3 as *const (), 3, &[mkstr(b"pre".to_vec())]);
+    G_HTMLTAG_CODE "$Html$code" = closure(vdom_node3 as *const (), 3, &[mkstr(b"code".to_vec())]);
+    G_HTMLTAG_EM "$Html$em" = closure(vdom_node3 as *const (), 3, &[mkstr(b"em".to_vec())]);
+    G_HTMLTAG_STRONG "$Html$strong" = closure(vdom_node3 as *const (), 3, &[mkstr(b"strong".to_vec())]);
+    G_HTMLTAG_I "$Html$i" = closure(vdom_node3 as *const (), 3, &[mkstr(b"i".to_vec())]);
+    G_HTMLTAG_B "$Html$b" = closure(vdom_node3 as *const (), 3, &[mkstr(b"b".to_vec())]);
+    G_HTMLTAG_U "$Html$u" = closure(vdom_node3 as *const (), 3, &[mkstr(b"u".to_vec())]);
+    G_HTMLTAG_SUB "$Html$sub" = closure(vdom_node3 as *const (), 3, &[mkstr(b"sub".to_vec())]);
+    G_HTMLTAG_SUP "$Html$sup" = closure(vdom_node3 as *const (), 3, &[mkstr(b"sup".to_vec())]);
+    G_HTMLTAG_H1 "$Html$h1" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h1".to_vec())]);
+    G_HTMLTAG_H2 "$Html$h2" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h2".to_vec())]);
+    G_HTMLTAG_H3 "$Html$h3" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h3".to_vec())]);
+    G_HTMLTAG_H4 "$Html$h4" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h4".to_vec())]);
+    G_HTMLTAG_H5 "$Html$h5" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h5".to_vec())]);
+    G_HTMLTAG_H6 "$Html$h6" = closure(vdom_node3 as *const (), 3, &[mkstr(b"h6".to_vec())]);
+    G_HTMLTAG_UL "$Html$ul" = closure(vdom_node3 as *const (), 3, &[mkstr(b"ul".to_vec())]);
+    G_HTMLTAG_OL "$Html$ol" = closure(vdom_node3 as *const (), 3, &[mkstr(b"ol".to_vec())]);
+    G_HTMLTAG_LI "$Html$li" = closure(vdom_node3 as *const (), 3, &[mkstr(b"li".to_vec())]);
+    G_HTMLTAG_DL "$Html$dl" = closure(vdom_node3 as *const (), 3, &[mkstr(b"dl".to_vec())]);
+    G_HTMLTAG_DT "$Html$dt" = closure(vdom_node3 as *const (), 3, &[mkstr(b"dt".to_vec())]);
+    G_HTMLTAG_DD "$Html$dd" = closure(vdom_node3 as *const (), 3, &[mkstr(b"dd".to_vec())]);
+    G_HTMLTAG_TABLE "$Html$table" = closure(vdom_node3 as *const (), 3, &[mkstr(b"table".to_vec())]);
+    G_HTMLTAG_CAPTION "$Html$caption" = closure(vdom_node3 as *const (), 3, &[mkstr(b"caption".to_vec())]);
+    G_HTMLTAG_THEAD "$Html$thead" = closure(vdom_node3 as *const (), 3, &[mkstr(b"thead".to_vec())]);
+    G_HTMLTAG_TBODY "$Html$tbody" = closure(vdom_node3 as *const (), 3, &[mkstr(b"tbody".to_vec())]);
+    G_HTMLTAG_TFOOT "$Html$tfoot" = closure(vdom_node3 as *const (), 3, &[mkstr(b"tfoot".to_vec())]);
+    G_HTMLTAG_TR "$Html$tr" = closure(vdom_node3 as *const (), 3, &[mkstr(b"tr".to_vec())]);
+    G_HTMLTAG_TD "$Html$td" = closure(vdom_node3 as *const (), 3, &[mkstr(b"td".to_vec())]);
+    G_HTMLTAG_TH "$Html$th" = closure(vdom_node3 as *const (), 3, &[mkstr(b"th".to_vec())]);
+    G_HTMLTAG_FORM "$Html$form" = closure(vdom_node3 as *const (), 3, &[mkstr(b"form".to_vec())]);
+    G_HTMLTAG_FIELDSET "$Html$fieldset" = closure(vdom_node3 as *const (), 3, &[mkstr(b"fieldset".to_vec())]);
+    G_HTMLTAG_LEGEND "$Html$legend" = closure(vdom_node3 as *const (), 3, &[mkstr(b"legend".to_vec())]);
+    G_HTMLTAG_LABEL "$Html$label" = closure(vdom_node3 as *const (), 3, &[mkstr(b"label".to_vec())]);
+    G_HTMLTAG_INPUT "$Html$input" = closure(vdom_node3 as *const (), 3, &[mkstr(b"input".to_vec())]);
+    G_HTMLTAG_TEXTAREA "$Html$textarea" = closure(vdom_node3 as *const (), 3, &[mkstr(b"textarea".to_vec())]);
+    G_HTMLTAG_BUTTON "$Html$button" = closure(vdom_node3 as *const (), 3, &[mkstr(b"button".to_vec())]);
+    G_HTMLTAG_SELECT "$Html$select" = closure(vdom_node3 as *const (), 3, &[mkstr(b"select".to_vec())]);
+    G_HTMLTAG_OPTION "$Html$option" = closure(vdom_node3 as *const (), 3, &[mkstr(b"option".to_vec())]);
+    G_HTMLTAG_SECTION "$Html$section" = closure(vdom_node3 as *const (), 3, &[mkstr(b"section".to_vec())]);
+    G_HTMLTAG_HEADER "$Html$header" = closure(vdom_node3 as *const (), 3, &[mkstr(b"header".to_vec())]);
+    G_HTMLTAG_FOOTER "$Html$footer" = closure(vdom_node3 as *const (), 3, &[mkstr(b"footer".to_vec())]);
+    G_HTMLTAG_NAV "$Html$nav" = closure(vdom_node3 as *const (), 3, &[mkstr(b"nav".to_vec())]);
+    G_HTMLTAG_ARTICLE "$Html$article" = closure(vdom_node3 as *const (), 3, &[mkstr(b"article".to_vec())]);
+    G_HTMLTAG_ASIDE "$Html$aside" = closure(vdom_node3 as *const (), 3, &[mkstr(b"aside".to_vec())]);
+    G_HTMLTAG_MAIN_ "$Html$main_" = closure(vdom_node3 as *const (), 3, &[mkstr(b"main".to_vec())]);
+    G_HTMLTAG_FIGURE "$Html$figure" = closure(vdom_node3 as *const (), 3, &[mkstr(b"figure".to_vec())]);
+    G_HTMLTAG_FIGCAPTION "$Html$figcaption" = closure(vdom_node3 as *const (), 3, &[mkstr(b"figcaption".to_vec())]);
+    G_HTMLTAG_BLOCKQUOTE "$Html$blockquote" = closure(vdom_node3 as *const (), 3, &[mkstr(b"blockquote".to_vec())]);
+    G_HTMLTAG_IFRAME "$Html$iframe" = closure(vdom_node3 as *const (), 3, &[mkstr(b"iframe".to_vec())]);
+    G_HTMLTAG_CANVAS "$Html$canvas" = closure(vdom_node3 as *const (), 3, &[mkstr(b"canvas".to_vec())]);
+    G_HTMLTAG_AUDIO "$Html$audio" = closure(vdom_node3 as *const (), 3, &[mkstr(b"audio".to_vec())]);
+    G_HTMLTAG_VIDEO "$Html$video" = closure(vdom_node3 as *const (), 3, &[mkstr(b"video".to_vec())]);
+    G_HTMLTAG_SOURCE "$Html$source" = closure(vdom_node3 as *const (), 3, &[mkstr(b"source".to_vec())]);
+    G_HTMLTAG_SMALL "$Html$small" = closure(vdom_node3 as *const (), 3, &[mkstr(b"small".to_vec())]);
+    G_HTMLTAG_CITE "$Html$cite" = closure(vdom_node3 as *const (), 3, &[mkstr(b"cite".to_vec())]);
+    G_HTMLTAG_DETAILS "$Html$details" = closure(vdom_node3 as *const (), 3, &[mkstr(b"details".to_vec())]);
+    G_HTMLTAG_SUMMARY "$Html$summary" = closure(vdom_node3 as *const (), 3, &[mkstr(b"summary".to_vec())]);
+    G_HTMLTAG_ABBR "$Html$abbr" = closure(vdom_node3 as *const (), 3, &[mkstr(b"abbr".to_vec())]);
+    G_HTMLTAG_ADDRESS "$Html$address" = closure(vdom_node3 as *const (), 3, &[mkstr(b"address".to_vec())]);
+    G_HTMLTAG_MARK "$Html$mark" = closure(vdom_node3 as *const (), 3, &[mkstr(b"mark".to_vec())]);
+    G_HTMLTAG_METER "$Html$meter" = closure(vdom_node3 as *const (), 3, &[mkstr(b"meter".to_vec())]);
+    G_HTMLTAG_PROGRESS "$Html$progress" = closure(vdom_node3 as *const (), 3, &[mkstr(b"progress".to_vec())]);
+    G_HTMLTAG_OUTPUT "$Html$output" = closure(vdom_node3 as *const (), 3, &[mkstr(b"output".to_vec())]);
+    G_HTMLTAG_DATALIST "$Html$datalist" = closure(vdom_node3 as *const (), 3, &[mkstr(b"datalist".to_vec())]);
+    G_HTMLTAG_OPTGROUP "$Html$optgroup" = closure(vdom_node3 as *const (), 3, &[mkstr(b"optgroup".to_vec())]);
+    G_HTMLTAG_S "$Html$s" = closure(vdom_node3 as *const (), 3, &[mkstr(b"s".to_vec())]);
+    G_HTMLTAG_Q "$Html$q" = closure(vdom_node3 as *const (), 3, &[mkstr(b"q".to_vec())]);
+    G_HTMLTAG_DEL "$Html$del" = closure(vdom_node3 as *const (), 3, &[mkstr(b"del".to_vec())]);
+    G_HTMLTAG_INS "$Html$ins" = closure(vdom_node3 as *const (), 3, &[mkstr(b"ins".to_vec())]);
+    G_HTMLTAG_COL "$Html$col" = closure(vdom_node3 as *const (), 3, &[mkstr(b"col".to_vec())]);
+    G_HTMLTAG_COLGROUP "$Html$colgroup" = closure(vdom_node3 as *const (), 3, &[mkstr(b"colgroup".to_vec())]);
+    G_HTMLTAG_TRACK "$Html$track" = closure(vdom_node3 as *const (), 3, &[mkstr(b"track".to_vec())]);
+    G_HTMLTAG_EMBED "$Html$embed" = closure(vdom_node3 as *const (), 3, &[mkstr(b"embed".to_vec())]);
+    G_HTMLTAG_OBJECT "$Html$object" = closure(vdom_node3 as *const (), 3, &[mkstr(b"object".to_vec())]);
+    G_HTMLTAG_PARAM "$Html$param" = closure(vdom_node3 as *const (), 3, &[mkstr(b"param".to_vec())]);
+    G_HTMLTAG_MATH "$Html$math" = closure(vdom_node3 as *const (), 3, &[mkstr(b"math".to_vec())]);
+    G_HTMLTAG_DFN "$Html$dfn" = closure(vdom_node3 as *const (), 3, &[mkstr(b"dfn".to_vec())]);
+    G_HTMLTAG_TIME "$Html$time" = closure(vdom_node3 as *const (), 3, &[mkstr(b"time".to_vec())]);
+    G_HTMLTAG_VAR "$Html$var" = closure(vdom_node3 as *const (), 3, &[mkstr(b"var".to_vec())]);
+    G_HTMLTAG_SAMP "$Html$samp" = closure(vdom_node3 as *const (), 3, &[mkstr(b"samp".to_vec())]);
+    G_HTMLTAG_KBD "$Html$kbd" = closure(vdom_node3 as *const (), 3, &[mkstr(b"kbd".to_vec())]);
+    G_HTMLTAG_RUBY "$Html$ruby" = closure(vdom_node3 as *const (), 3, &[mkstr(b"ruby".to_vec())]);
+    G_HTMLTAG_RT "$Html$rt" = closure(vdom_node3 as *const (), 3, &[mkstr(b"rt".to_vec())]);
+    G_HTMLTAG_RP "$Html$rp" = closure(vdom_node3 as *const (), 3, &[mkstr(b"rp".to_vec())]);
+    G_HTMLTAG_BDI "$Html$bdi" = closure(vdom_node3 as *const (), 3, &[mkstr(b"bdi".to_vec())]);
+    G_HTMLTAG_BDO "$Html$bdo" = closure(vdom_node3 as *const (), 3, &[mkstr(b"bdo".to_vec())]);
+    G_HTMLTAG_WBR "$Html$wbr" = closure(vdom_node3 as *const (), 3, &[mkstr(b"wbr".to_vec())]);
+    G_HTMLTAG_MENU "$Html$menu" = closure(vdom_node3 as *const (), 3, &[mkstr(b"menu".to_vec())]);
+    G_HTMLTAG_MENUITEM "$Html$menuitem" = closure(vdom_node3 as *const (), 3, &[mkstr(b"menuitem".to_vec())]);
+    G_HTMLATTR_CLASS "$Html$Attributes$class" = closure(attr_property2 as *const (), 2, &[mkstr(b"className".to_vec())]);
+    G_HTMLATTR_ID "$Html$Attributes$id" = closure(attr_property2 as *const (), 2, &[mkstr(b"id".to_vec())]);
+    G_HTMLATTR_TITLE "$Html$Attributes$title" = closure(attr_property2 as *const (), 2, &[mkstr(b"title".to_vec())]);
+    G_HTMLATTR_HREF "$Html$Attributes$href" = closure(attr_property2 as *const (), 2, &[mkstr(b"href".to_vec())]);
+    G_HTMLATTR_SRC "$Html$Attributes$src" = closure(attr_property2 as *const (), 2, &[mkstr(b"src".to_vec())]);
+    G_HTMLATTR_ALT "$Html$Attributes$alt" = closure(attr_property2 as *const (), 2, &[mkstr(b"alt".to_vec())]);
+    G_HTMLATTR_NAME "$Html$Attributes$name" = closure(attr_property2 as *const (), 2, &[mkstr(b"name".to_vec())]);
+    G_HTMLATTR_PLACEHOLDER "$Html$Attributes$placeholder" = closure(attr_property2 as *const (), 2, &[mkstr(b"placeholder".to_vec())]);
+    G_HTMLATTR_VALUE "$Html$Attributes$value" = closure(attr_property2 as *const (), 2, &[mkstr(b"value".to_vec())]);
+    G_HTMLATTR_TYPE_ "$Html$Attributes$type_" = closure(attr_property2 as *const (), 2, &[mkstr(b"type".to_vec())]);
+    G_HTMLATTR_DRAGGABLE "$Html$Attributes$draggable" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"draggable".to_vec())]);
+    G_HTMLATTR_FOR "$Html$Attributes$for" = closure(attr_property2 as *const (), 2, &[mkstr(b"htmlFor".to_vec())]);
+    G_HTMLATTR_ACTION "$Html$Attributes$action" = closure(attr_property2 as *const (), 2, &[mkstr(b"action".to_vec())]);
+    G_HTMLATTR_METHOD "$Html$Attributes$method" = closure(attr_property2 as *const (), 2, &[mkstr(b"method".to_vec())]);
+    G_HTMLATTR_TARGET "$Html$Attributes$target" = closure(attr_property2 as *const (), 2, &[mkstr(b"target".to_vec())]);
+    G_HTMLATTR_REL "$Html$Attributes$rel" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"rel".to_vec())]);
+    G_HTMLATTR_WRAP "$Html$Attributes$wrap" = closure(attr_property2 as *const (), 2, &[mkstr(b"wrap".to_vec())]);
+    G_HTMLATTR_ACCEPT "$Html$Attributes$accept" = closure(attr_property2 as *const (), 2, &[mkstr(b"accept".to_vec())]);
+    G_HTMLATTR_LIST "$Html$Attributes$list" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"list".to_vec())]);
+    G_HTMLATTR_MAX "$Html$Attributes$max" = closure(attr_property2 as *const (), 2, &[mkstr(b"max".to_vec())]);
+    G_HTMLATTR_MIN "$Html$Attributes$min" = closure(attr_property2 as *const (), 2, &[mkstr(b"min".to_vec())]);
+    G_HTMLATTR_STEP "$Html$Attributes$step" = closure(attr_property2 as *const (), 2, &[mkstr(b"step".to_vec())]);
+    G_HTMLATTR_PATTERN "$Html$Attributes$pattern" = closure(attr_property2 as *const (), 2, &[mkstr(b"pattern".to_vec())]);
+    G_HTMLATTR_LANG "$Html$Attributes$lang" = closure(attr_property2 as *const (), 2, &[mkstr(b"lang".to_vec())]);
+    G_HTMLATTR_DIR "$Html$Attributes$dir" = closure(attr_property2 as *const (), 2, &[mkstr(b"dir".to_vec())]);
+    G_HTMLATTR_DOWNLOAD "$Html$Attributes$download" = closure(attr_property2 as *const (), 2, &[mkstr(b"download".to_vec())]);
+    G_HTMLATTR_HREFLANG "$Html$Attributes$hreflang" = closure(attr_property2 as *const (), 2, &[mkstr(b"hreflang".to_vec())]);
+    G_HTMLATTR_MEDIA "$Html$Attributes$media" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"media".to_vec())]);
+    G_HTMLATTR_PING "$Html$Attributes$ping" = closure(attr_property2 as *const (), 2, &[mkstr(b"ping".to_vec())]);
+    G_HTMLATTR_USEMAP "$Html$Attributes$usemap" = closure(attr_property2 as *const (), 2, &[mkstr(b"useMap".to_vec())]);
+    G_HTMLATTR_SHAPE "$Html$Attributes$shape" = closure(attr_property2 as *const (), 2, &[mkstr(b"shape".to_vec())]);
+    G_HTMLATTR_COORDS "$Html$Attributes$coords" = closure(attr_property2 as *const (), 2, &[mkstr(b"coords".to_vec())]);
+    G_HTMLATTR_ENCTYPE "$Html$Attributes$enctype" = closure(attr_property2 as *const (), 2, &[mkstr(b"enctype".to_vec())]);
+    G_HTMLATTR_DATETIME "$Html$Attributes$datetime" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"datetime".to_vec())]);
+    G_HTMLATTR_CHARSET "$Html$Attributes$charset" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"charset".to_vec())]);
+    G_HTMLATTR_CONTENT "$Html$Attributes$content" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"content".to_vec())]);
+    G_HTMLATTR_HTTPEQUIV "$Html$Attributes$httpEquiv" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"http-equiv".to_vec())]);
+    G_HTMLATTR_POSTER "$Html$Attributes$poster" = closure(attr_property2 as *const (), 2, &[mkstr(b"poster".to_vec())]);
+    G_HTMLATTR_KIND "$Html$Attributes$kind" = closure(attr_property2 as *const (), 2, &[mkstr(b"kind".to_vec())]);
+    G_HTMLATTR_SRCLANG "$Html$Attributes$srclang" = closure(attr_property2 as *const (), 2, &[mkstr(b"srclang".to_vec())]);
+    G_HTMLATTR_SANDBOX "$Html$Attributes$sandbox" = closure(attr_property2 as *const (), 2, &[mkstr(b"sandbox".to_vec())]);
+    G_HTMLATTR_SRCDOC "$Html$Attributes$srcdoc" = closure(attr_property2 as *const (), 2, &[mkstr(b"srcdoc".to_vec())]);
+    G_HTMLATTR_MANIFEST "$Html$Attributes$manifest" = closure(attr_attribute2 as *const (), 2, &[mkstr(b"manifest".to_vec())]);
+    G_HTMLATTR_HEADERS "$Html$Attributes$headers" = closure(attr_property2 as *const (), 2, &[mkstr(b"headers".to_vec())]);
+    G_HTMLATTR_SCOPE "$Html$Attributes$scope" = closure(attr_property2 as *const (), 2, &[mkstr(b"scope".to_vec())]);
+    G_HTMLATTR_ACCESSKEY "$Html$Attributes$accesskey" = closure(attr_property2 as *const (), 2, &[mkstr(b"accessKey".to_vec())]);
+    G_HTMLATTR_CITE "$Html$Attributes$cite" = closure(attr_property2 as *const (), 2, &[mkstr(b"cite".to_vec())]);
+    G_HTMLATTR_ALIGN "$Html$Attributes$align" = closure(attr_property2 as *const (), 2, &[mkstr(b"align".to_vec())]);
+    G_HTMLATTR_ACCEPTCHARSET "$Html$Attributes$acceptCharset" = closure(attr_property2 as *const (), 2, &[mkstr(b"acceptCharset".to_vec())]);
+    G_HTMLATTR_CHECKED "$Html$Attributes$checked" = closure(attr_property2 as *const (), 2, &[mkstr(b"checked".to_vec())]);
+    G_HTMLATTR_SELECTED "$Html$Attributes$selected" = closure(attr_property2 as *const (), 2, &[mkstr(b"selected".to_vec())]);
+    G_HTMLATTR_DISABLED "$Html$Attributes$disabled" = closure(attr_property2 as *const (), 2, &[mkstr(b"disabled".to_vec())]);
+    G_HTMLATTR_HIDDEN "$Html$Attributes$hidden" = closure(attr_property2 as *const (), 2, &[mkstr(b"hidden".to_vec())]);
+    G_HTMLATTR_READONLY "$Html$Attributes$readonly" = closure(attr_property2 as *const (), 2, &[mkstr(b"readOnly".to_vec())]);
+    G_HTMLATTR_REQUIRED "$Html$Attributes$required" = closure(attr_property2 as *const (), 2, &[mkstr(b"required".to_vec())]);
+    G_HTMLATTR_AUTOFOCUS "$Html$Attributes$autofocus" = closure(attr_property2 as *const (), 2, &[mkstr(b"autofocus".to_vec())]);
+    G_HTMLATTR_CONTENTEDITABLE "$Html$Attributes$contenteditable" = closure(attr_property2 as *const (), 2, &[mkstr(b"contentEditable".to_vec())]);
+    G_HTMLATTR_AUTOPLAY "$Html$Attributes$autoplay" = closure(attr_property2 as *const (), 2, &[mkstr(b"autoplay".to_vec())]);
+    G_HTMLATTR_CONTROLS "$Html$Attributes$controls" = closure(attr_property2 as *const (), 2, &[mkstr(b"controls".to_vec())]);
+    G_HTMLATTR_LOOP "$Html$Attributes$loop" = closure(attr_property2 as *const (), 2, &[mkstr(b"loop".to_vec())]);
+    G_HTMLATTR_MULTIPLE "$Html$Attributes$multiple" = closure(attr_property2 as *const (), 2, &[mkstr(b"multiple".to_vec())]);
+    G_HTMLATTR_NOVALIDATE "$Html$Attributes$novalidate" = closure(attr_property2 as *const (), 2, &[mkstr(b"noValidate".to_vec())]);
+    G_HTMLATTR_SPELLCHECK "$Html$Attributes$spellcheck" = closure(attr_property2 as *const (), 2, &[mkstr(b"spellcheck".to_vec())]);
+    G_HTMLATTR_AUTOCOMPLETE "$Html$Attributes$autocomplete" = closure(attr_autocomplete1 as *const (), 1, &[]);
+    G_HTMLATTR_ISMAP "$Html$Attributes$ismap" = closure(attr_property2 as *const (), 2, &[mkstr(b"isMap".to_vec())]);
+    G_HTMLATTR_DEFAULT "$Html$Attributes$default" = closure(attr_property2 as *const (), 2, &[mkstr(b"default".to_vec())]);
+    G_HTMLATTR_ROWS "$Html$Attributes$rows" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"rows".to_vec())]);
+    G_HTMLATTR_COLS "$Html$Attributes$cols" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"cols".to_vec())]);
+    G_HTMLATTR_COLSPAN "$Html$Attributes$colspan" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"colspan".to_vec())]);
+    G_HTMLATTR_ROWSPAN "$Html$Attributes$rowspan" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"rowspan".to_vec())]);
+    G_HTMLATTR_TABINDEX "$Html$Attributes$tabindex" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"tabIndex".to_vec())]);
+    G_HTMLATTR_SIZE "$Html$Attributes$size" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"size".to_vec())]);
+    G_HTMLATTR_MAXLENGTH "$Html$Attributes$maxlength" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"maxlength".to_vec())]);
+    G_HTMLATTR_MINLENGTH "$Html$Attributes$minlength" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"minLength".to_vec())]);
+    G_HTMLATTR_HEIGHT "$Html$Attributes$height" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"height".to_vec())]);
+    G_HTMLATTR_WIDTH "$Html$Attributes$width" = closure(attr_int_str2 as *const (), 2, &[mkstr(b"width".to_vec())]);
+    G_HTMLATTR_START "$Html$Attributes$start" = closure(attr_property2 as *const (), 2, &[mkstr(b"start".to_vec())]);
+
+}
+
 kernel_fns! {
+    // elm/html + elm/virtual-dom core (non-baked; all arguments come from the
+    // caller). Per-tag/attr helpers live in `baked_globals!` above.
+    G_HTML_TEXT "$Html$text" vdom_text1, 1;
+    G_VDOM_TEXT "$VirtualDom$text" vdom_text1, 1;
+    G_SVG_TEXT "$Svg$text" vdom_text1, 1;
+    G_HTML_NODE "$Html$node" vdom_node3, 3;
+    G_VDOM_NODE "$VirtualDom$node" vdom_node3, 3;
+    G_SVG_NODE "$Svg$node" vdom_node_ns3, 3;
+    G_VDOM_NODENS "$VirtualDom$nodeNS" vdom_node_ns4, 4;
+    G_HTML_MAP "$Html$map" vdom_map2, 2;
+    G_VDOM_MAP "$VirtualDom$map" vdom_map2, 2;
+    G_SVG_MAP "$Svg$map" vdom_map2, 2;
+    G_HTMLKEYED_NODE "$Html$Keyed$node" vdom_keyed3, 3;
+    G_VDOM_KEYEDNODE "$VirtualDom$keyedNode" vdom_keyed3, 3;
+    G_VDOM_KEYEDNODENS "$VirtualDom$keyedNodeNS" vdom_keyed_ns4, 4;
+    G_HTMLATTR_STYLE "$Html$Attributes$style" attr_style2, 2;
+    G_VDOM_STYLE "$VirtualDom$style" attr_style2, 2;
+    G_HTMLATTR_ATTRIBUTE "$Html$Attributes$attribute" attr_attribute2, 2;
+    G_VDOM_ATTRIBUTE "$VirtualDom$attribute" attr_attribute2, 2;
+    G_HTMLATTR_PROPERTY "$Html$Attributes$property" attr_property2, 2;
+    G_VDOM_PROPERTY "$VirtualDom$property" attr_property2, 2;
+    G_HTMLATTR_CLASSLIST "$Html$Attributes$classList" attr_class_list1, 1;
+    G_HTMLATTR_MAP "$Html$Attributes$map" attr_map2, 2;
+    G_VDOM_MAPATTRIBUTE "$VirtualDom$mapAttribute" attr_map2, 2;
+    G_HTMLEV_ON "$Html$Events$on" events_on2, 2;
+    G_HTMLEV_STOPON "$Html$Events$stopPropagationOn" events_stop_on2, 2;
+    G_HTMLEV_PREVENTON "$Html$Events$preventDefaultOn" events_prevent_on2, 2;
+    G_HTMLEV_CUSTOM "$Html$Events$custom" events_custom2, 2;
+    G_HTMLEV_ONCLICK "$Html$Events$onClick" events_on_click1, 1;
+    G_HTMLEV_ONDBLCLICK "$Html$Events$onDoubleClick" events_on_dblclick1, 1;
+    G_HTMLEV_ONMOUSEDOWN "$Html$Events$onMouseDown" events_on_mousedown1, 1;
+    G_HTMLEV_ONMOUSEUP "$Html$Events$onMouseUp" events_on_mouseup1, 1;
+    G_HTMLEV_ONMOUSEENTER "$Html$Events$onMouseEnter" events_on_mouseenter1, 1;
+    G_HTMLEV_ONMOUSELEAVE "$Html$Events$onMouseLeave" events_on_mouseleave1, 1;
+    G_HTMLEV_ONMOUSEOVER "$Html$Events$onMouseOver" events_on_mouseover1, 1;
+    G_HTMLEV_ONMOUSEOUT "$Html$Events$onMouseOut" events_on_mouseout1, 1;
+    G_HTMLEV_ONBLUR "$Html$Events$onBlur" events_on_blur1, 1;
+    G_HTMLEV_ONFOCUS "$Html$Events$onFocus" events_on_focus1, 1;
+    G_HTMLEV_ONSUBMIT "$Html$Events$onSubmit" events_on_submit1, 1;
+    G_HTMLEV_ONINPUT "$Html$Events$onInput" events_on_input1, 1;
+    G_HTMLEV_ONCHECK "$Html$Events$onCheck" events_on_check1, 1;
+
     G_REGEX_FROMSTRINGWITH "$Elm$Kernel$Regex$fromStringWith" regex_from_string_with, 2;
     G_REGEX_CONTAINS "$Elm$Kernel$Regex$contains" regex_contains, 2;
     G_REGEX_FINDATMOST "$Elm$Kernel$Regex$findAtMost" regex_find_at_most, 3;
@@ -5677,6 +6126,9 @@ kernel_vals! {
     G_JSONE_NULL "$Json$Encode$null";
     G_REGEX_NEVER "$Elm$Kernel$Regex$never";
     G_REGEX_INFINITY "$Elm$Kernel$Regex$infinity";
+    G_HTMLEV_TARGETVALUE "$Html$Events$targetValue";
+    G_HTMLEV_TARGETCHECKED "$Html$Events$targetChecked";
+    G_HTMLEV_KEYCODE "$Html$Events$keyCode";
 }
 
 unsafe fn runtime_init() {
@@ -5726,6 +6178,13 @@ unsafe fn runtime_init() {
         false,
     ))));
     G_REGEX_INFINITY.set(mk_int(i32::MAX as i64));
+
+    // elm/html + elm/virtual-dom: the per-tag/attr closures, then the event
+    // decoders (`Html.Events.targetValue` reads `e.target.value`, etc.).
+    init_baked_globals();
+    G_HTMLEV_TARGETVALUE.set(target_field(b"value", Decoder::Str));
+    G_HTMLEV_TARGETCHECKED.set(target_field(b"checked", Decoder::Bool));
+    G_HTMLEV_KEYCODE.set(mk_decoder(Decoder::Field(b"keyCode".to_vec(), mk_decoder(Decoder::Int))));
 }
 
 // THE EVENT LOOP — the Rust twin of runtime.js's _Platform_initialize for
