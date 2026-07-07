@@ -452,6 +452,10 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     let ctxs = build_ctxs(modules);
 
     let mut functions = Vec::new();
+    // Distinct instances can now share a mangled name — e.g. several
+    // unconstrained `number` variables all normalize to `Int` — so emit each
+    // mangled name once (the specializations are layout-identical).
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for instance in &set.instances {
         let Some(mctx) = ctxs.get(&instance.module) else {
             continue;
@@ -459,6 +463,10 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         let Some(def) = mctx.defs.get(&instance.name) else {
             continue;
         };
+        let mangled = mangle(&instance.module, &instance.name, &instance.tipe);
+        if !emitted.insert(mangled.to_string()) {
+            continue;
+        }
         let scheme = mctx
             .types
             .get(&instance.name)
@@ -521,7 +529,7 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             idx += 1;
         }
         functions.push(TypedFn {
-            mangled: mangle(&instance.module, &instance.name, &instance.tipe),
+            mangled,
             original: instance.name.clone(),
             module: instance.module.clone(),
             tipe: instance.tipe.clone(),
@@ -1265,6 +1273,12 @@ pub fn mangle(module: &Name, name: &Name, tipe: &can::Type) -> Name {
 fn mangle_type(tipe: &can::Type) -> String {
     use can::Type::*;
     match tipe {
+        // An unconstrained `number` variable defaults to Int — exactly as elm
+        // does at the end of inference and as `layout_of` treats it. Without
+        // this, a concrete call site (`Int`) and a definition discovered with
+        // the variable still unresolved (`number`) mangle to different names
+        // for identical code, so the call finds no target.
+        Var(n) if n.as_str().starts_with("number") => "Int".to_string(),
         Var(n) => format!("v{}", n),
         Type(_, name, args) if args.is_empty() => name.to_string(),
         Type(_, name, args) => format!(
