@@ -1174,6 +1174,20 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
             x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
+        // Functions: Elm's `==` short-circuits to `true` for the same function
+        // reference (and errors otherwise). Native builds a fresh closure value
+        // per reference, so pointer identity of the closure value fails even for
+        // the same source function; compare by the underlying function pointer
+        // plus the already-applied capture *words* by raw identity. The captures
+        // of a boxed closure are raw pointers (e.g. a wrapped typed closure),
+        // not uniform values, so they must NOT be recursed into with `value_eq`
+        // — raw-word equality is both safe and the right notion of "same
+        // reference". Canonical top-level-function closures (a shared global)
+        // make this hold for e.g. a shared `Dict`/model comparator.
+        (
+            Value::Closure { func: f1, applied: n1, args: a1, .. },
+            Value::Closure { func: f2, applied: n2, args: a2, .. },
+        ) => f1 == f2 && n1 == n2 && a1[..*n1 as usize] == a2[..*n2 as usize],
         _ => false,
     }
 }

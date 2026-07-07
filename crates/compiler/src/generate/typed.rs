@@ -61,6 +61,20 @@ struct TypedCodegen<'ctx, 'l> {
     /// Closure wrappers for named functions used as first-class values,
     /// keyed by the function's mangled name.
     wrappers: HashMap<String, FunctionValue<'ctx>>,
+    /// A canonical module-global closure value for each named function used as
+    /// a first-class value, keyed by mangled name. A top-level function's
+    /// wrapper closure captures nothing, so it is a constant: sharing one
+    /// global instead of heap-allocating per reference makes every reference to
+    /// the same function pointer-identical (so structural `==` on values that
+    /// embed a function matches Elm's reference equality) and avoids the
+    /// per-reference allocation.
+    wrapper_closures: HashMap<String, inkwell::values::PointerValue<'ctx>>,
+    /// `box_closure` uniform-boxing trampolines, keyed by the function type they
+    /// box. The trampoline depends only on the type (which arguments to
+    /// unbox/box), so one is shared across every boxing site of that type —
+    /// less generated code, and two boxings of the same function share a
+    /// function pointer (needed for `==` on boxed functions to match Elm).
+    box_tramps: HashMap<String, FunctionValue<'ctx>>,
     /// Memoized box/unbox helper functions for tagged unions, keyed by the
     /// type. Recursive unions need a real recursive function (rather than
     /// inline structural expansion) so codegen terminates; a self-referential
@@ -153,6 +167,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             layouts,
             functions: HashMap::new(),
             wrappers: HashMap::new(),
+            wrapper_closures: HashMap::new(),
+            box_tramps: HashMap::new(),
             box_fns: HashMap::new(),
             unbox_fns: HashMap::new(),
             locals: HashMap::new(),
@@ -1380,42 +1396,52 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
 
         // Trampoline: (captured typed closure, arg0.., arg_{n-1}) -> result,
-        // all uniform words.
-        let tramp_params: Vec<BasicMetadataTypeEnum> = vec![i64_t.into(); n + 1];
-        let tramp_ty = i64_t.fn_type(&tramp_params, false);
-        let name = format!("clos.{}", self.lam_id);
-        self.lam_id += 1;
-        let tramp = self.module.add_function(&name, tramp_ty, Some(Linkage::Internal));
+        // all uniform words. It depends only on the function type, so it is
+        // shared across every boxing site of that type (keyed below) — less
+        // generated code, and two boxings of the same function get the same
+        // function pointer so a boxed-function `==` can match.
+        let key = format!("{:?}", tipe);
+        let tramp = if let Some(t) = self.box_tramps.get(&key) {
+            *t
+        } else {
+            let tramp_params: Vec<BasicMetadataTypeEnum> = vec![i64_t.into(); n + 1];
+            let tramp_ty = i64_t.fn_type(&tramp_params, false);
+            let name = format!("clos.{}", self.lam_id);
+            self.lam_id += 1;
+            let tramp = self.module.add_function(&name, tramp_ty, Some(Linkage::Internal));
 
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(tramp);
-        let entry = self.ctx.append_basic_block(tramp, "entry");
-        self.builder.position_at_end(entry);
-        self.clear_loc();
-        let cap = tramp.get_nth_param(0).unwrap().into_int_value();
-        let clos = self.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
-        let mut typed_args = Vec::new();
-        for (i, at) in arg_types.iter().enumerate() {
-            let uni = tramp.get_nth_param((i + 1) as u32).unwrap();
-            typed_args.push(self.unbox_value(uni, at)?);
-        }
-        let ret_layout = self.layouts.layout_of(&ret_type);
-        let result = self.apply_closure(clos, &typed_args, &ret_layout);
-        let body_result = self.box_value(result, &ret_type);
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        let boxed = body_result?;
-        self.builder.build_return(Some(&boxed)).unwrap();
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        // Restore the caller's debug location: a helper must neither leak its
-        // own (subprogram-less) scope nor its inner body's scope into the
-        // function it returns to.
-        self.restore_loc(saved_loc);
+            let saved_locals = std::mem::take(&mut self.locals);
+            let saved_fn = self.cur_fn;
+            let saved_block = self.builder.get_insert_block();
+            let saved_loc = self.cur_loc;
+            self.cur_fn = Some(tramp);
+            let entry = self.ctx.append_basic_block(tramp, "entry");
+            self.builder.position_at_end(entry);
+            self.clear_loc();
+            let cap = tramp.get_nth_param(0).unwrap().into_int_value();
+            let clos = self.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
+            let mut typed_args = Vec::new();
+            for (i, at) in arg_types.iter().enumerate() {
+                let uni = tramp.get_nth_param((i + 1) as u32).unwrap();
+                typed_args.push(self.unbox_value(uni, at)?);
+            }
+            let ret_layout = self.layouts.layout_of(&ret_type);
+            let result = self.apply_closure(clos, &typed_args, &ret_layout);
+            let body_result = self.box_value(result, &ret_type);
+            self.locals = saved_locals;
+            self.cur_fn = saved_fn;
+            let boxed = body_result?;
+            self.builder.build_return(Some(&boxed)).unwrap();
+            if let Some(b) = saved_block {
+                self.builder.position_at_end(b);
+            }
+            // Restore the caller's debug location: a helper must neither leak
+            // its own (subprogram-less) scope nor its inner body's scope into
+            // the function it returns to.
+            self.restore_loc(saved_loc);
+            self.box_tramps.insert(key, tramp);
+            tramp
+        };
 
         // Build the uniform closure capturing the typed closure pointer.
         let closure_word = self
@@ -4639,6 +4665,29 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .into()
     }
 
+    /// A canonical, module-global closure value `{fn_ptr}` for a captureless
+    /// wrapper — the closure used when a named top-level function is referenced
+    /// as a first-class value. Because it captures nothing it is a constant, so
+    /// one global is shared across all references: they become pointer-identical
+    /// (matching Elm's reference equality for functions) and cost no allocation.
+    /// Keyed by the wrapper's name.
+    fn global_closure(&mut self, wrapper: FunctionValue<'ctx>) -> inkwell::values::PointerValue<'ctx> {
+        let key = wrapper.get_name().to_string_lossy().to_string();
+        if let Some(g) = self.wrapper_closures.get(&key) {
+            return *g;
+        }
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let sty = self.ctx.struct_type(&[ptr_t.into()], false);
+        let fnptr = wrapper.as_global_value().as_pointer_value();
+        let g = self.module.add_global(sty, None, &format!("{}$closv", key));
+        g.set_initializer(&sty.const_named_struct(&[fnptr.into()]));
+        g.set_linkage(Linkage::Internal);
+        g.set_constant(true);
+        let p = g.as_pointer_value();
+        self.wrapper_closures.insert(key, p);
+        p
+    }
+
     /// Allocate a closure `{fn_ptr, captures...}` on the heap.
     fn build_closure_value(
         &self,
@@ -4851,7 +4900,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         if let Some(w) = self.wrappers.get(mangled) {
             let w = *w;
             self.emit_arity_reg(w);
-            return self.build_closure_value(w.as_global_value().as_pointer_value(), &[]);
+            return self.global_closure(w);
         }
         let compiled = self.functions[mangled].count_params() as usize;
         let type_arity = {
@@ -4905,7 +4954,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
         self.emit_arity_reg(wrapper);
-        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
+        self.global_closure(wrapper)
     }
 
     /// The eta-expanding variant of `wrap_global` for a point-free (under-arity)
@@ -4973,7 +5022,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.restore_loc(saved_loc);
         self.wrappers.insert(mangled.to_string(), wrapper);
         self.emit_arity_reg(wrapper);
-        self.build_closure_value(wrapper.as_global_value().as_pointer_value(), &[])
+        self.global_closure(wrapper)
     }
 
     fn gen_negate(&mut self, inner: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {

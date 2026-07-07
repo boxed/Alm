@@ -1902,6 +1902,34 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn equality_of_values_containing_a_shared_function() {
+    // Elm's `==` short-circuits to `true` for the same function reference, so a
+    // data structure that embeds a function (here a `Dict` value) compares equal
+    // when it holds the same top-level function. Native builds a fresh closure
+    // per reference, so this only works if references to a top-level function
+    // are canonical (a shared global closure) and the runtime's `value_eq`
+    // compares closures by function pointer + captures rather than falling
+    // through to `false`. Exercises both fixes.
+    assert_same(
+        "eq_shared_function",
+        "module Test exposing (..)\n\
+         \n\
+         import Dict\n\
+         \n\
+         bump : Int -> Int\n\
+         bump x =\n\
+         \x20   x + 1\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString\n\
+         \x20       ( Dict.fromList [ ( 0, bump ) ] == Dict.fromList [ ( 0, bump ) ]\n\
+         \x20       , Dict.fromList [ ( 0, bump ) ] == Dict.fromList [ ( 1, bump ) ]\n\
+         \x20       )\n",
+    );
+}
+
+#[test]
 fn hoisted_closed_local_constant() {
     // A `let` value inside a function whose right-hand side depends on none of
     // the function's arguments is a constant relative to every call. The typed
