@@ -1902,6 +1902,28 @@ fn point_free_polymorphic_let_binding() {
 }
 
 #[test]
+fn string_trim_unicode_whitespace() {
+    // Elm's `String.trim` delegates to JS `String.prototype.trim`, whose
+    // whitespace set is wider than ASCII — it includes the non-breaking space
+    // (U+00A0), the Unicode `Zs` category, line/paragraph separators, and the
+    // BOM. Native trimmed only ASCII whitespace, so `String.trim "\u{00A0}"`
+    // was non-empty (elm-csv's `blank` decoder then failed to treat an
+    // all-whitespace field as blank).
+    assert_same(
+        "trim_unicode_ws",
+        "module Test exposing (..)\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   [ Debug.toString (String.trim \"\\u{00A0}\\t\\n\" == \"\")\n\
+         \x20   , String.trim \"\\u{00A0}\\u{2003}x y\\u{3000}\"\n\
+         \x20   , String.fromInt (String.length (String.trim \"\\u{FEFF}\\u{00A0}\"))\n\
+         \x20   ]\n\
+         \x20       |> String.join \"|\"\n",
+    );
+}
+
+#[test]
 fn local_row_polymorphic_record_access() {
     // A record's fields are laid out sorted by name, so the offset of a field
     // depends on the *full* field set. A row-polymorphic function

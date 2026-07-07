@@ -1731,8 +1731,27 @@ unsafe extern "C" fn list_sort_with(f: u64, xs: u64) -> u64 {
 
 // STRING
 
-fn ascii_space(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b')
+/// The whitespace set JavaScript's `String.prototype.trim` removes — which
+/// Elm's `String.trim`/`trimLeft`/`trimRight` delegate to. It is the
+/// ECMAScript `WhiteSpace` set (tab, vertical tab, form feed, space, NBSP, the
+/// Unicode `Zs` "space separator" category, and the BOM) plus `LineTerminator`
+/// (LF, CR, line/paragraph separators). Notably wider than ASCII whitespace:
+/// e.g. `String.trim "\u{00A0}"` is empty in Elm.
+fn trim_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}' | '\u{000A}' | '\u{000B}' | '\u{000C}' | '\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Byte offset of the `idx`-th codepoint, clamped to the string length.
@@ -1960,13 +1979,13 @@ unsafe extern "C" fn string_to_lower(s: u64) -> u64 {
     mkstr(sstr(s).chars().map(|c| c.to_ascii_lowercase()).collect::<String>().into_bytes())
 }
 unsafe extern "C" fn string_trim(s: u64) -> u64 {
-    mkstr(sstr(s).trim_matches(ascii_space).as_bytes().to_vec())
+    mkstr(sstr(s).trim_matches(trim_space).as_bytes().to_vec())
 }
 unsafe extern "C" fn string_trim_left(s: u64) -> u64 {
-    mkstr(sstr(s).trim_start_matches(ascii_space).as_bytes().to_vec())
+    mkstr(sstr(s).trim_start_matches(trim_space).as_bytes().to_vec())
 }
 unsafe extern "C" fn string_trim_right(s: u64) -> u64 {
-    mkstr(sstr(s).trim_end_matches(ascii_space).as_bytes().to_vec())
+    mkstr(sstr(s).trim_end_matches(trim_space).as_bytes().to_vec())
 }
 unsafe extern "C" fn string_pad_left(n: u64, c: u64, s: u64) -> u64 {
     let ch = char::from_u32(as_int(c) as u32).unwrap_or(' ');
