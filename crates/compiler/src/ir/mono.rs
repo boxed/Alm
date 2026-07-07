@@ -1447,11 +1447,18 @@ fn mangle_type(tipe: &can::Type) -> String {
         // this, a concrete call site (`Int`) and a definition discovered with
         // the variable still unresolved (`number`) mangle to different names
         // for identical code, so the call finds no target.
-        Var(n) if n.as_str().starts_with("number") => "Int".to_string(),
+        Var(n) if n.as_str().starts_with("number") => "Basics$Int".to_string(),
         Var(n) => format!("v{}", n),
-        Type(_, name, args) if args.is_empty() => name.to_string(),
-        Type(_, name, args) => format!(
-            "{}${}",
+        // Qualify by module: two modules can each declare a `Msg`/`Model` whose
+        // layouts differ (an enum `i32` in one, a tagged pointer in another).
+        // Keyed by the short name alone, their specializations collided to one
+        // symbol — invalid IR when the layouts disagree, a silent miscompile
+        // when they happen to share a shape. `home` is unique per module (the
+        // per-package resolver renames duplicates), so `home$name` is not.
+        Type(home, name, args) if args.is_empty() => format!("{}${}", home, name),
+        Type(home, name, args) => format!(
+            "{}${}${}",
+            home,
             name,
             args.iter().map(mangle_type).collect::<Vec<_>>().join("$")
         ),
@@ -1519,5 +1526,54 @@ fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type 
             c.as_ref().map(|c| Box::new(apply_subst(subst, c))),
         ),
         Unit => Unit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mangle;
+    use crate::ast::canonical as can;
+    use crate::data::Name;
+
+    fn user_type(module: &str, name: &str) -> can::Type {
+        can::Type::Type(Name::from(module), Name::from(name), Vec::new())
+    }
+
+    #[test]
+    fn mangle_qualifies_type_by_module() {
+        // Two modules can each declare a same-named type (`Msg`) with different
+        // layouts. Keyed by the short name alone their specializations collided
+        // to one symbol — invalid IR or a silent miscompile. The mangled type
+        // must include the module so they stay distinct.
+        let a = mangle(
+            &Name::from("Test.Html.Event"),
+            &Name::from("expect"),
+            &user_type("Bootstrap.ButtonTest", "Msg"),
+        );
+        let b = mangle(
+            &Name::from("Test.Html.Event"),
+            &Name::from("expect"),
+            &user_type("Bootstrap.AlertTest", "Msg"),
+        );
+        assert_ne!(a, b);
+        assert!(a.as_str().contains("Bootstrap.ButtonTest$Msg"));
+    }
+
+    #[test]
+    fn mangle_number_default_matches_concrete_int() {
+        // A call site with a concrete `Int` and a definition still carrying an
+        // unresolved `number` must mangle identically, or the call finds no
+        // target.
+        let concrete = mangle(
+            &Name::from("M"),
+            &Name::from("f"),
+            &can::Type::Type(Name::from("Basics"), Name::from("Int"), Vec::new()),
+        );
+        let defaulted = mangle(
+            &Name::from("M"),
+            &Name::from("f"),
+            &can::Type::Var(Name::from("number")),
+        );
+        assert_eq!(concrete, defaulted);
     }
 }

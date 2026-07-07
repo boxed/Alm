@@ -316,9 +316,11 @@ fn every_call_target_is_defined() {
             );
         }
     }
-    // Sanity: the two specializations of `identity` both exist.
-    assert!(defined.contains("Test$identity$Fn$String$String"));
-    assert!(defined.contains("Test$identity$Fn$Int$Int"));
+    // Sanity: the two specializations of `identity` both exist. Types are
+    // module-qualified in mangled names (String -> `String$String`, Int ->
+    // `Basics$Int`) so same-named types in different modules never collide.
+    assert!(defined.contains("Test$identity$Fn$String$String$String$String"));
+    assert!(defined.contains("Test$identity$Fn$Basics$Int$Basics$Int"));
 }
 
 fn mentions_var(tipe: &can::Type) -> bool {
