@@ -3920,17 +3920,44 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             kind: TypedKind::Call(Box::new(first.clone()), vec![x_local]),
             region: whole.region,
         };
-        let outer = TypedExpr {
+        let mut outer = TypedExpr {
             tipe: c_ty.clone(),
             kind: TypedKind::Call(Box::new(second.clone()), vec![inner]),
             region: whole.region,
         };
         let pat = crate::reporting::Located {
             region: crate::reporting::Region::ZERO,
-            value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(xname)),
+            value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(xname.clone())),
         };
-        let params = vec![(pat, a_ty)];
-        let result_layout = self.layouts.layout_of(&c_ty);
+        let mut params = vec![(pat, a_ty)];
+        // `\x -> second (first x)` is always an arity-1 closure, but the
+        // composition's type can have more arrows (`add << negate` has type
+        // `Int -> Int -> Int`). A closure's compiled arity must equal its type
+        // arrow count, or a caller passing one argument per arrow reads past
+        // its parameters. Eta-expand the extra arrows.
+        let mut ret = c_ty;
+        let mut i = 0;
+        while let Type::Lambda(arg, rest) = ret {
+            let pn = format!("{}_e{}", xname, i);
+            let plocal = TypedExpr {
+                tipe: (*arg).clone(),
+                kind: TypedKind::Local(crate::data::Name::from(pn.clone())),
+                region: whole.region,
+            };
+            let ppat = crate::reporting::Located {
+                region: crate::reporting::Region::ZERO,
+                value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(pn)),
+            };
+            params.push((ppat, (*arg).clone()));
+            outer = TypedExpr {
+                tipe: (*rest).clone(),
+                kind: TypedKind::Call(Box::new(outer), vec![plocal]),
+                region: whole.region,
+            };
+            ret = *rest;
+            i += 1;
+        }
+        let result_layout = self.layouts.layout_of(&ret);
         self.gen_closure(&params, &outer, &result_layout)
     }
 

@@ -1724,3 +1724,37 @@ fn nested_and_point_free_lambdas_through_hof() {
          \x20       )\n",
     );
 }
+
+#[test]
+fn composition_and_partial_arity_normalization() {
+    // Two more ways a closure's compiled arity could fall short of its type's
+    // arrow count. `add << negate` composes into a two-argument function but the
+    // composition closure is intrinsically arity-1, so it must eta-expand. And a
+    // point-free partial `mkAdder 1` of a function whose own body returns a
+    // function (`mkAdder x y = (+) (x + y)`) must remember it still needs two
+    // more arguments, which requires the definition itself to be eta-normalized.
+    assert_same(
+        "composition_partial_arity",
+        "module Test exposing (..)\n\
+         \n\
+         add : Int -> Int -> Int\n\
+         add a b =\n\
+         \x20   a + b\n\
+         \n\
+         composed : Int -> Int -> Int\n\
+         composed =\n\
+         \x20   add << negate\n\
+         \n\
+         mkAdder : Int -> Int -> (Int -> Int)\n\
+         mkAdder x y =\n\
+         \x20   (+) (x + y)\n\
+         \n\
+         partial : Int -> (Int -> Int)\n\
+         partial =\n\
+         \x20   mkAdder 1\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString ( composed 3 10, partial 10 100 )\n",
+    );
+}

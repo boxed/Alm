@@ -488,13 +488,45 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             ctx: mctx,
             project: &ctxs,
         };
+        let mut body = spec.expr(&def.body, &subst);
+        // Eta-normalize: when the declared parameters cover fewer arrows than
+        // the concrete type -- the body itself has function type, as in
+        // `mkAdder x y = (+) (x + y)` whose type is `Int -> Int -> Int -> Int`
+        // -- append parameters and apply the body to them so the compiled arity
+        // equals the type's arrow count. Partial application, point-free
+        // wrapping, and closure application all assume that invariant (one
+        // parameter per arrow); a shortfall makes them read past the closure's
+        // arguments and return garbage.
+        let mut idx = 0u32;
+        while let can::Type::Lambda(a, b) = remaining {
+            let pname = Name::from(format!(
+                "_etf_{}_{}_{}",
+                def.name.region.start.row, def.name.region.start.col, idx
+            ));
+            let pat = Located::new(def.name.region, can::Pattern_::Var(pname.clone()));
+            params.push((pat, (*a).clone()));
+            body = TypedExpr {
+                tipe: (*b).clone(),
+                kind: TypedKind::Call(
+                    Box::new(body),
+                    vec![TypedExpr {
+                        tipe: (*a).clone(),
+                        kind: TypedKind::Local(pname),
+                        region: def.name.region,
+                    }],
+                ),
+                region: def.name.region,
+            };
+            remaining = *b;
+            idx += 1;
+        }
         functions.push(TypedFn {
             mangled: mangle(&instance.module, &instance.name, &instance.tipe),
             original: instance.name.clone(),
             module: instance.module.clone(),
             tipe: instance.tipe.clone(),
             params,
-            body: spec.expr(&def.body, &subst),
+            body,
             region: def.name.region,
         });
     }
