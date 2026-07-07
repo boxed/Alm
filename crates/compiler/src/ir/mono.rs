@@ -448,15 +448,28 @@ pub fn specialize_program(
 /// Analyze and specialize a whole project, emitting one typed function per
 /// reachable specialization across all modules.
 pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
-    let set = analyze_project(modules, entry);
     let ctxs = build_ctxs(modules);
 
     let mut functions = Vec::new();
-    // Distinct instances can now share a mangled name — e.g. several
-    // unconstrained `number` variables all normalize to `Int` — so emit each
-    // mangled name once (the specializations are layout-identical).
-    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for instance in &set.instances {
+    // A worklist fixpoint: `analyze_project` seeds the reachable instances, but
+    // specialization itself discovers more — every project reference resolves
+    // to a concrete `Global` and is pushed onto `sink`, catching instances
+    // (e.g. a foreign call inside a per-use-site-specialized local function)
+    // whose concrete type only exists after specialization. Distinct instances
+    // that share a mangled name (several `number` variables → `Int`, or
+    // layout-identical `Ref` specializations) are compiled once.
+    let sink: std::cell::RefCell<Vec<Instance>> = std::cell::RefCell::new(Vec::new());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut worklist: Vec<Instance> = Vec::new();
+    for inst in analyze_project(modules, entry).instances {
+        if seen.insert(mangle(&inst.module, &inst.name, &inst.tipe).to_string()) {
+            worklist.push(inst);
+        }
+    }
+    let mut wi = 0;
+    while wi < worklist.len() {
+        let instance = worklist[wi].clone();
+        wi += 1;
         let Some(mctx) = ctxs.get(&instance.module) else {
             continue;
         };
@@ -464,9 +477,6 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             continue;
         };
         let mangled = mangle(&instance.module, &instance.name, &instance.tipe);
-        if !emitted.insert(mangled.to_string()) {
-            continue;
-        }
         let scheme = mctx
             .types
             .get(&instance.name)
@@ -495,6 +505,7 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             module: &instance.module,
             ctx: mctx,
             project: &ctxs,
+            sink: &sink,
         };
         let mut body = spec.expr(&def.body, &subst);
         // Eta-normalize: when the declared parameters cover fewer arrows than
@@ -537,6 +548,12 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             body,
             region: def.name.region,
         });
+        // Enqueue every instance this body's references demanded.
+        for inst in sink.borrow_mut().drain(..) {
+            if seen.insert(mangle(&inst.module, &inst.name, &inst.tipe).to_string()) {
+                worklist.push(inst);
+            }
+        }
     }
 
     MonoProgram { functions }
@@ -548,6 +565,13 @@ struct Specializer<'a> {
     module: &'a Name,
     ctx: &'a ModuleCtx<'a>,
     project: &'a HashMap<Name, ModuleCtx<'a>>,
+    /// Every project-level reference this specialization resolves to a concrete
+    /// `Global`, recorded as an instance to compile. This drives discovery from
+    /// specialization itself, so references that only become concrete after
+    /// per-use-site local monomorphization (`spec_let`) are still found — a
+    /// plain AST walk under the top-level substitution would leave their types
+    /// polymorphic and miss the concrete instantiation.
+    sink: &'a std::cell::RefCell<Vec<Instance>>,
 }
 
 impl Specializer<'_> {
@@ -579,6 +603,11 @@ impl Specializer<'_> {
                 if self.ctx.defs.contains_key(name) {
                     // Resolve to the callee's specialization (this module) at
                     // this node's concrete type.
+                    self.sink.borrow_mut().push(Instance {
+                        module: self.module.clone(),
+                        name: name.clone(),
+                        tipe: tipe.clone(),
+                    });
                     TypedKind::Global(mangle(self.module, name, &tipe))
                 } else {
                     TypedKind::Local(name.clone())
@@ -588,6 +617,11 @@ impl Specializer<'_> {
                 // A value from another project module resolves to its
                 // specialization; a built-in stays a kernel reference.
                 if self.project.contains_key(module) {
+                    self.sink.borrow_mut().push(Instance {
+                        module: module.clone(),
+                        name: name.clone(),
+                        tipe: tipe.clone(),
+                    });
                     TypedKind::Global(mangle(module, name, &tipe))
                 } else {
                     TypedKind::Foreign(module.clone(), name.clone())
