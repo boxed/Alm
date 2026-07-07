@@ -12,7 +12,7 @@
 //! reclaimed — reference counting is a later pass.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inkwell::builder::Builder;
@@ -135,6 +135,15 @@ pub(crate) fn finish<'ctx>(
     let build_dir = output.with_extension("build");
     std::fs::create_dir_all(&build_dir)
         .map_err(|e| format!("could not create {}: {}", build_dir.display(), e))?;
+    // The build dir only holds transient link inputs (runtime archive, regex
+    // object, program object, bitcode) — the final binary is written straight
+    // to `output`. Remove it when the build ends, on success or error, so
+    // repeated builds don't accumulate ~7MB apiece. ALM_DUMP_IR keeps it so the
+    // dumped `program.ll` (and the rest) survive for inspection.
+    let _cleanup = BuildDirGuard {
+        dir: build_dir.clone(),
+        keep: std::env::var_os("ALM_DUMP_IR").is_some(),
+    };
 
     // Merge the runtime bitcode so the optimizer can inline the runtime's
     // hot primitives (rt_add, rt_ctor, rt_apply, the list kernels …) into
@@ -236,6 +245,21 @@ pub(crate) fn finish<'ctx>(
                 ));
             }
             Ok(())
+        }
+    }
+}
+
+/// Removes the transient build dir when the build ends (success or error),
+/// unless `keep` is set (ALM_DUMP_IR) so the dumped IR survives.
+struct BuildDirGuard {
+    dir: PathBuf,
+    keep: bool,
+}
+
+impl Drop for BuildDirGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 }
