@@ -131,6 +131,20 @@ pub fn analyze_project(modules: &[ModuleInfo], entry: &Name) -> MonoSet {
                 continue;
             };
             let concrete = apply_subst(&subst, captured);
+            // Seed only concrete instances. A reference whose resolved type
+            // still has a free variable is either genuinely ambiguous (e.g.
+            // `UL.empty : UniqueList a`, harmless — no elements) or a reference
+            // inside a local `let` body whose local type variables this
+            // top-level substitution cannot resolve (e.g. a helper's `a` inside
+            // `listShrinkRecurse`). Seeding the latter stamps out spurious
+            // free-variable specializations with a boxed (`Ref`) layout that a
+            // concrete call site would later read wrongly. Specialization itself
+            // (the sink fixpoint, via `spec_let`) discovers every instance that
+            // is actually reached, at its true concrete type — including the
+            // genuinely-ambiguous ones — so skip free-variable seeds here.
+            if type_has_free_tyvar(&concrete) {
+                continue;
+            }
             match &node.value {
                 can::Expr_::VarTopLevel(name) if mctx.defs.contains_key(name) => {
                     enqueue(
