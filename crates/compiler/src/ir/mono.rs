@@ -856,7 +856,15 @@ impl Specializer<'_> {
         let mut poly_index: HashMap<usize, Name> = HashMap::new();
         for (i, decl) in decls.iter().enumerate() {
             let (def, recursive) = match decl {
-                can::LetDecl::Def(def) if !def.args.is_empty() => (def, false),
+                // Any local binding whose type is polymorphic in context needs
+                // per-use-site specialization -- including a *point-free* one
+                // (zero args), e.g. `f = List.sort << g`. Compiling such a
+                // binding once under the enclosing substitution leaves its type
+                // variable free, producing a boxed (`Ref`) specialization of the
+                // functions it composes; a concrete unboxed call site then reads
+                // those values at the wrong layout. The `type_has_free_tyvar`
+                // check below filters out monomorphic values (`x = 5`).
+                can::LetDecl::Def(def) => (def, false),
                 can::LetDecl::Recursive(defs) if defs.len() == 1 && !defs[0].args.is_empty() => {
                     (&defs[0], true)
                 }

@@ -1873,3 +1873,30 @@ fn custom_infix_operator() {
          \x20   Debug.toString ( 1 |+| 2 |+| 3, 5 |+| 0 )\n",
     );
 }
+
+#[test]
+fn point_free_polymorphic_let_binding() {
+    // A point-free (zero-argument) local binding whose type is polymorphic in
+    // context -- `f = List.sort << dedup` -- must be specialized per use-site
+    // like any polymorphic local function. Compiling it once left its type
+    // variable free, so the functions it composed got boxed (Ref) instead of
+    // unboxed Int specializations, and the concrete Int call site then read the
+    // list elements at the wrong layout (they came out as Unit). Exercises the
+    // binding used at a concrete Int type.
+    assert_same(
+        "point_free_poly_let",
+        "module Test exposing (..)\n\
+         \n\
+         dedup : List a -> List a\n\
+         dedup xs =\n\
+         \x20   List.foldr (\\x acc -> if List.member x acc then acc else x :: acc) [] xs\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       sorted =\n\
+         \x20           List.sort << dedup\n\
+         \x20   in\n\
+         \x20   Debug.toString ( sorted [ 3, 1, 2, 1, 3 ], sorted [ 5, 2, 5 ] )\n",
+    );
+}
