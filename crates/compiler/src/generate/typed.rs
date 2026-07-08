@@ -5368,6 +5368,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         })
     }
 
+    /// Coerce a scalar operand to `f64`. A polymorphic number literal in a
+    /// float context can arrive as an `i64` (its `number` type defaulted to
+    /// `Int` in `layout_of`), so widen it — in well-typed Elm an integer can
+    /// only meet a float through such a literal.
+    fn to_float(&self, v: BasicValueEnum<'ctx>) -> inkwell::values::FloatValue<'ctx> {
+        if v.is_float_value() {
+            v.into_float_value()
+        } else {
+            self.builder
+                .build_signed_int_to_float(v.into_int_value(), self.ctx.f64_type(), "itof")
+                .unwrap()
+        }
+    }
+
     fn gen_binop(
         &mut self,
         op: &str,
@@ -5429,12 +5443,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             let cmp = self.call_named(sym, &[lw, rw]);
             return Ok(self.call_named("rt_is_true", &[cmp]));
         }
-        let is_float = matches!(layout, Layout::Float);
+        // A float op if either operand is a float — a number literal on the
+        // other side defaults to `Int` in `layout_of` but must widen (matching
+        // the runtime's rt_add "either side float" rule).
+        let is_float = matches!(layout, Layout::Float)
+            || matches!(self.layouts.layout_of(&r.tipe), Layout::Float);
         let lv = self.gen(l)?;
         let rv = self.gen(r)?;
-        let b = &self.builder;
         if is_float {
-            let (x, y) = (lv.into_float_value(), rv.into_float_value());
+            let (x, y) = (self.to_float(lv), self.to_float(rv));
+            let b = &self.builder;
             let v: BasicValueEnum = match op {
                 "+" => b.build_float_add(x, y, "f").unwrap().into(),
                 "-" => b.build_float_sub(x, y, "f").unwrap().into(),
@@ -5451,6 +5469,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             };
             Ok(v)
         } else {
+            let b = &self.builder;
             let (x, y) = (lv.into_int_value(), rv.into_int_value());
             let v: BasicValueEnum = match op {
                 "+" => b.build_int_add(x, y, "i").unwrap().into(),

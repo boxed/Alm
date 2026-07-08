@@ -2286,3 +2286,23 @@ fn multi_arg_function_mapped_point_free() {
          \x20   Debug.toString (List.map (\\f -> f 10) fns)\n",
     );
 }
+
+#[test]
+fn number_literal_in_float_binop() {
+    // A polymorphic number literal used in a float operation defaults to `Int`
+    // in `layout_of` (as an i64), so a float binop must widen it rather than
+    // read it as a float register. Previously this panicked in the LLVM layer
+    // (`Found IntValue ... expected FloatValue`), breaking jjant/linear-algebra.
+    assert_same(
+        "number_lit_float_binop",
+        "module Test exposing (..)\n\
+         \n\
+         scale : Float -> Float\n\
+         scale x =\n\
+         \x20   x / 2 + 500\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromFloat (scale 7.0)\n",
+    );
+}
