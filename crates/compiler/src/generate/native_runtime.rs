@@ -7218,7 +7218,21 @@ extern "C" {
 #[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
 pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    alm_entry()
+    // Run the program on a thread with a large stack. Elm code recurses on the
+    // native (C) stack for non-tail and mutual recursion (only self-tail-calls
+    // become loops), and the 8MB default main-thread stack overflows on the
+    // deep recursion typical of recursive-descent parsers and decoders — depth
+    // a JS engine's larger, growable stack absorbs. 512MB matches "effectively
+    // deep like JS" while staying bounded (a genuine infinite recursion still
+    // faults, just later, rather than running unbounded).
+    match std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(|| unsafe { alm_entry() })
+    {
+        Ok(h) => h.join().unwrap_or(70),
+        // If the thread can't be spawned, fall back to running inline.
+        Err(_) => alm_entry(),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
