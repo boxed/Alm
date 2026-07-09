@@ -105,8 +105,11 @@ pub enum Value {
     /// A set: the root of a persistent weight-balanced tree (0 = empty); the
     /// node's value slot is unused.
     Set(u64),
-    /// A persistent array: elements in order (index 0 first).
-    Array(Vec<u64>),
+    /// A persistent array: the root of a positional weight-balanced tree
+    /// (0 = empty), in-order = index order. get/set/push are O(log n) with
+    /// structural sharing, so `Array.set`/`push` in a loop no longer copies an
+    /// O(n) backing each time.
+    Array(u64),
     /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
     /// runtime's `DataView`; `encode` fills one, `read_*` read from it.
     Bytes(Vec<u8>),
@@ -1333,7 +1336,13 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
             px.iter().zip(&py).all(|((k1, _), (k2, _))| value_eq(*k1, *k2))
         }
         (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
+            if tsize(*x) != tsize(*y) {
+                return false;
+            }
+            let (mut px, mut py) = (Vec::new(), Vec::new());
+            tcollect_vals(*x, &mut px);
+            tcollect_vals(*y, &mut py);
+            px.iter().zip(&py).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         // Functions: Elm's `==` short-circuits to `true` for the same function
@@ -2499,7 +2508,9 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             }
             out.push(']');
         }
-        Value::Array(els) => {
+        Value::Array(root) => {
+            let mut els = Vec::new();
+            tcollect_vals(*root, &mut els);
             out.push_str("Array.fromList [");
             for (i, &x) in els.iter().enumerate() {
                 if i > 0 {
@@ -3127,13 +3138,13 @@ pub unsafe extern "C" fn set_partition(f: u64, s: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_append(a: u64, b: u64) -> u64 {
-    let mut els = as_array(a).to_vec();
-    els.extend_from_slice(as_array(b));
-    alloc(Value::Array(els))
+    let mut els = arr_elems(a);
+    els.extend(arr_elems(b));
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_to_indexed_list(a: u64) -> u64 {
-    let items: Vec<u64> = as_array(a)
+    let items: Vec<u64> = arr_elems(a)
         .iter()
         .enumerate()
         .map(|(i, &x)| pair(mk_int(i as i64), x))
@@ -3360,11 +3371,75 @@ unsafe fn mk_set(root: u64) -> u64 {
     alloc(Value::Set(root))
 }
 
-unsafe fn as_array<'a>(v: u64) -> &'a [u64] {
-    match deref(v) {
-        Value::Array(a) => a,
-        _ => &[],
+// Array = a positional weight-balanced tree (same nodes as Dict/Set, but keyed
+// by in-order rank rather than `value_cmp`; the `key` slot is unused). Reuses
+// `tbalance`/`tnode`/`tsize` — WBT rotations preserve in-order order, so they
+// rebalance a positional tree correctly.
+unsafe fn tget_rank(n: u64, mut i: u32) -> u64 {
+    let mut cur = n;
+    loop {
+        let nd = tref(cur);
+        let ls = tsize(nd.left);
+        if i < ls {
+            cur = nd.left;
+        } else if i == ls {
+            return nd.val;
+        } else {
+            i -= ls + 1;
+            cur = nd.right;
+        }
     }
+}
+unsafe fn tset_rank(n: u64, i: u32, v: u64) -> u64 {
+    let nd = tref(n);
+    let ls = tsize(nd.left);
+    if i < ls {
+        tnode(0, nd.val, tset_rank(nd.left, i, v), nd.right)
+    } else if i == ls {
+        tnode(0, v, nd.left, nd.right)
+    } else {
+        tnode(0, nd.val, nd.left, tset_rank(nd.right, i - ls - 1, v))
+    }
+}
+unsafe fn tpush_right(n: u64, v: u64) -> u64 {
+    if n == 0 {
+        return tnode(0, v, 0, 0);
+    }
+    let nd = tref(n);
+    tbalance(0, nd.val, nd.left, tpush_right(nd.right, v))
+}
+unsafe fn tcollect_vals(n: u64, out: &mut Vec<u64>) {
+    if n == 0 {
+        return;
+    }
+    let nd = tref(n);
+    tcollect_vals(nd.left, out);
+    out.push(nd.val);
+    tcollect_vals(nd.right, out);
+}
+unsafe fn tbuild_vals(items: &[u64]) -> u64 {
+    if items.is_empty() {
+        return 0;
+    }
+    let mid = items.len() / 2;
+    tnode(0, items[mid], tbuild_vals(&items[..mid]), tbuild_vals(&items[mid + 1..]))
+}
+#[inline]
+unsafe fn arr_root(v: u64) -> u64 {
+    match deref(v) {
+        Value::Array(r) => *r,
+        _ => 0,
+    }
+}
+unsafe fn arr_elems(v: u64) -> Vec<u64> {
+    let root = arr_root(v);
+    let mut out = Vec::with_capacity(tsize(root) as usize);
+    tcollect_vals(root, &mut out);
+    out
+}
+#[inline]
+unsafe fn mk_array(root: u64) -> u64 {
+    alloc(Value::Array(root))
 }
 unsafe fn mkbool(b: bool) -> u64 {
     if b {
@@ -3668,62 +3743,60 @@ pub unsafe extern "C" fn set_filter(f: u64, s: u64) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn array_is_empty(a: u64) -> u64 {
-    mkbool(as_array(a).is_empty())
+    mkbool(arr_root(a) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_length(a: u64) -> u64 {
-    mk_int(as_array(a).len() as i64)
+    mk_int(tsize(arr_root(a)) as i64)
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_initialize(n: u64, f: u64) -> u64 {
     let n = int_val(n).max(0);
-    let els = (0..n).map(|i| ap1(f, mk_int(i))).collect();
-    alloc(Value::Array(els))
+    let els: Vec<u64> = (0..n).map(|i| ap1(f, mk_int(i))).collect();
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_repeat(n: u64, x: u64) -> u64 {
     let n = int_val(n).max(0) as usize;
-    alloc(Value::Array(vec![x; n]))
+    mk_array(tbuild_vals(&vec![x; n]))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_from_list(list: u64) -> u64 {
     let els: Vec<u64> = list_store(list).iter().rev().copied().collect();
-    alloc(Value::Array(els))
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_to_list(a: u64) -> u64 {
-    let els: Vec<u64> = as_array(a).to_vec();
-    list_from_slice(&els)
+    list_from_slice(&arr_elems(a))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_get(i: u64, a: u64) -> u64 {
-    let arr = as_array(a);
+    let root = arr_root(a);
     let i = int_val(i);
-    if i >= 0 && (i as usize) < arr.len() {
-        just(arr[i as usize])
+    if i >= 0 && (i as u32 as i64) == i && (i as u32) < tsize(root) {
+        just(tget_rank(root, i as u32))
     } else {
         nothing()
     }
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_set(i: u64, v: u64, a: u64) -> u64 {
-    let mut arr = as_array(a).to_vec();
+    let root = arr_root(a);
     let i = int_val(i);
-    if i >= 0 && (i as usize) < arr.len() {
-        arr[i as usize] = v;
+    if i >= 0 && (i as u32 as i64) == i && (i as u32) < tsize(root) {
+        mk_array(tset_rank(root, i as u32, v))
+    } else {
+        mk_array(root)
     }
-    alloc(Value::Array(arr))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_push(v: u64, a: u64) -> u64 {
-    let mut arr = as_array(a).to_vec();
-    arr.push(v);
-    alloc(Value::Array(arr))
+    mk_array(tpush_right(arr_root(a), v))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_foldl(f: u64, init: u64, a: u64) -> u64 {
     let mut acc = init;
-    for &x in as_array(a) {
+    for &x in &arr_elems(a) {
         acc = ap2(f, x, acc);
     }
     acc
@@ -3731,33 +3804,33 @@ pub unsafe extern "C" fn array_foldl(f: u64, init: u64, a: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn array_foldr(f: u64, init: u64, a: u64) -> u64 {
     let mut acc = init;
-    for &x in as_array(a).iter().rev() {
+    for &x in arr_elems(a).iter().rev() {
         acc = ap2(f, x, acc);
     }
     acc
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_map(f: u64, a: u64) -> u64 {
-    let els = as_array(a).iter().map(|&x| ap1(f, x)).collect();
-    alloc(Value::Array(els))
+    let els: Vec<u64> = arr_elems(a).iter().map(|&x| ap1(f, x)).collect();
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_indexed_map(f: u64, a: u64) -> u64 {
-    let els = as_array(a)
+    let els: Vec<u64> = arr_elems(a)
         .iter()
         .enumerate()
         .map(|(i, &x)| ap2(f, mk_int(i as i64), x))
         .collect();
-    alloc(Value::Array(els))
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_filter(f: u64, a: u64) -> u64 {
-    let els = as_array(a).iter().filter(|&&x| truthy(ap1(f, x))).copied().collect();
-    alloc(Value::Array(els))
+    let els: Vec<u64> = arr_elems(a).into_iter().filter(|&x| truthy(ap1(f, x))).collect();
+    mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_slice(from: u64, to: u64, a: u64) -> u64 {
-    let arr = as_array(a);
+    let arr = arr_elems(a);
     let len = arr.len() as i64;
     let norm = |i: i64| -> i64 {
         let i = if i < 0 { len + i } else { i };
@@ -3765,11 +3838,11 @@ pub unsafe extern "C" fn array_slice(from: u64, to: u64, a: u64) -> u64 {
     };
     let (lo, hi) = (norm(int_val(from)), norm(int_val(to)));
     let els = if lo < hi {
-        arr[lo as usize..hi as usize].to_vec()
+        &arr[lo as usize..hi as usize]
     } else {
-        Vec::new()
+        &[][..]
     };
-    alloc(Value::Array(els))
+    mk_array(tbuild_vals(els))
 }
 
 // -- elm/bytes --
@@ -5035,11 +5108,10 @@ unsafe extern "C" fn encode_list(f: u64, items: u64) -> u64 {
     mk_json(JsonValue::JArray(arr))
 }
 unsafe extern "C" fn encode_array(f: u64, arr: u64) -> u64 {
-    let words = match deref(arr) {
-        Value::Array(els) => els.clone(),
-        _ => Vec::new(),
-    };
-    let out: Vec<JsonValue> = words.into_iter().map(|x| as_json(ap1(f, x)).clone()).collect();
+    let out: Vec<JsonValue> = arr_elems(arr)
+        .into_iter()
+        .map(|x| as_json(ap1(f, x)).clone())
+        .collect();
     mk_json(JsonValue::JArray(out))
 }
 unsafe extern "C" fn encode_set(f: u64, set: u64) -> u64 {
@@ -7172,7 +7244,7 @@ unsafe fn runtime_init() {
     G_PLATFORM_SUB_NONE.set(ctor(b"SubNone\0".as_ptr(), ST_NONE, Vec::new()));
     G_DICT_EMPTY.set(alloc(Value::Dict(0)));
     G_SET_EMPTY.set(alloc(Value::Set(0)));
-    G_ARRAY_EMPTY.set(alloc(Value::Array(Vec::new())));
+    G_ARRAY_EMPTY.set(alloc(Value::Array(0)));
     G_RANDOM_MININT.set(rt_int(-2147483648));
     G_RANDOM_MAXINT.set(rt_int(2147483647));
     G_RANDOM_INDEPENDENTSEED
