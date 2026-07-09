@@ -350,6 +350,14 @@ pub unsafe extern "C" fn rt_ctor_tag(w: u64) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn rt_unfloat(w: u64) -> f64 {
+    // A polymorphic number literal in a float position can be boxed as an
+    // immediate `Int` (its `number` type defaulted to Int) yet consumed as a
+    // `Float` — e.g. `(x, y, 0)` typed `(Float, Float, Float)` at the use site.
+    // Coerce it (elm treats all numbers as f64) rather than dereferencing the
+    // tagged immediate as a pointer, which segfaults.
+    if is_int(w) {
+        return int_val(w) as f64;
+    }
     match deref(w) {
         Value::Float(f) => *f,
         _ => 0.0,

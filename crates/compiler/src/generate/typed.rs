@@ -2558,6 +2558,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             vals.push(self.gen(c)?);
         }
         for (i, v) in vals.into_iter().enumerate() {
+            let v = self.coerce_to_slot(v, struct_ty.get_field_type_at_index(i as u32));
             agg = self
                 .builder
                 .build_insert_value(agg, v, i as u32, "tup")
@@ -2565,6 +2566,23 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .into_struct_value();
         }
         Ok(agg.into())
+    }
+
+    /// Widen an `i64` to `f64` when the aggregate slot is a float — a
+    /// polymorphic number literal in a float position (`( x, y, 0 )` where the
+    /// tuple is `(Float, Float, Float)`) is generated as an `Int` by `layout_of`
+    /// (see `to_float`), and inserting it into an `f64` slot would otherwise
+    /// build a struct whose layout disagrees between `case` branches.
+    fn coerce_to_slot(
+        &self,
+        v: BasicValueEnum<'ctx>,
+        slot: Option<BasicTypeEnum<'ctx>>,
+    ) -> BasicValueEnum<'ctx> {
+        if matches!(slot, Some(t) if t.is_float_type()) && v.is_int_value() {
+            self.to_float(v).into()
+        } else {
+            v
+        }
     }
 
     fn gen_record(
@@ -2583,6 +2601,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .position(|n| n == name.as_str())
                 .ok_or_else(|| format!("typed backend: record has no field `{}`", name))?;
             let v = self.gen(value)?;
+            let v = self.coerce_to_slot(v, struct_ty.get_field_type_at_index(idx as u32));
             agg = self
                 .builder
                 .build_insert_value(agg, v, idx as u32, "rec")
