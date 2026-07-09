@@ -167,15 +167,22 @@ pub(crate) fn finish<'ctx>(
     // resolved to the .a). Internal helpers (value_eq, the allocator, …) are
     // not exported, so keep them as internal definitions merged into the
     // object.
+    // Any externally-visible definition (External, but also the WeakODR /
+    // LinkOnce linkages rustc gives small `#[no_mangle]` fns it wants to inline)
+    // is also in the static library, so make it inline-only here; otherwise it
+    // is emitted in both program.o and runtime.a and the link fails with a
+    // duplicate symbol. Only truly-internal helpers stay as merged definitions.
+    let externally_visible =
+        |l: Linkage| !matches!(l, Linkage::Internal | Linkage::Private | Linkage::AvailableExternally);
     for function in runtime_module.get_functions() {
-        if function.count_basic_blocks() > 0 && function.get_linkage() == Linkage::External {
+        if function.count_basic_blocks() > 0 && externally_visible(function.get_linkage()) {
             function.set_linkage(Linkage::AvailableExternally);
         }
     }
     let mut global = runtime_module.get_first_global();
     while let Some(g) = global {
         global = g.get_next_global();
-        if g.get_initializer().is_some() && g.get_linkage() == Linkage::External {
+        if g.get_initializer().is_some() && externally_visible(g.get_linkage()) {
             g.set_linkage(Linkage::AvailableExternally);
         }
     }

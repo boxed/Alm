@@ -98,11 +98,13 @@ pub enum Value {
         fields: Vec<(*const u8, u64)>,
     },
     Tuple(Vec<u64>),
-    /// A dictionary: `(key, value)` pairs sorted ascending by key, no
-    /// duplicate keys. Immutable — operations copy (bump-allocated).
-    Dict(Vec<(u64, u64)>),
-    /// A set: elements sorted ascending, unique.
-    Set(Vec<u64>),
+    /// A dictionary: the root of a persistent weight-balanced tree keyed by
+    /// `value_cmp` (0 = empty). Immutable; updates path-copy O(log n) nodes and
+    /// share the rest, so building N entries in a loop is O(N log N), not O(N²).
+    Dict(u64),
+    /// A set: the root of a persistent weight-balanced tree (0 = empty); the
+    /// node's value slot is unused.
+    Set(u64),
     /// A persistent array: elements in order (index 0 first).
     Array(Vec<u64>),
     /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
@@ -1308,13 +1310,29 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
         (Value::Record { fields }, Value::Record { .. }) => {
             fields.iter().all(|&(name, value)| value_eq(value, rt_access(b, name)))
         }
+        // Dict/Set are balanced trees whose shape isn't canonical (same
+        // contents, different rotations), so compare by in-order contents.
         (Value::Dict(x), Value::Dict(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y)
-                    .all(|((k1, v1), (k2, v2))| value_eq(*k1, *k2) && value_eq(*v1, *v2))
+            if tsize(*x) != tsize(*y) {
+                return false;
+            }
+            let (mut px, mut py) = (Vec::new(), Vec::new());
+            tcollect(*x, &mut px);
+            tcollect(*y, &mut py);
+            px.iter()
+                .zip(&py)
+                .all(|((k1, v1), (k2, v2))| value_eq(*k1, *k2) && value_eq(*v1, *v2))
         }
-        (Value::Set(x), Value::Set(y)) | (Value::Array(x), Value::Array(y)) => {
+        (Value::Set(x), Value::Set(y)) => {
+            if tsize(*x) != tsize(*y) {
+                return false;
+            }
+            let (mut px, mut py) = (Vec::new(), Vec::new());
+            tcollect(*x, &mut px);
+            tcollect(*y, &mut py);
+            px.iter().zip(&py).all(|((k1, _), (k2, _))| value_eq(*k1, *k2))
+        }
+        (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
@@ -2453,7 +2471,9 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
         }
         Value::Closure { .. } => out.push_str("<function>"),
         Value::Regex(_) => out.push_str("<internals>"),
-        Value::Dict(pairs) => {
+        Value::Dict(root) => {
+            let mut pairs = Vec::new();
+            tcollect(*root, &mut pairs);
             out.push_str("Dict.fromList [");
             for (i, (k, val)) in pairs.iter().enumerate() {
                 if i > 0 {
@@ -2467,13 +2487,15 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             }
             out.push(']');
         }
-        Value::Set(els) => {
+        Value::Set(root) => {
+            let mut pairs = Vec::new();
+            tcollect(*root, &mut pairs);
             out.push_str("Set.fromList [");
-            for (i, &x) in els.iter().enumerate() {
+            for (i, (x, _)) in pairs.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                debug_fmt(out, x);
+                debug_fmt(out, *x);
             }
             out.push(']');
         }
@@ -3094,14 +3116,14 @@ pub unsafe extern "C" fn string_foldr(f: u64, init: u64, s: u64) -> u64 {
 pub unsafe extern "C" fn set_partition(f: u64, s: u64) -> u64 {
     let mut yes = Vec::new();
     let mut no = Vec::new();
-    for &x in as_set(s) {
+    for x in set_elems(s) {
         if truthy(ap1(f, x)) {
-            yes.push(x);
+            yes.push((x, 0));
         } else {
-            no.push(x);
+            no.push((x, 0));
         }
     }
-    pair(alloc(Value::Set(yes)), alloc(Value::Set(no)))
+    pair(mk_set(tbuild(&yes)), mk_set(tbuild(&no)))
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_append(a: u64, b: u64) -> u64 {
@@ -3127,18 +3149,217 @@ pub unsafe extern "C" fn array_to_indexed_list(a: u64) -> u64 {
 // like everything here. O(n) inserts (a sorted Vec, not a balanced tree) —
 // simple and correct; the tree can come later if it matters.
 
-unsafe fn as_pairs<'a>(v: u64) -> &'a [(u64, u64)] {
-    match deref(v) {
-        Value::Dict(d) => d,
-        _ => &[],
+// PERSISTENT WEIGHT-BALANCED TREE (Adams' variant, delta=3 gamma=2), keyed by
+// `value_cmp`. Backs both Dict and Set. Nodes are immutable and bump-allocated;
+// an update path-copies the O(log n) nodes on the search path and shares the
+// rest, so a fold that builds N entries allocates O(N log N) nodes rather than
+// copying an O(n) array N times (O(N²)). Not freed yet — reference counting is
+// a later stage; this stage removes the per-update copy that caused the OOMs.
+
+struct TNode {
+    key: u64,
+    val: u64,
+    size: u32,
+    left: u64,
+    right: u64,
+}
+const WBT_DELTA: u32 = 3;
+const WBT_GAMMA: u32 = 2;
+
+#[inline]
+unsafe fn tref<'a>(n: u64) -> &'a TNode {
+    &*(n as *const TNode)
+}
+#[inline]
+unsafe fn tsize(n: u64) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        tref(n).size
     }
 }
-unsafe fn as_set<'a>(v: u64) -> &'a [u64] {
-    match deref(v) {
-        Value::Set(s) => s,
-        _ => &[],
+unsafe fn tnode(key: u64, val: u64, left: u64, right: u64) -> u64 {
+    let size = 1 + tsize(left) + tsize(right);
+    Box::into_raw(Box::new(TNode { key, val, size, left, right })) as u64
+}
+unsafe fn t_single_l(k: u64, v: u64, l: u64, r: u64) -> u64 {
+    let rr = tref(r);
+    tnode(rr.key, rr.val, tnode(k, v, l, rr.left), rr.right)
+}
+unsafe fn t_single_r(k: u64, v: u64, l: u64, r: u64) -> u64 {
+    let ll = tref(l);
+    tnode(ll.key, ll.val, ll.left, tnode(k, v, ll.right, r))
+}
+unsafe fn t_double_l(k: u64, v: u64, l: u64, r: u64) -> u64 {
+    let (rr, rl) = (tref(r), tref(tref(r).left));
+    tnode(
+        rl.key,
+        rl.val,
+        tnode(k, v, l, rl.left),
+        tnode(rr.key, rr.val, rl.right, rr.right),
+    )
+}
+unsafe fn t_double_r(k: u64, v: u64, l: u64, r: u64) -> u64 {
+    let (ll, lr) = (tref(l), tref(tref(l).right));
+    tnode(
+        lr.key,
+        lr.val,
+        tnode(ll.key, ll.val, ll.left, lr.left),
+        tnode(k, v, lr.right, r),
+    )
+}
+unsafe fn tbalance(k: u64, v: u64, l: u64, r: u64) -> u64 {
+    let (ln, rn) = (tsize(l), tsize(r));
+    if ln + rn <= 1 {
+        tnode(k, v, l, r)
+    } else if rn > WBT_DELTA * ln {
+        let rr = tref(r);
+        if tsize(rr.left) < WBT_GAMMA * tsize(rr.right) {
+            t_single_l(k, v, l, r)
+        } else {
+            t_double_l(k, v, l, r)
+        }
+    } else if ln > WBT_DELTA * rn {
+        let ll = tref(l);
+        if tsize(ll.right) < WBT_GAMMA * tsize(ll.left) {
+            t_single_r(k, v, l, r)
+        } else {
+            t_double_r(k, v, l, r)
+        }
+    } else {
+        tnode(k, v, l, r)
     }
 }
+unsafe fn tinsert(n: u64, k: u64, v: u64) -> u64 {
+    if n == 0 {
+        return tnode(k, v, 0, 0);
+    }
+    let nd = tref(n);
+    match value_cmp(k, nd.key) {
+        c if c < 0 => tbalance(nd.key, nd.val, tinsert(nd.left, k, v), nd.right),
+        c if c > 0 => tbalance(nd.key, nd.val, nd.left, tinsert(nd.right, k, v)),
+        _ => tnode(k, v, nd.left, nd.right),
+    }
+}
+unsafe fn tfind(n: u64, k: u64) -> Option<u64> {
+    let mut cur = n;
+    while cur != 0 {
+        let nd = tref(cur);
+        match value_cmp(k, nd.key) {
+            c if c < 0 => cur = nd.left,
+            c if c > 0 => cur = nd.right,
+            _ => return Some(nd.val),
+        }
+    }
+    None
+}
+unsafe fn t_min(n: u64) -> (u64, u64) {
+    let mut cur = n;
+    loop {
+        let nd = tref(cur);
+        if nd.left == 0 {
+            return (nd.key, nd.val);
+        }
+        cur = nd.left;
+    }
+}
+unsafe fn t_delmin(n: u64) -> u64 {
+    let nd = tref(n);
+    if nd.left == 0 {
+        nd.right
+    } else {
+        tbalance(nd.key, nd.val, t_delmin(nd.left), nd.right)
+    }
+}
+unsafe fn t_glue(l: u64, r: u64) -> u64 {
+    if l == 0 {
+        r
+    } else if r == 0 {
+        l
+    } else {
+        let (mk, mv) = t_min(r);
+        tbalance(mk, mv, l, t_delmin(r))
+    }
+}
+unsafe fn tremove(n: u64, k: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let nd = tref(n);
+    match value_cmp(k, nd.key) {
+        c if c < 0 => tbalance(nd.key, nd.val, tremove(nd.left, k), nd.right),
+        c if c > 0 => tbalance(nd.key, nd.val, nd.left, tremove(nd.right, k)),
+        _ => t_glue(nd.left, nd.right),
+    }
+}
+unsafe fn tcollect(n: u64, out: &mut Vec<(u64, u64)>) {
+    if n == 0 {
+        return;
+    }
+    let nd = tref(n);
+    tcollect(nd.left, out);
+    out.push((nd.key, nd.val));
+    tcollect(nd.right, out);
+}
+/// A balanced tree from already-sorted, deduplicated pairs, in O(n).
+unsafe fn tbuild(items: &[(u64, u64)]) -> u64 {
+    if items.is_empty() {
+        return 0;
+    }
+    let mid = items.len() / 2;
+    let (k, v) = items[mid];
+    tnode(k, v, tbuild(&items[..mid]), tbuild(&items[mid + 1..]))
+}
+unsafe fn tmap(n: u64, f: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let nd = tref(n);
+    // Post-order-ish; keys and shape unchanged, only values remapped.
+    let left = tmap(nd.left, f);
+    let val = ap2(f, nd.key, nd.val);
+    let right = tmap(nd.right, f);
+    tnode(nd.key, val, left, right)
+}
+
+// Distinct accessors per variant: keeping them separate (rather than one that
+// matches both Dict and Set) is also what stops LLVM's function-merging pass
+// from folding the identical-looking set_*/dict_* wrappers into thunks with
+// external linkage — which duplicated symbols against the runtime archive.
+#[inline]
+unsafe fn dict_root(v: u64) -> u64 {
+    match deref(v) {
+        Value::Dict(r) => *r,
+        _ => 0,
+    }
+}
+#[inline]
+unsafe fn set_root(v: u64) -> u64 {
+    match deref(v) {
+        Value::Set(r) => *r,
+        _ => 0,
+    }
+}
+unsafe fn troot_pairs(root: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::with_capacity(tsize(root) as usize);
+    tcollect(root, &mut out);
+    out
+}
+unsafe fn dict_pairs(v: u64) -> Vec<(u64, u64)> {
+    troot_pairs(dict_root(v))
+}
+unsafe fn set_elems(v: u64) -> Vec<u64> {
+    troot_pairs(set_root(v)).into_iter().map(|(k, _)| k).collect()
+}
+#[inline]
+unsafe fn mk_dict(root: u64) -> u64 {
+    alloc(Value::Dict(root))
+}
+#[inline]
+unsafe fn mk_set(root: u64) -> u64 {
+    alloc(Value::Set(root))
+}
+
 unsafe fn as_array<'a>(v: u64) -> &'a [u64] {
     match deref(v) {
         Value::Array(a) => a,
@@ -3167,75 +3388,65 @@ unsafe fn ap3(f: u64, a: u64, b: u64, c: u64) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn dict_singleton(k: u64, v: u64) -> u64 {
-    alloc(Value::Dict(vec![(k, v)]))
+    mk_dict(tnode(k, v, 0, 0))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_insert(k: u64, v: u64, d: u64) -> u64 {
-    let mut pairs = as_pairs(d).to_vec();
-    match pairs.binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))) {
-        Ok(i) => pairs[i].1 = v,
-        Err(i) => pairs.insert(i, (k, v)),
-    }
-    alloc(Value::Dict(pairs))
+    mk_dict(tinsert(dict_root(d), k, v))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_get(k: u64, d: u64) -> u64 {
-    let pairs = as_pairs(d);
-    match pairs.binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))) {
-        Ok(i) => just(pairs[i].1),
-        Err(_) => nothing(),
+    match tfind(dict_root(d), k) {
+        Some(v) => just(v),
+        None => nothing(),
     }
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_remove(k: u64, d: u64) -> u64 {
-    let mut pairs = as_pairs(d).to_vec();
-    if let Ok(i) = pairs.binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))) {
-        pairs.remove(i);
-    }
-    alloc(Value::Dict(pairs))
+    mk_dict(tremove(dict_root(d), k))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_member(k: u64, d: u64) -> u64 {
-    mkbool(as_pairs(d).binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))).is_ok())
+    mkbool(tfind(dict_root(d), k).is_some())
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_is_empty(d: u64) -> u64 {
-    mkbool(as_pairs(d).is_empty())
+    mkbool(dict_root(d) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_size(d: u64) -> u64 {
-    mk_int(as_pairs(d).len() as i64)
+    mk_int(tsize(dict_root(d)) as i64)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_keys(d: u64) -> u64 {
-    let ks: Vec<u64> = as_pairs(d).iter().map(|(k, _)| *k).collect();
+    let ks: Vec<u64> = dict_pairs(d).iter().map(|(k, _)| *k).collect();
     list_from_slice(&ks)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_values(d: u64) -> u64 {
-    let vs: Vec<u64> = as_pairs(d).iter().map(|(_, v)| *v).collect();
+    let vs: Vec<u64> = dict_pairs(d).iter().map(|(_, v)| *v).collect();
     list_from_slice(&vs)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_to_list(d: u64) -> u64 {
-    let items: Vec<u64> = as_pairs(d).iter().map(|(k, v)| pair(*k, *v)).collect();
+    let items: Vec<u64> = dict_pairs(d).iter().map(|(k, v)| pair(*k, *v)).collect();
     list_from_slice(&items)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_from_list(list: u64) -> u64 {
-    let mut acc = alloc(Value::Dict(Vec::new()));
+    let mut root = 0u64;
     // Head-first: later entries override earlier (Elm semantics).
     for &p in list_store(list).iter().rev() {
         if let Value::Tuple(kv) = deref(p) {
-            acc = dict_insert(kv[0], kv[1], acc);
+            root = tinsert(root, kv[0], kv[1]);
         }
     }
-    acc
+    mk_dict(root)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_foldl(f: u64, init: u64, d: u64) -> u64 {
     let mut acc = init;
-    for &(k, v) in as_pairs(d) {
+    for &(k, v) in &dict_pairs(d) {
         acc = ap3(f, k, v, acc);
     }
     acc
@@ -3243,74 +3454,71 @@ pub unsafe extern "C" fn dict_foldl(f: u64, init: u64, d: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn dict_foldr(f: u64, init: u64, d: u64) -> u64 {
     let mut acc = init;
-    for &(k, v) in as_pairs(d).iter().rev() {
+    for &(k, v) in dict_pairs(d).iter().rev() {
         acc = ap3(f, k, v, acc);
     }
     acc
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_map(f: u64, d: u64) -> u64 {
-    let pairs = as_pairs(d).iter().map(|&(k, v)| (k, ap2(f, k, v))).collect();
-    alloc(Value::Dict(pairs))
+    mk_dict(tmap(dict_root(d), f))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_filter(f: u64, d: u64) -> u64 {
-    let pairs = as_pairs(d)
-        .iter()
-        .filter(|&&(k, v)| truthy(ap2(f, k, v)))
-        .copied()
+    let kept: Vec<(u64, u64)> = dict_pairs(d)
+        .into_iter()
+        .filter(|&(k, v)| truthy(ap2(f, k, v)))
         .collect();
-    alloc(Value::Dict(pairs))
+    mk_dict(tbuild(&kept))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_update(k: u64, f: u64, d: u64) -> u64 {
     let current = dict_get(k, d);
-    match deref(ap1(f, current)) {
-        Value::Ctor { index: 0, .. } => {
-            let v = ctor_get(ap1(f, current), 0);
-            dict_insert(k, v, d)
-        }
+    let result = ap1(f, current);
+    match deref(result) {
+        Value::Ctor { index: 0, .. } => dict_insert(k, ctor_get(result, 0), d),
         _ => dict_remove(k, d),
     }
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_union(a: u64, b: u64) -> u64 {
-    let mut acc = b;
-    for &(k, v) in as_pairs(a) {
-        acc = dict_insert(k, v, acc);
+    // Keep all keys; on conflict `a` wins (insert a's entries over b).
+    let mut root = dict_root(b);
+    for &(k, v) in &dict_pairs(a) {
+        root = tinsert(root, k, v);
     }
-    acc
+    mk_dict(root)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_intersect(a: u64, b: u64) -> u64 {
-    let pairs = as_pairs(a)
-        .iter()
-        .filter(|&&(k, _)| as_pairs(b).binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))).is_ok())
-        .copied()
+    let broot = dict_root(b);
+    let kept: Vec<(u64, u64)> = dict_pairs(a)
+        .into_iter()
+        .filter(|&(k, _)| tfind(broot, k).is_some())
         .collect();
-    alloc(Value::Dict(pairs))
+    mk_dict(tbuild(&kept))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_diff(a: u64, b: u64) -> u64 {
-    let pairs = as_pairs(a)
-        .iter()
-        .filter(|&&(k, _)| as_pairs(b).binary_search_by(|(kk, _)| ord(value_cmp(*kk, k))).is_err())
-        .copied()
+    let broot = dict_root(b);
+    let kept: Vec<(u64, u64)> = dict_pairs(a)
+        .into_iter()
+        .filter(|&(k, _)| tfind(broot, k).is_none())
         .collect();
-    alloc(Value::Dict(pairs))
+    mk_dict(tbuild(&kept))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_partition(f: u64, d: u64) -> u64 {
     let mut yes = Vec::new();
     let mut no = Vec::new();
-    for &(k, v) in as_pairs(d) {
+    for (k, v) in dict_pairs(d) {
         if truthy(ap2(f, k, v)) {
             yes.push((k, v));
         } else {
             no.push((k, v));
         }
     }
-    pair(alloc(Value::Dict(yes)), alloc(Value::Dict(no)))
+    pair(mk_dict(tbuild(&yes)), mk_dict(tbuild(&no)))
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_merge(
@@ -3321,9 +3529,9 @@ pub unsafe extern "C" fn dict_merge(
     right: u64,
     initial: u64,
 ) -> u64 {
-    // Copy first: the step closures allocate, which may move the arena.
-    let la = as_pairs(left).to_vec();
-    let ra = as_pairs(right).to_vec();
+    // Collect first: the step closures allocate.
+    let la = dict_pairs(left);
+    let ra = dict_pairs(right);
     let mut acc = initial;
     let (mut i, mut j) = (0usize, 0usize);
     while i < la.len() && j < ra.len() {
@@ -3360,79 +3568,72 @@ pub unsafe extern "C" fn dict_merge(
 
 #[no_mangle]
 pub unsafe extern "C" fn set_singleton(x: u64) -> u64 {
-    alloc(Value::Set(vec![x]))
+    mk_set(tnode(x, 0, 0, 0))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_insert(x: u64, s: u64) -> u64 {
-    let mut els = as_set(s).to_vec();
-    if let Err(i) = els.binary_search_by(|e| ord(value_cmp(*e, x))) {
-        els.insert(i, x);
-    }
-    alloc(Value::Set(els))
+    mk_set(tinsert(set_root(s), x, 0))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_remove(x: u64, s: u64) -> u64 {
-    let mut els = as_set(s).to_vec();
-    if let Ok(i) = els.binary_search_by(|e| ord(value_cmp(*e, x))) {
-        els.remove(i);
-    }
-    alloc(Value::Set(els))
+    mk_set(tremove(set_root(s), x))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_member(x: u64, s: u64) -> u64 {
-    mkbool(as_set(s).binary_search_by(|e| ord(value_cmp(*e, x))).is_ok())
+    mkbool(tfind(set_root(s), x).is_some())
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_is_empty(s: u64) -> u64 {
-    mkbool(as_set(s).is_empty())
+    mkbool(set_root(s) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_size(s: u64) -> u64 {
-    mk_int(as_set(s).len() as i64)
+    mk_int(tsize(set_root(s)) as i64)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_to_list(s: u64) -> u64 {
-    let els: Vec<u64> = as_set(s).to_vec();
-    list_from_slice(&els)
+    list_from_slice(&set_elems(s))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_from_list(list: u64) -> u64 {
-    let mut acc = alloc(Value::Set(Vec::new()));
+    let mut root = 0u64;
     for &x in list_store(list).iter().rev() {
-        acc = set_insert(x, acc);
+        root = tinsert(root, x, 0);
     }
-    acc
+    mk_set(root)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_union(a: u64, b: u64) -> u64 {
-    let mut acc = b;
-    for &x in as_set(a) {
-        acc = set_insert(x, acc);
+    let mut root = set_root(b);
+    for &x in &set_elems(a) {
+        root = tinsert(root, x, 0);
     }
-    acc
+    mk_set(root)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_intersect(a: u64, b: u64) -> u64 {
-    let els = as_set(a)
-        .iter()
-        .filter(|&&x| as_set(b).binary_search_by(|e| ord(value_cmp(*e, x))).is_ok())
-        .copied()
+    let broot = set_root(b);
+    let kept: Vec<(u64, u64)> = set_elems(a)
+        .into_iter()
+        .filter(|&x| tfind(broot, x).is_some())
+        .map(|x| (x, 0))
         .collect();
-    alloc(Value::Set(els))
+    mk_set(tbuild(&kept))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_diff(a: u64, b: u64) -> u64 {
-    let els = as_set(a)
-        .iter()
-        .filter(|&&x| as_set(b).binary_search_by(|e| ord(value_cmp(*e, x))).is_err())
-        .copied()
+    let broot = set_root(b);
+    let kept: Vec<(u64, u64)> = set_elems(a)
+        .into_iter()
+        .filter(|&x| tfind(broot, x).is_none())
+        .map(|x| (x, 0))
         .collect();
-    alloc(Value::Set(els))
+    mk_set(tbuild(&kept))
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_foldl(f: u64, init: u64, s: u64) -> u64 {
     let mut acc = init;
-    for &x in as_set(s) {
+    for &x in &set_elems(s) {
         acc = ap2(f, x, acc);
     }
     acc
@@ -3440,23 +3641,27 @@ pub unsafe extern "C" fn set_foldl(f: u64, init: u64, s: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn set_foldr(f: u64, init: u64, s: u64) -> u64 {
     let mut acc = init;
-    for &x in as_set(s).iter().rev() {
+    for &x in set_elems(s).iter().rev() {
         acc = ap2(f, x, acc);
     }
     acc
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_map(f: u64, s: u64) -> u64 {
-    let mut acc = alloc(Value::Set(Vec::new()));
-    for &x in as_set(s) {
-        acc = set_insert(ap1(f, x), acc);
+    let mut root = 0u64;
+    for &x in &set_elems(s) {
+        root = tinsert(root, ap1(f, x), 0);
     }
-    acc
+    mk_set(root)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_filter(f: u64, s: u64) -> u64 {
-    let els = as_set(s).iter().filter(|&&x| truthy(ap1(f, x))).copied().collect();
-    alloc(Value::Set(els))
+    let kept: Vec<(u64, u64)> = set_elems(s)
+        .into_iter()
+        .filter(|&x| truthy(ap1(f, x)))
+        .map(|x| (x, 0))
+        .collect();
+    mk_set(tbuild(&kept))
 }
 
 // -- Array --
@@ -4838,11 +5043,10 @@ unsafe extern "C" fn encode_array(f: u64, arr: u64) -> u64 {
     mk_json(JsonValue::JArray(out))
 }
 unsafe extern "C" fn encode_set(f: u64, set: u64) -> u64 {
-    let words = match deref(set) {
-        Value::Set(els) => els.clone(),
-        _ => Vec::new(),
-    };
-    let out: Vec<JsonValue> = words.into_iter().map(|x| as_json(ap1(f, x)).clone()).collect();
+    let out: Vec<JsonValue> = set_elems(set)
+        .into_iter()
+        .map(|x| as_json(ap1(f, x)).clone())
+        .collect();
     mk_json(JsonValue::JArray(out))
 }
 unsafe extern "C" fn encode_object(pairs: u64) -> u64 {
@@ -4860,10 +5064,7 @@ unsafe extern "C" fn encode_object(pairs: u64) -> u64 {
     mk_json(JsonValue::JObject(out))
 }
 unsafe extern "C" fn encode_dict(to_key: u64, to_value: u64, dict: u64) -> u64 {
-    let entries = match deref(dict) {
-        Value::Dict(pairs) => pairs.clone(),
-        _ => Vec::new(),
-    };
+    let entries = dict_pairs(dict);
     let mut out: Vec<(Vec<u8>, JsonValue)> = Vec::with_capacity(entries.len());
     for (k, v) in entries {
         let key = str_bytes(ap1(to_key, k));
@@ -6969,8 +7170,8 @@ unsafe fn runtime_init() {
     G_TIME_HERE.set(task_succeed(utc));
     G_PLATFORM_CMD_NONE.set(ctor(b"CmdNone\0".as_ptr(), CT_NONE, Vec::new()));
     G_PLATFORM_SUB_NONE.set(ctor(b"SubNone\0".as_ptr(), ST_NONE, Vec::new()));
-    G_DICT_EMPTY.set(alloc(Value::Dict(Vec::new())));
-    G_SET_EMPTY.set(alloc(Value::Set(Vec::new())));
+    G_DICT_EMPTY.set(alloc(Value::Dict(0)));
+    G_SET_EMPTY.set(alloc(Value::Set(0)));
     G_ARRAY_EMPTY.set(alloc(Value::Array(Vec::new())));
     G_RANDOM_MININT.set(rt_int(-2147483648));
     G_RANDOM_MAXINT.set(rt_int(2147483647));
