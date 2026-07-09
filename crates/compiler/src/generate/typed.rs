@@ -4087,6 +4087,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .unwrap())
             }
             Layout::List(elem) => self.gen_list_append(&elem, l, r),
+            // A polymorphic `appendable` that monomorphization left unresolved
+            // (layout Ref) — e.g. a helper `wrap a b = a ++ b` specialized only
+            // at its call sites. Both operands are already uniform words, so
+            // dispatch on the runtime value (String vs List) like the uniform
+            // backend's `rt_append`; the result is likewise a uniform word.
+            Layout::Ref => {
+                let lv = self.gen(l)?;
+                let rv = self.gen(r)?;
+                let lw = self.as_word(lv);
+                let rw = self.as_word(rv);
+                let word = self.call_named("rt_append", &[lw, rw]);
+                // `rt_append` yields a uniform word; the result type is the same
+                // unresolved `appendable` (Ref), so present it in that layout.
+                self.unbox_value(word, &l.tipe)
+            }
             other => Err(format!("typed backend: ++ is not supported on {:?}", other)),
         }
     }
