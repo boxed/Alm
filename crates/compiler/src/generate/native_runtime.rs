@@ -309,12 +309,13 @@ pub unsafe extern "C" fn alm_list_cons(
             return backing;
         }
     }
-    let old_cap = if backing.is_null() {
-        0
-    } else {
-        *(backing as *const i64) as usize
-    };
-    let new_cap = ((len + 1) * 2).max(4).max(old_cap * 2);
+    // Copy path: build a fresh backing holding the caller's `len` elements plus
+    // the new head. Size it by `len` (amortized doubling), NOT the source
+    // backing's capacity: consing onto a short view of a large shared backing
+    // (e.g. `[] = tail [x]`, whose backing has capacity from the tip list) must
+    // not inherit — and repeatedly double — that unrelated capacity, which grew
+    // it exponentially (1→4→8→…→2^40) until the allocation failed.
+    let new_cap = ((len + 1) * 2).max(4);
     let np = alm_alloc((16 + new_cap * esize) as u64);
     let nhdr = np as *mut i64;
     *nhdr = new_cap as i64;

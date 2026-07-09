@@ -2332,3 +2332,30 @@ fn url_kernels_roundtrip() {
          \x20       ]\n",
     );
 }
+
+#[test]
+fn cons_onto_shared_tail_does_not_blow_up_capacity() {
+    // Consing onto a short view (a `tail`) of a shared list backing must size
+    // the new backing by the copied length, not the source backing's capacity.
+    // The old `new_cap = ..max(old_cap*2)` doubled an unrelated capacity every
+    // iteration (1,4,8,..,2^40), exhausting memory — the crash behind the
+    // fast-OOM packages (elm-rope/astar's foldlHelper queue). `loop` here conses
+    // onto `tail acc` 200 times; pre-fix that is ~2^200 capacity.
+    assert_same(
+        "cons_shared_tail",
+        "module Test exposing (..)\n\
+         \n\
+         loop : Int -> List Int -> List Int\n\
+         loop n acc =\n\
+         \x20   if n <= 0 then\n\
+         \x20       acc\n\
+         \x20   else\n\
+         \x20       case acc of\n\
+         \x20           _ :: rest -> loop (n - 1) (n :: rest)\n\
+         \x20           [] -> loop (n - 1) [ n ]\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString (loop 200 [])\n",
+    );
+}
