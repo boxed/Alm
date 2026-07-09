@@ -2306,3 +2306,29 @@ fn number_literal_in_float_binop() {
          \x20   String.fromFloat (scale 7.0)\n",
     );
 }
+
+#[test]
+fn url_kernels_roundtrip() {
+    // Native elm/url: percentEncode/percentDecode and fromString/toString.
+    // fromString builds a `Url` record (with a Protocol enum + Maybe fields) that
+    // the typed backend unboxes by field; a pathless URL defaults to "/".
+    assert_same(
+        "url_kernels",
+        "module Test exposing (..)\n\
+         \n\
+         import Url\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \"|\"\n\
+         \x20       [ Url.percentEncode \"a b/c\"\n\
+         \x20       , Maybe.withDefault \"X\" (Url.percentDecode \"a%20b\")\n\
+         \x20       , case Url.fromString \"https://ex.com:99/p?q#f\" of\n\
+         \x20           Just u -> Url.toString u ++ \" h=\" ++ u.host\n\
+         \x20           Nothing -> \"none\"\n\
+         \x20       , case Url.fromString \"http://x.io\" of\n\
+         \x20           Just u -> Url.toString u\n\
+         \x20           Nothing -> \"none\"\n\
+         \x20       ]\n",
+    );
+}

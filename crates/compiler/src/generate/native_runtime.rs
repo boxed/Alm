@@ -5821,6 +5821,177 @@ unsafe extern "C" fn html_tagger_function(t: u64) -> u64 {
     json_get_elm_field(t, b"a")
 }
 
+// --- elm/url (the Rust twin of runtime.js's $Url$* / _Url_*) ---
+
+fn hex_digit(n: u8) -> u8 {
+    if n < 10 { b'0' + n } else { b'A' + (n - 10) }
+}
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+unsafe fn is_nothing(w: u64) -> bool {
+    !is_int(w) && matches!(deref(w), Value::Ctor { index: 1, argc: 0, .. })
+}
+
+// percentEncode = encodeURIComponent: keep the unreserved set (letters, digits,
+// and -_.!~*'()), percent-encode every other byte of the UTF-8 form.
+unsafe extern "C" fn url_percent_encode(s: u64) -> u64 {
+    let mut out: Vec<u8> = Vec::new();
+    for &b in str_slice(s) {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') {
+            out.push(b);
+        } else {
+            out.push(b'%');
+            out.push(hex_digit(b >> 4));
+            out.push(hex_digit(b & 0xf));
+        }
+    }
+    mkstr(out)
+}
+
+// percentDecode = decodeURIComponent: decode %XX to bytes then require valid
+// UTF-8; `Nothing` on any malformed escape or invalid UTF-8 (the try/catch).
+unsafe extern "C" fn url_percent_decode(s: u64) -> u64 {
+    let bytes = str_slice(s);
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return nothing();
+            }
+            match (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push((h << 4) | l);
+                    i += 3;
+                }
+                _ => return nothing(),
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    match std::str::from_utf8(&out) {
+        Ok(_) => just(mkstr(out)),
+        Err(_) => nothing(),
+    }
+}
+
+// Build the `Url` record (fields sorted by name: fragment, host, path, port_,
+// protocol, query). `proto` is the Protocol tag (0 Http, 1 Https).
+unsafe fn mk_url(proto: u32, host: &[u8], port_: u64, path: &[u8], query: u64, frag: u64) -> u64 {
+    let protocol = if proto == 0 {
+        ctor0(b"Http\0".as_ptr(), 0)
+    } else {
+        ctor0(b"Https\0".as_ptr(), 1)
+    };
+    let rec = rt_record_new(6);
+    rt_record_set(rec, 0, b"fragment\0".as_ptr(), frag);
+    rt_record_set(rec, 1, b"host\0".as_ptr(), mkstr(host.to_vec()));
+    rt_record_set(rec, 2, b"path\0".as_ptr(), mkstr(path.to_vec()));
+    rt_record_set(rec, 3, b"port_\0".as_ptr(), port_);
+    rt_record_set(rec, 4, b"protocol\0".as_ptr(), protocol);
+    rt_record_set(rec, 5, b"query\0".as_ptr(), query);
+    rec
+}
+
+fn find(s: &[u8], c: u8) -> Option<usize> {
+    s.iter().position(|&b| b == c)
+}
+
+// The parse pipeline mirrors runtime.js's _Url_chomp*. All split points are
+// ASCII delimiters, so byte slicing preserves the UTF-8 substrings.
+unsafe fn url_chomp_port(proto: u32, query: u64, frag: u64, authority: &[u8], path: &[u8]) -> u64 {
+    match find(authority, b':') {
+        None => just(mk_url(proto, authority, nothing(), path, query, frag)),
+        Some(i) => {
+            let port = string_to_int(mkstr(authority[i + 1..].to_vec()));
+            if is_nothing(port) {
+                nothing()
+            } else {
+                just(mk_url(proto, &authority[..i], port, path, query, frag))
+            }
+        }
+    }
+}
+unsafe fn url_chomp_authority(proto: u32, query: u64, frag: u64, authority: &[u8], path: &[u8]) -> u64 {
+    if authority.is_empty() {
+        return nothing();
+    }
+    let auth = match find(authority, b'@') {
+        Some(i) => &authority[i + 1..],
+        None => authority,
+    };
+    url_chomp_port(proto, query, frag, auth, path)
+}
+unsafe fn url_chomp_before_query(proto: u32, query: u64, frag: u64, s: &[u8]) -> u64 {
+    if s.is_empty() {
+        return nothing();
+    }
+    match find(s, b'/') {
+        // A pathless URL defaults to "/" (matching elm).
+        None => url_chomp_authority(proto, query, frag, s, b"/"),
+        Some(i) => url_chomp_authority(proto, query, frag, &s[..i], &s[i..]),
+    }
+}
+unsafe fn url_chomp_before_fragment(proto: u32, frag: u64, s: &[u8]) -> u64 {
+    if s.is_empty() {
+        return nothing();
+    }
+    match find(s, b'?') {
+        None => url_chomp_before_query(proto, nothing(), frag, s),
+        Some(i) => url_chomp_before_query(proto, just(mkstr(s[i + 1..].to_vec())), frag, &s[..i]),
+    }
+}
+unsafe fn url_chomp_after_protocol(proto: u32, s: &[u8]) -> u64 {
+    if s.is_empty() {
+        return nothing();
+    }
+    match find(s, b'#') {
+        None => url_chomp_before_fragment(proto, nothing(), s),
+        Some(i) => url_chomp_before_fragment(proto, just(mkstr(s[i + 1..].to_vec())), &s[..i]),
+    }
+}
+unsafe extern "C" fn url_from_string(s: u64) -> u64 {
+    let b = str_slice(s);
+    if b.starts_with(b"http://") {
+        url_chomp_after_protocol(0, &b[7..])
+    } else if b.starts_with(b"https://") {
+        url_chomp_after_protocol(1, &b[8..])
+    } else {
+        nothing()
+    }
+}
+unsafe extern "C" fn url_to_string(url: u64) -> u64 {
+    let is_https = rt_ctor_tag(rt_access(url, b"protocol\0".as_ptr())) == 1;
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(if is_https { b"https://" } else { b"http://" });
+    out.extend_from_slice(str_slice(rt_access(url, b"host\0".as_ptr())));
+    let port = rt_access(url, b"port_\0".as_ptr());
+    if !is_nothing(port) {
+        out.push(b':');
+        out.extend_from_slice(str_slice(string_from_int(ctor_get(port, 0))));
+    }
+    out.extend_from_slice(str_slice(rt_access(url, b"path\0".as_ptr())));
+    let query = rt_access(url, b"query\0".as_ptr());
+    if !is_nothing(query) {
+        out.push(b'?');
+        out.extend_from_slice(str_slice(ctor_get(query, 0)));
+    }
+    let frag = rt_access(url, b"fragment\0".as_ptr());
+    if !is_nothing(frag) {
+        out.push(b'#');
+        out.extend_from_slice(str_slice(ctor_get(frag, 0)));
+    }
+    mkstr(out)
+}
+
 // Per-tag / per-attribute globals whose DOM key is baked into a closure
 // capture — the native twin of runtime.js's `var $Html$div = _VDom_node('div')`
 // etc. Each entry: an ident, its exported mangled symbol, and the closure
@@ -6424,6 +6595,11 @@ kernel_fns! {
     G_BASICS_MUL "$Basics$mul" rt_mul, 2;
     G_BASICS_FDIV "$Basics$fdiv" rt_fdiv, 2;
     G_BASICS_IDIV "$Basics$idiv" rt_idiv, 2;
+
+    G_URL_PERCENTENCODE "$Url$percentEncode" url_percent_encode, 1;
+    G_URL_PERCENTDECODE "$Url$percentDecode" url_percent_decode, 1;
+    G_URL_FROMSTRING "$Url$fromString" url_from_string, 1;
+    G_URL_TOSTRING "$Url$toString" url_to_string, 1;
     G_BASICS_EQ "$Basics$eq" rt_eq, 2;
     G_BASICS_NEQ "$Basics$neq" rt_neq, 2;
     G_BASICS_LT "$Basics$lt" rt_lt, 2;
