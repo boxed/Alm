@@ -184,6 +184,13 @@ impl LayoutCtx {
             // handle produced by the kernel, not a tag — carry it as the
             // uniform word (like `Bytes`).
             ("Regex", "Regex") => return Layout::Opaque,
+            // elm-explorations/linear-algebra: `Vec2`/`Vec3`/`Vec4`/`Mat4` are
+            // phantom nullary constructors over kernel float buffers
+            // (`Value::Floats`) — carry them as the uniform word (like `Bytes`).
+            ("Math.Vector2", "Vec2")
+            | ("Math.Vector3", "Vec3")
+            | ("Math.Vector4", "Vec4")
+            | ("Math.Matrix4", "Mat4") => return Layout::Opaque,
             _ => {}
         }
 

@@ -180,6 +180,9 @@ pub enum Value {
     /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
     /// runtime's `DataView`; `encode` fills one, `read_*` read from it.
     Bytes(Vec<u8>),
+    /// A linear-algebra vector or matrix (elm-explorations/linear-algebra):
+    /// the native twin of the JS kernel's Float64Array, len 2/3/4/16.
+    Floats(Vec<f64>),
     /// A `Json.Encode.Value` / `Json.Decode.Value` — an opaque JSON tree. In
     /// the JS runtime these are raw JS values; natively they are this tree.
     Json(JsonValue),
@@ -1413,6 +1416,11 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
             px.iter().zip(&py).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
+        // linear-algebra vectors/matrices: element-wise float equality,
+        // matching JS `_Utils_eq` over Float64Array contents.
+        (Value::Floats(x), Value::Floats(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p == q)
+        }
         // Functions: Elm's `==` short-circuits to `true` for the same function
         // reference (and errors otherwise). Native builds a fresh closure value
         // per reference, so pointer identity of the closure value fails even for
@@ -2556,6 +2564,7 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
         }
         Value::Closure { .. } => out.push_str("<function>"),
         Value::Regex(_) => out.push_str("<internals>"),
+        Value::Floats(_) => out.push_str("<internals>"),
         Value::Dict(root) => {
             let mut pairs = Vec::new();
             tcollect(*root, &mut pairs);
@@ -3028,6 +3037,232 @@ unsafe fn tuple_xy(v: u64) -> (f64, f64) {
 }
 
 // -- Basics: trigonometry and float predicates --
+
+// `tan` ported verbatim from V8's src/base/ieee754.cc (fdlibm: __kernel_tan,
+// __ieee754_rem_pio2, tan) — the implementation behind `Math.tan` — so native
+// results are bit-identical to the JS backend. The host libm (Apple's)
+// differs from fdlibm by 1 ulp on some inputs (e.g. tan(pi/8)). Two caveats:
+//
+// * node/V8 is compiled by clang with its default `-ffp-contract=on`, which
+//   fuses every single-use `a*b` feeding an add/sub into an FMA. Rust never
+//   contracts, so those exact contractions are spelled out here with
+//   `f64::mul_add` — verified bit-identical to this machine's node on a large
+//   sweep. A plain (uncontracted) transcription differs from node by 1 ulp on
+//   ~1.4% of arguments.
+// * Arguments at or above 2^20*(pi/2) fall back to the host libm: full
+//   reduction would need fdlibm's multi-precision `__kernel_rem_pio2`, and
+//   such inputs keep today's (host-libm) behavior.
+
+/// fdlibm `__kernel_tan` on ~[-pi/4, pi/4]; `y` is the tail of `x`;
+/// `iy == 1` returns tan, `iy == -1` returns -1/tan.
+fn k_tan(mut x: f64, mut y: f64, iy: i32) -> f64 {
+    const T: [f64; 13] = [
+        3.33333333333334091986e-01,  /* 3FD55555, 55555563 */
+        1.33333333333201242699e-01,  /* 3FC11111, 1110FE7A */
+        5.39682539762260521377e-02,  /* 3FABA1BA, 1BB341FE */
+        2.18694882948595424599e-02,  /* 3F9664F4, 8406D637 */
+        8.86323982359930005737e-03,  /* 3F8226E3, E96E8493 */
+        3.59207910759131235356e-03,  /* 3F6D6D22, C9560328 */
+        1.45620945432529025516e-03,  /* 3F57DBC8, FEE08315 */
+        5.88041240820264096874e-04,  /* 3F4344D8, F2F26501 */
+        2.46463134818469906812e-04,  /* 3F3026F7, 1A8D1068 */
+        7.81794442939557092300e-05,  /* 3F147E88, A03792A6 */
+        7.14072491382608190305e-05,  /* 3F12B80F, 32F0A7E9 */
+        -1.85586374855275456654e-05, /* BEF375CB, DB605373 */
+        2.59073051863633712884e-05,  /* 3EFB2A70, 74BF7AD4 */
+    ];
+    const ONE: f64 = 1.0;
+    const PIO4: f64 = 7.85398163397448278999e-01; /* 3FE921FB, 54442D18 */
+    const PIO4_LO: f64 = 3.06161699786838301793e-17; /* 3C81A626, 33145C07 */
+    fn zero_low_word(x: f64) -> f64 {
+        f64::from_bits(f64::to_bits(x) & 0xFFFF_FFFF_0000_0000)
+    }
+
+    let hx = (f64::to_bits(x) >> 32) as i32;
+    let ix = hx & 0x7fffffff;
+    if ix < 0x3E300000 {
+        /* x < 2**-28 */
+        if x as i64 == 0 {
+            let low = f64::to_bits(x) as u32;
+            if ((ix as u32 | low) | (iy + 1) as u32) == 0 {
+                return ONE / x.abs();
+            } else if iy == 1 {
+                return x;
+            } else {
+                /* compute -1 / (x+y) carefully */
+                let w = x + y;
+                let z = zero_low_word(w);
+                let v = y - (z - x);
+                let a = -ONE / w;
+                let t = zero_low_word(a);
+                let s = t.mul_add(z, ONE);
+                return a.mul_add(t.mul_add(v, s), t);
+            }
+        }
+    }
+    let big = ix >= 0x3FE59428; /* |x| >= 0.6744 */
+    if big {
+        if hx < 0 {
+            x = -x;
+            y = -y;
+        }
+        let z = PIO4 - x;
+        let w = PIO4_LO - y;
+        x = z + w;
+        y = 0.0;
+    }
+    let z = x * x;
+    let w = z * z;
+    let r = w.mul_add(
+        w.mul_add(w.mul_add(w.mul_add(w.mul_add(T[11], T[9]), T[7]), T[5]), T[3]),
+        T[1],
+    );
+    let vi = w.mul_add(
+        w.mul_add(w.mul_add(w.mul_add(w.mul_add(T[12], T[10]), T[8]), T[6]), T[4]),
+        T[2],
+    );
+    let s = z * x;
+    /* r = y + z*(s*(r+v)+y); r += T[0]*s — with v = z*vi and clang's fusions */
+    let r = z.mul_add(s.mul_add(z.mul_add(vi, r), y), y);
+    let r = T[0].mul_add(s, r);
+    let w = x + r;
+    if big {
+        let v = iy as f64;
+        let sgn = (1 - ((hx >> 30) & 2)) as f64;
+        return sgn * (-2.0f64).mul_add(x - (w * w / (w + v) - r), v);
+    }
+    if iy == 1 {
+        return w;
+    }
+    /* compute -1.0/(x+r) accurately */
+    let z = zero_low_word(w);
+    let v = r - (z - x); /* z+v = r+x */
+    let a = -1.0 / w;
+    let t = zero_low_word(a);
+    let s = t.mul_add(z, 1.0);
+    a.mul_add(t.mul_add(v, s), t)
+}
+
+/// fdlibm/V8 `__ieee754_rem_pio2`: x rem pi/2 as (n, y0, y1). The caller
+/// handles |x| ~<= pi/4 and |x| >= 2^20*(pi/2) (the `__kernel_rem_pio2` case).
+fn rem_pio2(x: f64) -> (i32, f64, f64) {
+    const HALF: f64 = 0.5;
+    /// 53 bits of 2/pi
+    const INV_PIO2: f64 = 6.36619772367581382433e-01; /* 0x3FE45F30, 0x6DC9C883 */
+    /// first 33 bits of pi/2
+    const PIO2_1: f64 = 1.57079632673412561417e+00; /* 0x3FF921FB, 0x54400000 */
+    /// pi/2 - PIO2_1
+    const PIO2_1T: f64 = 6.07710050650619224932e-11; /* 0x3DD0B461, 0x1A626331 */
+    /// second 33 bits of pi/2
+    const PIO2_2: f64 = 6.07710050630396597660e-11; /* 0x3DD0B461, 0x1A600000 */
+    /// pi/2 - (PIO2_1+PIO2_2)
+    const PIO2_2T: f64 = 2.02226624879595063154e-21; /* 0x3BA3198A, 0x2E037073 */
+    /// third 33 bits of pi/2
+    const PIO2_3: f64 = 2.02226624871116645580e-21; /* 0x3BA3198A, 0x2E000000 */
+    /// pi/2 - (PIO2_1+PIO2_2+PIO2_3)
+    const PIO2_3T: f64 = 8.47842766036889956997e-32; /* 0x397B839A, 0x252049C1 */
+    const NPIO2_HW: [u32; 32] = [
+        0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB,
+        0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C, 0x4032D97C, 0x40346B9C, 0x4035FDBB,
+        0x40378FDB, 0x403921FB, 0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C,
+        0x4041475C, 0x4042106C, 0x4042D97C, 0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB,
+        0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB,
+    ];
+
+    let hx = (f64::to_bits(x) >> 32) as i32;
+    let ix = (hx & 0x7fffffff) as u32;
+
+    if ix < 0x4002D97C {
+        /* |x| < 3pi/4, special case with n=+-1 */
+        if hx > 0 {
+            let mut z = x - PIO2_1;
+            if ix != 0x3FF921FB {
+                /* 33+53 bit pi is good enough */
+                let y0 = z - PIO2_1T;
+                let y1 = (z - y0) - PIO2_1T;
+                return (1, y0, y1);
+            } else {
+                /* near pi/2, use 33+33+53 bit pi */
+                z -= PIO2_2;
+                let y0 = z - PIO2_2T;
+                let y1 = (z - y0) - PIO2_2T;
+                return (1, y0, y1);
+            }
+        } else {
+            /* negative x */
+            let mut z = x + PIO2_1;
+            if ix != 0x3FF921FB {
+                let y0 = z + PIO2_1T;
+                let y1 = (z - y0) + PIO2_1T;
+                return (-1, y0, y1);
+            } else {
+                z += PIO2_2;
+                let y0 = z + PIO2_2T;
+                let y1 = (z - y0) + PIO2_2T;
+                return (-1, y0, y1);
+            }
+        }
+    }
+    /* |x| ~<= 2^19*(pi/2), medium size (the caller excludes larger x) */
+    let t = x.abs();
+    let n = t.mul_add(INV_PIO2, HALF) as i32;
+    let f_n = n as f64;
+    let mut r = (-f_n).mul_add(PIO2_1, t); /* t - fn*pio2_1 (exact product) */
+    let mut w = f_n * PIO2_1T; /* 1st round good to 85 bits */
+    let mut y0;
+    if n < 32 && ix != NPIO2_HW[(n - 1) as usize] {
+        y0 = r - w; /* quick check no cancellation */
+    } else {
+        let j = (ix >> 20) as i32;
+        y0 = r - w;
+        let high = (f64::to_bits(y0) >> 52) as i32 & 0x7ff;
+        if j - high > 16 {
+            /* 2nd iteration needed, good to 118 */
+            let t2 = r;
+            w = f_n * PIO2_2;
+            r = t2 - w;
+            w = f_n.mul_add(PIO2_2T, -((t2 - r) - w));
+            y0 = r - w;
+            let high = (f64::to_bits(y0) >> 52) as i32 & 0x7ff;
+            if j - high > 49 {
+                /* 3rd iteration needed, 151 bits acc */
+                let t3 = r;
+                w = f_n * PIO2_3;
+                r = t3 - w;
+                w = f_n.mul_add(PIO2_3T, -((t3 - r) - w));
+                y0 = r - w;
+            }
+        }
+    }
+    let y1 = (r - y0) - w;
+    if hx < 0 {
+        (-n, -y0, -y1)
+    } else {
+        (n, y0, y1)
+    }
+}
+
+/// fdlibm/V8 `Math.tan`.
+fn js_tan(x: f64) -> f64 {
+    let ix = (f64::to_bits(x) >> 32) as u32 & 0x7fffffff;
+    /* |x| ~< pi/4 */
+    if ix <= 0x3FE921FB {
+        return k_tan(x, 0.0, 1);
+    }
+    /* tan(Inf or NaN) is NaN */
+    if ix >= 0x7FF00000 {
+        return x - x;
+    }
+    if ix > 0x413921FB {
+        /* beyond 2^20*(pi/2): host-libm fallback (see module comment) */
+        return x.tan();
+    }
+    /* argument reduction */
+    let (n, y0, y1) = rem_pio2(x);
+    /* 1 -> n even, -1 -> n odd */
+    k_tan(y0, y1, 1 - ((n & 1) << 1))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn basics_cos(x: u64) -> u64 {
     rt_float(num(x).cos())
@@ -3038,7 +3273,7 @@ pub unsafe extern "C" fn basics_sin(x: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn basics_tan(x: u64) -> u64 {
-    rt_float(num(x).tan())
+    rt_float(js_tan(num(x)))
 }
 #[no_mangle]
 pub unsafe extern "C" fn basics_acos(x: u64) -> u64 {
@@ -6061,6 +6296,843 @@ unsafe extern "C" fn http_post1(config: u64) -> u64 {
     http_simple_request(b"POST", url, body, expect)
 }
 
+// --- elm-explorations/linear-algebra (Elm.Kernel.MJS): pure vector/matrix
+// math, ported verbatim from the JS kernel (same formulas, same argument
+// order, same edge cases — e.g. `1/0 = inf` in normalize/direction and the
+// exact `det == 0` check in `inverse`). Vectors and matrices are
+// `Value::Floats` of length 2/3/4/16, the native twin of the JS
+// Float64Array; matrices are column-major like the JS kernel.
+
+/// Deref a linear-algebra value's float storage (borrowed; values are never
+/// freed, so 'a is sound — same model as `str_slice`).
+unsafe fn floats<'a>(w: u64) -> &'a [f64] {
+    match deref(w) {
+        Value::Floats(v) => v,
+        _ => crash!("expected a linear-algebra vector or matrix"),
+    }
+}
+
+unsafe fn mk_floats(v: Vec<f64>) -> u64 {
+    alloc(Value::Floats(v))
+}
+
+// Vector2
+
+unsafe extern "C" fn mjs_v2_2(x: u64, y: u64) -> u64 {
+    mk_floats(vec![num(x), num(y)])
+}
+unsafe extern "C" fn mjs_v2_get_x1(a: u64) -> u64 {
+    rt_float(floats(a)[0])
+}
+unsafe extern "C" fn mjs_v2_get_y1(a: u64) -> u64 {
+    rt_float(floats(a)[1])
+}
+unsafe extern "C" fn mjs_v2_set_x2(x: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![num(x), a[1]])
+}
+unsafe extern "C" fn mjs_v2_set_y2(y: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], num(y)])
+}
+unsafe extern "C" fn mjs_v2_to_record1(a: u64) -> u64 {
+    let a = floats(a);
+    let rec = rt_record_new(2);
+    rt_record_set(rec, 0, b"x\0".as_ptr(), rt_float(a[0]));
+    rt_record_set(rec, 1, b"y\0".as_ptr(), rt_float(a[1]));
+    rec
+}
+unsafe extern "C" fn mjs_v2_from_record1(r: u64) -> u64 {
+    mk_floats(vec![
+        num(rt_access(r, b"x\0".as_ptr())),
+        num(rt_access(r, b"y\0".as_ptr())),
+    ])
+}
+unsafe extern "C" fn mjs_v2_add2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    mk_floats(vec![a[0] + b[0], a[1] + b[1]])
+}
+unsafe extern "C" fn mjs_v2_sub2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    mk_floats(vec![a[0] - b[0], a[1] - b[1]])
+}
+unsafe extern "C" fn mjs_v2_negate1(a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![-a[0], -a[1]])
+}
+fn v2_length(a: &[f64]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1]).sqrt()
+}
+unsafe extern "C" fn mjs_v2_direction2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let r = [a[0] - b[0], a[1] - b[1]];
+    let im = 1.0 / v2_length(&r);
+    mk_floats(vec![r[0] * im, r[1] * im])
+}
+unsafe extern "C" fn mjs_v2_length1(a: u64) -> u64 {
+    rt_float(v2_length(floats(a)))
+}
+unsafe extern "C" fn mjs_v2_length_squared1(a: u64) -> u64 {
+    let a = floats(a);
+    rt_float(a[0] * a[0] + a[1] * a[1])
+}
+unsafe extern "C" fn mjs_v2_distance2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    rt_float((dx * dx + dy * dy).sqrt())
+}
+unsafe extern "C" fn mjs_v2_distance_squared2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    rt_float(dx * dx + dy * dy)
+}
+unsafe extern "C" fn mjs_v2_normalize1(a: u64) -> u64 {
+    let a = floats(a);
+    let im = 1.0 / v2_length(a);
+    mk_floats(vec![a[0] * im, a[1] * im])
+}
+unsafe extern "C" fn mjs_v2_scale2(k: u64, a: u64) -> u64 {
+    let k = num(k);
+    let a = floats(a);
+    mk_floats(vec![a[0] * k, a[1] * k])
+}
+unsafe extern "C" fn mjs_v2_dot2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    rt_float(a[0] * b[0] + a[1] * b[1])
+}
+
+// Vector3
+
+unsafe extern "C" fn mjs_v3_3(x: u64, y: u64, z: u64) -> u64 {
+    mk_floats(vec![num(x), num(y), num(z)])
+}
+unsafe extern "C" fn mjs_v3_get_x1(a: u64) -> u64 {
+    rt_float(floats(a)[0])
+}
+unsafe extern "C" fn mjs_v3_get_y1(a: u64) -> u64 {
+    rt_float(floats(a)[1])
+}
+unsafe extern "C" fn mjs_v3_get_z1(a: u64) -> u64 {
+    rt_float(floats(a)[2])
+}
+unsafe extern "C" fn mjs_v3_set_x2(x: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![num(x), a[1], a[2]])
+}
+unsafe extern "C" fn mjs_v3_set_y2(y: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], num(y), a[2]])
+}
+unsafe extern "C" fn mjs_v3_set_z2(z: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], a[1], num(z)])
+}
+unsafe extern "C" fn mjs_v3_to_record1(a: u64) -> u64 {
+    let a = floats(a);
+    let rec = rt_record_new(3);
+    rt_record_set(rec, 0, b"x\0".as_ptr(), rt_float(a[0]));
+    rt_record_set(rec, 1, b"y\0".as_ptr(), rt_float(a[1]));
+    rt_record_set(rec, 2, b"z\0".as_ptr(), rt_float(a[2]));
+    rec
+}
+unsafe extern "C" fn mjs_v3_from_record1(r: u64) -> u64 {
+    mk_floats(vec![
+        num(rt_access(r, b"x\0".as_ptr())),
+        num(rt_access(r, b"y\0".as_ptr())),
+        num(rt_access(r, b"z\0".as_ptr())),
+    ])
+}
+unsafe extern "C" fn mjs_v3_add2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    mk_floats(vec![a[0] + b[0], a[1] + b[1], a[2] + b[2]])
+}
+fn v3_sub(a: &[f64], b: &[f64]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+unsafe extern "C" fn mjs_v3_sub2(a: u64, b: u64) -> u64 {
+    mk_floats(v3_sub(floats(a), floats(b)).to_vec())
+}
+unsafe extern "C" fn mjs_v3_negate1(a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![-a[0], -a[1], -a[2]])
+}
+fn v3_length(a: &[f64]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+fn v3_normalize(a: &[f64]) -> [f64; 3] {
+    let im = 1.0 / v3_length(a);
+    [a[0] * im, a[1] * im, a[2] * im]
+}
+fn v3_direction(a: &[f64], b: &[f64]) -> [f64; 3] {
+    v3_normalize(&v3_sub(a, b))
+}
+unsafe extern "C" fn mjs_v3_direction2(a: u64, b: u64) -> u64 {
+    mk_floats(v3_direction(floats(a), floats(b)).to_vec())
+}
+unsafe extern "C" fn mjs_v3_length1(a: u64) -> u64 {
+    rt_float(v3_length(floats(a)))
+}
+unsafe extern "C" fn mjs_v3_length_squared1(a: u64) -> u64 {
+    let a = floats(a);
+    rt_float(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+}
+unsafe extern "C" fn mjs_v3_distance2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    rt_float((dx * dx + dy * dy + dz * dz).sqrt())
+}
+unsafe extern "C" fn mjs_v3_distance_squared2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    rt_float(dx * dx + dy * dy + dz * dz)
+}
+unsafe extern "C" fn mjs_v3_normalize1(a: u64) -> u64 {
+    mk_floats(v3_normalize(floats(a)).to_vec())
+}
+unsafe extern "C" fn mjs_v3_scale2(k: u64, a: u64) -> u64 {
+    let k = num(k);
+    let a = floats(a);
+    mk_floats(vec![a[0] * k, a[1] * k, a[2] * k])
+}
+fn v3_dot(a: &[f64], b: &[f64]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+unsafe extern "C" fn mjs_v3_dot2(a: u64, b: u64) -> u64 {
+    rt_float(v3_dot(floats(a), floats(b)))
+}
+fn v3_cross(a: &[f64], b: &[f64]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+unsafe extern "C" fn mjs_v3_cross2(a: u64, b: u64) -> u64 {
+    mk_floats(v3_cross(floats(a), floats(b)).to_vec())
+}
+unsafe extern "C" fn mjs_v3_mul4x4_2(m: u64, v: u64) -> u64 {
+    let (m, v) = (floats(m), floats(v));
+    let w = v3_dot(v, &[m[3], m[7], m[11]]) + m[15];
+    mk_floats(vec![
+        (v3_dot(v, &[m[0], m[4], m[8]]) + m[12]) / w,
+        (v3_dot(v, &[m[1], m[5], m[9]]) + m[13]) / w,
+        (v3_dot(v, &[m[2], m[6], m[10]]) + m[14]) / w,
+    ])
+}
+
+// Vector4
+
+unsafe extern "C" fn mjs_v4_4(x: u64, y: u64, z: u64, w: u64) -> u64 {
+    mk_floats(vec![num(x), num(y), num(z), num(w)])
+}
+unsafe extern "C" fn mjs_v4_get_x1(a: u64) -> u64 {
+    rt_float(floats(a)[0])
+}
+unsafe extern "C" fn mjs_v4_get_y1(a: u64) -> u64 {
+    rt_float(floats(a)[1])
+}
+unsafe extern "C" fn mjs_v4_get_z1(a: u64) -> u64 {
+    rt_float(floats(a)[2])
+}
+unsafe extern "C" fn mjs_v4_get_w1(a: u64) -> u64 {
+    rt_float(floats(a)[3])
+}
+unsafe extern "C" fn mjs_v4_set_x2(x: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![num(x), a[1], a[2], a[3]])
+}
+unsafe extern "C" fn mjs_v4_set_y2(y: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], num(y), a[2], a[3]])
+}
+unsafe extern "C" fn mjs_v4_set_z2(z: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], a[1], num(z), a[3]])
+}
+unsafe extern "C" fn mjs_v4_set_w2(w: u64, a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![a[0], a[1], a[2], num(w)])
+}
+unsafe extern "C" fn mjs_v4_to_record1(a: u64) -> u64 {
+    // Fields in alphabetical order: w, x, y, z.
+    let a = floats(a);
+    let rec = rt_record_new(4);
+    rt_record_set(rec, 0, b"w\0".as_ptr(), rt_float(a[3]));
+    rt_record_set(rec, 1, b"x\0".as_ptr(), rt_float(a[0]));
+    rt_record_set(rec, 2, b"y\0".as_ptr(), rt_float(a[1]));
+    rt_record_set(rec, 3, b"z\0".as_ptr(), rt_float(a[2]));
+    rec
+}
+unsafe extern "C" fn mjs_v4_from_record1(r: u64) -> u64 {
+    mk_floats(vec![
+        num(rt_access(r, b"x\0".as_ptr())),
+        num(rt_access(r, b"y\0".as_ptr())),
+        num(rt_access(r, b"z\0".as_ptr())),
+        num(rt_access(r, b"w\0".as_ptr())),
+    ])
+}
+unsafe extern "C" fn mjs_v4_add2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    mk_floats(vec![a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]])
+}
+unsafe extern "C" fn mjs_v4_sub2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    mk_floats(vec![a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]])
+}
+unsafe extern "C" fn mjs_v4_negate1(a: u64) -> u64 {
+    let a = floats(a);
+    mk_floats(vec![-a[0], -a[1], -a[2], -a[3]])
+}
+fn v4_length(a: &[f64]) -> f64 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]).sqrt()
+}
+unsafe extern "C" fn mjs_v4_direction2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let r = [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+    let im = 1.0 / v4_length(&r);
+    mk_floats(vec![r[0] * im, r[1] * im, r[2] * im, r[3] * im])
+}
+unsafe extern "C" fn mjs_v4_length1(a: u64) -> u64 {
+    rt_float(v4_length(floats(a)))
+}
+unsafe extern "C" fn mjs_v4_length_squared1(a: u64) -> u64 {
+    let a = floats(a);
+    rt_float(a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3])
+}
+unsafe extern "C" fn mjs_v4_distance2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    let dw = a[3] - b[3];
+    rt_float((dx * dx + dy * dy + dz * dz + dw * dw).sqrt())
+}
+unsafe extern "C" fn mjs_v4_distance_squared2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    let dw = a[3] - b[3];
+    rt_float(dx * dx + dy * dy + dz * dz + dw * dw)
+}
+unsafe extern "C" fn mjs_v4_normalize1(a: u64) -> u64 {
+    let a = floats(a);
+    let im = 1.0 / v4_length(a);
+    mk_floats(vec![a[0] * im, a[1] * im, a[2] * im, a[3] * im])
+}
+unsafe extern "C" fn mjs_v4_scale2(k: u64, a: u64) -> u64 {
+    let k = num(k);
+    let a = floats(a);
+    mk_floats(vec![a[0] * k, a[1] * k, a[2] * k, a[3] * k])
+}
+unsafe extern "C" fn mjs_v4_dot2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    rt_float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
+}
+
+// Matrix4 (column-major, like the JS kernel: m[1] is row 2 / column 1).
+
+unsafe extern "C" fn mjs_m4x4_from_record1(r: u64) -> u64 {
+    mk_floats(vec![
+        num(rt_access(r, b"m11\0".as_ptr())),
+        num(rt_access(r, b"m21\0".as_ptr())),
+        num(rt_access(r, b"m31\0".as_ptr())),
+        num(rt_access(r, b"m41\0".as_ptr())),
+        num(rt_access(r, b"m12\0".as_ptr())),
+        num(rt_access(r, b"m22\0".as_ptr())),
+        num(rt_access(r, b"m32\0".as_ptr())),
+        num(rt_access(r, b"m42\0".as_ptr())),
+        num(rt_access(r, b"m13\0".as_ptr())),
+        num(rt_access(r, b"m23\0".as_ptr())),
+        num(rt_access(r, b"m33\0".as_ptr())),
+        num(rt_access(r, b"m43\0".as_ptr())),
+        num(rt_access(r, b"m14\0".as_ptr())),
+        num(rt_access(r, b"m24\0".as_ptr())),
+        num(rt_access(r, b"m34\0".as_ptr())),
+        num(rt_access(r, b"m44\0".as_ptr())),
+    ])
+}
+unsafe extern "C" fn mjs_m4x4_to_record1(m: u64) -> u64 {
+    // Fields in alphabetical order (m11, m12, ..., m44); field mIJ (row I,
+    // column J) reads the column-major slot m[(J-1)*4 + (I-1)].
+    let m = floats(m);
+    let rec = rt_record_new(16);
+    rt_record_set(rec, 0, b"m11\0".as_ptr(), rt_float(m[0]));
+    rt_record_set(rec, 1, b"m12\0".as_ptr(), rt_float(m[4]));
+    rt_record_set(rec, 2, b"m13\0".as_ptr(), rt_float(m[8]));
+    rt_record_set(rec, 3, b"m14\0".as_ptr(), rt_float(m[12]));
+    rt_record_set(rec, 4, b"m21\0".as_ptr(), rt_float(m[1]));
+    rt_record_set(rec, 5, b"m22\0".as_ptr(), rt_float(m[5]));
+    rt_record_set(rec, 6, b"m23\0".as_ptr(), rt_float(m[9]));
+    rt_record_set(rec, 7, b"m24\0".as_ptr(), rt_float(m[13]));
+    rt_record_set(rec, 8, b"m31\0".as_ptr(), rt_float(m[2]));
+    rt_record_set(rec, 9, b"m32\0".as_ptr(), rt_float(m[6]));
+    rt_record_set(rec, 10, b"m33\0".as_ptr(), rt_float(m[10]));
+    rt_record_set(rec, 11, b"m34\0".as_ptr(), rt_float(m[14]));
+    rt_record_set(rec, 12, b"m41\0".as_ptr(), rt_float(m[3]));
+    rt_record_set(rec, 13, b"m42\0".as_ptr(), rt_float(m[7]));
+    rt_record_set(rec, 14, b"m43\0".as_ptr(), rt_float(m[11]));
+    rt_record_set(rec, 15, b"m44\0".as_ptr(), rt_float(m[15]));
+    rec
+}
+unsafe extern "C" fn mjs_m4x4_inverse1(mw: u64) -> u64 {
+    let m = floats(mw);
+    let mut r = [0.0f64; 16];
+
+    r[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15]
+        + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    r[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15]
+        - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    r[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15]
+        + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    r[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14]
+        - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    r[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15]
+        - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    r[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15]
+        + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    r[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15]
+        - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    r[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14]
+        + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    r[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15]
+        + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    r[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15]
+        - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    r[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15]
+        + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    r[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14]
+        - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    r[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11]
+        - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    r[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11]
+        + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    r[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11]
+        - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    r[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10]
+        + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+    let mut det = m[0] * r[0] + m[1] * r[4] + m[2] * r[8] + m[3] * r[12];
+
+    if det == 0.0 {
+        return nothing();
+    }
+
+    det = 1.0 / det;
+
+    for x in r.iter_mut() {
+        *x *= det;
+    }
+
+    just(mk_floats(r.to_vec()))
+}
+fn m4_transpose(m: &[f64]) -> [f64; 16] {
+    [
+        m[0], m[4], m[8], m[12],
+        m[1], m[5], m[9], m[13],
+        m[2], m[6], m[10], m[14],
+        m[3], m[7], m[11], m[15],
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_inverse_orthonormal1(mw: u64) -> u64 {
+    let m = floats(mw);
+    let mut r = m4_transpose(m);
+    let t = [m[12], m[13], m[14]];
+    r[3] = 0.0;
+    r[7] = 0.0;
+    r[11] = 0.0;
+    r[12] = -v3_dot(&[r[0], r[4], r[8]], &t);
+    r[13] = -v3_dot(&[r[1], r[5], r[9]], &t);
+    r[14] = -v3_dot(&[r[2], r[6], r[10]], &t);
+    mk_floats(r.to_vec())
+}
+fn m4_make_frustum(left: f64, right: f64, bottom: f64, top: f64, znear: f64, zfar: f64) -> Vec<f64> {
+    vec![
+        2.0 * znear / (right - left),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 * znear / (top - bottom),
+        0.0,
+        0.0,
+        (right + left) / (right - left),
+        (top + bottom) / (top - bottom),
+        -(zfar + znear) / (zfar - znear),
+        -1.0,
+        0.0,
+        0.0,
+        -2.0 * zfar * znear / (zfar - znear),
+        0.0,
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_make_frustum6(
+    left: u64,
+    right: u64,
+    bottom: u64,
+    top: u64,
+    znear: u64,
+    zfar: u64,
+) -> u64 {
+    mk_floats(m4_make_frustum(
+        num(left),
+        num(right),
+        num(bottom),
+        num(top),
+        num(znear),
+        num(zfar),
+    ))
+}
+unsafe extern "C" fn mjs_m4x4_make_perspective4(fovy: u64, aspect: u64, znear: u64, zfar: u64) -> u64 {
+    let (fovy, aspect, znear, zfar) = (num(fovy), num(aspect), num(znear), num(zfar));
+    let ymax = znear * js_tan(fovy * std::f64::consts::PI / 360.0);
+    let ymin = -ymax;
+    let xmin = ymin * aspect;
+    let xmax = ymax * aspect;
+    mk_floats(m4_make_frustum(xmin, xmax, ymin, ymax, znear, zfar))
+}
+fn m4_make_ortho(left: f64, right: f64, bottom: f64, top: f64, znear: f64, zfar: f64) -> Vec<f64> {
+    vec![
+        2.0 / (right - left),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 / (top - bottom),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -2.0 / (zfar - znear),
+        0.0,
+        -(right + left) / (right - left),
+        -(top + bottom) / (top - bottom),
+        -(zfar + znear) / (zfar - znear),
+        1.0,
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_make_ortho6(
+    left: u64,
+    right: u64,
+    bottom: u64,
+    top: u64,
+    znear: u64,
+    zfar: u64,
+) -> u64 {
+    mk_floats(m4_make_ortho(
+        num(left),
+        num(right),
+        num(bottom),
+        num(top),
+        num(znear),
+        num(zfar),
+    ))
+}
+unsafe extern "C" fn mjs_m4x4_make_ortho2d4(left: u64, right: u64, bottom: u64, top: u64) -> u64 {
+    mk_floats(m4_make_ortho(num(left), num(right), num(bottom), num(top), -1.0, 1.0))
+}
+fn m4_mul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let a11 = a[0];
+    let a21 = a[1];
+    let a31 = a[2];
+    let a41 = a[3];
+    let a12 = a[4];
+    let a22 = a[5];
+    let a32 = a[6];
+    let a42 = a[7];
+    let a13 = a[8];
+    let a23 = a[9];
+    let a33 = a[10];
+    let a43 = a[11];
+    let a14 = a[12];
+    let a24 = a[13];
+    let a34 = a[14];
+    let a44 = a[15];
+    let b11 = b[0];
+    let b21 = b[1];
+    let b31 = b[2];
+    let b41 = b[3];
+    let b12 = b[4];
+    let b22 = b[5];
+    let b32 = b[6];
+    let b42 = b[7];
+    let b13 = b[8];
+    let b23 = b[9];
+    let b33 = b[10];
+    let b43 = b[11];
+    let b14 = b[12];
+    let b24 = b[13];
+    let b34 = b[14];
+    let b44 = b[15];
+    vec![
+        a11 * b11 + a12 * b21 + a13 * b31 + a14 * b41,
+        a21 * b11 + a22 * b21 + a23 * b31 + a24 * b41,
+        a31 * b11 + a32 * b21 + a33 * b31 + a34 * b41,
+        a41 * b11 + a42 * b21 + a43 * b31 + a44 * b41,
+        a11 * b12 + a12 * b22 + a13 * b32 + a14 * b42,
+        a21 * b12 + a22 * b22 + a23 * b32 + a24 * b42,
+        a31 * b12 + a32 * b22 + a33 * b32 + a34 * b42,
+        a41 * b12 + a42 * b22 + a43 * b32 + a44 * b42,
+        a11 * b13 + a12 * b23 + a13 * b33 + a14 * b43,
+        a21 * b13 + a22 * b23 + a23 * b33 + a24 * b43,
+        a31 * b13 + a32 * b23 + a33 * b33 + a34 * b43,
+        a41 * b13 + a42 * b23 + a43 * b33 + a44 * b43,
+        a11 * b14 + a12 * b24 + a13 * b34 + a14 * b44,
+        a21 * b14 + a22 * b24 + a23 * b34 + a24 * b44,
+        a31 * b14 + a32 * b24 + a33 * b34 + a34 * b44,
+        a41 * b14 + a42 * b24 + a43 * b34 + a44 * b44,
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_mul2(a: u64, b: u64) -> u64 {
+    mk_floats(m4_mul(floats(a), floats(b)))
+}
+unsafe extern "C" fn mjs_m4x4_mul_affine2(a: u64, b: u64) -> u64 {
+    let (a, b) = (floats(a), floats(b));
+    let a11 = a[0];
+    let a21 = a[1];
+    let a31 = a[2];
+    let a12 = a[4];
+    let a22 = a[5];
+    let a32 = a[6];
+    let a13 = a[8];
+    let a23 = a[9];
+    let a33 = a[10];
+    let a14 = a[12];
+    let a24 = a[13];
+    let a34 = a[14];
+    let b11 = b[0];
+    let b21 = b[1];
+    let b31 = b[2];
+    let b12 = b[4];
+    let b22 = b[5];
+    let b32 = b[6];
+    let b13 = b[8];
+    let b23 = b[9];
+    let b33 = b[10];
+    let b14 = b[12];
+    let b24 = b[13];
+    let b34 = b[14];
+    mk_floats(vec![
+        a11 * b11 + a12 * b21 + a13 * b31,
+        a21 * b11 + a22 * b21 + a23 * b31,
+        a31 * b11 + a32 * b21 + a33 * b31,
+        0.0,
+        a11 * b12 + a12 * b22 + a13 * b32,
+        a21 * b12 + a22 * b22 + a23 * b32,
+        a31 * b12 + a32 * b22 + a33 * b32,
+        0.0,
+        a11 * b13 + a12 * b23 + a13 * b33,
+        a21 * b13 + a22 * b23 + a23 * b33,
+        a31 * b13 + a32 * b23 + a33 * b33,
+        0.0,
+        a11 * b14 + a12 * b24 + a13 * b34 + a14,
+        a21 * b14 + a22 * b24 + a23 * b34 + a24,
+        a31 * b14 + a32 * b24 + a33 * b34 + a34,
+        1.0,
+    ])
+}
+unsafe extern "C" fn mjs_m4x4_make_rotate2(angle: u64, axis: u64) -> u64 {
+    let angle = num(angle);
+    let axis = v3_normalize(floats(axis));
+    let x = axis[0];
+    let y = axis[1];
+    let z = axis[2];
+    let c = angle.cos();
+    let c1 = 1.0 - c;
+    let s = angle.sin();
+    mk_floats(vec![
+        x * x * c1 + c,
+        y * x * c1 + z * s,
+        z * x * c1 - y * s,
+        0.0,
+        x * y * c1 - z * s,
+        y * y * c1 + c,
+        y * z * c1 + x * s,
+        0.0,
+        x * z * c1 + y * s,
+        y * z * c1 - x * s,
+        z * z * c1 + c,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ])
+}
+unsafe extern "C" fn mjs_m4x4_rotate3(angle: u64, axis: u64, m: u64) -> u64 {
+    let angle = num(angle);
+    let axis = floats(axis);
+    let m = floats(m);
+    let im = 1.0 / v3_length(axis);
+    let x = axis[0] * im;
+    let y = axis[1] * im;
+    let z = axis[2] * im;
+    let c = angle.cos();
+    let c1 = 1.0 - c;
+    let s = angle.sin();
+    let xs = x * s;
+    let ys = y * s;
+    let zs = z * s;
+    let xyc1 = x * y * c1;
+    let xzc1 = x * z * c1;
+    let yzc1 = y * z * c1;
+    let t11 = x * x * c1 + c;
+    let t21 = xyc1 + zs;
+    let t31 = xzc1 - ys;
+    let t12 = xyc1 - zs;
+    let t22 = y * y * c1 + c;
+    let t32 = yzc1 + xs;
+    let t13 = xzc1 + ys;
+    let t23 = yzc1 - xs;
+    let t33 = z * z * c1 + c;
+    let (m11, m21, m31, m41) = (m[0], m[1], m[2], m[3]);
+    let (m12, m22, m32, m42) = (m[4], m[5], m[6], m[7]);
+    let (m13, m23, m33, m43) = (m[8], m[9], m[10], m[11]);
+    let (m14, m24, m34, m44) = (m[12], m[13], m[14], m[15]);
+    mk_floats(vec![
+        m11 * t11 + m12 * t21 + m13 * t31,
+        m21 * t11 + m22 * t21 + m23 * t31,
+        m31 * t11 + m32 * t21 + m33 * t31,
+        m41 * t11 + m42 * t21 + m43 * t31,
+        m11 * t12 + m12 * t22 + m13 * t32,
+        m21 * t12 + m22 * t22 + m23 * t32,
+        m31 * t12 + m32 * t22 + m33 * t32,
+        m41 * t12 + m42 * t22 + m43 * t32,
+        m11 * t13 + m12 * t23 + m13 * t33,
+        m21 * t13 + m22 * t23 + m23 * t33,
+        m31 * t13 + m32 * t23 + m33 * t33,
+        m41 * t13 + m42 * t23 + m43 * t33,
+        m14,
+        m24,
+        m34,
+        m44,
+    ])
+}
+fn m4_make_scale3(x: f64, y: f64, z: f64) -> Vec<f64> {
+    vec![
+        x, 0.0, 0.0, 0.0,
+        0.0, y, 0.0, 0.0,
+        0.0, 0.0, z, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_make_scale3_3(x: u64, y: u64, z: u64) -> u64 {
+    mk_floats(m4_make_scale3(num(x), num(y), num(z)))
+}
+unsafe extern "C" fn mjs_m4x4_make_scale1(v: u64) -> u64 {
+    let v = floats(v);
+    mk_floats(m4_make_scale3(v[0], v[1], v[2]))
+}
+unsafe fn m4_scale3(x: f64, y: f64, z: f64, m: &[f64]) -> u64 {
+    mk_floats(vec![
+        m[0] * x,
+        m[1] * x,
+        m[2] * x,
+        m[3] * x,
+        m[4] * y,
+        m[5] * y,
+        m[6] * y,
+        m[7] * y,
+        m[8] * z,
+        m[9] * z,
+        m[10] * z,
+        m[11] * z,
+        m[12],
+        m[13],
+        m[14],
+        m[15],
+    ])
+}
+unsafe extern "C" fn mjs_m4x4_scale3_4(x: u64, y: u64, z: u64, m: u64) -> u64 {
+    m4_scale3(num(x), num(y), num(z), floats(m))
+}
+unsafe extern "C" fn mjs_m4x4_scale2(v: u64, m: u64) -> u64 {
+    let v = floats(v);
+    m4_scale3(v[0], v[1], v[2], floats(m))
+}
+fn m4_make_translate3(x: f64, y: f64, z: f64) -> Vec<f64> {
+    vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        x, y, z, 1.0,
+    ]
+}
+unsafe extern "C" fn mjs_m4x4_make_translate3_3(x: u64, y: u64, z: u64) -> u64 {
+    mk_floats(m4_make_translate3(num(x), num(y), num(z)))
+}
+unsafe extern "C" fn mjs_m4x4_make_translate1(v: u64) -> u64 {
+    let v = floats(v);
+    mk_floats(m4_make_translate3(v[0], v[1], v[2]))
+}
+unsafe fn m4_translate3(x: f64, y: f64, z: f64, m: &[f64]) -> u64 {
+    let (m11, m21, m31, m41) = (m[0], m[1], m[2], m[3]);
+    let (m12, m22, m32, m42) = (m[4], m[5], m[6], m[7]);
+    let (m13, m23, m33, m43) = (m[8], m[9], m[10], m[11]);
+    mk_floats(vec![
+        m11,
+        m21,
+        m31,
+        m41,
+        m12,
+        m22,
+        m32,
+        m42,
+        m13,
+        m23,
+        m33,
+        m43,
+        m11 * x + m12 * y + m13 * z + m[12],
+        m21 * x + m22 * y + m23 * z + m[13],
+        m31 * x + m32 * y + m33 * z + m[14],
+        m41 * x + m42 * y + m43 * z + m[15],
+    ])
+}
+unsafe extern "C" fn mjs_m4x4_translate3_4(x: u64, y: u64, z: u64, m: u64) -> u64 {
+    m4_translate3(num(x), num(y), num(z), floats(m))
+}
+unsafe extern "C" fn mjs_m4x4_translate2(v: u64, m: u64) -> u64 {
+    let v = floats(v);
+    m4_translate3(v[0], v[1], v[2], floats(m))
+}
+unsafe extern "C" fn mjs_m4x4_make_look_at3(eye: u64, center: u64, up: u64) -> u64 {
+    let (eye, center, up) = (floats(eye), floats(center), floats(up));
+    let z = v3_direction(eye, center);
+    let x = v3_normalize(&v3_cross(up, &z));
+    let y = v3_normalize(&v3_cross(&z, &x));
+    let tm1 = [
+        x[0], y[0], z[0], 0.0,
+        x[1], y[1], z[1], 0.0,
+        x[2], y[2], z[2], 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let tm2 = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        -eye[0], -eye[1], -eye[2], 1.0,
+    ];
+    mk_floats(m4_mul(&tm1, &tm2))
+}
+unsafe extern "C" fn mjs_m4x4_transpose1(m: u64) -> u64 {
+    mk_floats(m4_transpose(floats(m)).to_vec())
+}
+unsafe extern "C" fn mjs_m4x4_make_basis3(vx: u64, vy: u64, vz: u64) -> u64 {
+    let (vx, vy, vz) = (floats(vx), floats(vy), floats(vz));
+    mk_floats(vec![
+        vx[0], vx[1], vx[2], 0.0,
+        vy[0], vy[1], vy[2], 0.0,
+        vz[0], vz[1], vz[2], 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ])
+}
+
 // --- HtmlAsJson: reflect the native vdom into the elm/virtual-dom JSON shape
 // that elm-explorations/test's Test.Html decoders read (the Rust twin of
 // runtime.js's `_HtmlAsJson_*`). Node kinds map to `$`: 0 text, 1 node, 2 keyed,
@@ -6531,6 +7603,13 @@ macro_rules! baked_globals {
 
 baked_globals! {
     G_HTTP_EMPTYBODY "$Http$emptyBody" = http_empty_body0();
+    // elm-explorations/linear-algebra: the identity matrix is a kernel VALUE.
+    G_MJS_M4X4IDENTITY "$Elm$Kernel$MJS$m4x4identity" = mk_floats(vec![
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]);
     G_HTMLKEYED_UL "$Html$Keyed$ul" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ul".to_vec())]);
     G_HTMLKEYED_OL "$Html$Keyed$ol" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ol".to_vec())]);
     // elm/svg element + attribute helpers (SVG namespace); mirrors
@@ -7118,6 +8197,94 @@ kernel_fns! {
     G_REGEX_FINDATMOST "$Elm$Kernel$Regex$findAtMost" regex_find_at_most, 3;
     G_REGEX_SPLITATMOST "$Elm$Kernel$Regex$splitAtMost" regex_split_at_most, 3;
     G_REGEX_REPLACEATMOST "$Elm$Kernel$Regex$replaceAtMost" regex_replace_at_most, 4;
+
+    // elm-explorations/linear-algebra (Elm.Kernel.MJS). `m4x4identity` is a
+    // value, not a function — it lives in `baked_globals!`.
+    G_MJS_V2 "$Elm$Kernel$MJS$v2" mjs_v2_2, 2;
+    G_MJS_V2GETX "$Elm$Kernel$MJS$v2getX" mjs_v2_get_x1, 1;
+    G_MJS_V2GETY "$Elm$Kernel$MJS$v2getY" mjs_v2_get_y1, 1;
+    G_MJS_V2SETX "$Elm$Kernel$MJS$v2setX" mjs_v2_set_x2, 2;
+    G_MJS_V2SETY "$Elm$Kernel$MJS$v2setY" mjs_v2_set_y2, 2;
+    G_MJS_V2TORECORD "$Elm$Kernel$MJS$v2toRecord" mjs_v2_to_record1, 1;
+    G_MJS_V2FROMRECORD "$Elm$Kernel$MJS$v2fromRecord" mjs_v2_from_record1, 1;
+    G_MJS_V2ADD "$Elm$Kernel$MJS$v2add" mjs_v2_add2, 2;
+    G_MJS_V2SUB "$Elm$Kernel$MJS$v2sub" mjs_v2_sub2, 2;
+    G_MJS_V2NEGATE "$Elm$Kernel$MJS$v2negate" mjs_v2_negate1, 1;
+    G_MJS_V2DIRECTION "$Elm$Kernel$MJS$v2direction" mjs_v2_direction2, 2;
+    G_MJS_V2LENGTH "$Elm$Kernel$MJS$v2length" mjs_v2_length1, 1;
+    G_MJS_V2LENGTHSQUARED "$Elm$Kernel$MJS$v2lengthSquared" mjs_v2_length_squared1, 1;
+    G_MJS_V2DISTANCE "$Elm$Kernel$MJS$v2distance" mjs_v2_distance2, 2;
+    G_MJS_V2DISTANCESQUARED "$Elm$Kernel$MJS$v2distanceSquared" mjs_v2_distance_squared2, 2;
+    G_MJS_V2NORMALIZE "$Elm$Kernel$MJS$v2normalize" mjs_v2_normalize1, 1;
+    G_MJS_V2SCALE "$Elm$Kernel$MJS$v2scale" mjs_v2_scale2, 2;
+    G_MJS_V2DOT "$Elm$Kernel$MJS$v2dot" mjs_v2_dot2, 2;
+    G_MJS_V3 "$Elm$Kernel$MJS$v3" mjs_v3_3, 3;
+    G_MJS_V3GETX "$Elm$Kernel$MJS$v3getX" mjs_v3_get_x1, 1;
+    G_MJS_V3GETY "$Elm$Kernel$MJS$v3getY" mjs_v3_get_y1, 1;
+    G_MJS_V3GETZ "$Elm$Kernel$MJS$v3getZ" mjs_v3_get_z1, 1;
+    G_MJS_V3SETX "$Elm$Kernel$MJS$v3setX" mjs_v3_set_x2, 2;
+    G_MJS_V3SETY "$Elm$Kernel$MJS$v3setY" mjs_v3_set_y2, 2;
+    G_MJS_V3SETZ "$Elm$Kernel$MJS$v3setZ" mjs_v3_set_z2, 2;
+    G_MJS_V3TORECORD "$Elm$Kernel$MJS$v3toRecord" mjs_v3_to_record1, 1;
+    G_MJS_V3FROMRECORD "$Elm$Kernel$MJS$v3fromRecord" mjs_v3_from_record1, 1;
+    G_MJS_V3ADD "$Elm$Kernel$MJS$v3add" mjs_v3_add2, 2;
+    G_MJS_V3SUB "$Elm$Kernel$MJS$v3sub" mjs_v3_sub2, 2;
+    G_MJS_V3NEGATE "$Elm$Kernel$MJS$v3negate" mjs_v3_negate1, 1;
+    G_MJS_V3DIRECTION "$Elm$Kernel$MJS$v3direction" mjs_v3_direction2, 2;
+    G_MJS_V3LENGTH "$Elm$Kernel$MJS$v3length" mjs_v3_length1, 1;
+    G_MJS_V3LENGTHSQUARED "$Elm$Kernel$MJS$v3lengthSquared" mjs_v3_length_squared1, 1;
+    G_MJS_V3DISTANCE "$Elm$Kernel$MJS$v3distance" mjs_v3_distance2, 2;
+    G_MJS_V3DISTANCESQUARED "$Elm$Kernel$MJS$v3distanceSquared" mjs_v3_distance_squared2, 2;
+    G_MJS_V3NORMALIZE "$Elm$Kernel$MJS$v3normalize" mjs_v3_normalize1, 1;
+    G_MJS_V3SCALE "$Elm$Kernel$MJS$v3scale" mjs_v3_scale2, 2;
+    G_MJS_V3DOT "$Elm$Kernel$MJS$v3dot" mjs_v3_dot2, 2;
+    G_MJS_V3CROSS "$Elm$Kernel$MJS$v3cross" mjs_v3_cross2, 2;
+    G_MJS_V3MUL4X4 "$Elm$Kernel$MJS$v3mul4x4" mjs_v3_mul4x4_2, 2;
+    G_MJS_V4 "$Elm$Kernel$MJS$v4" mjs_v4_4, 4;
+    G_MJS_V4GETX "$Elm$Kernel$MJS$v4getX" mjs_v4_get_x1, 1;
+    G_MJS_V4GETY "$Elm$Kernel$MJS$v4getY" mjs_v4_get_y1, 1;
+    G_MJS_V4GETZ "$Elm$Kernel$MJS$v4getZ" mjs_v4_get_z1, 1;
+    G_MJS_V4GETW "$Elm$Kernel$MJS$v4getW" mjs_v4_get_w1, 1;
+    G_MJS_V4SETX "$Elm$Kernel$MJS$v4setX" mjs_v4_set_x2, 2;
+    G_MJS_V4SETY "$Elm$Kernel$MJS$v4setY" mjs_v4_set_y2, 2;
+    G_MJS_V4SETZ "$Elm$Kernel$MJS$v4setZ" mjs_v4_set_z2, 2;
+    G_MJS_V4SETW "$Elm$Kernel$MJS$v4setW" mjs_v4_set_w2, 2;
+    G_MJS_V4TORECORD "$Elm$Kernel$MJS$v4toRecord" mjs_v4_to_record1, 1;
+    G_MJS_V4FROMRECORD "$Elm$Kernel$MJS$v4fromRecord" mjs_v4_from_record1, 1;
+    G_MJS_V4ADD "$Elm$Kernel$MJS$v4add" mjs_v4_add2, 2;
+    G_MJS_V4SUB "$Elm$Kernel$MJS$v4sub" mjs_v4_sub2, 2;
+    G_MJS_V4NEGATE "$Elm$Kernel$MJS$v4negate" mjs_v4_negate1, 1;
+    G_MJS_V4DIRECTION "$Elm$Kernel$MJS$v4direction" mjs_v4_direction2, 2;
+    G_MJS_V4LENGTH "$Elm$Kernel$MJS$v4length" mjs_v4_length1, 1;
+    G_MJS_V4LENGTHSQUARED "$Elm$Kernel$MJS$v4lengthSquared" mjs_v4_length_squared1, 1;
+    G_MJS_V4DISTANCE "$Elm$Kernel$MJS$v4distance" mjs_v4_distance2, 2;
+    G_MJS_V4DISTANCESQUARED "$Elm$Kernel$MJS$v4distanceSquared" mjs_v4_distance_squared2, 2;
+    G_MJS_V4NORMALIZE "$Elm$Kernel$MJS$v4normalize" mjs_v4_normalize1, 1;
+    G_MJS_V4SCALE "$Elm$Kernel$MJS$v4scale" mjs_v4_scale2, 2;
+    G_MJS_V4DOT "$Elm$Kernel$MJS$v4dot" mjs_v4_dot2, 2;
+    G_MJS_M4X4FROMRECORD "$Elm$Kernel$MJS$m4x4fromRecord" mjs_m4x4_from_record1, 1;
+    G_MJS_M4X4TORECORD "$Elm$Kernel$MJS$m4x4toRecord" mjs_m4x4_to_record1, 1;
+    G_MJS_M4X4INVERSE "$Elm$Kernel$MJS$m4x4inverse" mjs_m4x4_inverse1, 1;
+    G_MJS_M4X4INVERSEORTHONORMAL "$Elm$Kernel$MJS$m4x4inverseOrthonormal" mjs_m4x4_inverse_orthonormal1, 1;
+    G_MJS_M4X4MAKEFRUSTUM "$Elm$Kernel$MJS$m4x4makeFrustum" mjs_m4x4_make_frustum6, 6;
+    G_MJS_M4X4MAKEPERSPECTIVE "$Elm$Kernel$MJS$m4x4makePerspective" mjs_m4x4_make_perspective4, 4;
+    G_MJS_M4X4MAKEORTHO "$Elm$Kernel$MJS$m4x4makeOrtho" mjs_m4x4_make_ortho6, 6;
+    G_MJS_M4X4MAKEORTHO2D "$Elm$Kernel$MJS$m4x4makeOrtho2D" mjs_m4x4_make_ortho2d4, 4;
+    G_MJS_M4X4MUL "$Elm$Kernel$MJS$m4x4mul" mjs_m4x4_mul2, 2;
+    G_MJS_M4X4MULAFFINE "$Elm$Kernel$MJS$m4x4mulAffine" mjs_m4x4_mul_affine2, 2;
+    G_MJS_M4X4MAKEROTATE "$Elm$Kernel$MJS$m4x4makeRotate" mjs_m4x4_make_rotate2, 2;
+    G_MJS_M4X4ROTATE "$Elm$Kernel$MJS$m4x4rotate" mjs_m4x4_rotate3, 3;
+    G_MJS_M4X4MAKESCALE3 "$Elm$Kernel$MJS$m4x4makeScale3" mjs_m4x4_make_scale3_3, 3;
+    G_MJS_M4X4MAKESCALE "$Elm$Kernel$MJS$m4x4makeScale" mjs_m4x4_make_scale1, 1;
+    G_MJS_M4X4SCALE3 "$Elm$Kernel$MJS$m4x4scale3" mjs_m4x4_scale3_4, 4;
+    G_MJS_M4X4SCALE "$Elm$Kernel$MJS$m4x4scale" mjs_m4x4_scale2, 2;
+    G_MJS_M4X4MAKETRANSLATE3 "$Elm$Kernel$MJS$m4x4makeTranslate3" mjs_m4x4_make_translate3_3, 3;
+    G_MJS_M4X4MAKETRANSLATE "$Elm$Kernel$MJS$m4x4makeTranslate" mjs_m4x4_make_translate1, 1;
+    G_MJS_M4X4TRANSLATE3 "$Elm$Kernel$MJS$m4x4translate3" mjs_m4x4_translate3_4, 4;
+    G_MJS_M4X4TRANSLATE "$Elm$Kernel$MJS$m4x4translate" mjs_m4x4_translate2, 2;
+    G_MJS_M4X4MAKELOOKAT "$Elm$Kernel$MJS$m4x4makeLookAt" mjs_m4x4_make_look_at3, 3;
+    G_MJS_M4X4TRANSPOSE "$Elm$Kernel$MJS$m4x4transpose" mjs_m4x4_transpose1, 1;
+    G_MJS_M4X4MAKEBASIS "$Elm$Kernel$MJS$m4x4makeBasis" mjs_m4x4_make_basis3, 3;
     G_BASICS_IDENTITY "$Basics$identity" basics_identity, 1;
     G_BASICS_ALWAYS "$Basics$always" basics_always, 2;
     G_BASICS_NOT "$Basics$not" basics_not, 1;
