@@ -1603,6 +1603,14 @@ unsafe extern "C" fn basics_not(b: u64) -> u64 {
 unsafe extern "C" fn basics_xor(a: u64, b: u64) -> u64 {
     rt_bool(rt_is_true(a) != rt_is_true(b))
 }
+// `&&` / `||` as point-free function values (`Basics.and` / `Basics.or`, e.g.
+// `List.map2 and xs ys`). Total — no short-circuit is observable in Elm.
+unsafe extern "C" fn basics_and(a: u64, b: u64) -> u64 {
+    rt_bool(rt_is_true(a) && rt_is_true(b))
+}
+unsafe extern "C" fn basics_or(a: u64, b: u64) -> u64 {
+    rt_bool(rt_is_true(a) || rt_is_true(b))
+}
 #[export_name = "rtb$Basics$modBy"]
 unsafe extern "C" fn basics_mod_by(m: u64, n: u64) -> u64 {
     let m = as_int(m);
@@ -6990,6 +6998,9 @@ kernel_fns! {
     G_BASICS_MUL "$Basics$mul" rt_mul, 2;
     G_BASICS_FDIV "$Basics$fdiv" rt_fdiv, 2;
     G_BASICS_IDIV "$Basics$idiv" rt_idiv, 2;
+    G_BASICS_POW "$Basics$pow" rt_pow, 2;
+    G_BASICS_AND "$Basics$and" basics_and, 2;
+    G_BASICS_OR "$Basics$or" basics_or, 2;
 
     G_URL_PERCENTENCODE "$Url$percentEncode" url_percent_encode, 1;
     G_URL_PERCENTDECODE "$Url$percentDecode" url_percent_decode, 1;
