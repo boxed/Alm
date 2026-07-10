@@ -3498,10 +3498,35 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
     /// Truncate an f64 toward zero to an i64.
     fn f_to_int(&self, x: inkwell::values::FloatValue<'ctx>) -> BasicValueEnum<'ctx> {
+        // Ints are 63-bit tagged immediates, so a magnitude at or beyond 2^62
+        // overflows the tag bit; a raw fptosi on ±infinity / out-of-range is
+        // also poison. `round (1 / 0)` is a real idiom (elm-review's
+        // `infinity : Int` sentinel, expected to compare larger than any real
+        // value), so clamp to the representable tagged range on the float side
+        // — where minnum/maxnum also fold NaN to the bound — before converting.
+        // Keep this in step with native_runtime's `f64_to_int_word`.
+        let f64t = self.ctx.f64_type();
+        // 2^62 - 1024 (largest f64 strictly below 2^62) and -2^62.
+        let hi = f64t.const_float(4611686018427386880.0);
+        let lo = f64t.const_float(-4611686018427387904.0);
+        let t = self.call_f64_intrinsic2("llvm.minnum.f64", x, hi);
+        let t = self.call_f64_intrinsic2("llvm.maxnum.f64", t, lo);
+        let clamped = self
+            .builder
+            .build_float_to_signed_int(t, self.ctx.i64_type(), "toint")
+            .unwrap();
+        // NaN must become 0, not a bound: on JS `Int` is a double, so
+        // `ceiling (0/0)` stays NaN and `NaN >= 0` is False (e.g. an empty
+        // `Float.Extra.range`). minnum/maxnum fold NaN to the non-NaN operand
+        // (here `hi`), which would wrongly yield a huge count, so override it.
+        let is_nan = self
+            .builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, x, x, "isnan")
+            .unwrap();
+        let zero = self.ctx.i64_type().const_zero();
         self.builder
-            .build_float_to_signed_int(x, self.ctx.i64_type(), "toint")
+            .build_select(is_nan, zero, clamped, "nan0")
             .unwrap()
-            .into()
     }
 
     /// Call a unary f64 LLVM intrinsic (e.g. `llvm.floor.f64`), declaring it

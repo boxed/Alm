@@ -1797,18 +1797,38 @@ unsafe extern "C" fn basics_compare(a: u64, b: u64) -> u64 {
 unsafe extern "C" fn basics_to_float(n: u64) -> u64 {
     rt_float(num(n))
 }
+/// Convert a float to the integer word, clamped to the representable tagged
+/// range. Ints are 63-bit tagged immediates (`(n << 1) | 1`), so a value at or
+/// beyond ±2^62 overflows the tag bit and wraps to garbage. `Basics.round (1 /
+/// 0)` is a real idiom (elm-review's `infinity : Int` sentinel): on JS
+/// `round Infinity` stays `Infinity` and compares larger than every real value,
+/// so clamp to the tagged max/min to preserve that ordering rather than wrap.
+#[inline]
+fn f64_to_int_word(f: f64) -> i64 {
+    const HI: f64 = (1i64 << 62) as f64 - 1.0;
+    const LO: f64 = -((1i64 << 62) as f64);
+    if f.is_nan() {
+        0
+    } else if f >= HI {
+        (1i64 << 62) - 1
+    } else if f <= LO {
+        -(1i64 << 62)
+    } else {
+        f as i64
+    }
+}
 unsafe extern "C" fn basics_round(x: u64) -> u64 {
     // Math.round: half rounds toward +infinity.
-    rt_int((num(x) + 0.5).floor() as i64)
+    rt_int(f64_to_int_word((num(x) + 0.5).floor()))
 }
 unsafe extern "C" fn basics_floor(x: u64) -> u64 {
-    rt_int(num(x).floor() as i64)
+    rt_int(f64_to_int_word(num(x).floor()))
 }
 unsafe extern "C" fn basics_ceiling(x: u64) -> u64 {
-    rt_int(num(x).ceil() as i64)
+    rt_int(f64_to_int_word(num(x).ceil()))
 }
 unsafe extern "C" fn basics_truncate(x: u64) -> u64 {
-    rt_int(num(x) as i64)
+    rt_int(f64_to_int_word(num(x)))
 }
 unsafe extern "C" fn basics_sqrt(x: u64) -> u64 {
     rt_float(num(x).sqrt())

@@ -2505,3 +2505,42 @@ fn over_applied_fold_of_composed_functions() {
          \x20       ++ String.fromInt (Maybe.withDefault (\\x -> x) Nothing 3)\n",
     );
 }
+
+#[test]
+fn float_to_int_infinity_and_nan() {
+    // `round (1 / 0)` is a real idiom (elm-review's `infinity : Int` sentinel).
+    // On JS `Int` is a double so it stays `Infinity` and compares larger than
+    // any real value; natively it must clamp to a huge (but finite) int with
+    // the same ordering. NaN must act like JS's NaN in the range-building
+    // pattern (empty result), and ordinary rounding must still agree. Every
+    // sub-expression below is chosen so JS and native produce the same string.
+    assert_same(
+        "f_to_int_inf_nan",
+        "module Test exposing (..)\n\
+         \n\
+         countRange : Float -> Float -> Float -> Int\n\
+         countRange start stop step =\n\
+         \x20   if step == 0 then\n\
+         \x20       0\n\
+         \n\
+         \x20   else\n\
+         \x20       let\n\
+         \x20           n = (stop - start) / step |> ceiling |> max 0\n\
+         \x20           helper i c = if i >= 0 then helper (i - 1) (c + 1) else c\n\
+         \x20       in\n\
+         \x20       helper (n - 1) 0\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   (if round (1 / 0) > 1000000 then \"B\" else \"S\")\n\
+         \x20       ++ (if round (-1 / 0) < -1000000 then \"b\" else \"s\")\n\
+         \x20       ++ String.fromInt (round 3.5)\n\
+         \x20       ++ String.fromInt (round 2.4)\n\
+         \x20       ++ String.fromInt (floor 2.9)\n\
+         \x20       ++ String.fromInt (ceiling 2.1)\n\
+         \x20       ++ String.fromInt (truncate -2.9)\n\
+         \x20       ++ String.fromInt (countRange 0 5 1)\n\
+         \x20       ++ String.fromInt (countRange (1 / 0) 1 1)\n\
+         \x20       ++ String.fromInt (countRange (1 / 0) (1 / 0) 1)\n",
+    );
+}
