@@ -1591,7 +1591,13 @@ pub unsafe extern "C" fn rt_append(a: u64, b: u64) -> u64 {
             data.extend_from_slice(sa);
             list_from_store(data)
         }
-        _ => crash!("++ on a non-appendable"),
+        _ => {
+            eprintln!("alm: ++ on a non-appendable, found {}", variant_name(a));
+            if std::env::var("ALM_CRASH_BT").is_ok() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+            crash!("++ on a non-appendable")
+        }
     }
 }
 
