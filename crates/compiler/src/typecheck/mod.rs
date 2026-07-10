@@ -801,6 +801,23 @@ impl Checker<'_> {
             },
             content => {
                 let name = state.fresh_name(root, &content);
+                // Pin the chosen name on the variable itself: a node deferred
+                // past this generalization is zonked later by an enclosing
+                // scope in a FRESH naming state, and monomorphization matches
+                // an inner definition's scheme against node types BY NAME — an
+                // anonymous variable renamed by the outer state would miss the
+                // substitution and specialize at a bare type variable.
+                match &content {
+                    Content::FlexVar(None) => {
+                        self.pool
+                            .set_content(root, Content::FlexVar(Some(name.clone())));
+                    }
+                    Content::FlexSuper(s, None) => {
+                        self.pool
+                            .set_content(root, Content::FlexSuper(*s, Some(name.clone())));
+                    }
+                    _ => {}
+                }
                 if env_free.contains(&root) {
                     state.free.insert(name.clone(), root);
                 }
