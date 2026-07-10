@@ -5581,12 +5581,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .build_conditional_branch(cv, then_bb, else_bb)
                 .unwrap();
             self.builder.position_at_end(then_bb);
+            // Widen an Int-literal branch to a Float result (an unresolved
+            // `number` defaulted to Int on one arm of a Float-typed `if`).
             let tv = self.gen(then)?;
+            let tv = self.coerce_to_slot(tv, Some(result_ty));
             incoming.push((tv, self.builder.get_insert_block().unwrap()));
             self.builder.build_unconditional_branch(merge).unwrap();
             self.builder.position_at_end(else_bb);
         }
         let ev = self.gen(otherwise)?;
+        let ev = self.coerce_to_slot(ev, Some(result_ty));
         incoming.push((ev, self.builder.get_insert_block().unwrap()));
         self.builder.build_unconditional_branch(merge).unwrap();
 
@@ -5622,7 +5626,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // pattern's variables bound.
             let fail = self.new_block("case.next");
             let refutable = self.match_pattern(pattern, subject, &scrutinee.tipe, fail)?;
+            // Widen an Int-literal branch to a Float result (see gen_if).
             let v = self.gen(body)?;
+            let v = self.coerce_to_slot(v, Some(result_ty));
             incoming.push((v, self.builder.get_insert_block().unwrap()));
             self.builder.build_unconditional_branch(merge).unwrap();
             self.builder.position_at_end(fail);
