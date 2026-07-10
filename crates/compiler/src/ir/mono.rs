@@ -90,8 +90,8 @@ pub fn analyze(
 pub fn analyze_project(modules: &[ModuleInfo], entry: &Name) -> MonoSet {
     let ctxs = build_ctxs(modules);
     let mut set = MonoSet::default();
-    // Seen instances keyed by (module, name, printed type).
-    let mut seen: HashMap<(Name, Name, String), ()> = HashMap::new();
+    // Seen instances keyed by (module, name, type).
+    let mut seen: HashMap<(Name, Name, can::Type), ()> = HashMap::new();
     let mut queue: Vec<Instance> = Vec::new();
 
     if let Some(entry_ctx) = ctxs.get(entry) {
@@ -248,14 +248,17 @@ fn default_numbers(tipe: &can::Type) -> can::Type {
 
 fn enqueue(
     queue: &mut Vec<Instance>,
-    seen: &mut HashMap<(Name, Name, String), ()>,
+    seen: &mut HashMap<(Name, Name, can::Type), ()>,
     set: &mut MonoSet,
     instance: Instance,
 ) {
+    // Key by the type VALUE, not its Debug rendering: formatting every
+    // instance type is O(size) in string building and dominated compile time
+    // on instantiation-heavy packages (elm-geometry burned minutes here).
     let key = (
         instance.module.clone(),
         instance.name.clone(),
-        format!("{:?}", instance.tipe),
+        instance.tipe.clone(),
     );
     if seen.insert(key, ()).is_some() {
         return;
@@ -643,12 +646,22 @@ struct Specializer<'a> {
 impl Specializer<'_> {
     /// The concrete type of a node under a substitution.
     fn node_ty(&self, expr: &can::Expr, subst: &HashMap<Name, can::Type>) -> can::Type {
-        let captured = self
-            .ctx
-            .node_types
-            .get(&expr.region)
-            .cloned()
-            .unwrap_or(can::Type::Unit);
+        let captured = match self.ctx.node_types.get(&expr.region) {
+            Some(t) => t.clone(),
+            None => {
+                if std::env::var("ALM_MISSING_NODE").is_ok() {
+                    eprintln!(
+                        "[missing-node] {}:{}..{}:{} kind={:?}",
+                        expr.region.start.row,
+                        expr.region.start.col,
+                        expr.region.end.row,
+                        expr.region.end.col,
+                        std::mem::discriminant(&expr.value)
+                    );
+                }
+                can::Type::Unit
+            }
+        };
         apply_subst(subst, &captured)
     }
 

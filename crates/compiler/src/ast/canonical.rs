@@ -91,7 +91,7 @@ pub enum Pattern_ {
 
 // TYPES
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Var(Name),
     Lambda(Box<Type>, Box<Type>),
