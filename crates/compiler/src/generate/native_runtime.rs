@@ -800,7 +800,13 @@ unsafe fn ctor_get(v: u64, i: usize) -> u64 {
                 rest[i - 1]
             }
         }
-        _ => crash!("not a constructor"),
+        _ => {
+            eprintln!("alm: not a constructor, found {}", variant_name(v));
+            if std::env::var("ALM_CRASH_BT").is_ok() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+            crash!("not a constructor")
+        }
     }
 }
 
