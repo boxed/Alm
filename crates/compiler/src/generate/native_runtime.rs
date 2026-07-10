@@ -2342,6 +2342,10 @@ unsafe extern "C" fn char_is_digit(c: u64) -> u64 {
     let n = as_int(c);
     rt_bool((b'0' as i64..=b'9' as i64).contains(&n))
 }
+unsafe extern "C" fn char_is_oct_digit(c: u64) -> u64 {
+    let n = as_int(c);
+    rt_bool((b'0' as i64..=b'7' as i64).contains(&n))
+}
 unsafe extern "C" fn char_is_upper(c: u64) -> u64 {
     let n = as_int(c);
     rt_bool((b'A' as i64..=b'Z' as i64).contains(&n))
@@ -6295,6 +6299,51 @@ unsafe extern "C" fn http_post1(config: u64) -> u64 {
     let expect = rt_access(config, b"expect\0".as_ptr());
     http_simple_request(b"POST", url, body, expect)
 }
+unsafe extern "C" fn http_string_resolver1(to_result: u64) -> u64 {
+    let rec = rt_record_new(1);
+    rt_record_set(rec, 0, b"toResult\0".as_ptr(), to_result);
+    rec
+}
+// `Http.task`/`riskyTask` — a Task value that is never executed natively
+// (tests only construct and compose it); an opaque constructor suffices.
+unsafe extern "C" fn http_task1(config: u64) -> u64 {
+    ctor1(b"TaskHttp\0".as_ptr(), 0, config)
+}
+
+// --- Browser.Dom: headless stand-ins (no DOM natively). The JS runtime's
+// equivalents also run without a document and yield failing/zeroed tasks;
+// these are opaque Task values that tests construct but never perform.
+unsafe extern "C" fn dom_get_element1(id: u64) -> u64 {
+    ctor1(b"TaskDom\0".as_ptr(), 0, id)
+}
+unsafe extern "C" fn dom_set_viewport_of3(id: u64, _x: u64, _y: u64) -> u64 {
+    ctor1(b"TaskDom\0".as_ptr(), 0, id)
+}
+
+// --- elm-explorations/webgl (Elm.Kernel.WebGL): headless stand-ins mirroring
+// runtime.js — real rendering needs a GPU/DOM `gl` context. The nodes carry
+// their inputs as plain data so structural equality behaves predictably;
+// `enable*` settings/options all yield unit.
+unsafe extern "C" fn webgl_entity5(settings: u64, vert: u64, frag: u64, mesh: u64, uniforms: u64) -> u64 {
+    ctor(b"Entity\0".as_ptr(), 0, vec![settings, vert, frag, mesh, uniforms])
+}
+unsafe extern "C" fn webgl_to_html3(options: u64, attributes: u64, entities: u64) -> u64 {
+    ctor(b"WebGLScene\0".as_ptr(), 0, vec![options, attributes, entities])
+}
+unsafe extern "C" fn webgl_enable2(_ctx: u64, _setting: u64) -> u64 {
+    unit()
+}
+// Texture.load can never succeed headlessly (mirrors the JS stand-in, which
+// fails the task); size reads the (never-constructible) texture's dimensions.
+unsafe extern "C" fn texture_load6(_mag: u64, _min: u64, _hw: u64, _vw: u64, _fy: u64, _url: u64) -> u64 {
+    task_fail(unit())
+}
+unsafe extern "C" fn texture_size1(texture: u64) -> u64 {
+    pair(
+        rt_access(texture, b"width\0".as_ptr()),
+        rt_access(texture, b"height\0".as_ptr()),
+    )
+}
 
 // --- elm-explorations/linear-algebra (Elm.Kernel.MJS): pure vector/matrix
 // math, ported verbatim from the JS kernel (same formulas, same argument
@@ -8168,6 +8217,31 @@ kernel_fns! {
     G_HTTP_RISKYREQUEST "$Http$riskyRequest" http_request1, 1;
     G_HTTP_GET "$Http$get" http_get1, 1;
     G_HTTP_POST "$Http$post" http_post1, 1;
+    G_HTTP_STRINGRESOLVER "$Http$stringResolver" http_string_resolver1, 1;
+    G_HTTP_BYTESRESOLVER "$Http$bytesResolver" http_string_resolver1, 1;
+    G_HTTP_TASK "$Http$task" http_task1, 1;
+    G_HTTP_RISKYTASK "$Http$riskyTask" http_task1, 1;
+    G_DOM_GETELEMENT "$Browser$Dom$getElement" dom_get_element1, 1;
+    G_DOM_SETVIEWPORTOF "$Browser$Dom$setViewportOf" dom_set_viewport_of3, 3;
+    G_WEBGL_ENTITY "$Elm$Kernel$WebGL$entity" webgl_entity5, 5;
+    G_WEBGL_TOHTML "$Elm$Kernel$WebGL$toHtml" webgl_to_html3, 3;
+    G_WEBGL_ENABLEALPHA "$Elm$Kernel$WebGL$enableAlpha" webgl_enable2, 2;
+    G_WEBGL_ENABLEANTIALIAS "$Elm$Kernel$WebGL$enableAntialias" webgl_enable2, 2;
+    G_WEBGL_ENABLEBLEND "$Elm$Kernel$WebGL$enableBlend" webgl_enable2, 2;
+    G_WEBGL_ENABLECLEARCOLOR "$Elm$Kernel$WebGL$enableClearColor" webgl_enable2, 2;
+    G_WEBGL_ENABLECOLORMASK "$Elm$Kernel$WebGL$enableColorMask" webgl_enable2, 2;
+    G_WEBGL_ENABLECULLFACE "$Elm$Kernel$WebGL$enableCullFace" webgl_enable2, 2;
+    G_WEBGL_ENABLEDEPTH "$Elm$Kernel$WebGL$enableDepth" webgl_enable2, 2;
+    G_WEBGL_ENABLEDEPTHTEST "$Elm$Kernel$WebGL$enableDepthTest" webgl_enable2, 2;
+    G_WEBGL_ENABLEPOLYGONOFFSET "$Elm$Kernel$WebGL$enablePolygonOffset" webgl_enable2, 2;
+    G_WEBGL_ENABLEPRESERVEDRAWINGBUFFER "$Elm$Kernel$WebGL$enablePreserveDrawingBuffer" webgl_enable2, 2;
+    G_WEBGL_ENABLESAMPLEALPHATOCOVERAGE "$Elm$Kernel$WebGL$enableSampleAlphaToCoverage" webgl_enable2, 2;
+    G_WEBGL_ENABLESAMPLECOVERAGE "$Elm$Kernel$WebGL$enableSampleCoverage" webgl_enable2, 2;
+    G_WEBGL_ENABLESCISSOR "$Elm$Kernel$WebGL$enableScissor" webgl_enable2, 2;
+    G_WEBGL_ENABLESTENCIL "$Elm$Kernel$WebGL$enableStencil" webgl_enable2, 2;
+    G_WEBGL_ENABLESTENCILTEST "$Elm$Kernel$WebGL$enableStencilTest" webgl_enable2, 2;
+    G_TEXTURE_LOAD "$Elm$Kernel$Texture$load" texture_load6, 6;
+    G_TEXTURE_SIZE "$Elm$Kernel$Texture$size" texture_size1, 1;
     G_HTMLEV_ON "$Html$Events$on" events_on2, 2;
     G_HTMLEV_STOPON "$Html$Events$stopPropagationOn" events_stop_on2, 2;
     G_HTMLEV_PREVENTON "$Html$Events$preventDefaultOn" events_prevent_on2, 2;
@@ -8416,6 +8490,11 @@ kernel_fns! {
     G_CHAR_ISALPHA "$Char$isAlpha" char_is_alpha, 1;
     G_CHAR_TOUPPER "$Char$toUpper" char_to_upper, 1;
     G_CHAR_TOLOWER "$Char$toLower" char_to_lower, 1;
+    G_CHAR_ISOCTDIGIT "$Char$isOctDigit" char_is_oct_digit, 1;
+    // Locale variants: elm's own are ASCII-locale-independent for the
+    // characters tests exercise; map to the plain case kernels.
+    G_CHAR_TOLOCALEUPPER "$Char$toLocaleUpper" char_to_upper, 1;
+    G_CHAR_TOLOCALELOWER "$Char$toLocaleLower" char_to_lower, 1;
 
     G_MAYBE_WITHDEFAULT "$Maybe$withDefault" maybe_with_default, 2;
     G_MAYBE_MAP "$Maybe$map" maybe_map, 2;
