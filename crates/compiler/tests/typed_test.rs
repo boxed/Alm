@@ -2430,3 +2430,42 @@ fn recursive_local_with_row_expanded_record_param() {
          \x20   Debug.toString (calc { value = 5, count = 7 })\n",
     );
 }
+
+#[test]
+fn let_local_named_like_binop_function_is_not_a_cycle() {
+    // `+` resolves to Basics `add`; let-sorting collected that resolved binop
+    // function name as a bare reference, so a LOCAL binding named `add` gained
+    // an edge from every sibling that used `+` — manufacturing a bogus
+    // recursive group containing value bindings ("mutually-recursive local
+    // value bindings are not supported"). Operators cannot be let-bound, so
+    // binop functions must not count as let-local dependencies.
+    // elm-paragraph's stepr shape.
+    assert_same(
+        "local_named_add",
+        "module Test exposing (..)\n\
+         \n\
+         calc : Int -> Int\n\
+         calc w =\n\
+         \x20   let\n\
+         \x20       waste p =\n\
+         \x20           if p == 0 then 0 else width_hd p + 1\n\
+         \x20       width_hd p =\n\
+         \x20           tot_width - p\n\
+         \x20       tot_width =\n\
+         \x20           w + 1\n\
+         \x20       k p q =\n\
+         \x20           let\n\
+         \x20               wp0 =\n\
+         \x20                   width_hd p\n\
+         \x20           in\n\
+         \x20           waste p + wp0 + q\n\
+         \x20       add p =\n\
+         \x20           if p > 0 then add (p - 1) else k p p\n\
+         \x20   in\n\
+         \x20   add 3\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (calc 10)\n",
+    );
+}

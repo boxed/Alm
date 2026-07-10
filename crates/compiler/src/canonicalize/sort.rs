@@ -113,16 +113,29 @@ fn cyclic_nodes(count: usize, edges: &[Vec<usize>]) -> Vec<usize> {
 /// With `direct_only`, stop at lambdas and function definitions: those
 /// references only run when called, so they cannot make evaluation of a
 /// value diverge (used for cycle legality).
-fn collect_refs_help(expr: &can::Expr, direct_only: bool, refs: &mut HashSet<Name>) {
+fn collect_refs_help(
+    expr: &can::Expr,
+    direct_only: bool,
+    binop_fns: bool,
+    refs: &mut HashSet<Name>,
+) {
     use can::Expr_::*;
-    let walk = |e: &can::Expr, refs: &mut HashSet<Name>| collect_refs_help(e, direct_only, refs);
+    let walk =
+        |e: &can::Expr, refs: &mut HashSet<Name>| collect_refs_help(e, direct_only, binop_fns, refs);
     match &expr.value {
         VarLocal(name) | VarTopLevel(name) => {
             refs.insert(name.clone());
         }
         Binop(_, _, function, left, right) => {
-            // A locally-defined operator's function is a real dependency.
-            refs.insert(function.clone());
+            // For TOP-LEVEL sorting, a same-module operator's function is a
+            // real dependency (`|=` resolving to a sibling definition). For
+            // LET sorting it must not count: operators cannot be let-bound, so
+            // the resolved name (`+` -> Basics `add`) would spuriously match an
+            // unrelated local that happens to share it, manufacturing a cycle
+            // (elm-paragraph: every `+` edged to a local named `add`).
+            if binop_fns {
+                refs.insert(function.clone());
+            }
             walk(left, refs);
             walk(right, refs);
         }
@@ -187,11 +200,19 @@ fn collect_refs_help(expr: &can::Expr, direct_only: bool, refs: &mut HashSet<Nam
 }
 
 fn collect_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
-    collect_refs_help(expr, false, refs);
+    collect_refs_help(expr, false, true, refs);
 }
 
 fn collect_direct_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
-    collect_refs_help(expr, true, refs);
+    collect_refs_help(expr, true, true, refs);
+}
+
+fn collect_let_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
+    collect_refs_help(expr, false, false, refs);
+}
+
+fn collect_direct_let_refs(expr: &can::Expr, refs: &mut HashSet<Name>) {
+    collect_refs_help(expr, true, false, refs);
 }
 
 /// Sort let declarations into dependency order, grouping mutually recursive
@@ -218,9 +239,9 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
         .map(|decl| {
             let mut refs = HashSet::new();
             match decl {
-                can::LetDecl::Def(def) => collect_refs(&def.body, &mut refs),
+                can::LetDecl::Def(def) => collect_let_refs(&def.body, &mut refs),
                 can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
-                can::LetDecl::Destruct(_, e) => collect_refs(e, &mut refs),
+                can::LetDecl::Destruct(_, e) => collect_let_refs(e, &mut refs),
             }
             let mut deps: Vec<usize> = refs
                 .iter()
@@ -240,11 +261,11 @@ pub(super) fn sort_let_decls(decls: Vec<can::LetDecl>) -> CResult<Vec<can::LetDe
             match decl {
                 can::LetDecl::Def(def) => {
                     if def.args.is_empty() {
-                        collect_direct_refs(&def.body, &mut refs);
+                        collect_direct_let_refs(&def.body, &mut refs);
                     }
                 }
                 can::LetDecl::Recursive(_) => unreachable!("sort input is flat"),
-                can::LetDecl::Destruct(_, e) => collect_direct_refs(e, &mut refs),
+                can::LetDecl::Destruct(_, e) => collect_direct_let_refs(e, &mut refs),
             }
             let mut deps: Vec<usize> = refs
                 .iter()

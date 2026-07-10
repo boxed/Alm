@@ -2366,10 +2366,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         for d in group {
             match d {
                 Def { name, params, .. } if !params.is_empty() => names.push(name.to_string()),
-                Def { .. } => {
-                    return Err("typed backend: mutually-recursive local value bindings are \
-                                not supported"
-                        .to_string())
+                Def { name, .. } => {
+                    return Err(format!(
+                        "typed backend: mutually-recursive local value bindings are \
+                         not supported (`{}` in a recursive group)",
+                        name
+                    ))
                 }
                 _ => {
                     return Err(
