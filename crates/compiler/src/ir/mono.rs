@@ -607,7 +607,20 @@ impl Specializer<'_> {
         use can::Expr_::*;
         let tipe = self.node_ty(expr, subst);
         let kind = match &expr.value {
-            Int(n) => TypedKind::Int(*n),
+            // A `number` literal whose concrete type resolves to Float IS a
+            // float (elm defaults unresolved `number` to Int, but a literal in
+            // a Float position — `duration 150`, `( x, y, 0 )` — must take the
+            // resolved type). Without this the caller passes an i64 where the
+            // specialized callee expects a double: invalid IR when LLVM checks
+            // the call, silently reinterpreted bits when it does not.
+            Int(n) => match &tipe {
+                can::Type::Type(home, name, _)
+                    if home.as_str() == "Basics" && name.as_str() == "Float" =>
+                {
+                    TypedKind::Float(*n as f64)
+                }
+                _ => TypedKind::Int(*n),
+            },
             Float(f) => TypedKind::Float(*f),
             Str(s) => TypedKind::Str(s.clone()),
             Chr(c) => TypedKind::Chr(*c),

@@ -2050,15 +2050,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             if np == args.len() {
                 let mut argv = Vec::with_capacity(args.len());
                 for arg in args {
-                    argv.push(self.gen(arg)?.into());
+                    argv.push(self.gen(arg)?);
                 }
-                return Ok(self
-                    .builder
-                    .build_call(f, &argv, "call")
-                    .unwrap()
-                    .try_as_basic_value()
-                    .left()
-                    .unwrap());
+                // call_fn widens i64 args to double params (unresolved
+                // `number` literals defaulted to Int at a Float call site).
+                return Ok(self.call_fn(f, &argv));
             }
             if args.len() < np {
                 // Partial application: capture the given arguments in a closure
@@ -2079,16 +2075,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             for arg in args {
                 evaled.push(self.gen(arg)?);
             }
-            let head: Vec<inkwell::values::BasicMetadataValueEnum> =
-                evaled[..np].iter().map(|v| (*v).into()).collect();
-            let closure = self
-                .builder
-                .build_call(f, &head, "call")
-                .unwrap()
-                .try_as_basic_value()
-                .left()
-                .unwrap()
-                .into_pointer_value();
+            let closure = self.call_fn(f, &evaled[..np]).into_pointer_value();
             // The closure returned by the point-free (or under-arity) function
             // has the callee's type with its `np` compiled parameters peeled
             // off. Apply the remaining arguments with currying so an
@@ -3217,7 +3204,19 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         f: FunctionValue<'ctx>,
         args: &[BasicValueEnum<'ctx>],
     ) -> BasicValueEnum<'ctx> {
-        let argv: Vec<_> = args.iter().map(|a| (*a).into()).collect();
+        // Widen an i64 argument to a double parameter: a `number` literal whose
+        // variable never resolved defaults to Int at the use site, while the
+        // callee may be specialized at Float (`yFromLstar 50`). Elm's `number`
+        // makes the widening semantically exact.
+        let param_tys = f.get_type().get_param_types();
+        let argv: Vec<_> = args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                self.coerce_to_slot(*a, param_tys.get(i).copied().map(Into::into))
+                    .into()
+            })
+            .collect();
         self.builder
             .build_call(f, &argv, "hof")
             .unwrap()
