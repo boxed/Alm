@@ -21,20 +21,87 @@ use std::ffi::CStr;
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// BUMP ALLOCATOR
+// ALLOCATOR
 //
-// The runtime never frees (reference counting is a future pass), so a
-// pointer-bump allocator over large chunks is both correct and far faster
-// than hitting the system malloc for every boxed value. Single-threaded,
-// matching the runtime.
+// Native: the Boehm–Demers–Weiser conservative garbage collector (`libgc`).
+// The runtime holds Elm values as raw `u64` pointers with no ownership tracking
+// and reads them through fabricated lifetimes, so a precise collector would need
+// codegen-registered roots. A *conservative* GC needs none of that: it scans the
+// stack, registers, and statics treating any word that looks like a heap pointer
+// as a root, so it reclaims exactly the unreachable values and — because a value
+// stays live as long as any pointer to it is reachable — it also keeps the
+// runtime's raw-pointer reads valid. Elm ints are tagged (`w & 1`, i.e. odd), so
+// they are never mistaken for pointers and cause no false retention.
+//
+// `GC_malloc` returns 16-aligned, zeroed memory; every Elm allocation has align
+// ≤ 16, and `GC_memalign` covers the rare larger request. `dealloc` is a no-op —
+// the collector reclaims. The collector is initialised lazily on first
+// allocation (on whatever thread starts the program, which becomes GC-primary),
+// and the large-stack worker thread registers itself in `main`.
+//
+// Wasm: `libgc` is not linked there, so wasm keeps the leak-only bump allocator.
 
 struct Bump;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+struct GcStackBase {
+    mem_base: *mut u8,
+    // `struct GC_stack_base` is a single pointer on arm64/x86-64; an extra word
+    // over-allocates so `GC_get_stack_base` can never write past the struct.
+    _reg_base: *mut u8,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" {
+    fn GC_init();
+    fn GC_malloc(size: usize) -> *mut u8;
+    fn GC_memalign(align: usize, size: usize) -> *mut u8;
+    fn GC_realloc(p: *mut u8, size: usize) -> *mut u8;
+    fn GC_allow_register_threads();
+    fn GC_get_stack_base(sb: *mut GcStackBase) -> i32;
+    fn GC_register_my_thread(sb: *const GcStackBase) -> i32;
+    fn GC_unregister_my_thread() -> i32;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static mut GC_READY: bool = false;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn gc_ensure_init() {
+    if !GC_READY {
+        GC_READY = true;
+        GC_init();
+        GC_allow_register_threads();
+    }
+}
+
+// Wasm-only leak-everything bump allocator.
+#[cfg(target_arch = "wasm32")]
 static mut BUMP_CUR: usize = 0;
+#[cfg(target_arch = "wasm32")]
 static mut BUMP_END: usize = 0;
+#[cfg(target_arch = "wasm32")]
 const BUMP_CHUNK: usize = 64 << 20; // 64 MiB
 
 unsafe impl GlobalAlloc for Bump {
+    #[cfg(not(target_arch = "wasm32"))]
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        gc_ensure_init();
+        let size = layout.size().max(1);
+        if layout.align() > 16 {
+            GC_memalign(layout.align(), size)
+        } else {
+            GC_malloc(size)
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+        GC_realloc(ptr, new_size)
+    }
+
+    #[cfg(target_arch = "wasm32")]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let align = layout.align().max(1);
         let size = layout.size();
@@ -54,7 +121,7 @@ unsafe impl GlobalAlloc for Bump {
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Intentionally leak — see module docs.
+        // Native: the GC reclaims. Wasm: leak. Either way, nothing to do.
     }
 }
 
@@ -7507,9 +7574,25 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // a JS engine's larger, growable stack absorbs. 512MB matches "effectively
     // deep like JS" while staying bounded (a genuine infinite recursion still
     // faults, just later, rather than running unbounded).
+    // Ensure the collector is initialised on this (GC-primary) thread before we
+    // spawn, so the worker's `GC_register_my_thread` is allowed.
+    gc_ensure_init();
     match std::thread::Builder::new()
         .stack_size(512 * 1024 * 1024)
-        .spawn(|| unsafe { alm_entry() })
+        .spawn(|| unsafe {
+            // The collector scans registered threads' stacks; a bare `std::thread`
+            // is invisible to it, so register this thread (base .. current SP)
+            // for the duration of the program.
+            let mut sb = GcStackBase {
+                mem_base: std::ptr::null_mut(),
+                _reg_base: std::ptr::null_mut(),
+            };
+            GC_get_stack_base(&mut sb);
+            GC_register_my_thread(&sb);
+            let rc = alm_entry();
+            GC_unregister_my_thread();
+            rc
+        })
     {
         Ok(h) => h.join().unwrap_or(70),
         // If the thread can't be spawned, fall back to running inline.

@@ -218,9 +218,19 @@ pub(crate) fn finish<'ctx>(
             // The regex glue object resolves the elm/regex kernels' engine.
             let regex = build_dir.join("regex.o");
             std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
+            // The runtime uses the Boehm conservative GC (`libgc`) as its
+            // allocator; link it in. `-lgc` from the bdw-gc install prefix.
             run_linker(
                 "cc",
-                &[&object, &runtime, &regex, Path::new("-o"), output],
+                &[
+                    &object,
+                    &runtime,
+                    &regex,
+                    Path::new("-L/opt/homebrew/opt/bdw-gc/lib"),
+                    Path::new("-lgc"),
+                    Path::new("-o"),
+                    output,
+                ],
             )
         }
         Target::Wasm => {
