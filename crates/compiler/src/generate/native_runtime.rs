@@ -1020,7 +1020,13 @@ pub unsafe extern "C" fn rt_ctor_arg(v: u64, i: i32) -> u64 {
 pub unsafe extern "C" fn rt_tuple_item(v: u64, i: i32) -> u64 {
     match deref(v) {
         Value::Tuple(items) => items[i as usize],
-        _ => crash!("not a tuple"),
+        _ => {
+            eprintln!("alm: not a tuple, found {}", variant_name(v));
+            if std::env::var("ALM_CRASH_BT").is_ok() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+            crash!("not a tuple")
+        }
     }
 }
 
