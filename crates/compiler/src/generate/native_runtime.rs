@@ -451,6 +451,40 @@ unsafe fn deref_mut<'a>(w: u64) -> &'a mut Value {
     &mut *(w as *mut Value)
 }
 
+/// The variant of a value word, for crash messages: a kernel that finds the
+/// wrong variant should say what it FOUND, not just what it wanted.
+unsafe fn variant_name(w: u64) -> &'static str {
+    if w == 0 {
+        return "null";
+    }
+    if is_int(w) {
+        return "Int (immediate)";
+    }
+    match deref(w) {
+        Value::Float(_) => "Float",
+        Value::Char(_) => "Char",
+        Value::Bool(_) => "Bool",
+        Value::Unit => "Unit",
+        Value::Str(_) => "Str",
+        Value::List { .. } => "List",
+        Value::Ctor { name, .. } => {
+            // A static constructor name is 'static by construction.
+            cname(*name)
+        }
+        Value::Closure { .. } => "Closure",
+        Value::Record { .. } => "Record",
+        Value::Tuple(_) => "Tuple",
+        Value::Dict(_) => "Dict",
+        Value::Set(_) => "Set",
+        Value::Array(_) => "Array",
+        Value::Bytes(_) => "Bytes",
+        Value::Floats(_) => "Floats",
+        Value::Json(_) => "Json",
+        Value::Decoder(_) => "Decoder",
+        Value::Regex(_) => "Regex",
+    }
+}
+
 // VALUE WORD
 //
 // A value is a 64-bit word (`u64`), independent of the target's pointer
@@ -5144,7 +5178,10 @@ unsafe extern "C" fn json_decode_string(dec: u64, s: u64) -> u64 {
 unsafe fn str_bytes(w: u64) -> Vec<u8> {
     match deref(w) {
         Value::Str(b) => b.clone(),
-        _ => crash!("expected a String"),
+        _ => {
+            eprintln!("alm: expected a String, found {}", variant_name(w));
+            crash!("expected a String")
+        }
     }
 }
 
@@ -5152,7 +5189,13 @@ unsafe fn str_bytes(w: u64) -> Vec<u8> {
 unsafe fn str_slice<'a>(w: u64) -> &'a [u8] {
     match deref(w) {
         Value::Str(b) => b,
-        _ => crash!("expected a String"),
+        _ => {
+            eprintln!("alm: expected a String, found {}", variant_name(w));
+            if std::env::var("ALM_CRASH_BT").is_ok() {
+                eprintln!("{}", std::backtrace::Backtrace::force_capture());
+            }
+            crash!("expected a String")
+        }
     }
 }
 
@@ -5992,11 +6035,14 @@ unsafe fn str_is(w: u64, lit: &[u8]) -> bool {
 /// `a ++ " " ++ b` for two class strings (no leading space when `a` is empty),
 /// mirroring elm/virtual-dom's className merge.
 unsafe fn join_class(a: u64, b: u64) -> u64 {
-    let mut s = str_slice(a).to_vec();
+    // Property values are `Json.Encode.Value`s: plain Str from the class
+    // kernels, Json(JStr) from `VirtualDom.property "className" (Encode.string
+    // s)` (elm-css, bootstrap) — accept both (see `prop_str`).
+    let mut s = prop_str(a).to_vec();
     if !s.is_empty() {
         s.push(b' ');
     }
-    s.extend_from_slice(str_slice(b));
+    s.extend_from_slice(prop_str(b));
     mkstr(s)
 }
 
@@ -7256,6 +7302,16 @@ unsafe fn html_handler(attr: u64) -> JsonValue {
 }
 
 // _HtmlAsJson_facts.
+/// A DOM property's string content: the class/property kernels store a plain
+/// `Str`, while `VirtualDom.property` stores the `Json.Encode.Value` itself
+/// (a `Json(JStr)` for encoded strings). Both spell the same JS string.
+unsafe fn prop_str<'a>(w: u64) -> &'a [u8] {
+    if let Value::Json(JsonValue::JStr(s)) = deref(w) {
+        return s;
+    }
+    str_slice(w)
+}
+
 unsafe fn html_facts(attrs: u64) -> JsonValue {
     let mut styles: Vec<(Vec<u8>, JsonValue)> = Vec::new();
     let mut string_attrs: Vec<(Vec<u8>, JsonValue)> = Vec::new();
@@ -7285,7 +7341,12 @@ unsafe fn html_facts(attrs: u64) -> JsonValue {
                 }
                 AI_PROP => {
                     if str_is(key, b"className") {
-                        add_class(&mut classes, str_slice(rest[0]));
+                        // A property VALUE is a `Json.Encode.Value`: the class
+                        // kernels build a plain Str, but code going through
+                        // `VirtualDom.property "className" (Encode.string s)`
+                        // (elm-css, origami) carries Json — read either. On the
+                        // JS side both are raw strings, so JS never noticed.
+                        add_class(&mut classes, prop_str(rest[0]));
                     } else {
                         props.push((str_slice(key).to_vec(), val_to_json(rest[0])));
                     }
