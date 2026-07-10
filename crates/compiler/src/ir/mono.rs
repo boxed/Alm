@@ -491,6 +491,9 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             continue;
         };
         let mangled = mangle(&instance.module, &instance.name, &instance.tipe);
+        if std::env::var("ALM_MONO_TRACE").map_or(false, |t| t == instance.name.as_str()) {
+            eprintln!("[mono spec {}] {:?}", instance.name.as_str(), instance.tipe);
+        }
         let scheme = mctx
             .types
             .get(&instance.name)
@@ -614,6 +617,15 @@ impl Specializer<'_> {
             Shader(shader) => TypedKind::Str(shader.src.clone()),
             VarLocal(name) => TypedKind::Local(name.clone()),
             VarTopLevel(name) => {
+                if std::env::var("ALM_MONO_TRACE").map_or(false, |t| t == name.as_str()) {
+                    eprintln!(
+                        "[mono {} @{}:{}] {:?}",
+                        name.as_str(),
+                        expr.region.start.row,
+                        expr.region.start.col,
+                        tipe
+                    );
+                }
                 if self.ctx.defs.contains_key(name) {
                     // Resolve to the callee's specialization (this module) at
                     // this node's concrete type.
@@ -628,6 +640,17 @@ impl Specializer<'_> {
                 }
             }
             VarForeign(module, name) => {
+                // ALM_MONO_TRACE=<name> prints every instantiation of a
+                // definition during specialization (debugging aid).
+                if std::env::var("ALM_MONO_TRACE").map_or(false, |t| t == name.as_str()) {
+                    eprintln!(
+                        "[mono {} @{}:{}] {:?}",
+                        name.as_str(),
+                        expr.region.start.row,
+                        expr.region.start.col,
+                        tipe
+                    );
+                }
                 // A value from another project module resolves to its
                 // specialization; a built-in stays a kernel reference.
                 if self.project.contains_key(module) {

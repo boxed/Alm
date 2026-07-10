@@ -335,7 +335,10 @@ impl Checker<'_> {
                     let mut reserved = HashSet::new();
                     Self::collect_tyvar_names(annotation, &mut reserved);
                     let mut state = Self::fresh_generalize_state(reserved);
-                    self.zonk_nodes(*start, *end, &mut state, &HashSet::new());
+                    // Defer nodes that still mention unresolved enclosing
+                    // variables (see `check_def`'s annotated arm).
+                    let env_free = self.env_free_vars();
+                    self.zonk_nodes(*start, *end, &mut state, &env_free);
                     Scheme::closed(annotation.clone())
                 }
                 (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end),
@@ -358,10 +361,19 @@ impl Checker<'_> {
                 // variables, so a fresh naming state reproduces those names.
                 // Reserve those names so an inner `let`-helper's fresh names
                 // cannot collide with them (see `GeneralizeState::reserved`).
+                //
+                // The annotation fixes THIS definition's type, but its body can
+                // still reference enclosing variables that are not yet resolved
+                // (an inner annotated `let` inside a lambda whose parameter is
+                // only pinned by the enclosing application). Freezing such a
+                // node now would capture a bare type/row variable and drive the
+                // wrong specialization — defer it to an enclosing scope's zonk,
+                // exactly as the unannotated path does.
                 let mut reserved = HashSet::new();
                 Self::collect_tyvar_names(annotation, &mut reserved);
                 let mut state = Self::fresh_generalize_state(reserved);
-                self.zonk_nodes(body_start, body_end, &mut state, &HashSet::new());
+                let env_free = self.env_free_vars();
+                self.zonk_nodes(body_start, body_end, &mut state, &env_free);
                 Ok(Scheme::closed(annotation.clone()))
             }
             None => Ok(self.generalize_and_zonk(def_type, body_start, body_end)),
