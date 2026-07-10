@@ -1969,17 +1969,45 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     kind: TypedKind::Local(crate::data::Name::from(rname.clone())),
                     region: expr.region,
                 };
-                let body = TypedExpr {
+                let mut body = TypedExpr {
                     tipe: field_ty.clone(),
                     kind: TypedKind::Access(Box::new(r_local), field.clone()),
                     region: expr.region,
                 };
-                let pat = crate::reporting::Located {
+                let mk_pat = |name: String| crate::reporting::Located {
                     region: crate::reporting::Region::ZERO,
-                    value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(rname)),
+                    value: crate::ast::canonical::Pattern_::Var(crate::data::Name::from(name)),
                 };
-                let params = vec![(pat, rec_ty)];
-                let result_layout = self.layouts.layout_of(&field_ty);
+                let mut params = vec![(mk_pat(rname), rec_ty)];
+                // Eta-expand over the FIELD type's arrows. Closure application
+                // assumes a closure of type `T1 -> .. -> Tn -> R` is flat n-ary
+                // (one parameter per arrow); when the accessed field is itself a
+                // function (`.addPerson : rec -> s -> s`), a bare 1-parameter
+                // accessor closure would be called with all n arguments at once
+                // and return the field's closure as if it were the final result.
+                // `\r p1 .. -> (r.field) p1 ..` restores the invariant.
+                if let Type::Lambda(..) = &field_ty {
+                    let mut eta_args = Vec::new();
+                    let mut remaining = field_ty.clone();
+                    let mut idx = 0u32;
+                    while let Type::Lambda(a, b) = remaining {
+                        let pname = format!("$accp{}_{}", self.lam_id, idx);
+                        eta_args.push(TypedExpr {
+                            tipe: (*a).clone(),
+                            kind: TypedKind::Local(crate::data::Name::from(pname.clone())),
+                            region: expr.region,
+                        });
+                        params.push((mk_pat(pname), (*a).clone()));
+                        remaining = *b;
+                        idx += 1;
+                    }
+                    body = TypedExpr {
+                        tipe: remaining,
+                        kind: TypedKind::Call(Box::new(body), eta_args),
+                        region: expr.region,
+                    };
+                }
+                let result_layout = self.layouts.layout_of(&body.tipe);
                 self.gen_closure(&params, &body, &result_layout)
             }
         }

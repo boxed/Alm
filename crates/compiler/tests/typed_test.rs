@@ -2359,3 +2359,41 @@ fn cons_onto_shared_tail_does_not_blow_up_capacity() {
          \x20   Debug.toString (loop 200 [])\n",
     );
 }
+
+#[test]
+fn accessor_to_function_field_is_fully_applied() {
+    // An accessor whose field holds a *function* (`.bump : Rec -> Int -> Int`,
+    // two arrows) must compile as a flat 2-ary closure — closure application
+    // calls a closure of type `T1 -> .. -> Tn -> R` with all n arguments at
+    // once, and a bare 1-parameter accessor closure would swallow both args and
+    // return the field's closure pointer as if it were the final result
+    // (garbage Int here; a SIGSEGV in dwayne/elm-form and arturopala/elm-monocle,
+    // whose Form/Lens records store functions in fields).
+    assert_same(
+        "accessor_fn_field",
+        "module Test exposing (..)\n\
+         \n\
+         type alias Accessors =\n\
+         \x20   { bump : Int -> Int\n\
+         \x20   , scale : Int -> Int -> Int\n\
+         \x20   }\n\
+         \n\
+         apply2 : (Accessors -> Int -> Int) -> Accessors -> Int -> Int\n\
+         apply2 f accs n =\n\
+         \x20   f accs n\n\
+         \n\
+         apply3 : (Accessors -> Int -> Int -> Int) -> Accessors -> Int -> Int -> Int\n\
+         apply3 f accs a b =\n\
+         \x20   f accs a b\n\
+         \n\
+         accessors : Accessors\n\
+         accessors =\n\
+         \x20   { bump = \\x -> x + 1, scale = \\x y -> x * y }\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (apply2 .bump accessors 41)\n\
+         \x20       ++ \" \"\n\
+         \x20       ++ String.fromInt (apply3 .scale accessors 6 7)\n",
+    );
+}
