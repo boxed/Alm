@@ -5941,6 +5941,126 @@ unsafe extern "C" fn events_on_check1(to_msg: u64) -> u64 {
     event(b"change", mk_decoder(Decoder::Map(to_msg, target_field(b"checked", Decoder::Bool))), 0)
 }
 
+// `VirtualDom.on name handler` — handler is the `Handler` union (Normal /
+// MayStopPropagation / MayPreventDefault / Custom, each wrapping a decoder).
+// Match by constructor NAME rather than index so this is independent of the
+// tag-assignment scheme. The opts tag mirrors `event`'s encoding.
+unsafe extern "C" fn vdom_on2(name: u64, handler: u64) -> u64 {
+    let (tag, dec) = match deref(handler) {
+        Value::Ctor { name: cn, arg0, .. } => {
+            let opts = match cname(*cn) {
+                "MayStopPropagation" => 1,
+                "MayPreventDefault" => 2,
+                "Custom" => 3,
+                _ => 0, // Normal
+            };
+            (opts, *arg0)
+        }
+        _ => (0, handler),
+    };
+    ctor(b"AEvent\0".as_ptr(), AI_EVENT, vec![name, dec, mk_int(tag)])
+}
+
+// `Html.Lazy.lazy*` / `VirtualDom.lazy*` — force eagerly. Laziness is purely a
+// render-cache optimization; the value is the forced node, and Test.Html (the
+// only consumer of native vdom) forces lazies before reflecting anyway.
+macro_rules! vdom_lazy {
+    ($fname:ident, $($arg:ident),+) => {
+        unsafe extern "C" fn $fname(f: u64, $($arg: u64),+) -> u64 {
+            let mut r = f;
+            $( r = ap1(r, $arg); )+
+            r
+        }
+    };
+}
+vdom_lazy!(vdom_lazy2, a);
+vdom_lazy!(vdom_lazy3, a, b);
+vdom_lazy!(vdom_lazy4, a, b, c);
+vdom_lazy!(vdom_lazy5, a, b, c, d);
+vdom_lazy!(vdom_lazy6, a, b, c, d, e);
+vdom_lazy!(vdom_lazy7, a, b, c, d, e, g);
+vdom_lazy!(vdom_lazy8, a, b, c, d, e, g, h);
+vdom_lazy!(vdom_lazy9, a, b, c, d, e, g, h, i);
+
+// --- elm/http: structural twins of runtime.js's `$Http$*`. Native programs
+// never perform requests (tests only construct and inspect these values), so
+// the kernels build the same shapes the JS runtime does: headers and bodies are
+// records, an Expect is a record carrying `toMsg` (the handler closure is never
+// invoked natively — a unit placeholder), and `request` wraps its config in a
+// `CmdHttp` constructor.
+unsafe extern "C" fn http_header2(name: u64, value: u64) -> u64 {
+    let rec = rt_record_new(2);
+    rt_record_set(rec, 0, b"name\0".as_ptr(), name);
+    rt_record_set(rec, 1, b"value\0".as_ptr(), value);
+    rec
+}
+unsafe fn http_body(content_type: u64, content: u64) -> u64 {
+    let rec = rt_record_new(2);
+    rt_record_set(rec, 0, b"contentType\0".as_ptr(), content_type);
+    rt_record_set(rec, 1, b"content\0".as_ptr(), content);
+    rec
+}
+unsafe extern "C" fn http_empty_body0() -> u64 {
+    // JS uses nulls; the JSON null is the equality-comparable native twin.
+    let null = alloc(Value::Json(JsonValue::Null));
+    http_body(null, null)
+}
+unsafe extern "C" fn http_string_body2(content_type: u64, content: u64) -> u64 {
+    http_body(content_type, content)
+}
+unsafe extern "C" fn http_json_body1(value: u64) -> u64 {
+    http_body(
+        mkstr(b"application/json".to_vec()),
+        encode_encode(mk_int(0), value),
+    )
+}
+unsafe fn http_expect(to_msg: u64) -> u64 {
+    let rec = rt_record_new(2);
+    rt_record_set(rec, 0, b"toMsg\0".as_ptr(), to_msg);
+    rt_record_set(rec, 1, b"handle\0".as_ptr(), unit());
+    rec
+}
+unsafe extern "C" fn http_expect_string1(to_msg: u64) -> u64 {
+    http_expect(to_msg)
+}
+unsafe extern "C" fn http_expect_whatever1(to_msg: u64) -> u64 {
+    http_expect(to_msg)
+}
+unsafe extern "C" fn http_expect_json2(to_msg: u64, _decoder: u64) -> u64 {
+    http_expect(to_msg)
+}
+unsafe extern "C" fn http_expect_string_response2(to_msg: u64, _to_result: u64) -> u64 {
+    http_expect(to_msg)
+}
+unsafe extern "C" fn http_expect_bytes_response2(to_msg: u64, _to_result: u64) -> u64 {
+    http_expect(to_msg)
+}
+unsafe extern "C" fn http_request1(config: u64) -> u64 {
+    ctor1(b"CmdHttp\0".as_ptr(), 0, config)
+}
+unsafe fn http_simple_request(method: &[u8], url: u64, body: u64, expect: u64) -> u64 {
+    let rec = rt_record_new(7);
+    rt_record_set(rec, 0, b"method\0".as_ptr(), mkstr(method.to_vec()));
+    rt_record_set(rec, 1, b"headers\0".as_ptr(), nil());
+    rt_record_set(rec, 2, b"url\0".as_ptr(), url);
+    rt_record_set(rec, 3, b"body\0".as_ptr(), body);
+    rt_record_set(rec, 4, b"expect\0".as_ptr(), expect);
+    rt_record_set(rec, 5, b"timeout\0".as_ptr(), nothing());
+    rt_record_set(rec, 6, b"tracker\0".as_ptr(), nothing());
+    http_request1(rec)
+}
+unsafe extern "C" fn http_get1(config: u64) -> u64 {
+    let url = rt_access(config, b"url\0".as_ptr());
+    let expect = rt_access(config, b"expect\0".as_ptr());
+    http_simple_request(b"GET", url, http_empty_body0(), expect)
+}
+unsafe extern "C" fn http_post1(config: u64) -> u64 {
+    let url = rt_access(config, b"url\0".as_ptr());
+    let body = rt_access(config, b"body\0".as_ptr());
+    let expect = rt_access(config, b"expect\0".as_ptr());
+    http_simple_request(b"POST", url, body, expect)
+}
+
 // --- HtmlAsJson: reflect the native vdom into the elm/virtual-dom JSON shape
 // that elm-explorations/test's Test.Html decoders read (the Rust twin of
 // runtime.js's `_HtmlAsJson_*`). Node kinds map to `$`: 0 text, 1 node, 2 keyed,
@@ -6410,6 +6530,7 @@ macro_rules! baked_globals {
 }
 
 baked_globals! {
+    G_HTTP_EMPTYBODY "$Http$emptyBody" = http_empty_body0();
     G_HTMLKEYED_UL "$Html$Keyed$ul" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ul".to_vec())]);
     G_HTMLKEYED_OL "$Html$Keyed$ol" = closure(vdom_keyed3 as *const (), 3, &[mkstr(b"ol".to_vec())]);
     // elm/svg element + attribute helpers (SVG namespace); mirrors
@@ -6939,6 +7060,35 @@ kernel_fns! {
     G_HTMLATTR_CLASSLIST "$Html$Attributes$classList" attr_class_list1, 1;
     G_HTMLATTR_MAP "$Html$Attributes$map" attr_map2, 2;
     G_VDOM_MAPATTRIBUTE "$VirtualDom$mapAttribute" attr_map2, 2;
+    G_VDOM_ON "$VirtualDom$on" vdom_on2, 2;
+    G_VDOM_LAZY "$VirtualDom$lazy" vdom_lazy2, 2;
+    G_VDOM_LAZY2 "$VirtualDom$lazy2" vdom_lazy3, 3;
+    G_VDOM_LAZY3 "$VirtualDom$lazy3" vdom_lazy4, 4;
+    G_VDOM_LAZY4 "$VirtualDom$lazy4" vdom_lazy5, 5;
+    G_VDOM_LAZY5 "$VirtualDom$lazy5" vdom_lazy6, 6;
+    G_VDOM_LAZY6 "$VirtualDom$lazy6" vdom_lazy7, 7;
+    G_VDOM_LAZY7 "$VirtualDom$lazy7" vdom_lazy8, 8;
+    G_VDOM_LAZY8 "$VirtualDom$lazy8" vdom_lazy9, 9;
+    G_HTMLLAZY_LAZY "$Html$Lazy$lazy" vdom_lazy2, 2;
+    G_HTMLLAZY_LAZY2 "$Html$Lazy$lazy2" vdom_lazy3, 3;
+    G_HTMLLAZY_LAZY3 "$Html$Lazy$lazy3" vdom_lazy4, 4;
+    G_HTMLLAZY_LAZY4 "$Html$Lazy$lazy4" vdom_lazy5, 5;
+    G_HTMLLAZY_LAZY5 "$Html$Lazy$lazy5" vdom_lazy6, 6;
+    G_HTMLLAZY_LAZY6 "$Html$Lazy$lazy6" vdom_lazy7, 7;
+    G_HTMLLAZY_LAZY7 "$Html$Lazy$lazy7" vdom_lazy8, 8;
+    G_HTMLLAZY_LAZY8 "$Html$Lazy$lazy8" vdom_lazy9, 9;
+    G_HTTP_HEADER "$Http$header" http_header2, 2;
+    G_HTTP_STRINGBODY "$Http$stringBody" http_string_body2, 2;
+    G_HTTP_JSONBODY "$Http$jsonBody" http_json_body1, 1;
+    G_HTTP_EXPECTSTRING "$Http$expectString" http_expect_string1, 1;
+    G_HTTP_EXPECTWHATEVER "$Http$expectWhatever" http_expect_whatever1, 1;
+    G_HTTP_EXPECTJSON "$Http$expectJson" http_expect_json2, 2;
+    G_HTTP_EXPECTSTRINGRESPONSE "$Http$expectStringResponse" http_expect_string_response2, 2;
+    G_HTTP_EXPECTBYTESRESPONSE "$Http$expectBytesResponse" http_expect_bytes_response2, 2;
+    G_HTTP_REQUEST "$Http$request" http_request1, 1;
+    G_HTTP_RISKYREQUEST "$Http$riskyRequest" http_request1, 1;
+    G_HTTP_GET "$Http$get" http_get1, 1;
+    G_HTTP_POST "$Http$post" http_post1, 1;
     G_HTMLEV_ON "$Html$Events$on" events_on2, 2;
     G_HTMLEV_STOPON "$Html$Events$stopPropagationOn" events_stop_on2, 2;
     G_HTMLEV_PREVENTON "$Html$Events$preventDefaultOn" events_prevent_on2, 2;
