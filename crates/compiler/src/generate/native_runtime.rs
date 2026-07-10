@@ -6300,7 +6300,11 @@ unsafe extern "C" fn events_on_mouseout1(msg: u64) -> u64 { on_msg(b"mouseout", 
 unsafe extern "C" fn events_on_blur1(msg: u64) -> u64 { on_msg(b"blur", msg) }
 unsafe extern "C" fn events_on_focus1(msg: u64) -> u64 { on_msg(b"focus", msg) }
 unsafe extern "C" fn events_on_submit1(msg: u64) -> u64 {
-    event(b"submit", mk_decoder(Decoder::Succeed(msg)), 2)
+    // elm/html: `onSubmit msg = preventDefaultOn "submit" (Decode.map
+    // alwaysPreventDefault (Decode.succeed msg))` where `alwaysPreventDefault m
+    // = ( m, True )`. The handler is MayPreventDefault (opts 2), whose decoder
+    // must yield the `( msg, Bool )` tuple — Test.Html destructures it as one.
+    event(b"submit", mk_decoder(Decoder::Succeed(pair(msg, mkbool(true)))), 2)
 }
 unsafe extern "C" fn events_on_input1(to_msg: u64) -> u64 {
     event(b"input", mk_decoder(Decoder::Map(to_msg, target_field(b"value", Decoder::Str))), 0)
