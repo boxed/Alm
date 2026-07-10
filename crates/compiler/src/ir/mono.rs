@@ -974,6 +974,12 @@ impl Specializer<'_> {
             }
             let poly = &polys[&name];
             let g_sub = apply_subst(subst, &poly.generic);
+            if std::env::var("ALM_SPECLET_TRACE").is_ok() {
+                eprintln!(
+                    "[speclet {}] use-ty={:?}\n   g_sub={:?}\n   mangled={}",
+                    name.as_str(), ty, g_sub, mangled.as_str()
+                );
+            }
             let mut subst_i = subst.clone();
             match_type(&g_sub, &ty, &mut subst_i);
             let (params, spec_body) = self.local_def_params_body(poly.def, &subst_i);
@@ -1493,14 +1499,19 @@ fn mangle_type(tipe: &can::Type) -> String {
             }
             format!("Tup${}", parts.join("$"))
         }
-        Record(fields, _) => format!(
-            "Rec${}",
-            fields
+        Record(fields, _) => {
+            // Field order is not canonical in node types (row-variable
+            // expansion appends extension fields after the named ones, while
+            // fully-inferred nodes carry them sorted), but the layout sorts by
+            // name — so mangle sorted too, or one record type mangles to two
+            // names and a reference resolves to a missing sibling copy.
+            let mut parts: Vec<String> = fields
                 .iter()
                 .map(|(n, t)| format!("{}_{}", n, mangle_type(t)))
-                .collect::<Vec<_>>()
-                .join("$")
-        ),
+                .collect();
+            parts.sort();
+            format!("Rec${}", parts.join("$"))
+        }
         Unit => "Unit".to_string(),
     }
 }

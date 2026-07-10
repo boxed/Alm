@@ -2398,3 +2398,35 @@ fn accessor_to_function_field_is_fully_applied() {
     );
 }
 
+
+#[test]
+fn recursive_local_with_row_expanded_record_param() {
+    // A self-recursive `let` function taking a record whose type is discovered
+    // through row-variable expansion (the `rr.value` access opens the record,
+    // and the extension supplies `count`) produced a node type with fields in
+    // append order (value, count) while fully-inferred uses carried them
+    // sorted (count, value). Mangling was order-sensitive, so one type got two
+    // specialized names and the self-call referenced a sibling copy that is
+    // not in scope ("unbound local"). elm-flate's calculateCodes loop2 shape.
+    assert_same(
+        "rec_local_row_record",
+        "module Test exposing (..)\n\
+         \n\
+         import Array exposing (Array)\n\
+         \n\
+         calc : { value : Int, count : Int } -> Array ( Int, Int, Int )\n\
+         calc r =\n\
+         \x20   let\n\
+         \x20       go rr c codes =\n\
+         \x20           if c >= 3 then\n\
+         \x20               go rr (c - 3) (Array.push ( 16, 2, c ) codes)\n\
+         \x20           else\n\
+         \x20               Array.append codes (Array.repeat c ( rr.value, 0, 0 ))\n\
+         \x20   in\n\
+         \x20   go r r.count Array.empty\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   Debug.toString (calc { value = 5, count = 7 })\n",
+    );
+}
