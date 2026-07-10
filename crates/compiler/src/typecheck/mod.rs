@@ -332,7 +332,9 @@ impl Checker<'_> {
         for ((def, mono), (start, end)) in defs.iter().zip(&mono_vars).zip(&bounds) {
             let scheme = match (&def.annotation, mono) {
                 (Some(annotation), _) => {
-                    let mut state = Self::fresh_generalize_state();
+                    let mut reserved = HashSet::new();
+                    Self::collect_tyvar_names(annotation, &mut reserved);
+                    let mut state = Self::fresh_generalize_state(reserved);
                     self.zonk_nodes(*start, *end, &mut state, &HashSet::new());
                     Scheme::closed(annotation.clone())
                 }
@@ -354,7 +356,11 @@ impl Checker<'_> {
             Some(annotation) => {
                 // Body nodes already resolve to the annotation's rigid
                 // variables, so a fresh naming state reproduces those names.
-                let mut state = Self::fresh_generalize_state();
+                // Reserve those names so an inner `let`-helper's fresh names
+                // cannot collide with them (see `GeneralizeState::reserved`).
+                let mut reserved = HashSet::new();
+                Self::collect_tyvar_names(annotation, &mut reserved);
+                let mut state = Self::fresh_generalize_state(reserved);
                 self.zonk_nodes(body_start, body_end, &mut state, &HashSet::new());
                 Ok(Scheme::closed(annotation.clone()))
             }
@@ -629,10 +635,19 @@ impl Checker<'_> {
     /// the same variable names as the function's scheme.
     fn generalize_and_zonk(&mut self, var: Variable, start: usize, end: usize) -> Scheme {
         let env_free = self.env_free_vars();
+        // Reserve enclosing annotated definitions' rigid variable names so this
+        // (inner) definition's freshly-generated names never collide with them.
+        let mut reserved = std::collections::HashSet::new();
+        for scope in &self.rigid_scope {
+            for name in scope.keys() {
+                reserved.insert(name.clone());
+            }
+        }
         let mut state = GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
             counter: 0,
+            reserved,
         };
         // Reserve the names of already-named free variables (rigids and
         // named flexes) up front. `instantiate` keys its substitution map by
@@ -678,12 +693,51 @@ impl Checker<'_> {
 
     /// A fresh naming state for zonking annotated definitions, whose body
     /// nodes already resolve to the annotation's rigid variables (so their
-    /// names are fixed and need no shared counter).
-    fn fresh_generalize_state() -> GeneralizeState {
+    /// names are fixed and need no shared counter). `reserved` carries the
+    /// annotation's own type-variable names so anonymous names generated for
+    /// inner `let`-bound helpers never collide with them.
+    fn fresh_generalize_state(reserved: std::collections::HashSet<Name>) -> GeneralizeState {
         GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
             counter: 0,
+            reserved,
+        }
+    }
+
+    /// Collect every type-variable name mentioned in a type (for reserving an
+    /// annotation's rigid names during zonking).
+    fn collect_tyvar_names(tipe: &can::Type, out: &mut std::collections::HashSet<Name>) {
+        use can::Type::*;
+        match tipe {
+            Var(n) => {
+                out.insert(n.clone());
+            }
+            Lambda(a, b) => {
+                Self::collect_tyvar_names(a, out);
+                Self::collect_tyvar_names(b, out);
+            }
+            Tuple(a, b, c) => {
+                Self::collect_tyvar_names(a, out);
+                Self::collect_tyvar_names(b, out);
+                if let Some(c) = c {
+                    Self::collect_tyvar_names(c, out);
+                }
+            }
+            Type(_, _, args) => {
+                for a in args {
+                    Self::collect_tyvar_names(a, out);
+                }
+            }
+            Record(fields, ext) => {
+                for (_, t) in fields {
+                    Self::collect_tyvar_names(t, out);
+                }
+                if let Some(n) = ext {
+                    out.insert(n.clone());
+                }
+            }
+            Unit => {}
         }
     }
 
@@ -1252,6 +1306,14 @@ struct GeneralizeState {
     names: HashMap<Variable, Name>,
     free: HashMap<Name, Variable>,
     counter: usize,
+    /// Type-variable names that belong to an enclosing annotated definition's
+    /// rigid scheme. A freshly-generated (anonymous or suggested) name must
+    /// avoid these: monomorphization applies the enclosing definition's
+    /// substitution (keyed by name) to inner nodes, so an inner binding whose
+    /// quantified variable reused an outer rigid's name would be wrongly
+    /// captured and specialized at the outer variable's concrete type. Rigid
+    /// variables themselves still take their own names verbatim.
+    reserved: std::collections::HashSet<Name>,
 }
 
 impl GeneralizeState {
@@ -1259,7 +1321,10 @@ impl GeneralizeState {
         match content {
             Content::RigidVar(name) => name.clone(),
             Content::RigidSuper(_, name) => name.clone(),
-            Content::FlexVar(Some(name)) if !self.names.values().any(|n| n == name) => {
+            Content::FlexVar(Some(name))
+                if !self.reserved.contains(name)
+                    && !self.names.values().any(|n| n == name) =>
+            {
                 name.clone()
             }
             Content::FlexSuper(super_, _) => {
@@ -1289,8 +1354,10 @@ impl GeneralizeState {
                     }
                     n -= 1;
                 }
-                // Avoid collisions with names already taken.
-                while self.names.values().any(|existing| existing.as_str() == name) {
+                // Avoid collisions with names already taken or reserved.
+                while self.reserved.contains(&Name::from(name.as_str()))
+                    || self.names.values().any(|existing| existing.as_str() == name)
+                {
                     name.push('_');
                 }
                 Name::from(name)
