@@ -21,7 +21,8 @@ static ELM_HOME_LOCK: Mutex<()> = Mutex::new(());
 
 // The `ø` is a real multi-byte UTF-8 scalar: it exercises string width and
 // UTF-8 decode/round-trip, and must survive byte-for-byte.
-const EXPECTED: &str = "(18,Just (65,1000000,3.5),(Just \"br\u{f8}d\",Just [7,8,9],Nothing))";
+const EXPECTED: &str =
+    "(18,Just (65,1000000,3.5),(Just \"br\u{f8}d\",Just [7,8,9],(Nothing,Nothing,Just 3)))";
 
 const BYTES_ELM: &str = r#"module Bytes exposing (Bytes, width, Endianness(..), getHostEndianness)
 
@@ -472,8 +473,22 @@ main =
 
         fail =
             D.decode (D.unsignedInt32 BE) (E.encode (E.unsignedInt8 1))
+
+        -- A failed read must abort the decode non-locally (JS throws; native
+        -- longjmps): `map2`/`andThen` apply callbacks unconditionally, so a
+        -- sentinel return would hand the failure dummy to `pairSum`, which
+        -- destructures it as a tuple (pre-fix: SIGSEGV at 0x1).
+        pairSum =
+            D.map2 (\a b -> ( a, b )) D.unsignedInt8 D.unsignedInt8
+                |> D.andThen (\( a, b ) -> D.succeed (a + b))
+
+        failMid =
+            D.decode pairSum (E.encode (E.unsignedInt8 1))
+
+        okPair =
+            D.decode pairSum (E.encode (E.sequence [ E.unsignedInt8 1, E.unsignedInt8 2 ]))
     in
-    Debug.toString ( Bytes.width e, d, ( s, loopDec, fail ) )
+    Debug.toString ( Bytes.width e, d, ( s, loopDec, ( fail, failMid, okPair ) ) )
 "#;
 
 fn setup() -> std::path::PathBuf {

@@ -3931,6 +3931,7 @@ pub unsafe extern "C" fn array_slice(from: u64, to: u64, a: u64) -> u64 {
 // whenever the final offset is negative. Real offsets are always in
 // `0..=len`, so a negative offset is unambiguous, and threading it through
 // the value the decoder already returns is robust under any optimization.
+#[allow(dead_code)] // used on the wasm sentinel path only
 const BYTES_FAIL_OFFSET: i64 = i64::MIN / 2;
 
 unsafe fn as_bytes<'a>(v: u64) -> &'a [u8] {
@@ -4061,12 +4062,43 @@ unsafe fn read_result(off: i64, width: usize, value: u64) -> u64 {
     pair(mk_int(off + width as i64), value)
 }
 
+// Bytes.Decode failure — non-local exit, the twin of the JS runtime throwing
+// from `_Bytes_read_*` and `_Bytes_decode` catching. elm/bytes' combinators
+// (`map`/`andThen`/`loop`, plain Elm) apply user callbacks unconditionally,
+// relying on a failed read aborting the whole decode; returning a sentinel
+// instead would hand a dummy value to code that inspects it at an arbitrary
+// (unboxed) layout — dereferencing a tagged int as a pointer. The jump lives in
+// a C shim (`bytes_jmp.c`) because `setjmp` needs `returns_twice` codegen.
+//
+// Wasm has no shim linked (and no longjmp), so it keeps the sentinel encoding —
+// `(BYTES_FAIL_OFFSET, dummy)` — which is correct on the uniform (boxed) wasm
+// path where the dummy is never read at a concrete layout.
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" {
+    fn alm_bytes_try(
+        run: unsafe extern "C" fn(u64, u64) -> u64,
+        decoder: u64,
+        bytes: u64,
+        failed: *mut u64,
+    ) -> u64;
+    fn alm_bytes_fail() -> !;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn bytes_fail(_dummy: impl FnOnce() -> u64) -> u64 {
+    alm_bytes_fail()
+}
+#[cfg(target_arch = "wasm32")]
+unsafe fn bytes_fail(dummy: impl FnOnce() -> u64) -> u64 {
+    pair(mk_int(BYTES_FAIL_OFFSET), dummy())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn bytes_read_i8(b: u64, off: u64) -> u64 {
     let off = int_val(off);
     match read_at(b, off, 1) {
         Some(s) => read_result(off, 1, mk_int(s[0] as i8 as i64)),
-        None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+        None => bytes_fail(|| mk_int(0)),
     }
 }
 #[no_mangle]
@@ -4074,7 +4106,7 @@ pub unsafe extern "C" fn bytes_read_u8(b: u64, off: u64) -> u64 {
     let off = int_val(off);
     match read_at(b, off, 1) {
         Some(s) => read_result(off, 1, mk_int(s[0] as i64)),
-        None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+        None => bytes_fail(|| mk_int(0)),
     }
 }
 
@@ -4094,7 +4126,7 @@ macro_rules! read_int {
                     };
                     read_result(off, $width, mk_int(v as i64))
                 }
-                None => pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0)),
+                None => bytes_fail(|| mk_int(0)),
             }
         }
     };
@@ -4120,7 +4152,7 @@ macro_rules! read_float {
                     };
                     read_result(off, $width, rt_float(v as f64))
                 }
-                None => pair(mk_int(BYTES_FAIL_OFFSET), rt_float(0.0)),
+                None => bytes_fail(|| rt_float(0.0)),
             }
         }
     };
@@ -4134,7 +4166,7 @@ pub unsafe extern "C" fn bytes_read_bytes(len: u64, b: u64, off: u64) -> u64 {
     let len = int_val(len).max(0) as usize;
     match read_at(b, off, len) {
         Some(s) => read_result(off, len, alloc(Value::Bytes(s.to_vec()))),
-        None => pair(mk_int(BYTES_FAIL_OFFSET), alloc(Value::Bytes(Vec::new()))),
+        None => bytes_fail(|| alloc(Value::Bytes(Vec::new()))),
     }
 }
 
@@ -4144,21 +4176,35 @@ pub unsafe extern "C" fn bytes_read_string(len: u64, b: u64, off: u64) -> u64 {
     let len = int_val(len).max(0) as usize;
     match read_at(b, off, len) {
         Some(s) => read_result(off, len, mkstr(s.to_vec())),
-        None => pair(mk_int(BYTES_FAIL_OFFSET), mkstr(Vec::new())),
+        None => bytes_fail(|| mkstr(Vec::new())),
     }
 }
 
 /// `Bytes.Decode.fail` — always fails.
 #[no_mangle]
 pub unsafe extern "C" fn bytes_decode_failure(_b: u64, _off: u64) -> u64 {
-    pair(mk_int(BYTES_FAIL_OFFSET), mk_int(0))
+    bytes_fail(|| mk_int(0))
+}
+
+unsafe extern "C" fn bytes_run_decoder(decoder: u64, bytes: u64) -> u64 {
+    ap2(decoder, bytes, mk_int(0))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn bytes_decode(decoder: u64, bytes: u64) -> u64 {
-    let result = ap2(decoder, bytes, mk_int(0));
+    #[cfg(not(target_arch = "wasm32"))]
+    let result = {
+        let mut failed: u64 = 0;
+        let r = alm_bytes_try(bytes_run_decoder, decoder, bytes, &mut failed);
+        if failed != 0 {
+            return nothing();
+        }
+        r
+    };
+    #[cfg(target_arch = "wasm32")]
+    let result = bytes_run_decoder(decoder, bytes);
     // `result` is `(offset, value)`; a negative offset means a read ran past
-    // the end (or `fail` fired), so the decode failed.
+    // the end (wasm's sentinel path — a native failure longjmp'd above).
     match deref(result) {
         Value::Tuple(items) if items.len() == 2 && int_val(items[0]) >= 0 => just(items[1]),
         _ => nothing(),

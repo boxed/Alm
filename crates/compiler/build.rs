@@ -65,6 +65,24 @@ fn main() {
     // archive) into an isolated target dir to avoid contending with the outer
     // build's lock. The `.a` is embedded and linked into native programs.
     build_regex_glue(&out_dir);
+
+    // setjmp/longjmp shim for Bytes.Decode failure (the native twin of the JS
+    // runtime's exception-based decode abort). In C because `setjmp` needs
+    // `returns_twice` codegen that a plain Rust extern declaration does not
+    // guarantee. Compiled to one object and linked into native programs.
+    let jmp_src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("src/generate/bytes_jmp.c");
+    println!("cargo:rerun-if-changed={}", jmp_src.display());
+    let jmp_obj = out_dir.join("bytes_jmp.o");
+    let status = Command::new("cc")
+        .arg("-O2")
+        .arg("-c")
+        .arg(&jmp_src)
+        .arg("-o")
+        .arg(&jmp_obj)
+        .status()
+        .unwrap_or_else(|e| panic!("compiling bytes_jmp.c: {e}"));
+    assert!(status.success(), "compiling the bytes_jmp shim failed");
 }
 
 fn build_regex_glue(out_dir: &PathBuf) {

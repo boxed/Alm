@@ -2397,3 +2397,4 @@ fn accessor_to_function_field_is_fully_applied() {
          \x20       ++ String.fromInt (apply3 .scale accessors 6 7)\n",
     );
 }
+

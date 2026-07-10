@@ -40,6 +40,10 @@ pub const RUNTIME_LIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_
 /// localized, so its private `std` doesn't clash with the runtime's at link.
 pub const REGEX_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_regex.o"));
 
+/// The setjmp/longjmp shim for Bytes.Decode failure (C, for `returns_twice`
+/// correctness); provides `alm_bytes_try` / `alm_bytes_fail`.
+pub const BYTES_JMP_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bytes_jmp.o"));
+
 /// The same runtime as optimized LLVM bitcode. Merged into each program
 /// module (as `available_externally`) so LLVM can inline the runtime's hot
 /// primitives into generated code; the real symbols still come from the
@@ -218,6 +222,8 @@ pub(crate) fn finish<'ctx>(
             // The regex glue object resolves the elm/regex kernels' engine.
             let regex = build_dir.join("regex.o");
             std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
+            let bytes_jmp = build_dir.join("bytes_jmp.o");
+            std::fs::write(&bytes_jmp, BYTES_JMP_OBJ).map_err(|e| e.to_string())?;
             // The runtime uses the Boehm conservative GC (`libgc`) as its
             // allocator; link it in. `-lgc` from the bdw-gc install prefix.
             run_linker(
@@ -226,6 +232,7 @@ pub(crate) fn finish<'ctx>(
                     &object,
                     &runtime,
                     &regex,
+                    &bytes_jmp,
                     Path::new("-L/opt/homebrew/opt/bdw-gc/lib"),
                     Path::new("-lgc"),
                     Path::new("-o"),
