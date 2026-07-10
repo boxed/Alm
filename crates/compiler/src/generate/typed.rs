@@ -6090,6 +6090,14 @@ fn foreign_intrinsic_arity(module: &str, name: &str) -> Option<usize> {
         ("Maybe", "withDefault") => 2,
         ("Result", "withDefault") => 2,
         ("Tuple", "first") | ("Tuple", "second") => 1,
+        // `Test.Html`'s reflection kernel `taggerFunction : Tagger -> (a -> msg)`
+        // is a true 1-argument extractor (it hands back the tagger's mapping
+        // function), but its type has two arrows. Arrow-counting made
+        // `taggerFunction tagger` look under-applied, so the backend filled the
+        // phantom second argument with a unit placeholder and applied the
+        // extracted function to `()` — unboxing unit as the msg ctor ('not a
+        // constructor, found Unit'). It is arity 1.
+        ("Elm.Kernel.HtmlAsJson", "taggerFunction") => 1,
         _ => return None,
     })
 }
