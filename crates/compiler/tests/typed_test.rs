@@ -2469,3 +2469,39 @@ fn let_local_named_like_binop_function_is_not_a_cycle() {
          \x20   String.fromInt (calc 10)\n",
     );
 }
+
+#[test]
+fn over_applied_fold_of_composed_functions() {
+    // `(List.foldl (>>) identity fs) x` flattens to a four-argument call of
+    // the 3-ary foldl; its instantiated type has four arrows (the fold's
+    // result is itself a function), so arrow-counting made it look saturated —
+    // gen_kernel read the call's FINAL type (Int) as the accumulator type and
+    // silently dropped `x`. Builtins whose scheme result is a type variable
+    // now carry their intrinsic arity, and the extra argument is applied to
+    // the kernel's result. Janiczek/transform's crash shape.
+    assert_same(
+        "overapp_fold_compose",
+        "module Test exposing (..)\n\
+         \n\
+         type Expr\n\
+         \x20   = Int_ Int\n\
+         \x20   | Negate Expr\n\
+         \n\
+         simplify : Expr -> Expr\n\
+         simplify e =\n\
+         \x20   case e of\n\
+         \x20       Negate (Int_ i) ->\n\
+         \x20           Int_ -i\n\
+         \n\
+         \x20       _ ->\n\
+         \x20           e\n\
+         \n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt ((List.foldl (>>) identity [ \\x -> x + 1, \\x -> x * 2 ]) 10)\n\
+         \x20       ++ \" \"\n\
+         \x20       ++ Debug.toString ((List.foldl (>>) identity [ simplify, simplify ]) (Negate (Int_ 7)))\n\
+         \x20       ++ \" \"\n\
+         \x20       ++ String.fromInt (Maybe.withDefault (\\x -> x) Nothing 3)\n",
+    );
+}

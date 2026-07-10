@@ -2033,9 +2033,40 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // arguments (e.g. `modBy 2` passed to `List.map`) is eta-expanded into
         // a closure that takes the remaining arguments.
         if let TypedKind::Foreign(module, name) = &func.kind {
-            let arity = foreign_arity(&func.tipe);
+            let arity = foreign_intrinsic_arity(module.as_str(), name.as_str())
+                .unwrap_or_else(|| foreign_arity(&func.tipe));
             if args.len() < arity {
                 return self.eta_expand_foreign(module, name, &func.tipe, args, whole.region);
+            }
+            if args.len() > arity {
+                // Over-application: the builtin returns a function that is
+                // applied further in the same flattened call —
+                // `(List.foldl (>>) identity fs) x`. Passing all the arguments
+                // to gen_kernel would make it read `whole.tipe` (the FINAL
+                // type) as the kernel's result type — e.g. a fold whose
+                // accumulator is a closure laid out as the final Int. Call the
+                // kernel at its own arity and result type, then apply the
+                // returned closure to the rest.
+                let mut mid_ty = func.tipe.clone();
+                for _ in 0..arity {
+                    match mid_ty {
+                        crate::ast::canonical::Type::Lambda(_, r) => mid_ty = *r,
+                        _ => break,
+                    }
+                }
+                let mid = TypedExpr {
+                    tipe: mid_ty.clone(),
+                    kind: whole.kind.clone(),
+                    region: whole.region,
+                };
+                let closure = self
+                    .gen_kernel(&mid, module.as_str(), name.as_str(), &args[..arity])?
+                    .into_pointer_value();
+                let mut rest = Vec::with_capacity(args.len() - arity);
+                for arg in &args[arity..] {
+                    rest.push(self.gen(arg)?);
+                }
+                return Ok(self.apply_closure_curried(closure, &rest, &mid_ty));
             }
             return self.gen_kernel(whole, module.as_str(), name.as_str(), args);
         }
@@ -6034,6 +6065,33 @@ fn foreign_arity(tipe: &crate::ast::canonical::Type) -> usize {
         t = b;
     }
     n
+}
+
+/// The intrinsic arity of core builtins whose SCHEME result is a type
+/// variable. Counting the instantiated type's arrows over-counts when the
+/// result is itself a function — `(List.foldl (>>) identity fs) x` flattens to
+/// a 4-argument call whose type has four arrows, which looked saturated: the
+/// kernel then consumed the call's FINAL type as its result type and silently
+/// dropped the extra argument. All other builtins' scheme arity equals their
+/// arrow count, so they need no entry.
+fn foreign_intrinsic_arity(module: &str, name: &str) -> Option<usize> {
+    Some(match (module, name) {
+        ("Basics", "identity") => 1,
+        ("Basics", "always") => 2,
+        ("Basics", "apL") | ("Basics", "apR") => 2,
+        ("Basics", "composeL") | ("Basics", "composeR") => 3,
+        ("Debug", "log") => 2,
+        ("Debug", "todo") => 1,
+        ("List", "foldl") | ("List", "foldr") => 3,
+        ("Array", "foldl") | ("Array", "foldr") => 3,
+        ("Dict", "foldl") | ("Dict", "foldr") => 3,
+        ("Set", "foldl") | ("Set", "foldr") => 3,
+        ("Dict", "merge") => 6,
+        ("Maybe", "withDefault") => 2,
+        ("Result", "withDefault") => 2,
+        ("Tuple", "first") | ("Tuple", "second") => 1,
+        _ => return None,
+    })
 }
 
 /// Rewrite a lambda's parameter list so every destructuring pattern becomes a
