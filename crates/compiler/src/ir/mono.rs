@@ -206,6 +206,46 @@ fn build_ctxs<'a>(modules: &'a [ModuleInfo<'a>]) -> HashMap<Name, ModuleCtx<'a>>
         .collect()
 }
 
+/// Default every unresolved `number` variable to Int, as elm does at the end
+/// of inference. Instances discovered with `number`s still free (a use whose
+/// context never pins them, or a node zonked in a different naming state than
+/// its callee's scheme) must specialize CONCRETELY: matching an open scheme
+/// against an open instance binds one variable to another under mismatched
+/// numbering (`number4 -> Var(number5)`), driving a specialization whose layout
+/// disagrees with its callers' (an Int-flavored record where a Float one is
+/// expected — invalid IR). `mangle` and `layout_of` already Int-default these
+/// names, so defaulting the instance keeps symbol, layout, and body consistent.
+fn default_numbers(tipe: &can::Type) -> can::Type {
+    use can::Type::*;
+    match tipe {
+        Var(n) if n.as_str().starts_with("number") => {
+            Type(Name::from("Basics"), Name::from("Int"), Vec::new())
+        }
+        Var(_) | Unit => tipe.clone(),
+        Lambda(a, b) => Lambda(
+            Box::new(default_numbers(a)),
+            Box::new(default_numbers(b)),
+        ),
+        Type(home, name, args) => Type(
+            home.clone(),
+            name.clone(),
+            args.iter().map(default_numbers).collect(),
+        ),
+        Record(fields, ext) => Record(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), default_numbers(t)))
+                .collect(),
+            ext.clone(),
+        ),
+        Tuple(a, b, c) => Tuple(
+            Box::new(default_numbers(a)),
+            Box::new(default_numbers(b)),
+            c.as_ref().map(|c| Box::new(default_numbers(c))),
+        ),
+    }
+}
+
 fn enqueue(
     queue: &mut Vec<Instance>,
     seen: &mut HashMap<(Name, Name, String), ()>,
@@ -482,7 +522,11 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     }
     let mut wi = 0;
     while wi < worklist.len() {
-        let instance = worklist[wi].clone();
+        let mut instance = worklist[wi].clone();
+        // Specialize at the number-defaulted type (see `default_numbers`); the
+        // reference sites' mangled names already Int-default, so the symbol,
+        // the layout, and the copy compiled here all agree.
+        instance.tipe = default_numbers(&instance.tipe);
         wi += 1;
         let Some(mctx) = ctxs.get(&instance.module) else {
             continue;
@@ -492,7 +536,12 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         };
         let mangled = mangle(&instance.module, &instance.name, &instance.tipe);
         if std::env::var("ALM_MONO_TRACE").map_or(false, |t| t == instance.name.as_str()) {
-            eprintln!("[mono spec {}] {:?}", instance.name.as_str(), instance.tipe);
+            eprintln!(
+                "[mono spec {}] inst={:?}\n   scheme={:?}",
+                instance.name.as_str(),
+                instance.tipe,
+                mctx.types.get(&instance.name)
+            );
         }
         let scheme = mctx
             .types
@@ -1124,7 +1173,14 @@ impl Specializer<'_> {
 fn type_has_free_tyvar(tipe: &can::Type) -> bool {
     use can::Type::*;
     match tipe {
-        Var(n) => !n.as_str().starts_with("number"),
+        // `number` variables count as free: a generalized local used at both
+        // Int and Float (or only pinned to Float by a LATER consumer, e.g.
+        // `let arcs = [ { defaultArc | ... } ] in List.map Shape.arc arcs`)
+        // needs one copy per numeric instantiation. On the JS backend a single
+        // copy works because Int and Float share one representation; natively
+        // their layouts differ, so compiling the binding once at the Int
+        // default feeds an Int-shaped record to Float-typed consumers.
+        Var(_) => true,
         Lambda(a, b) => type_has_free_tyvar(a) || type_has_free_tyvar(b),
         Type(_, _, args) => args.iter().any(type_has_free_tyvar),
         Tuple(a, b, c) => {
