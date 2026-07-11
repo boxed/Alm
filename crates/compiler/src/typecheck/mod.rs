@@ -70,6 +70,16 @@ pub struct Checker<'a> {
     /// alignment to substitute structurally.
     node_vars: Vec<(Region, Variable)>,
     node_types: HashMap<Region, can::Type>,
+    /// Module-wide counter for anonymously-named zonk variables. Each
+    /// definition's `GeneralizeState` starts here and writes back, so no two
+    /// naming states can hand out the same anonymous name. Names are pinned on
+    /// the pool variables (`variable_to_type`) and node types survive across
+    /// states; monomorphization then substitutes BY NAME — two distinct
+    /// variables sharing a name (an inner `let acc = identity` pinned "a" by
+    /// its own state, and the enclosing unannotated def's scheme also naming
+    /// its first variable "a") would make the outer substitution capture the
+    /// inner node's variable and specialize it at the wrong type.
+    zonk_name_counter: usize,
 }
 
 /// The result of checking a module: the type of every top-level definition
@@ -149,6 +159,7 @@ pub fn check_module(
         interfaces,
         module_name: module.name.clone(),
         rigid_scope: Vec::new(),
+        zonk_name_counter: 0,
         errors: Vec::new(),
         node_vars: Vec::new(),
         node_types: HashMap::new(),
@@ -335,10 +346,12 @@ impl Checker<'_> {
                     let mut reserved = HashSet::new();
                     Self::collect_tyvar_names(annotation, &mut reserved);
                     let mut state = Self::fresh_generalize_state(reserved);
+                    state.counter = self.zonk_name_counter;
                     // Defer nodes that still mention unresolved enclosing
                     // variables (see `check_def`'s annotated arm).
                     let env_free = self.env_free_vars();
                     self.zonk_nodes(*start, *end, &mut state, &env_free);
+                    self.zonk_name_counter = state.counter;
                     Scheme::closed(annotation.clone())
                 }
                 (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end),
@@ -372,8 +385,10 @@ impl Checker<'_> {
                 let mut reserved = HashSet::new();
                 Self::collect_tyvar_names(annotation, &mut reserved);
                 let mut state = Self::fresh_generalize_state(reserved);
+                state.counter = self.zonk_name_counter;
                 let env_free = self.env_free_vars();
                 self.zonk_nodes(body_start, body_end, &mut state, &env_free);
+                self.zonk_name_counter = state.counter;
                 Ok(Scheme::closed(annotation.clone()))
             }
             None => Ok(self.generalize_and_zonk(def_type, body_start, body_end)),
@@ -658,7 +673,7 @@ impl Checker<'_> {
         let mut state = GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
-            counter: 0,
+            counter: self.zonk_name_counter,
             reserved,
         };
         // Reserve the names of already-named free variables (rigids and
@@ -697,6 +712,7 @@ impl Checker<'_> {
         }
         let tipe = self.variable_to_type(var, &env_free, &mut state);
         self.zonk_nodes(start, end, &mut state, &env_free);
+        self.zonk_name_counter = state.counter;
         Scheme {
             tipe,
             free: state.free,
@@ -1357,18 +1373,26 @@ impl GeneralizeState {
                 name.clone()
             }
             Content::FlexSuper(super_, _) => {
+                // Suffix from the shared module-wide counter, so two naming
+                // states can never hand out the same `numberK`/`comparableK`
+                // name for distinct variables (the same cross-state collision
+                // the counter prevents for letter names; monomorphization
+                // substitutes by name). Downstream checks only look at the
+                // prefix (`starts_with("number")`), so the suffix is free.
                 let base = super_.name();
-                let mut i = 0;
                 loop {
-                    let candidate = if i == 0 {
+                    let n = self.counter;
+                    self.counter += 1;
+                    let candidate = if n == 0 {
                         Name::from(base)
                     } else {
-                        Name::from(format!("{}{}", base, i + 1))
+                        Name::from(format!("{}{}", base, n + 1))
                     };
-                    if !self.names.values().any(|n| *n == candidate) {
+                    if !self.names.values().any(|nm| *nm == candidate)
+                        && !self.reserved.contains(&candidate)
+                    {
                         return candidate;
                     }
-                    i += 1;
                 }
             }
             _ => {
