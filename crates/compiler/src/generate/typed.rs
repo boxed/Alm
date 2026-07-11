@@ -1109,10 +1109,26 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Layout::Closure => self.box_closure(val, tipe),
             // Opaque values are already the uniform word.
             Layout::Opaque => Ok(val),
-            // An unresolved phantom (e.g. the element type of `Nothing`): this
-            // boxing code is generated but never executed. A unit placeholder
-            // keeps it well-typed.
-            Layout::Ref => Ok(self.load_global("rt_unit_v")),
+            // An unresolved type variable is carried as an opaque uniform word
+            // held in a pointer slot (see `unbox_value`'s `Ref` arm, which is
+            // `int_to_ptr`). Boxing is the inverse — `ptr_to_int` — NOT a unit
+            // placeholder: this arm really does run when a value of unresolved
+            // type flows through a polymorphic boundary (e.g. a msg passed to
+            // `Test.Html`'s `taggerFunction : Tagger -> (a -> msg)`, whose `a`
+            // never gets pinned). Discarding it as unit corrupted the value.
+            Layout::Ref => {
+                // A Ref value is carried in a pointer slot; if it is already an
+                // integer word (some phantom sites), pass it through.
+                if val.is_pointer_value() {
+                    Ok(self
+                        .builder
+                        .build_ptr_to_int(val.into_pointer_value(), self.ctx.i64_type(), "refbox")
+                        .unwrap()
+                        .into())
+                } else {
+                    Ok(val)
+                }
+            }
         }
     }
 
@@ -1592,13 +1608,30 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // typed closure instead of wrapping it again — so box∘unbox is identity
         // and a round-tripped function keeps its identity (Elm's `==` on
         // functions is reference equality). Otherwise wrap the uniform closure.
+        //
+        // BUT only when the requested type matches the type the closure was
+        // boxed at. When an argument type is an unresolved variable (`Ref`
+        // layout), this unbox is happening at a polymorphic boundary that
+        // ERASED a concrete type — e.g. `Test.Html`'s `taggerFunction : Tagger
+        // -> (a -> msg)` hands back a closure boxed at `Inner -> Outer` but now
+        // requested as `va -> Outer`. Recovering the original `Inner`-typed
+        // closure and then applying it through the `va` (opaque, un-unboxed)
+        // path feeds it a raw uniform word where it expects an unboxed `Inner`,
+        // corrupting the value. Keep it as the uniform closure and wrap it, so
+        // application routes through the closure's own correct trampoline.
+        let has_unresolved_arg = arg_types
+            .iter()
+            .any(|t| matches!(self.layouts.layout_of(t), Layout::Ref));
         let recovered = self
             .call_named("alm_recover_boxed", &[w])
             .into_int_value();
-        let is_rec = self
-            .builder
-            .build_int_compare(IntPredicate::NE, recovered, i64_t.const_zero(), "isrec")
-            .unwrap();
+        let is_rec = if has_unresolved_arg {
+            self.ctx.bool_type().const_zero()
+        } else {
+            self.builder
+                .build_int_compare(IntPredicate::NE, recovered, i64_t.const_zero(), "isrec")
+                .unwrap()
+        };
         let rec_bb = self.new_block("unbox.recover");
         let wrap_bb = self.new_block("unbox.wrap");
         let cont_bb = self.new_block("unbox.cont");
