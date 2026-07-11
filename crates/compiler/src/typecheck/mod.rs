@@ -1372,6 +1372,22 @@ impl GeneralizeState {
             {
                 name.clone()
             }
+            // A super variable already named by an earlier state keeps its
+            // pinned name (exactly like the FlexVar arm above): the same
+            // variable re-encountered across states MUST resolve to the same
+            // name, or a scheme naming it one way and a node naming it another
+            // makes monomorphization's by-name substitution miss it — an
+            // unsubstituted `number` silently defaults to Int while its
+            // Float-pinned siblings don't (Random.Extra.frequency at Float
+            // broke exactly so). Before the shared counter, this consistency
+            // held by ACCIDENT: every state named its first number variable
+            // plain "number", so re-encounters collided into agreement.
+            Content::FlexSuper(_, Some(name))
+                if !self.reserved.contains(name)
+                    && !self.names.values().any(|n| n == name) =>
+            {
+                name.clone()
+            }
             Content::FlexSuper(super_, _) => {
                 // Suffix from the shared module-wide counter, so two naming
                 // states can never hand out the same `numberK`/`comparableK`
