@@ -534,11 +534,24 @@ static RT_FALSE: Global = Global::NULL;
 #[export_name = "rt_unit_v"]
 static RT_UNIT: Global = Global::NULL;
 
-// Internal singletons.
+// Runtime singletons filled in by `runtime_init`. These MUST be exported (not
+// plain `static`s): the backend merges the runtime bitcode into each program
+// for cross-module inlining, and an *internal* global is DUPLICATED by that
+// merge — the inlined copy of e.g. `array_get` would then read the program's
+// private, never-initialized copy of `NOTHING` (0/NULL) while `runtime_init`
+// (linked from the static lib) fills in the library's separate copy. Exporting
+// them makes each a single symbol the merge marks `available_externally`,
+// resolving every reference to the one instance the runtime initializes. (Same
+// reason the `rt_*_v` singletons above are exported.)
+#[export_name = "alm_NIL"]
 static NIL: Global = Global::NULL;
+#[export_name = "alm_NOTHING"]
 static NOTHING: Global = Global::NULL;
+#[export_name = "alm_LT"]
 static LT: Global = Global::NULL;
+#[export_name = "alm_EQ"]
 static EQ: Global = Global::NULL;
+#[export_name = "alm_GT"]
 static GT: Global = Global::NULL;
 
 unsafe fn tru() -> u64 {
