@@ -971,37 +971,70 @@ impl Specializer<'_> {
             recursive: bool,
         }
         let mut polys: HashMap<Name, PolyLocal> = HashMap::new();
-        let mut poly_index: HashMap<usize, Name> = HashMap::new();
+        let mut poly_index: HashMap<usize, Vec<Name>> = HashMap::new();
         for (i, decl) in decls.iter().enumerate() {
-            let (def, recursive) = match decl {
-                // Any local binding whose type is polymorphic in context needs
-                // per-use-site specialization -- including a *point-free* one
-                // (zero args), e.g. `f = List.sort << g`. Compiling such a
-                // binding once under the enclosing substitution leaves its type
-                // variable free, producing a boxed (`Ref`) specialization of the
-                // functions it composes; a concrete unboxed call site then reads
-                // those values at the wrong layout. The `type_has_free_tyvar`
-                // check below filters out monomorphic values (`x = 5`).
-                can::LetDecl::Def(def) => (def, false),
-                can::LetDecl::Recursive(defs) if defs.len() == 1 && !defs[0].args.is_empty() => {
-                    (&defs[0], true)
+            // Any local binding whose type is polymorphic in context needs
+            // per-use-site specialization -- including a *point-free* one
+            // (zero args), e.g. `f = List.sort << g`. Compiling such a
+            // binding once under the enclosing substitution leaves its type
+            // variable free, producing a boxed (`Ref`) specialization of the
+            // functions it composes; a concrete unboxed call site then reads
+            // those values at the wrong layout. The `type_has_free_tyvar`
+            // check below filters out monomorphic values (`x = 5`).
+            //
+            // A `Recursive` group registers EVERY member — including mutual
+            // recursion (Form.Tree's `walkTree`/`mapGroupItem`): compiling a
+            // mutual group once under the enclosing substitution has the same
+            // wrong-layout consequence, and the members must specialize
+            // together since they call each other.
+            let group: Vec<(&can::Def, bool)> = match decl {
+                can::LetDecl::Def(def) => vec![(def, false)],
+                can::LetDecl::Recursive(defs)
+                    if !defs.is_empty() && defs.iter().all(|d| !d.args.is_empty()) =>
+                {
+                    defs.iter().map(|d| (d, true)).collect()
                 }
                 _ => continue,
             };
-            let Some(generic) = self.ctx.node_types.get(&def.name.region) else {
+            let mut members: Vec<(&can::Def, bool, can::Type)> = Vec::new();
+            let mut any_poly = false;
+            let mut complete = true;
+            for (def, recursive) in &group {
+                let Some(generic) = self.ctx.node_types.get(&def.name.region) else {
+                    complete = false;
+                    break;
+                };
+                let subbed = apply_subst(subst, generic);
+                // A single definition keeps the wider rule (number vars count —
+                // see type_has_free_tyvar's comment); a MUTUAL group only
+                // specializes for genuine type variables (see
+                // type_has_free_named_tyvar).
+                let is_poly = if group.len() == 1 {
+                    type_has_free_tyvar(&subbed)
+                } else {
+                    type_has_free_named_tyvar(&subbed)
+                };
+                if is_poly {
+                    any_poly = true;
+                }
+                members.push((def, *recursive, generic.clone()));
+            }
+            if !complete || !any_poly {
                 continue;
-            };
-            if type_has_free_tyvar(&apply_subst(subst, generic)) {
-                poly_index.insert(i, def.name.value.clone());
+            }
+            let mut names = Vec::new();
+            for (def, recursive, generic) in members {
+                names.push(def.name.value.clone());
                 polys.insert(
                     def.name.value.clone(),
                     PolyLocal {
                         def,
-                        generic: generic.clone(),
+                        generic,
                         recursive,
                     },
                 );
             }
+            poly_index.insert(i, names);
         }
 
         // No polymorphic locals: ordinary specialization.
@@ -1067,12 +1100,7 @@ impl Specializer<'_> {
                 params,
                 body: spec_body,
             };
-            let decl = if poly.recursive {
-                TypedLetDecl::Recursive(vec![inner])
-            } else {
-                inner
-            };
-            spec_decls.insert(mangled.to_string(), decl);
+            spec_decls.insert(mangled.to_string(), inner);
             per_name.entry(name).or_default().push(mangled);
         }
 
@@ -1083,15 +1111,47 @@ impl Specializer<'_> {
         let mut specialized: std::collections::HashSet<Name> = std::collections::HashSet::new();
         for (i, decl) in decls.iter().enumerate() {
             match poly_index.get(&i) {
-                Some(name) => match per_name.get(name) {
-                    Some(mangleds) if !mangleds.is_empty() => {
-                        specialized.insert(name.clone());
-                        for m in mangleds {
-                            out_decls.push(spec_decls.remove(m.as_str()).unwrap());
+                Some(names) => {
+                    let mut copies: Vec<TypedLetDecl> = Vec::new();
+                    for name in names {
+                        if let Some(mangleds) = per_name.get(name) {
+                            for m in mangleds {
+                                copies.push(spec_decls.remove(m.as_str()).unwrap());
+                            }
                         }
                     }
-                    _ => out_decls.push(self.let_decl(decl, subst)),
-                },
+                    if copies.is_empty() {
+                        // No discovered use of any member: ordinary single copy.
+                        out_decls.push(self.let_decl(decl, subst));
+                        continue;
+                    }
+                    for name in names {
+                        if per_name.get(name).map_or(false, |ms| !ms.is_empty()) {
+                            specialized.insert(name.clone());
+                        }
+                    }
+                    let recursive = names
+                        .first()
+                        .map_or(false, |n| polys[n].recursive);
+                    if !recursive {
+                        out_decls.extend(copies);
+                    } else if names.len() > 1 {
+                        // A MUTUAL group: all specialized copies go into ONE
+                        // Recursive decl so every copy sees every other (they
+                        // reference each other's mangled names, and
+                        // let-bindings otherwise scope sequentially).
+                        out_decls.push(TypedLetDecl::Recursive(copies));
+                    } else {
+                        // A single self-recursive local: its copies never
+                        // reference each other, so each stays its own
+                        // singleton group (the mutual-group machinery's
+                        // heavier env layout is unnecessary and was observed
+                        // to miscompile independent copies bundled together).
+                        for c in copies {
+                            out_decls.push(TypedLetDecl::Recursive(vec![c]));
+                        }
+                    }
+                }
                 None => out_decls.push(nonpoly.remove(&i).unwrap()),
             }
         }
@@ -1183,6 +1243,37 @@ impl Specializer<'_> {
 /// Whether a type still carries a free type variable that would drive a boxed
 /// (`Ref`) layout. A `number` variable is excluded: it defaults to `Int`
 /// consistently, so it needs no per-use specialization.
+/// Like [`type_has_free_tyvar`], but `number`/`comparable`-style super
+/// variables do not count. Used to gate MUTUAL-group specialization: a group
+/// that is polymorphic only in `number` compiled correctly before group
+/// specialization existed (every use defaults to Int uniformly), and
+/// specializing such groups interacts badly with the top-level number-default
+/// fixpoint (Int/Float instantiations of the group members enqueue each other
+/// unboundedly). A genuinely-polymorphic group (a real type variable) is the
+/// case group specialization exists to fix.
+fn type_has_free_named_tyvar(tipe: &can::Type) -> bool {
+    use can::Type::*;
+    match tipe {
+        Var(name) => {
+            !name.as_str().starts_with("number")
+                && !name.as_str().starts_with("comparable")
+                && !name.as_str().starts_with("appendable")
+                && !name.as_str().starts_with("compappend")
+        }
+        Lambda(a, b) => type_has_free_named_tyvar(a) || type_has_free_named_tyvar(b),
+        Type(_, _, args) => args.iter().any(type_has_free_named_tyvar),
+        Tuple(a, b, c) => {
+            type_has_free_named_tyvar(a)
+                || type_has_free_named_tyvar(b)
+                || c.as_ref().map_or(false, |c| type_has_free_named_tyvar(c))
+        }
+        Record(fields, ext) => {
+            ext.is_some() || fields.iter().any(|(_, t)| type_has_free_named_tyvar(t))
+        }
+        Unit => false,
+    }
+}
+
 fn type_has_free_tyvar(tipe: &can::Type) -> bool {
     use can::Type::*;
     match tipe {
