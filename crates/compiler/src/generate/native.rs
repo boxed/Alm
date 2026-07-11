@@ -146,8 +146,18 @@ pub(crate) fn finish<'ctx>(
     // dumped `program.ll` (and the rest) survive for inspection.
     let _cleanup = BuildDirGuard {
         dir: build_dir.clone(),
-        keep: std::env::var_os("ALM_DUMP_IR").is_some(),
+        keep: std::env::var_os("ALM_DUMP_IR").is_some()
+            || std::env::var_os("ALM_DUMP_IR_PRE").is_some(),
     };
+
+    // The pure generated IR, before the runtime is merged in and before LLVM
+    // optimizes — so it shows exactly what the typed backend emitted, with no
+    // inlining or UB-exploitation (dead-code elimination, GVN) applied. This is
+    // the form to read when a value is corrupted or a call vanishes post-O2:
+    // ALM_DUMP_IR shows the optimized result, ALM_DUMP_IR_PRE the source of it.
+    if std::env::var_os("ALM_DUMP_IR_PRE").is_some() {
+        let _ = module.print_to_file(build_dir.join("program.pre.ll"));
+    }
 
     // Merge the runtime bitcode so the optimizer can inline the runtime's
     // hot primitives (rt_add, rt_ctor, rt_apply, the list kernels …) into
@@ -193,6 +203,13 @@ pub(crate) fn finish<'ctx>(
     module
         .link_in_module(runtime_module)
         .map_err(|e| format!("could not merge runtime bitcode: {}", e))?;
+
+    // The merged module before optimization: generated code + the runtime's
+    // (available_externally) definitions, but no inlining/DCE yet. Reading the
+    // runtime primitive bodies here shows what O2 will inline and fold.
+    if std::env::var_os("ALM_DUMP_IR_PRE").is_some() {
+        let _ = module.print_to_file(build_dir.join("program.merged.ll"));
+    }
 
     // Run LLVM's optimization pipeline (inlining, mem2reg, GVN, …). With the
     // runtime merged in, this inlines it into the generated code.
