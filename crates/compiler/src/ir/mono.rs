@@ -1649,7 +1649,7 @@ fn mangle_type(tipe: &can::Type) -> String {
         // this, a concrete call site (`Int`) and a definition discovered with
         // the variable still unresolved (`number`) mangle to different names
         // for identical code, so the call finds no target.
-        Var(n) if n.as_str().starts_with("number") => "Basics$Int".to_string(),
+        Var(n) if n.as_str().starts_with("number") => "Basics$Int$0".to_string(),
         Var(n) => format!("v{}", n),
         // Qualify by module: two modules can each declare a `Msg`/`Model` whose
         // layouts differ (an enum `i32` in one, a tagged pointer in another).
@@ -1657,11 +1657,20 @@ fn mangle_type(tipe: &can::Type) -> String {
         // symbol — invalid IR when the layouts disagree, a silent miscompile
         // when they happen to share a shape. `home` is unique per module (the
         // per-package resolver renames duplicates), so `home$name` is not.
-        Type(home, name, args) if args.is_empty() => format!("{}${}", home, name),
+        // Every compound form carries its child COUNT, making the encoding a
+        // prefix-unambiguous Polish notation. Without counts the flat `$`
+        // joining cannot tell nesting from siblings: `Rec$a_T$b_U` followed by
+        // a sibling `$c_V` is byte-identical to a Rec whose LAST FIELD contains
+        // `c_V` nested one level deeper — two different types (html-table's
+        // `{colA,id,items:List {colB,id,things:…}}` vs the same fields with
+        // `things` hoisted to the outer record) collided to one specialization,
+        // and callers handed it rows of the other layout.
+        Type(home, name, args) if args.is_empty() => format!("{}${}$0", home, name),
         Type(home, name, args) => format!(
-            "{}${}${}",
+            "{}${}${}${}",
             home,
             name,
+            args.len(),
             args.iter().map(mangle_type).collect::<Vec<_>>().join("$")
         ),
         Lambda(a, b) => format!("Fn${}${}", mangle_type(a), mangle_type(b)),
@@ -1670,7 +1679,7 @@ fn mangle_type(tipe: &can::Type) -> String {
             if let Some(c) = c {
                 parts.push(mangle_type(c));
             }
-            format!("Tup${}", parts.join("$"))
+            format!("Tup{}${}", parts.len(), parts.join("$"))
         }
         Record(fields, _) => {
             // Field order is not canonical in node types (row-variable
@@ -1683,7 +1692,7 @@ fn mangle_type(tipe: &can::Type) -> String {
                 .map(|(n, t)| format!("{}_{}", n, mangle_type(t)))
                 .collect();
             parts.sort();
-            format!("Rec${}", parts.join("$"))
+            format!("Rec{}${}", parts.len(), parts.join("$"))
         }
         Unit => "Unit".to_string(),
     }
