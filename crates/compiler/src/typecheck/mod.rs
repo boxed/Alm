@@ -70,6 +70,15 @@ pub struct Checker<'a> {
     /// alignment to substitute structurally.
     node_vars: Vec<(Region, Variable)>,
     node_types: HashMap<Region, can::Type>,
+    /// Depth of `let` nesting during inference. Inner (local) definitions
+    /// compute their schemes but must NOT freeze node types: at that moment
+    /// the enclosing body's later unifications have not happened yet, so an
+    /// eager zonk captures variables under names that no longer correspond to
+    /// anything once those variables merge with the enclosing definition's
+    /// (which the enclosing sweep names differently). Locals' nodes stay in
+    /// `node_vars` and are zonked by the enclosing top-level definition's
+    /// sweep, in one consistent naming state.
+    let_depth: usize,
     /// Module-wide counter for anonymously-named zonk variables. Each
     /// definition's `GeneralizeState` starts here and writes back, so no two
     /// naming states can hand out the same anonymous name. Names are pinned on
@@ -160,6 +169,7 @@ pub fn check_module(
         module_name: module.name.clone(),
         rigid_scope: Vec::new(),
         zonk_name_counter: 0,
+        let_depth: 0,
         errors: Vec::new(),
         node_vars: Vec::new(),
         node_types: HashMap::new(),
@@ -354,7 +364,7 @@ impl Checker<'_> {
                     self.zonk_name_counter = state.counter;
                     Scheme::closed(annotation.clone())
                 }
-                (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end),
+                (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end, def.name.region),
                 (None, None) => unreachable!(),
             };
             bind(self, def.name.value.clone(), Binding::Scheme(scheme));
@@ -391,7 +401,16 @@ impl Checker<'_> {
                 self.zonk_name_counter = state.counter;
                 Ok(Scheme::closed(annotation.clone()))
             }
-            None => Ok(self.generalize_and_zonk(def_type, body_start, body_end)),
+            None => {
+                if self.let_depth > 0 {
+                    // A local definition: compute the scheme (with pinned
+                    // names, so the enclosing sweep reuses them for the same
+                    // variables) but freeze NO node types — see `let_depth`.
+                    Ok(self.generalize_scheme(def_type))
+                } else {
+                    Ok(self.generalize_and_zonk(def_type, body_start, body_end, def.name.region))
+                }
+            }
         }
     }
 
@@ -660,7 +679,55 @@ impl Checker<'_> {
     /// naming state, zonk the body expressions recorded in `start..end`.
     /// Sharing the state is what makes a subexpression's captured type use
     /// the same variable names as the function's scheme.
-    fn generalize_and_zonk(&mut self, var: Variable, start: usize, end: usize) -> Scheme {
+    /// Compute a definition's scheme only — no node freezing. Used for local
+    /// (`let`-bound) definitions, whose nodes the enclosing top-level sweep
+    /// zonks later in one consistent state (see `let_depth`).
+    fn generalize_scheme(&mut self, var: Variable) -> Scheme {
+        let env_free = self.env_free_vars();
+        let mut reserved = std::collections::HashSet::new();
+        for scope in &self.rigid_scope {
+            for name in scope.keys() {
+                reserved.insert(name.clone());
+            }
+        }
+        let mut state = GeneralizeState {
+            names: HashMap::new(),
+            free: HashMap::new(),
+            counter: self.zonk_name_counter,
+            reserved,
+        };
+        let mut seeds: Vec<Variable> = env_free.iter().copied().collect();
+        seeds.sort_unstable();
+        for root in seeds {
+            let name = match self.pool.content(root) {
+                Content::RigidVar(name)
+                | Content::FlexVar(Some(name))
+                | Content::RigidSuper(_, name) => Some(name),
+                _ => None,
+            };
+            if let Some(mut name) = name {
+                while state.free.contains_key(&name) {
+                    name = Name::from(format!("{}_", name));
+                }
+                state.names.insert(root, name.clone());
+                state.free.insert(name, root);
+            }
+        }
+        let tipe = self.variable_to_type(var, &env_free, &mut state);
+        self.zonk_name_counter = state.counter;
+        Scheme {
+            tipe,
+            free: state.free,
+        }
+    }
+
+    fn generalize_and_zonk(
+        &mut self,
+        var: Variable,
+        start: usize,
+        end: usize,
+        name_region: Region,
+    ) -> Scheme {
         let env_free = self.env_free_vars();
         // Reserve enclosing annotated definitions' rigid variable names so this
         // (inner) definition's freshly-generated names never collide with them.
@@ -711,6 +778,19 @@ impl Checker<'_> {
             }
         }
         let tipe = self.variable_to_type(var, &env_free, &mut state);
+        // Record the definition's own type at its name region NOW, in this
+        // state's (scheme-consistent) names, exempt from deferral. The name
+        // node often touches enclosing unresolved variables and would defer to
+        // an enclosing state — which, zonking after later unifications merged
+        // variables, names them differently than this scheme and this body's
+        // frozen nodes. Monomorphization matches the name-node type against
+        // body node types BY NAME, so the two views must agree: a poly local
+        // whose name node says `{ b | … }` while its body says `{ d | … }` is
+        // judged monomorphic (the enclosing subst closes b) yet its body rows
+        // (d) never close — an open-row record laid out with only its named
+        // fields, read against the concrete record at wrong offsets
+        // (advanced-grid's Filters helper crashed exactly so).
+        self.node_types.entry(name_region).or_insert_with(|| tipe.clone());
         self.zonk_nodes(start, end, &mut state, &env_free);
         self.zonk_name_counter = state.counter;
         Scheme {
@@ -1194,6 +1274,7 @@ impl Checker<'_> {
             }
             Let(decls, body) => {
                 self.scopes.push(HashMap::new());
+                self.let_depth += 1;
                 let result = (|| {
                     for decl in decls {
                         match decl {
@@ -1221,6 +1302,7 @@ impl Checker<'_> {
                     }
                     self.infer_expr(body)
                 })();
+                self.let_depth -= 1;
                 self.scopes.pop();
                 result
             }
