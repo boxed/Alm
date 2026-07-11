@@ -2,15 +2,15 @@
 //! driven by the C event loop, checked against the JS runtime under node
 //! (both print via Terminal.writeLine and exit when nothing is pending).
 
+
+mod common;
+
 use std::process::Command;
 
 use alm_compiler::{generate, ir, project};
 
 fn run_both(test_name: &str, source: &str) -> (String, String) {
-    let dir = std::env::temp_dir()
-        .join("alm-native-tea")
-        .join(format!("{}-{}", test_name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-native-tea", test_name);
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
 

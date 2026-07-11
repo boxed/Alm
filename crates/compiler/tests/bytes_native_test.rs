@@ -12,6 +12,9 @@
 //! backend does not yet compile); the semantics are identical to the stock
 //! package.
 
+
+mod common;
+
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -491,13 +494,8 @@ main =
     Debug.toString ( Bytes.width e, d, ( s, loopDec, ( fail, failMid, okPair ) ) )
 "#;
 
-fn setup() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-bytes-native-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+fn setup() -> common::TestDir {
+    let dir = common::test_dir("alm-bytes-native", "t");
     let src = dir.join("src");
     let pkg = dir.join("elm-home/0.19.1/packages/elm/bytes/1.0.8/src");
     std::fs::create_dir_all(src.join("")).unwrap();

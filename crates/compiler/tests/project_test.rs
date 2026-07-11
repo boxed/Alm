@@ -12,12 +12,7 @@ mod common;
 static ELM_HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn project(files: &[(&str, &str)]) -> Result<String, String> {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-project-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-project", "t");
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
@@ -37,12 +32,7 @@ fn project(files: &[(&str, &str)]) -> Result<String, String> {
 /// returning any rendered errors. Used for programs that type-check but
 /// cannot be evaluated (e.g. ones with a `Debug.todo` placeholder value).
 fn check_project(files: &[(&str, &str)]) -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-check-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-check", "t");
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(
@@ -645,13 +635,7 @@ fn opaque_ctor_exposing_import_is_lenient() {
 #[test]
 fn project_without_elm_json() {
     // The entry file's directory becomes the only source root.
-    let dir = std::env::temp_dir().join(format!(
-        "alm-noelmjson-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::test_dir("alm-noelmjson", "t");
     std::fs::write(
         dir.join("Main.elm"),
         "module Main exposing (main)\n\nimport Helper\n\nmain = Helper.word\n",
@@ -668,12 +652,7 @@ fn project_without_elm_json() {
 
 #[test]
 fn elm_json_without_source_directories() {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-nodirs-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-nodirs", "t");
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(dir.join("elm.json"), r#"{ "type": "application" }"#).unwrap();
@@ -687,12 +666,7 @@ fn elm_json_without_source_directories() {
 
 #[test]
 fn packages_resolve_from_elm_home() {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-pkg-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-pkg", "t");
     let src = dir.join("src");
     let pkg_src = dir
         .join("elm-home/0.19.1/packages/acme/tools/1.0.0/src");
@@ -736,12 +710,7 @@ fn duplicate_module_names_resolve_per_package() {
     // qq/two's `Bar` (whose transitive imports reach back to `Foo`), inventing
     // a false import cycle Foo -> Bar -> Baz -> Foo. Regression: e.g. both
     // elm-community/html-extra and arowM/html-extra expose `Html.Extra`.
-    let dir = std::env::temp_dir().join(format!(
-        "alm-dupmod-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-dupmod", "t");
     let src = dir.join("src");
     let pkgs = dir.join("elm-home/0.19.1/packages");
     let one = pkgs.join("pp/one/1.0.0");
@@ -862,12 +831,7 @@ fn qualified_foreign_constructors_and_alias_ctors() {
 // the official Elm 0.19.1 compiler with the real elm/bytes 1.0.8.
 #[test]
 fn elm_bytes_encode_decode_roundtrip() {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-bytes-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::test_dir("alm-bytes", "t");
     let src = dir.join("src");
     let pkg_src = dir.join("elm-home/0.19.1/packages/elm/bytes/1.0.8/src");
     std::fs::create_dir_all(src.join("")).unwrap();

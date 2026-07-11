@@ -1,7 +1,31 @@
 //! CLI integration tests: drive the `alm` binary end to end.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// A per-test scratch directory that removes itself when the test finishes
+/// (kept on panic, or with ALM_KEEP_TEST_DIRS=1, for inspection). TMPDIR is
+/// redirected into the in-project `.almtmp/` by `.cargo/config.toml`, and the
+/// per-PID names meant every run leaked a new set of directories.
+struct TestDir {
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if std::thread::panicking() || std::env::var_os("ALM_KEEP_TEST_DIRS").is_some() {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 fn alm(args: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_alm"))
@@ -15,14 +39,14 @@ fn alm(args: &[&str]) -> (bool, String, String) {
     )
 }
 
-fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+fn temp_dir() -> TestDir {
+    let path = std::env::temp_dir().join(format!(
         "alm-cli-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    std::fs::create_dir_all(&path).unwrap();
+    TestDir { path }
 }
 
 #[test]

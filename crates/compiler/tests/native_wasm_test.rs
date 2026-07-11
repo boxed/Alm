@@ -2,6 +2,9 @@
 //! `.wasm` module and run it with node's WASI, comparing stdout with what
 //! the JS backend prints. Requires the wasm32-wasi target and node.
 
+
+mod common;
+
 use std::process::Command;
 
 use alm_compiler::{generate, ir, project};
@@ -31,10 +34,7 @@ fn run_wasm(dir: &std::path::Path, wasm: &std::path::Path) -> String {
 /// typed backend; the uniform backend is still the fallback/substrate, so both
 /// are exercised here.
 fn run_both(test_name: &str, source: &str) -> (String, String, String) {
-    let dir = std::env::temp_dir()
-        .join("alm-wasm-tests")
-        .join(format!("{}-{}", test_name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-wasm-tests", test_name);
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
 
@@ -91,10 +91,7 @@ fn run(command: &mut Command) -> String {
 /// WASI, returning what it printed (the TEA event loop drives sleep/timers
 /// through WASI's poll_oneoff/clock_time_get).
 fn run_worker_wasm(test_name: &str, source: &str) -> String {
-    let dir = std::env::temp_dir()
-        .join("alm-wasm-tea")
-        .join(format!("{}-{}", test_name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-wasm-tea", test_name);
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
     let checked = project::check_project(&entry).unwrap_or_else(|errors| {
@@ -210,10 +207,7 @@ fn custom_types_and_debug() {
 /// user function. `llvm-dwarfdump` reads the wasm container directly.
 #[test]
 fn wasm_has_dwarf_line_table() {
-    let dir = std::env::temp_dir()
-        .join("alm-wasm-dwarf")
-        .join(format!("dwarf-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-wasm-dwarf", "dwarf");
     let entry = dir.join("Test.elm");
     // A recursive function survives O2 as a real out-of-line function, so its
     // line program is retained (a trivial helper would be inlined and folded

@@ -3,6 +3,9 @@
 //!
 //!   cargo test -p alm-compiler --test typed_bench -- --ignored --nocapture
 
+
+mod common;
+
 use std::process::Command;
 use std::time::Instant;
 
@@ -77,12 +80,7 @@ fn bench() {
 }
 
 fn bench_one(label: &str, src: &str) {
-    let dir = std::env::temp_dir().join(format!(
-        "alm-typed-bench-{}-{}",
-        label.replace(' ', "_"),
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::test_dir("alm-typed-bench", &label.replace(' ', "_"));
 
     let module = parse::parse_module(src).unwrap();
     let canonical = canonicalize::canonicalize(&module).unwrap();

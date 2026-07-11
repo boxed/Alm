@@ -2,6 +2,9 @@
 //! binary with clang and compare its stdout with what the JS backend
 //! would print.
 
+
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -10,10 +13,7 @@ use alm_compiler::{generate, ir, project};
 /// Compile `source` (a `module Test ...`) to a native binary and return
 /// its stdout.
 fn run_native(test_name: &str, source: &str) -> String {
-    let dir = std::env::temp_dir()
-        .join("alm-native-tests")
-        .join(format!("{}-{}", test_name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-native-tests", test_name);
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
 

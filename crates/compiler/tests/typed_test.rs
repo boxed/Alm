@@ -3,6 +3,9 @@
 //! against the JS backend under node — the same differential discipline the
 //! uniform native backend uses.
 
+
+mod common;
+
 use std::process::Command;
 
 use alm_compiler::generate::native::Target;
@@ -13,10 +16,7 @@ use alm_compiler::interface::Interfaces;
 use alm_compiler::{canonicalize, generate, parse, typecheck};
 
 fn run_both(test_name: &str, source: &str) -> (String, String) {
-    let dir = std::env::temp_dir()
-        .join("alm-typed-tests")
-        .join(format!("{}-{}", test_name, std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create test dir");
+    let dir = common::test_dir("alm-typed-tests", test_name);
 
     let module = parse::parse_module(source).expect("parse");
     let canonical = canonicalize::canonicalize(&module).expect("canonicalize");
@@ -849,10 +849,7 @@ fn take_drop_all_any() {
 fn cross_module_specialization() {
     // A helper module imported by the entry: the polymorphic helper must be
     // specialized in its own module and called across the boundary.
-    let dir = std::env::temp_dir()
-        .join("alm-typed-xmod")
-        .join(format!("xmod-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create dir");
+    let dir = common::test_dir("alm-typed-xmod", "xmod");
     std::fs::write(
         dir.join("Helper.elm"),
         "module Helper exposing (..)\n\
@@ -962,10 +959,7 @@ fn tea_worker_ticks() {
     // A Platform.worker program with a timer subscription and Terminal
     // output, compiled through the typed backend and driven by the runtime's
     // TEA loop.
-    let dir = std::env::temp_dir()
-        .join("alm-typed-tea")
-        .join(format!("tea-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::test_dir("alm-typed-tea", "tea");
     let entry = dir.join("Test.elm");
     std::fs::write(
         &entry,
@@ -1003,10 +997,7 @@ fn tea_worker_ticks() {
 fn tea_task_chain() {
     // Task.succeed/andThen/map piped through Task.perform, delivered as a Msg
     // and printed — the task interpreter on the typed backend.
-    let dir = std::env::temp_dir()
-        .join("alm-typed-task")
-        .join(format!("task-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::test_dir("alm-typed-task", "task");
     let entry = dir.join("Test.elm");
     std::fs::write(
         &entry,
