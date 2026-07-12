@@ -675,10 +675,6 @@ impl Checker<'_> {
         false
     }
 
-    /// Generalize a definition's inferred type and, with the very same
-    /// naming state, zonk the body expressions recorded in `start..end`.
-    /// Sharing the state is what makes a subexpression's captured type use
-    /// the same variable names as the function's scheme.
     /// Compute a definition's scheme only — no node freezing. Used for local
     /// (`let`-bound) definitions, whose nodes the enclosing top-level sweep
     /// zonks later in one consistent state (see `let_depth`).
@@ -721,6 +717,10 @@ impl Checker<'_> {
         }
     }
 
+    /// Generalize a definition's inferred type and, with the very same
+    /// naming state, zonk the body expressions recorded in `start..end`.
+    /// Sharing the state is what makes a subexpression's captured type use
+    /// the same variable names as the function's scheme.
     fn generalize_and_zonk(
         &mut self,
         var: Variable,

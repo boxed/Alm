@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 
+
 use crate::ast::canonical as can;
 use crate::data::Name;
 use crate::reporting::annotation::Located;
@@ -453,8 +454,9 @@ pub enum TypedKind {
     Local(Name),
     /// A resolved reference to another specialization (mangled name).
     Global(Name),
-    /// A built-in/kernel value — still the uniform representation until
-    /// typed kernels land.
+    /// A built-in/kernel value. The typed backend compiles known ones to
+    /// specialized inline code (`gen_kernel`) and falls back to the uniform
+    /// runtime closure for the rest.
     Foreign(Name, Name),
     Ctor(Name, Name, can::Ctor),
     List(Vec<TypedExpr>),
@@ -1240,9 +1242,6 @@ impl Specializer<'_> {
     }
 }
 
-/// Whether a type still carries a free type variable that would drive a boxed
-/// (`Ref`) layout. A `number` variable is excluded: it defaults to `Int`
-/// consistently, so it needs no per-use specialization.
 /// Like [`type_has_free_tyvar`], but `number`/`comparable`-style super
 /// variables do not count. Used to gate MUTUAL-group specialization: a group
 /// that is polymorphic only in `number` compiled correctly before group
@@ -1634,8 +1633,9 @@ fn rewrite_decl_uses_masked(
 }
 
 /// Mangle a `(module, name, concrete type)` triple into a unique symbol.
-/// Provisional scheme — readable and injective enough for the types we see;
-/// codegen only needs distinct names per instance. The module qualifier keeps
+/// The encoding must be INJECTIVE — a collision silently merges two
+/// specializations of different layouts (a miscompile). See `mangle_type`
+/// for the prefix-unambiguous scheme. The module qualifier keeps
 /// specializations from different modules distinct.
 pub fn mangle(module: &Name, name: &Name, tipe: &can::Type) -> Name {
     Name::from(format!("{}${}${}", module, name, mangle_type(tipe)))
@@ -1657,7 +1657,8 @@ fn mangle_type(tipe: &can::Type) -> String {
         // symbol — invalid IR when the layouts disagree, a silent miscompile
         // when they happen to share a shape. `home` is unique per module (the
         // per-package resolver renames duplicates), so `home$name` is not.
-        // Every compound form carries its child COUNT, making the encoding a
+        // Every VARIABLE-ARITY form carries its child COUNT (`Fn` needs none
+        // — Lambda is fixed arity 2), making the encoding a
         // prefix-unambiguous Polish notation. Without counts the flat `$`
         // joining cannot tell nesting from siblings: `Rec$a_T$b_U` followed by
         // a sibling `$c_V` is byte-identical to a Rec whose LAST FIELD contains
