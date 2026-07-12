@@ -3169,9 +3169,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ("Time", "now") => Ok(self.load_uniform_global("$Time$now")),
             ("Basics", "modBy") => self.kernel_mod_by(args),
             ("Basics", "remainderBy") => {
+                // srem by zero is UB; JS gives NaN whose comparisons are all
+                // false — 0 is the i64 stand-in. Divide by 1 in that case and
+                // select the 0 afterwards so no poison srem executes.
                 let m = self.gen(&args[0])?.into_int_value();
                 let x = self.gen(&args[1])?.into_int_value();
-                Ok(self.builder.build_int_signed_rem(x, m, "rem").unwrap().into())
+                let b = &self.builder;
+                let zero = self.ctx.i64_type().const_zero();
+                let one = self.ctx.i64_type().const_int(1, false);
+                let m_zero = b.build_int_compare(IntPredicate::EQ, m, zero, "mz").unwrap();
+                let safe_m = b.build_select(m_zero, one, m, "safem").unwrap().into_int_value();
+                let r = b.build_int_signed_rem(x, safe_m, "rem").unwrap();
+                Ok(b.build_select(m_zero, zero, r, "rem0").unwrap())
             }
             ("Basics", "abs") => {
                 let v = self.gen(&args[0])?;
@@ -3804,6 +3813,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let x = self.gen(&args[1])?.into_int_value();
         let b = &self.builder;
         let zero = self.ctx.i64_type().const_zero();
+        // srem by zero is UB; JS modBy 0 yields NaN — 0 is the i64 stand-in
+        // (same scheme as remainderBy above).
+        let one = self.ctx.i64_type().const_int(1, false);
+        let m_zero = b.build_int_compare(IntPredicate::EQ, m, zero, "mz").unwrap();
+        let m = b.build_select(m_zero, one, m, "safem").unwrap().into_int_value();
         let r = b.build_int_signed_rem(x, m, "r").unwrap();
         let r_nz = b.build_int_compare(IntPredicate::NE, r, zero, "rnz").unwrap();
         let r_neg = b.build_int_compare(IntPredicate::SLT, r, zero, "rneg").unwrap();
@@ -3811,7 +3825,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let diff = b.build_xor(r_neg, m_neg, "diff").unwrap();
         let need = b.build_and(r_nz, diff, "need").unwrap();
         let radd = b.build_int_add(r, m, "radd").unwrap();
-        Ok(b.build_select(need, radd, r, "mod").unwrap())
+        let modv = b.build_select(need, radd, r, "mod").unwrap().into_int_value();
+        Ok(b.build_select(m_zero, zero, modv, "mod0").unwrap())
     }
 
     /// `Maybe.map f m`, typed: tag check + one closure call. Without this,

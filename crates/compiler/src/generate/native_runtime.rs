@@ -1897,7 +1897,9 @@ unsafe extern "C" fn basics_or(a: u64, b: u64) -> u64 {
 unsafe extern "C" fn basics_mod_by(m: u64, n: u64) -> u64 {
     let m = as_int(m);
     if m == 0 {
-        crash!("modBy 0 is undefined");
+        // JS: x % 0 is NaN and elm's kernel returns it — comparisons on it
+        // are all false; 0 is the i64 stand-in (see basics_remainder_by).
+        return rt_int(0);
     }
     let mut r = as_int(n) % m;
     if (r > 0 && m < 0) || (r < 0 && m > 0) {
@@ -1909,7 +1911,10 @@ unsafe extern "C" fn basics_mod_by(m: u64, n: u64) -> u64 {
 unsafe extern "C" fn basics_remainder_by(m: u64, n: u64) -> u64 {
     let m = as_int(m);
     if m == 0 {
-        crash!("remainderBy 0 is undefined");
+        // JS: n % 0 is NaN, which every later comparison treats as false —
+        // 0 reproduces that comparison behavior in i64 (select-list's fuzz
+        // tests do `remainderBy (List.length xs) n` on possibly-empty xs).
+        return rt_int(0);
     }
     rt_int(as_int(n) % m)
 }
