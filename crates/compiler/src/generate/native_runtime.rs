@@ -63,6 +63,7 @@ extern "C" {
     /// first word. The backbone of the `alloc` cell pool below.
     fn GC_malloc_many(size: usize) -> *mut u8;
     fn GC_expand_hp(bytes: usize) -> i32;
+    fn GC_set_free_space_divisor(d: usize);
     fn GC_memalign(align: usize, size: usize) -> *mut u8;
     fn GC_realloc(p: *mut u8, size: usize) -> *mut u8;
     fn GC_allow_register_threads();
@@ -79,13 +80,18 @@ static mut GC_READY: bool = false;
 unsafe fn gc_ensure_init() {
     if !GC_READY {
         GC_READY = true;
+        // Divisor 6 (default 3): collect harder before growing the heap —
+        // set BEFORE GC_init so the very first growth decisions use it.
+        GC_set_free_space_divisor(6);
         GC_init();
         GC_allow_register_threads();
         // Start with a roomy heap. Elm code allocates in torrents (every
         // cons cell and boxed value); growing from Boehm's tiny default
         // means near-continuous full collections — marking dominated whole
-        // workloads (bbase64: 49s → 8s with this). 256MB stays well under
-        // the test harness's 1GB cap, and untouched pages cost little RSS.
+        // workloads. 64MB keeps growth proportional to the live set (a
+        // bigger floor overshot the doubling policy to 2.3GB on
+        // elm-monocle); divisor 6 halves churn-heavy peaks
+        // (base64-bytes 1.6GB → <1GB) at no measurable time cost.
         GC_expand_hp(64 << 20);
     }
 }
@@ -749,9 +755,10 @@ unsafe fn mkslice(s: u64, from: usize, to: usize) -> u64 {
     if to <= from {
         return mkstr(Vec::new());
     }
-    if true {
+    if to - from <= 16 {
         return mkstr(sbytes(s)[from..to].to_vec());
     }
+    // Compose with an existing view so bases never nest.
     // Compose with an existing view so bases never nest.
     if let Value::StrSlice { base, off, .. } = deref(s) {
         return alloc(Value::StrSlice {
@@ -1799,7 +1806,7 @@ pub unsafe extern "C" fn rt_append(a: u64, b: u64) -> u64 {
             }
             // Short result: concatenate eagerly (a rope node costs more than
             // the copy). Long result: O(1) rope node, flattened on first read.
-            if true {
+            if la + lb <= 64 {
                 let mut bytes = Vec::with_capacity(la + lb);
                 bytes.extend_from_slice(sbytes(a));
                 bytes.extend_from_slice(sbytes(b));
@@ -2340,14 +2347,38 @@ fn cp_byte(s: &[u8], cp: usize) -> usize {
 /// scanned GC root, so the cached string cannot be collected — and its
 /// address cannot be recycled — while it is the cache key.
 unsafe fn parser_cp_byte(sword: u64, s: &[u8], cp: usize) -> usize {
-    static mut ASCII: (u64, bool) = (0, false);
+    static mut ASCII: [(u64, bool); 4] = [(0, false); 4];
+    static mut ASCII_NEXT: usize = 0;
     static mut CURSOR: (u64, usize, usize) = (0, 0, 0);
-    let ascii = &mut *std::ptr::addr_of_mut!(ASCII);
-    if ascii.0 != sword {
-        *ascii = (sword, s.iter().all(|b| b & 0x80 == 0));
-        *std::ptr::addr_of_mut!(CURSOR) = (sword, 0, 0);
-    }
-    if ascii.1 {
+    // Key the ASCII flag by the slice's BASE string: code that recurses on
+    // `String.slice`d tails creates a fresh view per step, and a per-view
+    // scan would stay O(n²). ASCII-ness of the base covers every subrange,
+    // the base word is stable across the whole walk, and a few entries
+    // cover code walking a couple of strings in lockstep. Cached words are
+    // GC roots (see below), so keys are never stale.
+    // Tiny strings: scan inline — caching them would evict the entries
+    // that matter (a loop slicing 4-char groups off a megabyte source must
+    // not push the source's entry out and force a full rescan per group).
+    let is_ascii = if s.len() <= 64 {
+        s.iter().all(|b| b & 0x80 == 0)
+    } else {
+        let key = match deref(sword) {
+            Value::StrSlice { base, .. } => *base,
+            _ => sword,
+        };
+        let ascii_cache = &mut *std::ptr::addr_of_mut!(ASCII);
+        match ascii_cache.iter().find(|e| e.0 == key) {
+            Some(e) => e.1,
+            None => {
+                let a = sbytes(key).iter().all(|b| b & 0x80 == 0);
+                let slot = &mut *std::ptr::addr_of_mut!(ASCII_NEXT);
+                ascii_cache[*slot] = (key, a);
+                *slot = (*slot + 1) % 4;
+                a
+            }
+        }
+    };
+    if is_ascii {
         return cp.min(s.len());
     }
     let cursor = &mut *std::ptr::addr_of_mut!(CURSOR);
