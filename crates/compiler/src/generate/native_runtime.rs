@@ -759,7 +759,6 @@ unsafe fn mkslice(s: u64, from: usize, to: usize) -> u64 {
         return mkstr(sbytes(s)[from..to].to_vec());
     }
     // Compose with an existing view so bases never nest.
-    // Compose with an existing view so bases never nest.
     if let Value::StrSlice { base, off, .. } = deref(s) {
         return alloc(Value::StrSlice {
             base: *base,
@@ -1158,6 +1157,12 @@ pub unsafe extern "C" fn rt_list_head(v: u64) -> u64 {
         Value::List { head, .. } => *head,
         _ => crash!("head of an empty list"),
     }
+}
+
+/// The typed backend's `modBy 0` crash — elm/core's kernel crashes here.
+#[no_mangle]
+pub unsafe extern "C" fn rt_mod_by_zero() -> u64 {
+    crash!("modBy 0 is undefined");
 }
 
 #[no_mangle]
@@ -1897,8 +1902,12 @@ unsafe extern "C" fn basics_or(a: u64, b: u64) -> u64 {
 unsafe extern "C" fn basics_mod_by(m: u64, n: u64) -> u64 {
     let m = as_int(m);
     if m == 0 {
-        // JS: x % 0 is NaN and elm's kernel returns it — comparisons on it
-        // are all false; 0 is the i64 stand-in (see basics_remainder_by).
+        // elm/core's kernel CRASHES on modBy 0 (unlike remainderBy, whose
+        // NaN result flows on) — match it.
+        crash!("modBy 0 is undefined");
+    }
+    if m == -1 {
+        // i64::MIN % -1 overflows in Rust; x mod -1 == 0 for every x.
         return rt_int(0);
     }
     let mut r = as_int(n) % m;
@@ -1914,6 +1923,10 @@ unsafe extern "C" fn basics_remainder_by(m: u64, n: u64) -> u64 {
         // JS: n % 0 is NaN, which every later comparison treats as false —
         // 0 reproduces that comparison behavior in i64 (select-list's fuzz
         // tests do `remainderBy (List.length xs) n` on possibly-empty xs).
+        return rt_int(0);
+    }
+    if m == -1 {
+        // i64::MIN % -1 overflows in Rust; the result is 0 for every x.
         return rt_int(0);
     }
     rt_int(as_int(n) % m)
@@ -2746,6 +2759,8 @@ unsafe extern "C" fn char_is_alpha(c: u64) -> u64 {
 unsafe extern "C" fn char_to_upper(c: u64) -> u64 {
     // JS kernel: String.prototype.toUpperCase — full Unicode, not ASCII
     // (elm-syntax's Char.Extra relies on Greek letters case-mapping).
+    // KNOWN LIMIT: expansion mappings ('ß' → "SS") truncate to their first
+    // char — a native Char is one codepoint, JS's is a string.
     match char::from_u32(as_int(c) as u32) {
         Some(ch) => rt_chr(ch.to_uppercase().next().unwrap_or(ch) as i32),
         None => c,

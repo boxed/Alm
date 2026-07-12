@@ -336,6 +336,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 Some(Linkage::External),
             );
         }
+        self.module.add_function(
+            "rt_mod_by_zero",
+            i64_t.fn_type(&[], false),
+            Some(Linkage::External),
+        );
         for name in ["rt_list_head", "rt_list_tail", "string_to_int", "string_to_float"] {
             self.module.add_function(
                 name,
@@ -3177,10 +3182,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let b = &self.builder;
                 let zero = self.ctx.i64_type().const_zero();
                 let one = self.ctx.i64_type().const_int(1, false);
+                let neg1 = self.ctx.i64_type().const_int(u64::MAX, true);
                 let m_zero = b.build_int_compare(IntPredicate::EQ, m, zero, "mz").unwrap();
-                let safe_m = b.build_select(m_zero, one, m, "safem").unwrap().into_int_value();
+                let m_neg1 = b.build_int_compare(IntPredicate::EQ, m, neg1, "mn1").unwrap();
+                // m == -1: x % -1 == 0 mathematically, and srem(i64::MIN, -1)
+                // is overflow UB — route through the safe divisor too.
+                let m_bad = b.build_or(m_zero, m_neg1, "mbad").unwrap();
+                let safe_m = b.build_select(m_bad, one, m, "safem").unwrap().into_int_value();
                 let r = b.build_int_signed_rem(x, safe_m, "rem").unwrap();
-                Ok(b.build_select(m_zero, zero, r, "rem0").unwrap())
+                Ok(b.build_select(m_bad, zero, r, "rem0").unwrap())
             }
             ("Basics", "abs") => {
                 let v = self.gen(&args[0])?;
@@ -3816,7 +3826,19 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // srem by zero is UB; JS modBy 0 yields NaN — 0 is the i64 stand-in
         // (same scheme as remainderBy above).
         let one = self.ctx.i64_type().const_int(1, false);
-        let m_zero = b.build_int_compare(IntPredicate::EQ, m, zero, "mz").unwrap();
+        let neg1 = self.ctx.i64_type().const_int(u64::MAX, true);
+        // elm/core's kernel CRASHES on modBy 0 — branch to the runtime crash.
+        let m_is_zero = self.builder.build_int_compare(IntPredicate::EQ, m, zero, "mz").unwrap();
+        let crash_bb = self.new_block("mod.zero");
+        let ok_bb = self.new_block("mod.ok");
+        self.builder.build_conditional_branch(m_is_zero, crash_bb, ok_bb).unwrap();
+        self.builder.position_at_end(crash_bb);
+        self.call_named("rt_mod_by_zero", &[]);
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(ok_bb);
+        let b = &self.builder;
+        // m == -1 would make srem(i64::MIN, -1) overflow UB; x mod -1 == 0.
+        let m_zero = b.build_int_compare(IntPredicate::EQ, m, neg1, "mn1").unwrap();
         let m = b.build_select(m_zero, one, m, "safem").unwrap().into_int_value();
         let r = b.build_int_signed_rem(x, m, "r").unwrap();
         let r_nz = b.build_int_compare(IntPredicate::NE, r, zero, "rnz").unwrap();
