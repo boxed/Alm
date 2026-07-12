@@ -3024,6 +3024,77 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         match (module, name) {
+            // `(::)` used first-class (e.g. `List.foldl (::) [] xs`) arrives
+            // here via eta-expansion; without this entry it would fall back to
+            // `generic_foreign`, which boxes the WHOLE tail list to uniform
+            // and unboxes the WHOLE result per call — O(n) per element, so
+            // O(n²) inside a fold.
+            ("List", "cons") => {
+                if std::env::var("ALM_KERNEL_TRACE").is_ok() {
+                    eprintln!("[cons] @{}:{} whole={:?}", whole.region.start.row, whole.region.start.col, whole.tipe);
+                }
+                self.gen_cons(whole, &args[0], &args[1])
+            }
+            ("Maybe", "map")
+                if false && args.len() == 2
+                    && matches!(&args[0].tipe, crate::ast::canonical::Type::Lambda(..))
+                    && matches!(self.layouts.layout_of(&args[1].tipe), Layout::Tagged(_))
+                    && matches!(self.layouts.layout_of(&whole.tipe), Layout::Tagged(_)) =>
+            {
+                self.kernel_maybe_map(whole, args)
+            }
+            ("Maybe", "withDefault")
+                if false && args.len() == 2
+                    && matches!(self.layouts.layout_of(&args[1].tipe), Layout::Tagged(_)) =>
+            {
+                self.kernel_maybe_with_default(args)
+            }
+            // String/Array folds: rewrite `M.foldX f acc c` as
+            // `List.foldX f acc (M.toList c)`. `toList` marshals once
+            // (O(n)); the fold then runs typed. Without this the whole fold
+            // goes through `generic_foreign`, which re-boxes the accumulator
+            // per element — O(n²) when the accumulator carries a list
+            // (base64 decoders folding chars into a List Encoder, elm-flate
+            // folding an Array of ints into encoders).
+            ("String", "foldl") | ("String", "foldr") | ("Array", "foldl") | ("Array", "foldr")
+                if args.len() == 3
+                    && matches!(&args[0].tipe, crate::ast::canonical::Type::Lambda(..)) =>
+            {
+                use crate::ast::canonical::Type;
+                if std::env::var("ALM_KERNEL_TRACE").is_ok() {
+                    eprintln!("[fold-rewrite] {}.{} @{}:{} f={:?}", module, name, whole.region.start.row, whole.region.start.col, args[0].tipe);
+                }
+                let elem_ty = match &args[0].tipe {
+                    Type::Lambda(a, _) => (**a).clone(),
+                    _ => unreachable!(),
+                };
+                let list_ty = Type::Type(
+                    crate::data::Name::from("List"),
+                    crate::data::Name::from("List"),
+                    vec![elem_ty],
+                );
+                let to_list = TypedExpr {
+                    tipe: list_ty.clone(),
+                    kind: TypedKind::Call(
+                        Box::new(TypedExpr {
+                            tipe: Type::Lambda(
+                                Box::new(args[2].tipe.clone()),
+                                Box::new(list_ty),
+                            ),
+                            kind: TypedKind::Foreign(
+                                crate::data::Name::from(module),
+                                crate::data::Name::from("toList"),
+                            ),
+                            region: whole.region,
+                        }),
+                        vec![args[2].clone()],
+                    ),
+                    region: whole.region,
+                };
+                let fold = if name == "foldl" { "foldl" } else { "foldr" };
+                let new_args = vec![args[0].clone(), args[1].clone(), to_list];
+                self.gen_kernel(whole, "List", fold, &new_args)
+            }
             ("List", "sum") => self.kernel_list_sum(args),
             ("List", "length") => self.kernel_list_length(args),
             ("List", "range") => self.kernel_list_range(whole, args),
@@ -3755,6 +3826,101 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     /// `List.head`/`List.tail : List a -> Maybe _` — Nothing on empty, else
     /// Just of the head (or the tail list). Maybe's constructors are Just
     /// (variant 0, one field) and Nothing (variant 1, no fields).
+    /// `Maybe.map f m`, typed: tag check + one closure call. Without this,
+    /// the call goes through `generic_foreign`, boxing `m` (and the closure's
+    /// captured state) to uniform per call — quadratic when the mapped value
+    /// carries a list and the call sits in a fold (base64 decoders).
+    fn kernel_maybe_map(
+        &mut self,
+        whole: &TypedExpr,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let in_variants = match self.layouts.layout_of(&args[1].tipe) {
+            Layout::Tagged(v) => v,
+            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
+        };
+        let out_variants = match self.layouts.layout_of(&whole.tipe) {
+            Layout::Tagged(v) => v,
+            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
+        };
+        let f = self.gen(&args[0])?.into_pointer_value();
+        let m = self.gen(&args[1])?.into_pointer_value();
+        let i32_t = self.ctx.i32_type();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // Tag order matches kernel_list_head_tail: Just = 0, Nothing = 1.
+        let tag = self.builder.build_load(i32_t, m, "tag").unwrap().into_int_value();
+        let is_just = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, i32_t.const_zero(), "isjust")
+            .unwrap();
+        let just_bb = self.new_block("mbm.just");
+        let nothing_bb = self.new_block("mbm.nothing");
+        let merge = self.new_block("mbm.end");
+        self.builder.build_conditional_branch(is_just, just_bb, nothing_bb).unwrap();
+
+        self.builder.position_at_end(just_bb);
+        let in_struct = self.ctor_struct(&in_variants[0]);
+        let fp = self.builder.build_struct_gep(in_struct, m, 1, "fp").unwrap();
+        let x = self
+            .builder
+            .build_load(self.llvm_type(&in_variants[0][0]), fp, "x")
+            .unwrap();
+        let fx = self.apply_closure_curried(f, &[x], &args[0].tipe);
+        let just: BasicValueEnum = self.alloc_tagged(&out_variants[0], 0, &[fx]).into();
+        // apply_closure_curried can emit blocks; branch from the CURRENT one.
+        let just_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(nothing_bb);
+        let nothing: BasicValueEnum = self.alloc_tagged(&out_variants[1], 1, &[]).into();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(ptr_t, "maybe").unwrap();
+        phi.add_incoming(&[
+            (&just as &dyn BasicValue, just_end),
+            (&nothing as &dyn BasicValue, nothing_bb),
+        ]);
+        Ok(phi.as_basic_value())
+    }
+
+    /// `Maybe.withDefault d m`, typed — same motivation as [`kernel_maybe_map`].
+    fn kernel_maybe_with_default(
+        &mut self,
+        args: &[TypedExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let in_variants = match self.layouts.layout_of(&args[1].tipe) {
+            Layout::Tagged(v) => v,
+            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
+        };
+        let d = self.gen(&args[0])?;
+        let m = self.gen(&args[1])?.into_pointer_value();
+        let i32_t = self.ctx.i32_type();
+        let tag = self.builder.build_load(i32_t, m, "tag").unwrap().into_int_value();
+        let is_just = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, i32_t.const_zero(), "isjust")
+            .unwrap();
+        let just_bb = self.new_block("mbw.just");
+        let merge = self.new_block("mbw.end");
+        let from_bb = self.builder.get_insert_block().unwrap();
+        self.builder.build_conditional_branch(is_just, just_bb, merge).unwrap();
+
+        self.builder.position_at_end(just_bb);
+        let in_struct = self.ctor_struct(&in_variants[0]);
+        let fp = self.builder.build_struct_gep(in_struct, m, 1, "fp").unwrap();
+        let x = self
+            .builder
+            .build_load(self.llvm_type(&in_variants[0][0]), fp, "x")
+            .unwrap();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(d.get_type(), "mwd").unwrap();
+        phi.add_incoming(&[(&d as &dyn BasicValue, from_bb), (&x as &dyn BasicValue, just_bb)]);
+        Ok(phi.as_basic_value())
+    }
+
     fn kernel_list_head_tail(
         &mut self,
         whole: &TypedExpr,
@@ -6141,6 +6307,7 @@ fn foreign_intrinsic_arity(module: &str, name: &str) -> Option<usize> {
         ("Debug", "log") => 2,
         ("Debug", "todo") => 1,
         ("List", "foldl") | ("List", "foldr") => 3,
+        ("String", "foldl") | ("String", "foldr") => 3,
         ("Array", "foldl") | ("Array", "foldr") => 3,
         ("Dict", "foldl") | ("Dict", "foldr") => 3,
         ("Set", "foldl") | ("Set", "foldr") => 3,

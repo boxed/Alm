@@ -4,11 +4,13 @@
 //! (`libalm_runtime.a`) and linked into every native binary the compiler
 //! produces. It is NOT a module of the compiler crate.
 //!
-//! Every Elm value is a boxed, immutable [`Value`] behind a raw pointer,
-//! matching the uniform representation the LLVM codegen assumes. All the
-//! entry points the generated code calls are `extern "C"` with the exact
-//! signatures declared in `generate::native`. Memory is allocated and
-//! never freed for now; reference counting is a planned pass.
+//! Every Elm value is a boxed [`Value`] behind a raw pointer, matching the
+//! uniform representation the LLVM codegen assumes. Values are immutable
+//! with ONE exception: `sbytes` flattens a `StrCat` rope node into a plain
+//! `Str` in place, exactly once — the write-once discipline its borrow
+//! soundness depends on. All the entry points the generated code calls are
+//! `extern "C"` with the exact signatures declared in `generate::native`.
+//! Memory is managed by the Boehm conservative GC (see below).
 //!
 //! Compiled with `panic = abort`, so a Rust panic never unwinds across the
 //! C ABI boundary into generated code.
@@ -136,14 +138,29 @@ pub enum Value {
     Bool(bool),
     Unit,
     Str(Vec<u8>),
-    /// A list: a slice of length `len` into a contiguous, refcounted
-    /// backing array. Elements are stored REVERSED — the Elm head is at
-    /// `backing.data[len - 1]` — so `::` (prepend) is a push at the back
-    /// and `tail` is just `len - 1` sharing the same backing.
+    /// A lazy string concatenation (rope node): `a ++ b` in O(1). `len` is
+    /// the total byte length. The first read (via `sbytes`) flattens the
+    /// tree into a plain `Str` IN PLACE, so repeated `acc ++ x` string
+    /// building is amortized O(total) instead of O(total²) — matching V8's
+    /// rope strings, which is what the JS backend leans on.
+    StrCat { left: u64, right: u64, len: usize },
+    /// A substring view: `off..off + len` bytes into `base` (a `Str` or a
+    /// rope that flattens on first read). O(1) `String.slice`/`dropLeft`/
+    /// `uncons` — matching V8's sliced strings, which is what makes
+    /// char-by-char string recursion linear on the JS backend.
+    StrSlice { base: u64, off: usize, len: usize },
+    /// A non-empty list: a cons cell, exactly like the JS backend. `tail`
+    /// is another `List` cell or `Nil`. Cells make `::`, `head` and `tail`
+    /// all O(1) with no copying — the previous contiguous-backing scheme
+    /// copied O(n) on every `cons` onto a non-tip view (e.g. after `tail`),
+    /// which made lazy-list traversal (elm-test fuzzers, byte decoding)
+    /// quadratic, and allocated a fresh header per `tail`.
     List {
-        backing: *mut Backing,
-        len: usize,
+        head: u64,
+        tail: u64,
     },
+    /// The empty list. A single shared instance lives in `NIL`.
+    Nil,
     Ctor {
         name: *const u8,
         index: u32,
@@ -303,20 +320,17 @@ pub enum Decoder {
     Lazy(u64),
 }
 
-/// A list's backing store, shared by a list and its tails. `rc` counts how
-/// many list values reference it (used to decide in-place mutation);
-/// `data` holds elements in reversed order (head last).
-pub struct Backing {
-    rc: usize,
-    data: Vec<u64>,
-}
-
-fn alloc_backing(data: Vec<u64>) -> *mut Backing {
-    Box::into_raw(Box::new(Backing { rc: 1, data }))
-}
-
-/// Allocate a value on the heap and return it as a value word. Never freed
-/// (see module docs).
+/// Allocate a value on the heap and return it as a value word.
+///
+/// `inline(never)` is load-bearing: the runtime bitcode is merged with the
+/// program module and O2-optimized as one unit, and letting the allocation
+/// (and with it the `GC_malloc` fast path) inline into generated lambdas
+/// produced code shapes where a collection triggered inside the allocation
+/// could miss the last live reference to an object — nondeterministic
+/// use-after-reclaim crashes (elm-safe-recursion). A real call boundary
+/// restores the C-ABI register/stack discipline the conservative collector's
+/// root scan depends on.
+#[inline(never)]
 fn alloc(value: Value) -> u64 {
     Box::into_raw(Box::new(value)) as u64
 }
@@ -340,8 +354,8 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
 // list value `{backing, len}` has its head at element `len - 1`; `tail` is
 // the same backing with `len - 1` (O(1)), and `cons` appends at the back
 // (O(1) amortized). Appends never disturb other views' visible range, so
-// sharing is sound without refcounting — the uniform backend's scheme with
-// unboxed elements.
+// sharing is sound without refcounting. (The uniform backend used the same
+// scheme before it switched to cons cells; this typed variant remains.)
 
 /// Allocate a list backing with `count` elements (cap = used = count); the
 /// caller fills the data. `esize` is the element size in bytes.
@@ -465,8 +479,8 @@ unsafe fn variant_name(w: u64) -> &'static str {
         Value::Char(_) => "Char",
         Value::Bool(_) => "Bool",
         Value::Unit => "Unit",
-        Value::Str(_) => "Str",
-        Value::List { .. } => "List",
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => "Str",
+        Value::List { .. } | Value::Nil => "List",
         Value::Ctor { name, .. } => {
             // A static constructor name is 'static by construction.
             cname(*name)
@@ -639,6 +653,79 @@ unsafe fn as_int(p: u64) -> i64 {
 unsafe fn sbytes<'a>(p: u64) -> &'a [u8] {
     match deref(p) {
         Value::Str(b) => b.as_slice(),
+        Value::StrCat { len, .. } => {
+            // Flatten the rope into a plain Str, overwriting this node so
+            // the next read is O(1). Iterative right-spine stack: append
+            // trees are left-deep, so recurse-on-left would overflow.
+            let mut flat = Vec::with_capacity(*len);
+            let mut stack = vec![p];
+            while let Some(node) = stack.pop() {
+                match deref(node) {
+                    Value::Str(b) => flat.extend_from_slice(b),
+                    Value::StrCat { left, right, .. } => {
+                        stack.push(*right);
+                        stack.push(*left);
+                    }
+                    // A slice leaf: read its subrange (flattening ITS base
+                    // if needed) without touching the node itself.
+                    Value::StrSlice { .. } => flat.extend_from_slice(sbytes(node)),
+                    _ => crash!("expected a string"),
+                }
+            }
+            *deref_mut(p) = Value::Str(flat);
+            match deref(p) {
+                Value::Str(b) => b.as_slice(),
+                _ => unreachable!(),
+            }
+        }
+        Value::StrSlice { base, off, len } => {
+            let (base, off, len) = (*base, *off, *len);
+            let b = sbytes(base); // flattens a rope base in place
+            &b[off..off + len]
+        }
+        _ => crash!("expected a string"),
+    }
+}
+
+#[inline]
+unsafe fn is_str_value(v: u64) -> bool {
+    !is_int(v)
+        && matches!(
+            deref(v),
+            Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. }
+        )
+}
+
+/// A substring view of `s` covering byte range `from..to` (caller-validated,
+/// on char boundaries). Tiny results are copied — a view that pins a large
+/// base alive isn't worth 16 bytes.
+unsafe fn mkslice(s: u64, from: usize, to: usize) -> u64 {
+    if to <= from {
+        return mkstr(Vec::new());
+    }
+    if true {
+        return mkstr(sbytes(s)[from..to].to_vec());
+    }
+    // Compose with an existing view so bases never nest.
+    if let Value::StrSlice { base, off, .. } = deref(s) {
+        return alloc(Value::StrSlice {
+            base: *base,
+            off: *off + from,
+            len: to - from,
+        });
+    }
+    alloc(Value::StrSlice {
+        base: s,
+        off: from,
+        len: to - from,
+    })
+}
+
+/// A string's byte length without flattening.
+unsafe fn str_len_bytes(p: u64) -> usize {
+    match deref(p) {
+        Value::Str(b) => b.len(),
+        Value::StrCat { len, .. } | Value::StrSlice { len, .. } => *len,
         _ => crash!("expected a string"),
     }
 }
@@ -652,72 +739,40 @@ fn mkstr(bytes: Vec<u8>) -> u64 {
     alloc(Value::Str(bytes))
 }
 
-/// The list's `(backing, len)`. Panics/crashes if `v` is not a list.
-#[inline]
-unsafe fn list_view(v: u64) -> (*mut Backing, usize) {
-    match deref(v) {
-        Value::List { backing, len } => (*backing, *len),
-        _ => crash!("expected a list"),
-    }
-}
-
 #[inline]
 unsafe fn list_len(v: u64) -> usize {
-    match deref(v) {
-        Value::List { len, .. } => *len,
-        _ => 0,
+    let mut n = 0;
+    let mut cur = v;
+    while let Value::List { tail, .. } = deref(cur) {
+        n += 1;
+        cur = *tail;
     }
-}
-
-/// The active elements in reversed storage order (head is the last).
-#[inline]
-unsafe fn list_store<'a>(v: u64) -> &'a [u64] {
-    let (backing, len) = list_view(v);
-    &(*backing).data[..len]
-}
-
-/// Build a list value from elements already in reversed storage order.
-#[inline]
-unsafe fn list_from_store(data: Vec<u64>) -> u64 {
-    let len = data.len();
-    alloc(Value::List {
-        backing: alloc_backing(data),
-        len,
-    })
+    n
 }
 
 #[inline]
 unsafe fn cons(head: u64, tail: u64) -> u64 {
-    let (backing, len) = list_view(tail);
-    // Grow in place when this list sits at the tip of its backing (its view
-    // covers all stored elements). Appending only ever EXTENDS the buffer
-    // (writes at data.len(), never overwrites), so no other view — which
-    // reads a prefix data[..its_len] — is disturbed; and if two lists share
-    // a backing, only the first extends (the second then sees len !=
-    // data.len() and copies). This is sound with no refcount, and Vec's
-    // exponential growth makes repeated `::` O(1) amortized. `len > 0`
-    // avoids mutating the shared empty-list singleton.
-    if len > 0 && (*backing).data.len() == len {
-        (*backing).data.push(head);
-        return alloc(Value::List {
-            backing,
-            len: len + 1,
-        });
-    }
-    let mut data = Vec::with_capacity(len + 1);
-    data.extend_from_slice(&(*backing).data[..len]);
-    data.push(head); // head lives at the back of the reversed store
-    list_from_store(data)
+    alloc(Value::List { head, tail })
 }
 
 /// Elm-order elements (head first).
 unsafe fn to_vec(xs: u64) -> Vec<u64> {
-    list_store(xs).iter().rev().copied().collect()
+    let mut out = Vec::new();
+    let mut cur = xs;
+    while let Value::List { head, tail } = deref(cur) {
+        out.push(*head);
+        cur = *tail;
+    }
+    out
 }
 
 /// Build a list from elements in Elm order (head first).
 unsafe fn list_from_slice(items: &[u64]) -> u64 {
-    list_from_store(items.iter().rev().copied().collect())
+    let mut out = nil();
+    for &x in items.iter().rev() {
+        out = cons(x, out);
+    }
+    out
 }
 
 unsafe fn collect(args: *const u64, n: i32) -> Vec<u64> {
@@ -1046,26 +1101,18 @@ pub unsafe extern "C" fn rt_tuple_item(v: u64, i: i32) -> u64 {
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn rt_list_head(v: u64) -> u64 {
-    let store = list_store(v);
-    match store.last() {
-        Some(&h) => h, // head is the last element of the reversed store
-        None => crash!("head of an empty list"),
+    match deref(v) {
+        Value::List { head, .. } => *head,
+        _ => crash!("head of an empty list"),
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_tail(v: u64) -> u64 {
-    let (backing, len) = list_view(v);
-    if len == 0 {
-        crash!("tail of an empty list");
+    match deref(v) {
+        Value::List { tail, .. } => *tail,
+        _ => crash!("tail of an empty list"),
     }
-    // Drop the head (the last stored element) by shrinking the view; the
-    // backing is shared.
-    (*backing).rc += 1;
-    alloc(Value::List {
-        backing,
-        len: len - 1,
-    })
 }
 
 // TESTS
@@ -1106,7 +1153,10 @@ pub unsafe extern "C" fn rt_is_str(v: u64, ptr: *const u8, len: i64) -> bool {
         return false;
     }
     match deref(v) {
-        Value::Str(b) => b.len() == len as usize && b.as_slice() == std::slice::from_raw_parts(ptr, len as usize),
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => {
+            let b = sbytes(v);
+            b.len() == len as usize && b == std::slice::from_raw_parts(ptr, len as usize)
+        }
         _ => false,
     }
 }
@@ -1114,13 +1164,13 @@ pub unsafe extern "C" fn rt_is_str(v: u64, ptr: *const u8, len: i64) -> bool {
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn rt_is_cons(v: u64) -> bool {
-    !is_int(v) && matches!(deref(v), Value::List { len, .. } if *len > 0)
+    !is_int(v) && matches!(deref(v), Value::List { .. })
 }
 
 #[no_mangle]
 #[inline]
 pub unsafe extern "C" fn rt_is_nil(v: u64) -> bool {
-    !is_int(v) && matches!(deref(v), Value::List { len: 0, .. })
+    !is_int(v) && matches!(deref(v), Value::Nil)
 }
 
 // CURRYING — the Rust twin of the JS F/A helpers.
@@ -1490,14 +1540,30 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
         (Value::Char(x), Value::Char(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Unit, Value::Unit) => true,
-        (Value::Str(x), Value::Str(y)) => x == y,
+        (
+            Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. },
+            Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. },
+        ) => sbytes(a) == sbytes(b),
         // `Json.Encode.Value`/`Json.Decode.Value` wrap raw JS values in Elm, so
         // `==` compares them structurally (deep-equal, with object keys matched
         // by name regardless of order — matching JS `_Utils_eq`).
         (Value::Json(x), Value::Json(y)) => json_eq(x, y),
+        (Value::Nil, Value::Nil) => true,
         (Value::List { .. }, Value::List { .. }) => {
-            let (x, y) = (list_store(a), list_store(b));
-            x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
+            let (mut x, mut y) = (a, b);
+            loop {
+                match (deref(x), deref(y)) {
+                    (Value::List { head: h1, tail: t1 }, Value::List { head: h2, tail: t2 }) => {
+                        if !value_eq(*h1, *h2) {
+                            return false;
+                        }
+                        x = *t1;
+                        y = *t2;
+                    }
+                    (Value::Nil, Value::Nil) => return true,
+                    _ => return false,
+                }
+            }
         }
         (Value::Ctor { index: i1, argc: n1, .. }, Value::Ctor { index: i2, argc: n2, .. }) => {
             i1 == i2 && n1 == n2 && (0..*n1 as usize).all(|i| value_eq(ctor_get(a, i), ctor_get(b, i)))
@@ -1577,25 +1643,35 @@ unsafe fn value_cmp(a: u64, b: u64) -> i32 {
     }
     match (deref(a), deref(b)) {
         (Value::Char(x), Value::Char(y)) => (*x as i64 - *y as i64).signum() as i32,
-        (Value::Str(x), Value::Str(y)) => match x.cmp(y) {
+        (
+            Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. },
+            Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. },
+        ) => match sbytes(a).cmp(sbytes(b)) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
         },
+        (Value::Nil, Value::Nil) => 0,
+        (Value::Nil, Value::List { .. }) => -1,
+        (Value::List { .. }, Value::Nil) => 1,
         (Value::List { .. }, Value::List { .. }) => {
-            // Lexicographic in Elm order (head first = reversed store).
-            let (x, y) = (list_store(a), list_store(b));
-            let mut i = x.len();
-            let mut j = y.len();
-            while i > 0 && j > 0 {
-                i -= 1;
-                j -= 1;
-                let c = value_cmp(x[i], y[j]);
-                if c != 0 {
-                    return c;
+            // Lexicographic in Elm order (head first).
+            let (mut x, mut y) = (a, b);
+            loop {
+                match (deref(x), deref(y)) {
+                    (Value::List { head: h1, tail: t1 }, Value::List { head: h2, tail: t2 }) => {
+                        let c = value_cmp(*h1, *h2);
+                        if c != 0 {
+                            return c;
+                        }
+                        x = *t1;
+                        y = *t2;
+                    }
+                    (Value::Nil, Value::Nil) => return 0,
+                    (Value::Nil, _) => return -1,
+                    _ => return 1,
                 }
             }
-            (x.len() as i64 - y.len() as i64).signum() as i32
         }
         (Value::Tuple(x), Value::Tuple(y)) => {
             for (&p, &q) in x.iter().zip(y) {
@@ -1667,19 +1743,34 @@ pub unsafe extern "C" fn rt_ge(a: u64, b: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_append(a: u64, b: u64) -> u64 {
     match deref(a) {
-        Value::Str(x) => {
-            let mut bytes = x.clone();
-            bytes.extend_from_slice(sbytes(b));
-            mkstr(bytes)
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => {
+            let (la, lb) = (str_len_bytes(a), str_len_bytes(b));
+            if la == 0 {
+                return b;
+            }
+            if lb == 0 {
+                return a;
+            }
+            // Short result: concatenate eagerly (a rope node costs more than
+            // the copy). Long result: O(1) rope node, flattened on first read.
+            if true {
+                let mut bytes = Vec::with_capacity(la + lb);
+                bytes.extend_from_slice(sbytes(a));
+                bytes.extend_from_slice(sbytes(b));
+                mkstr(bytes)
+            } else {
+                alloc(Value::StrCat { left: a, right: b, len: la + lb })
+            }
         }
+        Value::Nil => b,
         Value::List { .. } => {
-            // Result in Elm order is a ++ b; in reversed storage that is
-            // b's store followed by a's store.
-            let (sa, sb) = (list_store(a), list_store(b));
-            let mut data = Vec::with_capacity(sa.len() + sb.len());
-            data.extend_from_slice(sb);
-            data.extend_from_slice(sa);
-            list_from_store(data)
+            // a ++ b: re-cons a's elements onto b (which is shared, not
+            // copied — the JS backend does the same).
+            let mut out = b;
+            for &x in to_vec(a).iter().rev() {
+                out = cons(x, out);
+            }
+            out
         }
         _ => {
             eprintln!("alm: ++ on a non-appendable, found {}", variant_name(a));
@@ -1868,85 +1959,80 @@ unsafe extern "C" fn basics_never(_n: u64) -> u64 {
 // LIST
 
 unsafe extern "C" fn list_singleton(x: u64) -> u64 {
-    list_from_store(vec![x])
+    cons(x, nil())
 }
 #[export_name = "rtb$List$repeat"]
 unsafe extern "C" fn list_repeat(n: u64, x: u64) -> u64 {
-    // Build the backing directly — repeated `cons` would copy-on-write each
-    // step (O(n^2)).
     let n = as_int(n).max(0) as usize;
-    list_from_store(vec![x; n])
+    let mut out = nil();
+    for _ in 0..n {
+        out = cons(x, out);
+    }
+    out
 }
 #[export_name = "rtb$List$range"]
 unsafe extern "C" fn list_range(lo: u64, hi: u64) -> u64 {
     let (lo, hi) = (as_int(lo), as_int(hi));
-    if hi < lo {
-        return nil();
-    }
-    // Reversed storage (head = lo at the back): [hi, hi-1, ..., lo].
-    let mut data = Vec::with_capacity((hi - lo + 1) as usize);
+    let mut out = nil();
     let mut h = hi;
     while h >= lo {
-        data.push(mk_int(h));
+        out = cons(mk_int(h), out);
         h -= 1;
     }
-    list_from_store(data)
+    out
 }
 #[export_name = "rtb$List$map"]
 unsafe extern "C" fn list_map(f: u64, xs: u64) -> u64 {
-    // Store stays reversed under the map, so build the new store directly.
-    let store = list_store(xs);
-    let data: Vec<u64> = store.iter().map(|&x| ap1(f, x)).collect();
-    list_from_store(data)
+    let mut out: Vec<u64> = to_vec(xs);
+    for x in out.iter_mut() {
+        *x = ap1(f, *x);
+    }
+    list_from_slice(&out)
 }
 #[export_name = "rtb$List$indexedMap"]
 unsafe extern "C" fn list_indexed_map(f: u64, xs: u64) -> u64 {
-    let store = list_store(xs);
-    let n = store.len();
-    // store[i] is Elm index (n-1-i); build results in Elm order then store.
-    let mut out = Vec::with_capacity(n);
-    for (elm_i, &x) in store.iter().rev().enumerate() {
-        out.push(ap2(f, mk_int(elm_i as i64), x));
+    let mut out: Vec<u64> = to_vec(xs);
+    for (elm_i, x) in out.iter_mut().enumerate() {
+        *x = ap2(f, mk_int(elm_i as i64), *x);
     }
     list_from_slice(&out)
 }
 #[export_name = "rtb$List$foldl"]
 unsafe extern "C" fn list_foldl(f: u64, mut acc: u64, xs: u64) -> u64 {
-    // Elm order = reversed store.
-    for &x in list_store(xs).iter().rev() {
-        acc = ap2(f, x, acc);
+    let mut cur = xs;
+    while let Value::List { head, tail } = deref(cur) {
+        let (h, t) = (*head, *tail);
+        acc = ap2(f, h, acc);
+        cur = t;
     }
     acc
 }
 #[export_name = "rtb$List$foldr"]
 unsafe extern "C" fn list_foldr(f: u64, mut acc: u64, xs: u64) -> u64 {
-    // Right fold visits last-to-first = store order.
-    for &x in list_store(xs) {
+    // Right fold visits last-to-first.
+    for &x in to_vec(xs).iter().rev() {
         acc = ap2(f, x, acc);
     }
     acc
 }
 #[export_name = "rtb$List$filter"]
 unsafe extern "C" fn list_filter(is_good: u64, xs: u64) -> u64 {
-    let store = list_store(xs);
-    let data: Vec<u64> = store
-        .iter()
-        .copied()
+    let data: Vec<u64> = to_vec(xs)
+        .into_iter()
         .filter(|&x| rt_is_true(ap1(is_good, x)))
         .collect();
-    list_from_store(data)
+    list_from_slice(&data)
 }
 #[export_name = "rtb$List$filterMap"]
 unsafe extern "C" fn list_filter_map(f: u64, xs: u64) -> u64 {
-    let store = list_store(xs);
     let mut data = Vec::new();
-    for &x in store {
+    for x in to_vec(xs) {
         let m = ap1(f, x);
         if is_ctor0(m) {
             data.push(rt_ctor_arg(m, 0));
         }
     }
-    list_from_store(data)
+    list_from_slice(&data)
 }
 #[export_name = "rtb$List$length"]
 unsafe extern "C" fn list_length(xs: u64) -> u64 {
@@ -1954,8 +2040,13 @@ unsafe extern "C" fn list_length(xs: u64) -> u64 {
 }
 #[export_name = "rtb$List$reverse"]
 unsafe extern "C" fn list_reverse(xs: u64) -> u64 {
-    // Reversing the list reverses the store.
-    list_from_store(list_store(xs).iter().rev().copied().collect())
+    let mut out = nil();
+    let mut cur = xs;
+    while let Value::List { head, tail } = deref(cur) {
+        out = cons(*head, out);
+        cur = *tail;
+    }
+    out
 }
 #[export_name = "rtb$List$member"]
 unsafe extern "C" fn list_member(y: u64, xs: u64) -> u64 {
@@ -2049,41 +2140,53 @@ unsafe extern "C" fn list_map2(f: u64, xs: u64, ys: u64) -> u64 {
 }
 #[export_name = "rtb$List$isEmpty"]
 unsafe extern "C" fn list_is_empty(xs: u64) -> u64 {
-    rt_bool(list_len(xs) == 0)
+    rt_bool(rt_is_nil(xs))
 }
 #[export_name = "rtb$List$head"]
 unsafe extern "C" fn list_head(xs: u64) -> u64 {
-    match list_store(xs).last() {
-        Some(&h) => just(h),
-        None => nothing(),
+    match deref(xs) {
+        Value::List { head, .. } => just(*head),
+        _ => nothing(),
     }
 }
 #[export_name = "rtb$List$tail"]
 unsafe extern "C" fn list_tail(xs: u64) -> u64 {
-    if list_len(xs) == 0 {
-        nothing()
-    } else {
-        just(rt_list_tail(xs))
+    match deref(xs) {
+        Value::List { tail, .. } => just(*tail),
+        _ => nothing(),
     }
 }
 #[export_name = "rtb$List$take"]
 unsafe extern "C" fn list_take(n: u64, xs: u64) -> u64 {
-    let store = list_store(xs);
-    let count = (as_int(n).max(0) as usize).min(store.len());
-    // Take the first `count` in Elm order = the last `count` of the store.
-    list_from_store(store[store.len() - count..].to_vec())
+    let mut count = as_int(n).max(0) as usize;
+    let mut taken = Vec::with_capacity(count.min(64));
+    let mut cur = xs;
+    while count > 0 {
+        match deref(cur) {
+            Value::List { head, tail } => {
+                taken.push(*head);
+                cur = *tail;
+                count -= 1;
+            }
+            _ => break,
+        }
+    }
+    list_from_slice(&taken)
 }
 #[export_name = "rtb$List$drop"]
 unsafe extern "C" fn list_drop(n: u64, xs: u64) -> u64 {
-    let (backing, len) = list_view(xs);
-    let drop = (as_int(n).max(0) as usize).min(len);
-    // Dropping `drop` from the head (the back of the store) shrinks the
-    // view and shares the backing.
-    (*backing).rc += 1;
-    alloc(Value::List {
-        backing,
-        len: len - drop,
-    })
+    let mut count = as_int(n).max(0);
+    let mut cur = xs;
+    while count > 0 {
+        match deref(cur) {
+            Value::List { tail, .. } => {
+                cur = *tail;
+                count -= 1;
+            }
+            _ => break,
+        }
+    }
+    cur
 }
 unsafe extern "C" fn list_partition(is_good: u64, xs: u64) -> u64 {
     let (mut yes, mut no) = (Vec::new(), Vec::new());
@@ -2194,21 +2297,30 @@ fn cp_count(s: &[u8]) -> usize {
 
 unsafe fn slice_cp(p: u64, mut start: i64, mut end: i64) -> u64 {
     let s = sstr(p);
-    let len = s.chars().count() as i64;
-    if start < 0 {
-        start += len;
-    }
-    if end < 0 {
-        end += len;
+    // Count chars (O(n)) only when an index is negative (from-the-end);
+    // `char_byte` clamps past-the-end indices, so a huge `end` needs no
+    // count. Keeps `dropLeft`/`left` walks linear instead of quadratic.
+    if start < 0 || end < 0 {
+        let len = s.chars().count() as i64;
+        if start < 0 {
+            start += len;
+        }
+        if end < 0 {
+            end += len;
+        }
     }
     start = start.max(0);
-    end = end.min(len);
     if end <= start {
         return mkstr(Vec::new());
     }
     let from = char_byte(s, start as usize);
-    let to = char_byte(s, end as usize);
-    mkstr(s.as_bytes()[from..to].to_vec())
+    // Whole-tail slice (the `dropLeft` shape): skip the second walk.
+    let to = if end >= i64::MAX / 2 || end as usize >= s.len() {
+        s.len()
+    } else {
+        char_byte(s, end as usize)
+    };
+    mkslice(p, from, to)
 }
 
 #[export_name = "rtb$String$fromInt"]
@@ -2224,7 +2336,7 @@ unsafe extern "C" fn string_length(s: u64) -> u64 {
     rt_int(sstr(s).chars().count() as i64)
 }
 unsafe extern "C" fn string_is_empty(s: u64) -> u64 {
-    rt_bool(sbytes(s).is_empty())
+    rt_bool(str_len_bytes(s) == 0)
 }
 unsafe extern "C" fn string_reverse(s: u64) -> u64 {
     mkstr(sstr(s).chars().rev().collect::<String>().into_bytes())
@@ -2296,14 +2408,14 @@ unsafe extern "C" fn string_right(n: u64, s: u64) -> u64 {
     if n < 1 {
         mkstr(Vec::new())
     } else {
-        slice_cp(s, -n, sstr(s).chars().count() as i64)
+        slice_cp(s, -n, i64::MAX)
     }
 }
 unsafe extern "C" fn string_drop_left(n: u64, s: u64) -> u64 {
     if as_int(n) < 1 {
         s
     } else {
-        slice_cp(s, as_int(n), sstr(s).chars().count() as i64)
+        slice_cp(s, as_int(n), i64::MAX)
     }
 }
 unsafe extern "C" fn string_drop_right(n: u64, s: u64) -> u64 {
@@ -2389,8 +2501,9 @@ unsafe extern "C" fn string_uncons(s: u64) -> u64 {
     match sstr(s).chars().next() {
         None => nothing(),
         Some(ch) => {
-            let rest = &sbytes(s)[ch.len_utf8()..];
-            just(pair(rt_chr(ch as i32), mkstr(rest.to_vec())))
+            let blen = sbytes(s).len();
+            let rest = mkslice(s, ch.len_utf8(), blen);
+            just(pair(rt_chr(ch as i32), rest))
         }
     }
 }
@@ -2663,8 +2776,8 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             let s = char::from_u32(*c).unwrap_or('\u{fffd}').to_string();
             debug_string(out, s.as_bytes(), true);
         }
-        Value::Str(b) => debug_string(out, b, false),
-        Value::List { .. } => {
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => debug_string(out, sbytes(v), false),
+        Value::List { .. } | Value::Nil => {
             out.push('[');
             for (i, x) in to_vec(v).into_iter().enumerate() {
                 if i > 0 {
@@ -2936,7 +3049,7 @@ unsafe extern "C" fn task_sequence_step(rest: u64, v: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn task_sequence(tasks: u64) -> u64 {
-    if list_len(tasks) == 0 {
+    if rt_is_nil(tasks) {
         task_succeed(nil())
     } else {
         let head = rt_list_head(tasks);
@@ -3976,7 +4089,7 @@ pub unsafe extern "C" fn dict_to_list(d: u64) -> u64 {
 pub unsafe extern "C" fn dict_from_list(list: u64) -> u64 {
     let mut root = 0u64;
     // Head-first: later entries override earlier (Elm semantics).
-    for &p in list_store(list).iter().rev() {
+    for p in to_vec(list) {
         if let Value::Tuple(kv) = deref(p) {
             root = tinsert(root, kv[0], kv[1]);
         }
@@ -4137,7 +4250,7 @@ pub unsafe extern "C" fn set_to_list(s: u64) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn set_from_list(list: u64) -> u64 {
     let mut root = 0u64;
-    for &x in list_store(list).iter().rev() {
+    for x in to_vec(list) {
         root = tinsert(root, x, 0);
     }
     mk_set(root)
@@ -4227,7 +4340,7 @@ pub unsafe extern "C" fn array_repeat(n: u64, x: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_from_list(list: u64) -> u64 {
-    let els: Vec<u64> = list_store(list).iter().rev().copied().collect();
+    let els: Vec<u64> = to_vec(list);
     mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
@@ -4569,12 +4682,57 @@ pub unsafe extern "C" fn bytes_read_bytes(len: u64, b: u64, off: u64) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn bytes_read_string(len: u64, b: u64, off: u64) -> u64 {
-    let off = int_val(off);
+    // Exact port of elm/bytes' JS `_Bytes_read_string`: decode UTF-8 by
+    // hand, where continuation bytes are read PAST the requested slice (a
+    // multi-byte sequence near the end advances the offset beyond
+    // `off + len`), and a read past the BUFFER end fails the whole decode
+    // (JS: DataView RangeError caught by `_Bytes_decode`). A plain
+    // "copy the slice" version silently accepted truncated/invalid
+    // sequences that JS rejects (bbase64's InvalidByteSequence tests).
+    let off0 = int_val(off);
     let len = int_val(len).max(0) as usize;
-    match read_at(b, off, len) {
-        Some(s) => read_result(off, len, mkstr(s.to_vec())),
-        None => bytes_fail(|| mkstr(Vec::new())),
+    let buf = as_bytes(b);
+    if off0 < 0 {
+        return bytes_fail(|| mkstr(Vec::new()));
     }
+    let mut o = off0 as usize;
+    let end = o + len;
+    // Fast path: a byte range that is entire, in-bounds, valid UTF-8 — the
+    // overwhelmingly common case — is a straight copy (matches JS, which
+    // yields the same string when every sequence decodes cleanly).
+    if end <= buf.len() {
+        if let Ok(v) = std::str::from_utf8(&buf[o..end]) {
+            return read_result(off0, len, mkstr(v.as_bytes().to_vec()));
+        }
+    }
+    let mut out = String::new();
+    macro_rules! next {
+        () => {{
+            if o >= buf.len() {
+                return bytes_fail(|| mkstr(Vec::new()));
+            }
+            let v = buf[o];
+            o += 1;
+            v as u32
+        }};
+    }
+    while o < end {
+        let byte = next!();
+        let cp = if byte < 128 {
+            byte
+        } else if byte & 0xE0 == 0xC0 {
+            (byte & 0x1F) << 6 | (next!() & 0x3F)
+        } else if byte & 0xF0 == 0xE0 {
+            (byte & 0xF) << 12 | (next!() & 0x3F) << 6 | (next!() & 0x3F)
+        } else {
+            (byte & 0x7) << 18 | (next!() & 0x3F) << 12 | (next!() & 0x3F) << 6 | (next!() & 0x3F)
+        };
+        // JS builds UTF-16 code units (garbage sequences can yield lone
+        // surrogates); UTF-8 storage renders those as replacement chars,
+        // like a JS string printed to the outside world.
+        out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+    }
+    read_result(off0, o - off0 as usize, mkstr(out.into_bytes()))
 }
 
 /// `Bytes.Decode.fail` — always fails.
@@ -5294,6 +5452,7 @@ unsafe extern "C" fn json_decode_string(dec: u64, s: u64) -> u64 {
 unsafe fn str_bytes(w: u64) -> Vec<u8> {
     match deref(w) {
         Value::Str(b) => b.clone(),
+        Value::StrCat { .. } | Value::StrSlice { .. } => sbytes(w).to_vec(),
         _ => {
             eprintln!("alm: expected a String, found {}", variant_name(w));
             crash!("expected a String")
@@ -5305,6 +5464,7 @@ unsafe fn str_bytes(w: u64) -> Vec<u8> {
 unsafe fn str_slice<'a>(w: u64) -> &'a [u8] {
     match deref(w) {
         Value::Str(b) => b,
+        Value::StrCat { .. } | Value::StrSlice { .. } => sbytes(w),
         _ => {
             eprintln!("alm: expected a String, found {}", variant_name(w));
             if std::env::var("ALM_CRASH_BT").is_ok() {
@@ -6145,7 +6305,7 @@ const AI_STYLE: u32 = 12;
 const AI_EVENT: u32 = 13;
 
 unsafe fn str_is(w: u64, lit: &[u8]) -> bool {
-    !is_int(w) && matches!(deref(w), Value::Str(s) if s.as_slice() == lit)
+    is_str_value(w) && sbytes(w) == lit
 }
 
 /// `a ++ " " ++ b` for two class strings (no leading space when `a` is empty),
@@ -7371,7 +7531,9 @@ unsafe fn val_to_json(w: u64) -> JsonValue {
         return JsonValue::Number(int_val(w) as f64);
     }
     match deref(w) {
-        Value::Str(s) => JsonValue::JStr(s.clone()),
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => {
+            JsonValue::JStr(sbytes(w).to_vec())
+        }
         Value::Bool(b) => JsonValue::Bool(*b),
         Value::Float(f) => JsonValue::Number(*f),
         Value::Json(j) => j.clone(),
@@ -8925,10 +9087,7 @@ unsafe fn runtime_init() {
     RT_TRUE.set(alloc(Value::Bool(true)));
     RT_FALSE.set(alloc(Value::Bool(false)));
     RT_UNIT.set(alloc(Value::Unit));
-    NIL.set(alloc(Value::List {
-        backing: alloc_backing(Vec::new()),
-        len: 0,
-    }));
+    NIL.set(alloc(Value::Nil));
     NOTHING.set(ctor(b"Nothing\0".as_ptr(), 1, Vec::new()));
     LT.set(ctor(b"LT\0".as_ptr(), 0, Vec::new()));
     EQ.set(ctor(b"EQ\0".as_ptr(), 1, Vec::new()));
@@ -9257,8 +9416,8 @@ unsafe fn alm_entry() -> i32 {
             tea_run(rt_ctor_arg(v, 0));
             0
         }
-        Value::Str(bytes) => {
-            out_line(bytes);
+        Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => {
+            out_line(sbytes(v));
             0
         }
         Value::Float(f) => {
