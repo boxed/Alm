@@ -1003,6 +1003,7 @@ pub unsafe extern "C" fn rt_closure(
 // built with ALM_ARITY_CHECK set). Registers each closure wrapper's true LLVM
 // parameter count at creation and verifies it at every typed application, to
 // catch a closure of one arity being invoked through a slot of another. ---
+#[export_name = "alm_ARITY_MAP"]
 static mut ARITY_MAP: Option<std::collections::HashMap<usize, u32>> = None;
 
 #[no_mangle]
@@ -1027,6 +1028,11 @@ pub unsafe extern "C" fn alm_dbg_check(fnptr: u64, argc: u32) {
     }
 }
 
+// Exported like NIL/NOTHING (see the singleton comment above): the bitcode
+// merge would otherwise DUPLICATE this static — generated code registering
+// into one copy while inlined runtime code consults the other, silently
+// disabling (or, for diagnostics, falsifying) trampoline identification.
+#[export_name = "alm_BOX_TRAMPS"]
 static mut BOX_TRAMPS: Option<std::collections::HashSet<usize>> = None;
 
 /// Register a `box_closure` trampoline's function pointer so `unbox_closure`
@@ -1354,6 +1360,9 @@ unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
                     eprintln!("  +{:#04x}: {:#018x}{}", k * 8, v, if is_tramp { "  <-- REGISTERED TRAMPOLINE" } else { "" });
                 }
                 eprintln!("call_fn's own addr for slide calc: {:#x}", call_fn as usize);
+                // Fault on purpose so ALM_SEGV_DUMP prints registers (lr/fp
+                // give the caller); abort() would bypass the handler's info.
+                std::ptr::read_volatile(8 as *const u64);
                 std::process::abort();
             }
         }
@@ -9319,6 +9328,20 @@ mod segv_dump {
                 }
             }
         }
+        eprintln!("fp chain (caller lrs):");
+        let mut f = fp;
+        for _ in 0..8 {
+            if f < 0x1000 || f % 8 != 0 {
+                break;
+            }
+            let next = rd(f);
+            let ret = rd(f + 8);
+            eprintln!("  fp={:#x} lr={:#x}", f, ret);
+            if next <= f {
+                break;
+            }
+            f = next;
+        }
         eprintln!("stack sp..sp+256:");
         for k in 0..32u64 {
             eprintln!("  sp+{:#04x}: {:#018x}", k * 8, rd(sp + k * 8));
@@ -9651,8 +9674,19 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             GC_get_stack_base(&mut sb);
             GC_register_my_thread(&sb);
             let rc = alm_entry();
-            GC_unregister_my_thread();
-            rc
+            // Exit the PROCESS from here, WITHOUT any teardown: returning
+            // (and even process::exit, via Darwin's _tlv_exit) runs this
+            // thread's TLS destructors, whose registration list lives on
+            // the GC heap referenced only from thread-locals — which Boehm
+            // does NOT scan. By teardown time those nodes have been
+            // collected and recycled, and run_dtors jumps through garbage.
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            extern "C" {
+                fn _exit(code: i32) -> !;
+            }
+            _exit(rc);
         })
     {
         Ok(h) => h.join().unwrap_or(70),
@@ -9667,7 +9701,17 @@ pub unsafe extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const u8) -
     alm_entry()
 }
 
+/// GC-visible pins for allocations that std keeps reachable only through
+/// thread-local storage, which the conservative collector does not scan
+/// (`thread::current()`'s Arc<Thread> is the known one). One slot per kind.
+#[export_name = "alm_TLS_PINS"]
+static mut TLS_PINS: [usize; 2] = [0; 2];
+
 unsafe fn alm_entry() -> i32 {
+    // Root this thread's std::thread::Thread handle before any Elm runs:
+    // its Arc lives on the GC heap and is otherwise reachable only via TLS.
+    let t = std::thread::current();
+    *std::ptr::addr_of_mut!(TLS_PINS[0]) = std::mem::transmute::<std::thread::Thread, usize>(t);
     runtime_init();
     alm_init();
     let v = alm_main();
