@@ -991,6 +991,11 @@ impl Specializer<'_> {
             // together since they call each other.
             let group: Vec<(&can::Def, bool)> = match decl {
                 can::LetDecl::Def(def) => vec![(def, false)],
+                // KNOWN GAP: a lambda-style member (`f = \x -> ...`,
+                // empty `def.args`) skips the whole group. Admitting such
+                // members by TYPE was tried and reintroduced SEGVs
+                // (elm-monocle, elm-statecharts) — zero-arg member
+                // specialization needs its own work first.
                 can::LetDecl::Recursive(defs)
                     if !defs.is_empty() && defs.iter().all(|d| !d.args.is_empty()) =>
                 {
@@ -1688,11 +1693,16 @@ fn mangle_type(tipe: &can::Type) -> String {
             // fully-inferred nodes carry them sorted), but the layout sorts by
             // name — so mangle sorted too, or one record type mangles to two
             // names and a reference resolves to a missing sibling copy.
-            let mut parts: Vec<String> = fields
+            // Field name and type as separate `$` tokens: `_` is legal in
+            // field and tyvar names, so the old `name_type` form collided
+            // (`{f : oo_vx}` vs `{f_voo : x}`). Sorted by field name (unique
+            // per record) to stay canonical with the layout's order.
+            let mut sorted: Vec<&(Name, can::Type)> = fields.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let parts: Vec<String> = sorted
                 .iter()
-                .map(|(n, t)| format!("{}_{}", n, mangle_type(t)))
+                .map(|(n, t)| format!("{}${}", n, mangle_type(t)))
                 .collect();
-            parts.sort();
             format!("Rec{}${}", parts.len(), parts.join("$"))
         }
         Unit => "Unit".to_string(),

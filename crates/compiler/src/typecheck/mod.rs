@@ -364,6 +364,11 @@ impl Checker<'_> {
                     self.zonk_name_counter = state.counter;
                     Scheme::closed(annotation.clone())
                 }
+                // Local recursive groups (let_depth > 0) must not freeze
+                // node types eagerly — the enclosing top-level sweep zonks
+                // them once all unifications land, exactly like `check_def`'s
+                // unannotated arm.
+                (None, Some(var)) if self.let_depth > 0 => self.generalize_scheme(*var),
                 (None, Some(var)) => self.generalize_and_zonk(*var, *start, *end, def.name.region),
                 (None, None) => unreachable!(),
             };
@@ -702,8 +707,21 @@ impl Checker<'_> {
                 _ => None,
             };
             if let Some(mut name) = name {
+                let orig = name.clone();
                 while state.free.contains_key(&name) {
                     name = Name::from(format!("{}_", name));
+                }
+                // Write a collision rename BACK to the variable: a later
+                // state re-reads the stored name, and a stale one would
+                // name the same variable differently across states.
+                if name != orig {
+                    let renamed = match self.pool.content(root) {
+                        Content::RigidVar(_) => Content::RigidVar(name.clone()),
+                        Content::FlexVar(Some(_)) => Content::FlexVar(Some(name.clone())),
+                        Content::RigidSuper(sup, _) => Content::RigidSuper(sup.clone(), name.clone()),
+                        c => c.clone(),
+                    };
+                    self.pool.set_content(root, renamed);
                 }
                 state.names.insert(root, name.clone());
                 state.free.insert(name, root);
@@ -770,8 +788,21 @@ impl Checker<'_> {
                 _ => None,
             };
             if let Some(mut name) = name {
+                let orig = name.clone();
                 while state.free.contains_key(&name) {
                     name = Name::from(format!("{}_", name));
+                }
+                // Write a collision rename BACK to the variable: a later
+                // state re-reads the stored name, and a stale one would
+                // name the same variable differently across states.
+                if name != orig {
+                    let renamed = match self.pool.content(root) {
+                        Content::RigidVar(_) => Content::RigidVar(name.clone()),
+                        Content::FlexVar(Some(_)) => Content::FlexVar(Some(name.clone())),
+                        Content::RigidSuper(sup, _) => Content::RigidSuper(sup.clone(), name.clone()),
+                        c => c.clone(),
+                    };
+                    self.pool.set_content(root, renamed);
                 }
                 state.names.insert(root, name.clone());
                 state.free.insert(name, root);
