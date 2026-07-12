@@ -3029,14 +3029,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // `generic_foreign`, which boxes the WHOLE tail list to uniform
             // and unboxes the WHOLE result per call — O(n) per element, so
             // O(n²) inside a fold.
-            ("List", "cons") => {
-                if std::env::var("ALM_KERNEL_TRACE").is_ok() {
-                    eprintln!("[cons] @{}:{} whole={:?}", whole.region.start.row, whole.region.start.col, whole.tipe);
-                }
-                self.gen_cons(whole, &args[0], &args[1])
-            }
+            ("List", "cons") => self.gen_cons(whole, &args[0], &args[1]),
             ("Maybe", "map")
-                if false && args.len() == 2
+                if args.len() == 2
                     && matches!(&args[0].tipe, crate::ast::canonical::Type::Lambda(..))
                     && matches!(self.layouts.layout_of(&args[1].tipe), Layout::Tagged(_))
                     && matches!(self.layouts.layout_of(&whole.tipe), Layout::Tagged(_)) =>
@@ -3044,7 +3039,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 self.kernel_maybe_map(whole, args)
             }
             ("Maybe", "withDefault")
-                if false && args.len() == 2
+                if args.len() == 2
                     && matches!(self.layouts.layout_of(&args[1].tipe), Layout::Tagged(_)) =>
             {
                 self.kernel_maybe_with_default(args)
@@ -3061,9 +3056,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     && matches!(&args[0].tipe, crate::ast::canonical::Type::Lambda(..)) =>
             {
                 use crate::ast::canonical::Type;
-                if std::env::var("ALM_KERNEL_TRACE").is_ok() {
-                    eprintln!("[fold-rewrite] {}.{} @{}:{} f={:?}", module, name, whole.region.start.row, whole.region.start.col, args[0].tipe);
-                }
                 let elem_ty = match &args[0].tipe {
                     Type::Lambda(a, _) => (**a).clone(),
                     _ => unreachable!(),
@@ -3091,9 +3083,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     ),
                     region: whole.region,
                 };
-                let fold = if name == "foldl" { "foldl" } else { "foldr" };
                 let new_args = vec![args[0].clone(), args[1].clone(), to_list];
-                self.gen_kernel(whole, "List", fold, &new_args)
+                self.gen_kernel(whole, "List", name, &new_args)
             }
             ("List", "sum") => self.kernel_list_sum(args),
             ("List", "length") => self.kernel_list_length(args),
@@ -3823,9 +3814,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(b.build_select(need, radd, r, "mod").unwrap())
     }
 
-    /// `List.head`/`List.tail : List a -> Maybe _` — Nothing on empty, else
-    /// Just of the head (or the tail list). Maybe's constructors are Just
-    /// (variant 0, one field) and Nothing (variant 1, no fields).
     /// `Maybe.map f m`, typed: tag check + one closure call. Without this,
     /// the call goes through `generic_foreign`, boxing `m` (and the closure's
     /// captured state) to uniform per call — quadratic when the mapped value
@@ -3921,6 +3909,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(phi.as_basic_value())
     }
 
+    /// `List.head`/`List.tail : List a -> Maybe _` — Nothing on empty, else
+    /// Just of the head (or the tail list). Maybe's constructors are Just
+    /// (variant 0, one field) and Nothing (variant 1, no fields).
     fn kernel_list_head_tail(
         &mut self,
         whole: &TypedExpr,
@@ -6277,7 +6268,6 @@ fn collection_symbol(module: &str, name: &str) -> Option<&'static str> {
     })
 }
 
-/// The name a simple `Var` parameter binds, if that is all this pattern is.
 /// The arity of a built-in from its function type: the number of leading
 /// `->` arrows.
 fn foreign_arity(tipe: &crate::ast::canonical::Type) -> usize {
@@ -6379,6 +6369,7 @@ fn desugar_destructuring_params(
     (new_params, wrapped)
 }
 
+/// The name a simple `Var` parameter binds, if that is all this pattern is.
 fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String> {
     use crate::ast::canonical::Pattern_::*;
     match &pattern.value {
@@ -6388,9 +6379,6 @@ fn simple_param_name(pattern: &crate::ast::canonical::Pattern) -> Option<String>
     }
 }
 
-/// Collect the free variables of an expression: `Local` references not bound
-/// by a binder within it. `bound` starts with the enclosing lambda's
-/// parameters. Order-preserving and de-duplicated.
 /// Whether `expr` contains, in tail position, a saturated call to the
 /// function `mangled` (arity `nparams`). Tail positions are the branches of
 /// `if`/`case` and the body of `let`; anything else is not a tail call.
@@ -6441,6 +6429,9 @@ fn is_closed(expr: &TypedExpr) -> bool {
     out.is_empty()
 }
 
+/// Collect the free variables of an expression: `Local` references not bound
+/// by a binder within it. `bound` starts with the enclosing lambda's
+/// parameters. Order-preserving and de-duplicated.
 fn free_vars(expr: &TypedExpr, bound: &mut std::collections::HashSet<String>, out: &mut Vec<String>) {
     match &expr.kind {
         TypedKind::Local(name) => {
