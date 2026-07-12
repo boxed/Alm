@@ -1318,6 +1318,47 @@ type Fn64 = unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64, u6
 
 #[inline]
 unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
+    // DIAG (ALM_ARG_CHECK=1): every application funnels through here —
+    // validate each argument word (int-tagged, or a plausible heap pointer
+    // with a sane discriminant) and abort with context on the first bad
+    // one. Trampoline closures carry ONE raw typed-closure word as their
+    // first (captured) argument; it is exempt.
+    if std::env::var("ALM_ARG_CHECK").is_ok() {
+        let tramp = if let Some(set) = &*std::ptr::addr_of!(BOX_TRAMPS) {
+            set.contains(&(func as usize))
+        } else {
+            false
+        };
+        for (i, &w) in a.iter().enumerate() {
+            if tramp && i == 0 {
+                continue;
+            }
+            let bad =
+                !is_int(w) && (w < 0x1_0000 || w % 8 != 0 || (*(w as *const u8)) > 40);
+            if bad {
+                eprintln!(
+                    "=== ALM ARG CHECK (call_fn): bad a[{}]={:#x} arity={} func={:#x} ===",
+                    i, w, arity, func as usize
+                );
+                for (k, &v) in a.iter().enumerate() {
+                    eprintln!("  a[{}] = {:#x}", k, v);
+                }
+                eprintln!("a[{}]'s first 6 words:", i);
+                for k in 0..6u64 {
+                    let v = *((w + k * 8) as *const u64);
+                    let is_tramp = if let Some(set) = &*std::ptr::addr_of!(BOX_TRAMPS) {
+                        set.contains(&(v as usize))
+                    } else {
+                        false
+                    };
+                    eprintln!("  +{:#04x}: {:#018x}{}", k * 8, v, if is_tramp { "  <-- REGISTERED TRAMPOLINE" } else { "" });
+                }
+                eprintln!("call_fn's own addr for slide calc: {:#x}", call_fn as usize);
+                std::process::abort();
+            }
+        }
+    }
+
     use std::mem::transmute;
     match arity {
         1 => (transmute::<_, Fn1>(func))(a[0]),
@@ -9591,6 +9632,12 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // Ensure the collector is initialised on this (GC-primary) thread before we
     // spawn, so the worker's `GC_register_my_thread` is allowed.
     gc_ensure_init();
+    // DIAG: ALM_MAIN_THREAD=1 runs Elm on the primordial thread (8MB stack —
+    // deep recursion will overflow) to discriminate worker-thread
+    // registration/suspension bugs from everything else.
+    if std::env::var("ALM_MAIN_THREAD").is_ok() {
+        return alm_entry();
+    }
     match std::thread::Builder::new()
         .stack_size(512 * 1024 * 1024)
         .spawn(|| unsafe {
