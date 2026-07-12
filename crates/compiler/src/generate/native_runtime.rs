@@ -58,6 +58,11 @@ struct GcStackBase {
 extern "C" {
     fn GC_init();
     fn GC_malloc(size: usize) -> *mut u8;
+    /// One allocation-lock acquisition returns a whole chain of cleared,
+    /// pointer-scanned blocks of the given size, linked through each block's
+    /// first word. The backbone of the `alloc` cell pool below.
+    fn GC_malloc_many(size: usize) -> *mut u8;
+    fn GC_expand_hp(bytes: usize) -> i32;
     fn GC_memalign(align: usize, size: usize) -> *mut u8;
     fn GC_realloc(p: *mut u8, size: usize) -> *mut u8;
     fn GC_allow_register_threads();
@@ -76,6 +81,12 @@ unsafe fn gc_ensure_init() {
         GC_READY = true;
         GC_init();
         GC_allow_register_threads();
+        // Start with a roomy heap. Elm code allocates in torrents (every
+        // cons cell and boxed value); growing from Boehm's tiny default
+        // means near-continuous full collections — marking dominated whole
+        // workloads (bbase64: 49s → 8s with this). 256MB stays well under
+        // the test harness's 1GB cap, and untouched pages cost little RSS.
+        GC_expand_hp(64 << 20);
     }
 }
 
@@ -320,17 +331,52 @@ pub enum Decoder {
     Lazy(u64),
 }
 
+/// Head of a free chain of `Value`-sized blocks from `GC_malloc_many`,
+/// linked through each free block's first word. The mutator is single-
+/// threaded (all Elm code runs on the one big-stack runner thread), so a
+/// plain static suffices. The static is a scanned root and the link words
+/// live inside scanned blocks, so the pooled blocks are never reclaimed
+/// out from under us; handing one out overwrites the link word.
+#[cfg(not(target_arch = "wasm32"))]
+static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
+
 /// Allocate a value on the heap and return it as a value word.
+///
+/// Values are the hottest allocation in the uniform backend (every cons
+/// cell, tuple and constructor), and `GC_malloc` takes the collector's
+/// allocation lock on every call. `GC_malloc_many` amortizes that: one
+/// locked call refills a local chain of `Value`-sized blocks that we carve
+/// off lock-free.
 ///
 /// `inline(never)` is load-bearing: the runtime bitcode is merged with the
 /// program module and O2-optimized as one unit, and letting the allocation
-/// (and with it the `GC_malloc` fast path) inline into generated lambdas
-/// produced code shapes where a collection triggered inside the allocation
-/// could miss the last live reference to an object — nondeterministic
-/// use-after-reclaim crashes (elm-safe-recursion). A real call boundary
-/// restores the C-ABI register/stack discipline the conservative collector's
-/// root scan depends on.
+/// fast path inline into generated lambdas produced code shapes where a
+/// collection triggered inside the allocation could miss the last live
+/// reference to an object — nondeterministic use-after-reclaim crashes
+/// (elm-safe-recursion). A real call boundary restores the C-ABI
+/// register/stack discipline the conservative collector's root scan
+/// depends on.
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
+fn alloc(value: Value) -> u64 {
+    unsafe {
+        let mut p = *std::ptr::addr_of!(CELL_POOL);
+        if p.is_null() {
+            gc_ensure_init();
+            p = GC_malloc_many(std::mem::size_of::<Value>());
+            if p.is_null() {
+                // Refill failed (heap pressure): fall back to a plain boxed
+                // allocation rather than crashing here.
+                return Box::into_raw(Box::new(value)) as u64;
+            }
+        }
+        *std::ptr::addr_of_mut!(CELL_POOL) = *(p as *mut *mut u8);
+        std::ptr::write(p as *mut Value, value);
+        p as u64
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 fn alloc(value: Value) -> u64 {
     Box::into_raw(Box::new(value)) as u64
 }
@@ -2283,6 +2329,42 @@ fn cp_byte(s: &[u8], cp: usize) -> usize {
     o
 }
 
+/// [`cp_byte`] with a per-string cache for the parser primitives, which call
+/// it once per parse step: a fresh O(offset) rescan each step made parsing an
+/// N-char source O(N²) (elm-syntax's module-sized inputs timed out). ASCII
+/// sources (checked once per string) convert in O(1); others advance a
+/// monotonic (codepoint, byte) cursor and only rescan on backtrack. The
+/// mutator is single-threaded and string bytes are immutable (a rope flatten
+/// preserves content), so plain statics are sound. Keying by the value word
+/// is safe against address reuse: the word stored in the static is itself a
+/// scanned GC root, so the cached string cannot be collected — and its
+/// address cannot be recycled — while it is the cache key.
+unsafe fn parser_cp_byte(sword: u64, s: &[u8], cp: usize) -> usize {
+    static mut ASCII: (u64, bool) = (0, false);
+    static mut CURSOR: (u64, usize, usize) = (0, 0, 0);
+    let ascii = &mut *std::ptr::addr_of_mut!(ASCII);
+    if ascii.0 != sword {
+        *ascii = (sword, s.iter().all(|b| b & 0x80 == 0));
+        *std::ptr::addr_of_mut!(CURSOR) = (sword, 0, 0);
+    }
+    if ascii.1 {
+        return cp.min(s.len());
+    }
+    let cursor = &mut *std::ptr::addr_of_mut!(CURSOR);
+    let (mut n, mut o) = if cursor.0 == sword && cursor.1 <= cp {
+        (cursor.1, cursor.2)
+    } else {
+        (0, 0)
+    };
+    while n < cp && o < s.len() {
+        let (_, len) = decode_char(s, o);
+        o += len;
+        n += 1;
+    }
+    *cursor = (sword, cp.min(n), o);
+    o
+}
+
 /// Number of codepoints in a UTF-8 byte slice.
 fn cp_count(s: &[u8]) -> usize {
     let mut o = 0;
@@ -2313,12 +2395,15 @@ unsafe fn slice_cp(p: u64, mut start: i64, mut end: i64) -> u64 {
     if end <= start {
         return mkstr(Vec::new());
     }
-    let from = char_byte(s, start as usize);
+    // Cached conversion: ParserFast-style code slices per character
+    // (`String.slice o (o+1) src`), and a fresh O(offset) walk per call made
+    // that O(n²) over the source.
+    let from = parser_cp_byte(p, s.as_bytes(), start as usize);
     // Whole-tail slice (the `dropLeft` shape): skip the second walk.
     let to = if end >= i64::MAX / 2 || end as usize >= s.len() {
         s.len()
     } else {
-        char_byte(s, end as usize)
+        parser_cp_byte(p, s.as_bytes(), end as usize)
     };
     mkslice(p, from, to)
 }
@@ -2519,10 +2604,11 @@ unsafe extern "C" fn string_from_list(chars: u64) -> u64 {
     mkstr(out.into_bytes())
 }
 unsafe extern "C" fn string_to_upper(s: u64) -> u64 {
-    mkstr(sstr(s).chars().map(|c| c.to_ascii_uppercase()).collect::<String>().into_bytes())
+    // Full Unicode, like JS String.prototype.toUpperCase.
+    mkstr(sstr(s).to_uppercase().into_bytes())
 }
 unsafe extern "C" fn string_to_lower(s: u64) -> u64 {
-    mkstr(sstr(s).chars().map(|c| c.to_ascii_lowercase()).collect::<String>().into_bytes())
+    mkstr(sstr(s).to_lowercase().into_bytes())
 }
 unsafe extern "C" fn string_trim(s: u64) -> u64 {
     mkstr(sstr(s).trim_matches(trim_space).as_bytes().to_vec())
@@ -2622,19 +2708,17 @@ unsafe extern "C" fn char_is_alpha(c: u64) -> u64 {
     rt_bool((b'a' as i64..=b'z' as i64).contains(&n) || (b'A' as i64..=b'Z' as i64).contains(&n))
 }
 unsafe extern "C" fn char_to_upper(c: u64) -> u64 {
-    let n = as_int(c);
-    if (b'a' as i64..=b'z' as i64).contains(&n) {
-        rt_chr((n - 32) as i32)
-    } else {
-        c
+    // JS kernel: String.prototype.toUpperCase — full Unicode, not ASCII
+    // (elm-syntax's Char.Extra relies on Greek letters case-mapping).
+    match char::from_u32(as_int(c) as u32) {
+        Some(ch) => rt_chr(ch.to_uppercase().next().unwrap_or(ch) as i32),
+        None => c,
     }
 }
 unsafe extern "C" fn char_to_lower(c: u64) -> u64 {
-    let n = as_int(c);
-    if (b'A' as i64..=b'Z' as i64).contains(&n) {
-        rt_chr((n + 32) as i32)
-    } else {
-        c
+    match char::from_u32(as_int(c) as u32) {
+        Some(ch) => rt_chr(ch.to_lowercase().next().unwrap_or(ch) as i32),
+        None => c,
     }
 }
 
@@ -5525,7 +5609,7 @@ unsafe extern "C" fn parser_is_sub_string(
     let s = str_slice(small);
     let b = str_slice(big);
     let co = int_val(offset) as usize;
-    let mut bo = cp_byte(b, co);
+    let mut bo = parser_cp_byte(big, b, co);
     let mut new_co = co;
     let mut r = int_val(row);
     let mut c = int_val(col);
@@ -5561,7 +5645,7 @@ unsafe extern "C" fn parser_is_sub_string(
 unsafe extern "C" fn parser_is_sub_char(predicate: u64, offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
     let co = int_val(offset) as usize;
-    let bo = cp_byte(s, co);
+    let bo = parser_cp_byte(string, s, co);
     if s.len() <= bo {
         return rt_int(-1);
     }
@@ -5578,7 +5662,7 @@ unsafe extern "C" fn parser_is_sub_char(predicate: u64, offset: u64, string: u64
 
 unsafe extern "C" fn parser_is_ascii_code(code: u64, offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
-    let bo = cp_byte(s, int_val(offset) as usize);
+    let bo = parser_cp_byte(string, s, int_val(offset) as usize);
     let byte = if bo < s.len() { s[bo] as i64 } else { -1 };
     rt_bool(byte == int_val(code))
 }
@@ -5586,7 +5670,7 @@ unsafe extern "C" fn parser_is_ascii_code(code: u64, offset: u64, string: u64) -
 unsafe extern "C" fn parser_chomp_base10(offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
     let co = int_val(offset) as usize;
-    let mut bo = cp_byte(s, co);
+    let mut bo = parser_cp_byte(string, s, co);
     let mut n = co;
     while bo < s.len() && (0x30..=0x39).contains(&s[bo]) {
         bo += 1;
@@ -5599,7 +5683,7 @@ unsafe extern "C" fn parser_consume_base(base: u64, offset: u64, string: u64) ->
     let s = str_slice(string);
     let base = int_val(base);
     let co = int_val(offset) as usize;
-    let mut bo = cp_byte(s, co);
+    let mut bo = parser_cp_byte(string, s, co);
     let mut n = co;
     let mut total: i64 = 0;
     while bo < s.len() {
@@ -5617,7 +5701,7 @@ unsafe extern "C" fn parser_consume_base(base: u64, offset: u64, string: u64) ->
 unsafe extern "C" fn parser_consume_base16(offset: u64, string: u64) -> u64 {
     let s = str_slice(string);
     let co = int_val(offset) as usize;
-    let mut bo = cp_byte(s, co);
+    let mut bo = parser_cp_byte(string, s, co);
     let mut n = co;
     let mut total: i64 = 0;
     while bo < s.len() {
@@ -5647,7 +5731,7 @@ unsafe extern "C" fn parser_find_sub_string(
     let s = str_slice(small);
     let b = str_slice(big);
     let o0 = int_val(offset) as usize;
-    let bo0 = cp_byte(b, o0);
+    let bo0 = parser_cp_byte(big, b, o0);
     let bmatch: i64 = if s.is_empty() {
         bo0.min(b.len()) as i64
     } else if bo0 <= b.len() {
