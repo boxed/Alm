@@ -9218,7 +9218,93 @@ kernel_vals! {
     G_HTMLEV_KEYCODE "$Html$Events$keyCode";
 }
 
+/// DIAG (ALM_SEGV_DUMP=1): on SIGSEGV/SIGBUS, dump pc/lr, x0-x28, sp, the
+/// faulting address, and nearby memory, then abort. Raw Darwin arm64 ABI
+/// (the runtime builds as a single-file rustc crate — no libc crate).
+#[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+mod segv_dump {
+    #[repr(C)]
+    pub struct Sigaction {
+        pub handler: usize,
+        pub mask: u32,
+        pub flags: i32,
+    }
+    extern "C" {
+        pub fn sigaction(sig: i32, act: *const Sigaction, old: *mut Sigaction) -> i32;
+        pub fn abort() -> !;
+        pub fn _dyld_get_image_vmaddr_slide(idx: u32) -> isize;
+    }
+    pub const SIGSEGV: i32 = 11;
+    pub const SIGBUS: i32 = 10;
+    pub const SA_SIGINFO: i32 = 0x0040;
+
+    unsafe fn rd(addr: u64) -> u64 {
+        core::ptr::read_volatile(addr as *const u64)
+    }
+
+    pub unsafe extern "C" fn handler(_sig: i32, info: *const u8, ctx: *const u8) {
+        // Darwin: siginfo.si_addr at +24; ucontext.uc_mcontext (ptr) at +48;
+        // mcontext64.__ss (thread state) at +16: x[0..29], fp, lr, sp, pc.
+        let fault = rd(info.add(24) as u64);
+        let mc = rd(ctx.add(48) as u64);
+        let ss = mc + 16;
+        let x = |i: u64| rd(ss + i * 8);
+        let (fp, lr, sp, pc) = (rd(ss + 29 * 8), rd(ss + 30 * 8), rd(ss + 31 * 8), rd(ss + 32 * 8));
+        eprintln!("=== ALM SEGV DUMP ===");
+        eprintln!("slide={:#x}", _dyld_get_image_vmaddr_slide(0));
+        eprintln!("fault={:#x} pc={:#x} lr={:#x} sp={:#x} fp={:#x}", fault, pc, lr, sp, fp);
+        for i in 0..29 {
+            eprint!("x{}={:#x} ", i, x(i));
+            if i % 6 == 5 {
+                eprintln!();
+            }
+        }
+        eprintln!();
+        for i in 0..29u64 {
+            let v = x(i);
+            if v > 0x1_0000_0000 && v % 8 == 0 && v.abs_diff(fault) < 256 {
+                eprintln!("x{} = {:#x} near fault; 8 words:", i, v);
+                for k in 0..8u64 {
+                    eprintln!("  +{:#04x}: {:#018x}", k * 8, rd(v + k * 8));
+                }
+            }
+        }
+        for i in 0..8u64 {
+            let v = x(i);
+            if v > 0x1_0000_0000 && v < 0x7_0000_0000 && v % 8 == 0 {
+                eprintln!("x{} = {:#x} (heap?); 8 words:", i, v);
+                for k in 0..8u64 {
+                    eprintln!("  +{:#04x}: {:#018x}", k * 8, rd(v + k * 8));
+                }
+            }
+        }
+        eprintln!("stack sp..sp+256:");
+        for k in 0..32u64 {
+            eprintln!("  sp+{:#04x}: {:#018x}", k * 8, rd(sp + k * 8));
+        }
+        abort();
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+unsafe fn install_segv_dump() {
+    if std::env::var("ALM_SEGV_DUMP").is_err() {
+        return;
+    }
+    let sa = segv_dump::Sigaction {
+        handler: segv_dump::handler as usize,
+        mask: 0,
+        flags: segv_dump::SA_SIGINFO,
+    };
+    segv_dump::sigaction(segv_dump::SIGSEGV, &sa, std::ptr::null_mut());
+    segv_dump::sigaction(segv_dump::SIGBUS, &sa, std::ptr::null_mut());
+}
+
+#[cfg(not(all(not(target_arch = "wasm32"), target_os = "macos")))]
+unsafe fn install_segv_dump() {}
+
 unsafe fn runtime_init() {
+    install_segv_dump();
     RT_TRUE.set(alloc(Value::Bool(true)));
     RT_FALSE.set(alloc(Value::Bool(false)));
     RT_UNIT.set(alloc(Value::Unit));
