@@ -4738,6 +4738,107 @@ pub unsafe extern "C" fn bytes_encode(enc: u64) -> u64 {
     alloc(Value::Bytes(buf))
 }
 
+// The TYPED Bytes.Encode.Encoder tree, walked directly — the boxing wrapper
+// that converted whole encoder trees to uniform ctors per `encode` call was
+// flate's dominant cost. Layout mirrors the typed backend's ctor structs
+// ({i32 tag, fields...} with natural alignment) for elm/bytes' declaration
+// order: 0=I8[Int] 1=I16[E,Int] 2=I32[E,Int] 3=U8 4=U16 5=U32 6=F32[E,F]
+// 7=F64[E,F] 8=Seq[Int,List] 9=Utf8[Int,String] 10=Bytes[Bytes]; Endianness
+// is Layout::Enum i32 at +4 (LE=0), scalars at +8, second fields at +16;
+// typed lists are {i64 len, ptr backing} with reversed elements at
+// backing+16. Any layout change in the typed backend must update this.
+unsafe fn tenc_tag(e: *const u8) -> u32 {
+    *(e as *const u32)
+}
+unsafe fn tenc_i64(e: *const u8, off: usize) -> i64 {
+    *(e.add(off) as *const i64)
+}
+unsafe fn tenc_is_le(e: *const u8) -> bool {
+    *(e.add(4) as *const u32) == 0
+}
+
+unsafe fn typed_encoder_width(e: *const u8) -> usize {
+    match tenc_tag(e) {
+        0 | 3 => 1,
+        1 | 4 => 2,
+        2 | 5 | 6 => 4,
+        7 => 8,
+        8 => {
+            let list = tenc_i64(e, 16) as *const u8;
+            let len = *(list as *const i64) as usize;
+            let backing = *(list.add(8) as *const *const u8);
+            let mut w = 0;
+            for i in 0..len {
+                let child = *(backing.add(16) as *const *const u8).add(i);
+                w += typed_encoder_width(child);
+            }
+            w
+        }
+        9 => sbytes(tenc_i64(e, 16) as u64).len(),
+        10 => as_bytes(tenc_i64(e, 8) as u64).len(),
+        _ => 0,
+    }
+}
+
+unsafe fn write_typed_encoder(buf: &mut Vec<u8>, e: *const u8) {
+    match tenc_tag(e) {
+        0 | 3 => buf.push(tenc_i64(e, 8) as u8),
+        1 | 4 => {
+            let b = (tenc_i64(e, 8) as u16).to_le_bytes();
+            if tenc_is_le(e) {
+                buf.extend_from_slice(&b);
+            } else {
+                buf.extend_from_slice(&[b[1], b[0]]);
+            }
+        }
+        2 | 5 => {
+            let n = tenc_i64(e, 8) as u32;
+            if tenc_is_le(e) {
+                buf.extend_from_slice(&n.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&n.to_be_bytes());
+            }
+        }
+        6 => {
+            let f = *(e.add(8) as *const f64) as f32;
+            if tenc_is_le(e) {
+                buf.extend_from_slice(&f.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&f.to_be_bytes());
+            }
+        }
+        7 => {
+            let f = *(e.add(8) as *const f64);
+            if tenc_is_le(e) {
+                buf.extend_from_slice(&f.to_le_bytes());
+            } else {
+                buf.extend_from_slice(&f.to_be_bytes());
+            }
+        }
+        8 => {
+            let list = tenc_i64(e, 16) as *const u8;
+            let len = *(list as *const i64) as usize;
+            let backing = *(list.add(8) as *const *const u8);
+            // Reversed storage: Elm order is index len-1 down to 0.
+            for i in (0..len).rev() {
+                let child = *(backing.add(16) as *const *const u8).add(i);
+                write_typed_encoder(buf, child);
+            }
+        }
+        9 => buf.extend_from_slice(sbytes(tenc_i64(e, 16) as u64)),
+        10 => buf.extend_from_slice(as_bytes(tenc_i64(e, 8) as u64)),
+        _ => {}
+    }
+}
+
+/// `Bytes.Encode.encode` over the TYPED encoder tree (no boxing).
+#[no_mangle]
+pub unsafe extern "C" fn bytes_encode_typed(root: *const u8) -> u64 {
+    let mut buf = Vec::with_capacity(typed_encoder_width(root));
+    write_typed_encoder(&mut buf, root);
+    alloc(Value::Bytes(buf))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn bytes_width(b: u64) -> u64 {
     mk_int(as_bytes(b).len() as i64)

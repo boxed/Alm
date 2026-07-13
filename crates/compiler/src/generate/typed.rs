@@ -341,6 +341,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             i64_t.fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "bytes_encode_typed",
+            i64_t.fn_type(&[self.ctx.ptr_type(inkwell::AddressSpace::default()).into()], false),
+            Some(Linkage::External),
+        );
         for name in ["rt_list_head", "rt_list_tail", "string_to_int", "string_to_float"] {
             self.module.add_function(
                 name,
@@ -3253,6 +3258,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // a normal tagged union the runtime's `bytes_encode` tree-walks; a
             // `Decoder`'s inner `Bytes -> Int -> (Int, a)` function is applied
             // by `bytes_decode`. Every primitive marshals through the runtime.
+            // A concrete (typed, tagged) encoder tree is walked directly by
+            // the runtime — the per-call tree boxing was elm-flate's
+            // dominant cost. Polymorphic/uniform encoders keep the marshal.
+            ("Elm.Kernel.Bytes", "encode")
+                if matches!(self.layouts.layout_of(&args[0].tipe), Layout::Tagged(_)) =>
+            {
+                let tree = self.gen(&args[0])?;
+                Ok(self.call_named("bytes_encode_typed", &[tree]))
+            }
             ("Elm.Kernel.Bytes", "encode") => self.marshal_call("bytes_encode", args, &whole.tipe),
             ("Elm.Kernel.Bytes", "width") => self.marshal_call("bytes_width", args, &whole.tipe),
             ("Elm.Kernel.Bytes", "getStringWidth") => {
