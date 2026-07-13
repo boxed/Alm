@@ -993,9 +993,11 @@ impl Specializer<'_> {
                 can::LetDecl::Def(def) => vec![(def, false)],
                 // KNOWN GAP: a lambda-style member (`f = \x -> ...`,
                 // empty `def.args`) skips the whole group. Admitting such
-                // members by TYPE was tried and reintroduced SEGVs
-                // (elm-monocle, elm-statecharts) — zero-arg member
-                // specialization needs its own work first.
+                // members by TYPE was tried TWICE (incl. after the
+                // runtime-merge GC fix) and reliably breaks
+                // elm-monocle/elm-statecharts/intervals — zero-arg member
+                // specialization (local_def_params_body eta-normalization
+                // or downstream assembly) needs real work first.
                 can::LetDecl::Recursive(defs)
                     if !defs.is_empty() && defs.iter().all(|d| !d.args.is_empty()) =>
                 {

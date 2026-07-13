@@ -354,14 +354,11 @@ static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
 /// locked call refills a local chain of `Value`-sized blocks that we carve
 /// off lock-free.
 ///
-/// `inline(never)` is load-bearing: the runtime bitcode is merged with the
-/// program module and O2-optimized as one unit, and letting the allocation
-/// fast path inline into generated lambdas produced code shapes where a
-/// collection triggered inside the allocation could miss the last live
-/// reference to an object — nondeterministic use-after-reclaim crashes
-/// (elm-safe-recursion). A real call boundary restores the C-ABI
-/// register/stack discipline the conservative collector's root scan
-/// depends on.
+/// (An `inline(never)` here was once thought load-bearing for the
+/// collector's root scan; the real culprit was the runtime-bitcode merge,
+/// now disabled — see `native.rs`. With every rt_* call behind a C-ABI
+/// boundary the attribute is moot, but the merge experiment flag can
+/// reintroduce cross-inlining, so it stays as cheap insurance.)
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
