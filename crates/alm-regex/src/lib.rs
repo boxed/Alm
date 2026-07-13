@@ -66,6 +66,10 @@ fn js_translate(pat: &str) -> String {
                 in_class = true;
                 out.push('[');
             }
+            // A literal `[` inside a class: JS treats it as an ordinary
+            // character, but fancy-regex reads it as the start of a nested
+            // class/set operation and errors. Escape it so it stays literal.
+            '[' if in_class => out.push_str("\\["),
             ']' if in_class => {
                 in_class = false;
                 out.push(']');
@@ -237,5 +241,13 @@ mod tests {
         // Non-class escapes and escaped backslashes pass through unchanged.
         assert_eq!(js_translate(r"\.\n\\w"), r"\.\n\\w");
         assert_eq!(js_translate(r"\s\S"), r"\s\S");
+    }
+
+    #[test]
+    fn literal_open_bracket_in_class() {
+        // JS treats `[` inside a class as a literal; fancy-regex would read it
+        // as a nested set and error, so escape it.
+        assert_eq!(js_translate(r"[[]"), r"[\[]");
+        assert_eq!(js_translate(r"[\\^$.|?*+()[]"), r"[\\^$.|?*+()\[]");
     }
 }
