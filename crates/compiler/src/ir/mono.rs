@@ -66,6 +66,7 @@ pub struct ForeignUse {
 pub struct MonoSet {
     pub instances: Vec<Instance>,
     pub foreign_uses: Vec<ForeignUse>,
+    pub error: Option<String>,
 }
 
 /// Compute the specializations reachable from `main` within a single module.
@@ -256,6 +257,21 @@ fn enqueue(
     // Key by the type VALUE, not its Debug rendering: formatting every
     // instance type is O(size) in string building and dominated compile time
     // on instantiation-heavy packages (elm-geometry burned minutes here).
+    // Watchdog: polymorphic recursion (a recursive call at a more deeply
+    // nested instantiation, legal in Elm via annotation) makes this fixpoint
+    // enqueue `Deque (Buffer^n a)`-style types for unbounded n — the
+    // monomorphizer fundamentally cannot terminate. Diagnose instead of
+    // hanging. (A uniform-representation fallback for the deep tail is
+    // designed but needs closure-convention adaptation at the boundary.)
+    if type_depth(&instance.tipe) > 20 {
+        if set.error.is_none() {
+            set.error = Some(format!(
+                "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
+                instance.module, instance.name
+            ));
+        }
+        return;
+    }
     let key = (
         instance.module.clone(),
         instance.name.clone(),
@@ -416,6 +432,10 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
 #[derive(Debug)]
 pub struct MonoProgram {
     pub functions: Vec<TypedFn>,
+    /// A fatal specialization diagnosis (e.g. polymorphic recursion driving
+    /// unbounded instantiation) — reported instead of hanging or blowing the
+    /// compiler's stack.
+    pub error: Option<String>,
 }
 
 /// A specialized function: its mangled name, the source name and concrete
@@ -520,14 +540,30 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     let sink: std::cell::RefCell<Vec<Instance>> = std::cell::RefCell::new(Vec::new());
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut worklist: Vec<Instance> = Vec::new();
-    for inst in analyze_project(modules, entry).instances {
+    let analyzed = analyze_project(modules, entry);
+    let mut error = analyzed.error.clone();
+    for inst in analyzed.instances {
         if seen.insert(mangle(&inst.module, &inst.name, &inst.tipe).to_string()) {
             worklist.push(inst);
         }
     }
     let mut wi = 0;
-    while wi < worklist.len() {
+    while wi < worklist.len() && error.is_none() {
         let mut instance = worklist[wi].clone();
+        // Watchdog: polymorphic recursion (a recursive call at a LARGER
+        // instantiation, legal in Elm via annotation) makes this fixpoint
+        // enqueue ever-deeper types forever — elm-deque's chunked
+        // `Deque (Buffer^n a)`. Monomorphization fundamentally cannot
+        // terminate on those; report it instead of hanging. (A uniform-
+        // representation fallback for the deep tail is designed but needs
+        // closure-convention adaptation at the boundary first.)
+        if error.is_none() && type_depth(&instance.tipe) > 20 {
+            error = Some(format!(
+                "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
+                instance.module, instance.name
+            ));
+            break;
+        }
         // Specialize at the number-defaulted type (see `default_numbers`); the
         // reference sites' mangled names already Int-default, so the symbol,
         // the layout, and the copy compiled here all agree.
@@ -627,7 +663,7 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         }
     }
 
-    MonoProgram { functions }
+    MonoProgram { functions, error }
 }
 
 struct Specializer<'a> {
@@ -1342,7 +1378,7 @@ fn is_native_binop(op: &str) -> bool {
 /// The mangled name of a local specialization: the source name plus its
 /// concrete type, mirroring [`mangle`] for top-level functions.
 fn mangle_local(name: &Name, tipe: &can::Type) -> Name {
-    Name::from(format!("{}${}", name, mangle_type(tipe)))
+    Name::from(format!("{}${}", name, mangle_type(&alpha_normalize(tipe))))
 }
 
 /// The names a pattern binds (used to detect shadowing of a specialized local).
@@ -1639,13 +1675,75 @@ fn rewrite_decl_uses_masked(
     }
 }
 
+/// Structural nesting depth of a type — the watchdog metric for runaway
+/// specialization (polymorphic recursion instantiates `Deque (Buffer^n a)`
+/// for unbounded n; genuine programs stay shallow).
+fn type_depth(tipe: &can::Type) -> usize {
+    use can::Type::*;
+    match tipe {
+        Var(_) | Unit => 1,
+        Lambda(a, b) => 1 + type_depth(a).max(type_depth(b)),
+        Type(_, _, args) => 1 + args.iter().map(type_depth).max().unwrap_or(0),
+        Tuple(a, b, c) => {
+            1 + type_depth(a)
+                .max(type_depth(b))
+                .max(c.as_deref().map(type_depth).unwrap_or(0))
+        }
+        Record(fields, _) => 1 + fields.iter().map(|(_, t)| type_depth(t)).max().unwrap_or(0),
+    }
+}
+
 /// Mangle a `(module, name, concrete type)` triple into a unique symbol.
 /// The encoding must be INJECTIVE — a collision silently merges two
 /// specializations of different layouts (a miscompile). See `mangle_type`
 /// for the prefix-unambiguous scheme. The module qualifier keeps
 /// specializations from different modules distinct.
 pub fn mangle(module: &Name, name: &Name, tipe: &can::Type) -> Name {
-    Name::from(format!("{}${}${}", module, name, mangle_type(tipe)))
+    Name::from(format!("{}${}${}", module, name, mangle_type(&alpha_normalize(tipe))))
+}
+
+/// Rename type variables to `p0, p1, …` in first-occurrence order. Two
+/// instantiations that differ only in tyvar NAMES (`Deque (Buffer a17)` vs
+/// `Deque (Buffer a18)` — inference mints fresh names per use) are the same
+/// specialization; without this the fixpoint enqueues unboundedly many
+/// name-distinct copies (elm-deque's polymorphic recursion compiled forever
+/// at shallow types), and layout-identical `Ref` copies duplicated code.
+fn alpha_normalize(tipe: &can::Type) -> can::Type {
+    fn go(t: &can::Type, map: &mut Vec<(Name, Name)>) -> can::Type {
+        use can::Type::*;
+        match t {
+            Var(n) => {
+                // Keep constraint prefixes meaningful: `number*`/`comparable*`
+                // mangle by their constraint class, not their spelling.
+                let class = ["number", "comparable", "appendable", "compappend"]
+                    .iter()
+                    .find(|c| n.as_str().starts_with(*c));
+                if let Some(c) = class {
+                    return Var(Name::from(*c));
+                }
+                if let Some((_, to)) = map.iter().find(|(from, _)| from == n) {
+                    return Var(to.clone());
+                }
+                let to = Name::from(format!("p{}", map.len()));
+                map.push((n.clone(), to.clone()));
+                Var(to)
+            }
+            Lambda(a, b) => Lambda(Box::new(go(a, map)), Box::new(go(b, map))),
+            Type(h, n, args) => Type(h.clone(), n.clone(), args.iter().map(|a| go(a, map)).collect()),
+            Tuple(a, b, c) => Tuple(
+                Box::new(go(a, map)),
+                Box::new(go(b, map)),
+                c.as_ref().map(|x| Box::new(go(x, map))),
+            ),
+            Record(fields, ext) => Record(
+                fields.iter().map(|(n, t)| (n.clone(), go(t, map))).collect(),
+                ext.clone(),
+            ),
+            Unit => Unit,
+        }
+    }
+    let mut map = Vec::new();
+    go(tipe, &mut map)
 }
 
 fn mangle_type(tipe: &can::Type) -> String {

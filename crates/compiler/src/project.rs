@@ -134,6 +134,15 @@ pub fn compile_project_typed(
         })
         .collect();
     let program = crate::ir::mono::specialize_project(&infos, &checked.entry);
+    if let Some(message) = &program.error {
+        return Err(vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "NATIVE BACKEND LIMITATION",
+            Region::ZERO,
+            message.clone(),
+        )]);
+    }
     let module_refs: Vec<&can::Module> = checked.modules.iter().collect();
     let layouts = crate::ir::layout::LayoutCtx::for_modules(&module_refs);
     generate::typed::build(&program, &layouts, output, target).map_err(|message| {
