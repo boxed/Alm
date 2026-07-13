@@ -38,6 +38,19 @@ fn js_translate(pat: &str) -> String {
         match c {
             '\\' => match chars.peek().copied() {
                 Some(n) => {
+                    // JS `\0` is the NUL character (U+0000) when not followed by
+                    // another digit; fancy-regex doesn't accept `\0` (and rejects
+                    // it inside a class), so emit `\x00`. A following digit means
+                    // a legacy octal/backref form — leave that verbatim.
+                    if n == '0' {
+                        chars.next();
+                        if chars.peek().is_some_and(|d| d.is_ascii_digit()) {
+                            out.push_str("\\0");
+                        } else {
+                            out.push_str("\\x00");
+                        }
+                        continue;
+                    }
                     let repl: Option<&str> = match n {
                         'd' => Some(if in_class { "0-9" } else { "[0-9]" }),
                         'w' => Some(if in_class { "0-9A-Za-z_" } else { "[0-9A-Za-z_]" }),
@@ -70,6 +83,11 @@ fn js_translate(pat: &str) -> String {
             // character, but fancy-regex reads it as the start of a nested
             // class/set operation and errors. Escape it so it stays literal.
             '[' if in_class => out.push_str("\\["),
+            // Doubled `&&` / `~~` inside a class are set intersection / symmetric
+            // difference in fancy-regex, but plain literals in JS. Escape the
+            // first character of the pair; the second is then a lone literal.
+            '&' if in_class && chars.peek() == Some(&'&') => out.push_str("\\&"),
+            '~' if in_class && chars.peek() == Some(&'~') => out.push_str("\\~"),
             ']' if in_class => {
                 in_class = false;
                 out.push(']');
@@ -249,5 +267,25 @@ mod tests {
         // as a nested set and error, so escape it.
         assert_eq!(js_translate(r"[[]"), r"[\[]");
         assert_eq!(js_translate(r"[\\^$.|?*+()[]"), r"[\\^$.|?*+()\[]");
+    }
+
+    #[test]
+    fn nul_escape() {
+        // JS `\0` = NUL; fancy-regex needs `\x00` (and rejects `\0` in a class).
+        assert_eq!(js_translate(r"\0"), r"\x00");
+        assert_eq!(js_translate(r"[\0]"), r"[\x00]");
+        assert_eq!(js_translate(r"a\0b"), r"a\x00b");
+        // A following digit is a legacy octal/backref form — left verbatim.
+        assert_eq!(js_translate(r"\01"), r"\01");
+    }
+
+    #[test]
+    fn class_set_operators_are_literal() {
+        // `&&` / `~~` inside a class are literals in JS, set ops in fancy-regex.
+        assert_eq!(js_translate(r"[a&&b]"), r"[a\&&b]");
+        assert_eq!(js_translate(r"[a~~b]"), r"[a\~~b]");
+        // A single `&` / `~` stays as-is (already literal in both).
+        assert_eq!(js_translate(r"[a&b]"), r"[a&b]");
+        assert_eq!(js_translate(r"[a~b]"), r"[a~b]");
     }
 }
