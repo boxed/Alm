@@ -83,6 +83,8 @@ unsafe fn gc_ensure_init() {
         // Divisor 6 (default 3): collect harder before growing the heap —
         // set BEFORE GC_init so the very first growth decisions use it.
         GC_set_free_space_divisor(6);
+        FLAG_ARG_CHECK = std::env::var("ALM_ARG_CHECK").is_ok();
+        FLAG_NO_POOL = std::env::var("ALM_NO_POOL").is_ok();
         GC_init();
         GC_allow_register_threads();
         // Start with a roomy heap. Elm code allocates in torrents (every
@@ -346,6 +348,12 @@ pub enum Decoder {
 #[cfg(not(target_arch = "wasm32"))]
 static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
 
+/// Diagnostic env flags, read ONCE at collector init (single-threaded —
+/// getenv per call took a libc lock inside the hottest paths, and a lazy
+/// OnceLock here once deadlocked the parallel test suite).
+static mut FLAG_ARG_CHECK: bool = false;
+static mut FLAG_NO_POOL: bool = false;
+
 /// Allocate a value on the heap and return it as a value word.
 ///
 /// Values are the hottest allocation in the uniform backend (every cons
@@ -363,9 +371,8 @@ static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
     unsafe {
-        // DIAG: ALM_NO_POOL=1 falls back to plain Box (GC_malloc) to test
-        // whether pool blocks lack ALL_INTERIOR_POINTERS' extra byte.
-        if std::env::var("ALM_NO_POOL").is_ok() {
+        // DIAG: ALM_NO_POOL=1 falls back to plain Box (GC_malloc).
+        if *std::ptr::addr_of!(FLAG_NO_POOL) {
             return Box::into_raw(Box::new(value)) as u64;
         }
         let mut p = *std::ptr::addr_of!(CELL_POOL);
@@ -1331,7 +1338,7 @@ unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
     // with a sane discriminant) and abort with context on the first bad
     // one. Trampoline closures carry ONE raw typed-closure word as their
     // first (captured) argument; it is exempt.
-    if std::env::var("ALM_ARG_CHECK").is_ok() {
+    if *std::ptr::addr_of!(FLAG_ARG_CHECK) {
         let tramp = if let Some(set) = &*std::ptr::addr_of!(BOX_TRAMPS) {
             set.contains(&(func as usize))
         } else {
