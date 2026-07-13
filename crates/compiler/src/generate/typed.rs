@@ -4118,10 +4118,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(phi.as_basic_value())
     }
 
-    /// `List.member x xs : Bool` — walk comparing each element to `x`
-    /// (scalar elements only), short-circuiting on the first match.
+    /// `List.member x xs : Bool` — walk comparing each element to `x`,
+    /// short-circuiting on the first match.
     fn kernel_list_member(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let elem = self.elem_layout(&args[1].tipe)?;
+        // Recursive element types (e.g. `Node Expression`) lay out with a `Ref`
+        // where the structure loops back, so a bare layout comparison would fall
+        // to pointer identity there and miss structurally-equal values. Compare
+        // by element *type* in that case, exactly as the `==` operator does.
+        let elem_ty = list_elem_type(&args[1].tipe);
         let target = self.gen(&args[0])?;
         let list = self.gen(&args[1])?.into_pointer_value();
         let len = self.list_len(list);
@@ -4146,7 +4151,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
 
         self.builder.position_at_end(body_bb);
         let head = self.list_load(backing, &elem, i);
-        let eq = self.equals_vals(head, target, &elem)?;
+        let eq = match (&elem_ty, layout_has_ref(&elem)) {
+            (Some(ty), true) => self.equals_typed(head, target, ty)?,
+            _ => self.equals_vals(head, target, &elem)?,
+        };
         self.builder.build_conditional_branch(eq, found_bb, cont_bb).unwrap();
 
         self.builder.position_at_end(cont_bb);
@@ -6450,6 +6458,19 @@ fn tail_has_self_call(expr: &TypedExpr, mangled: &str, nparams: usize) -> bool {
             .any(|(_, b)| tail_has_self_call(b, mangled, nparams)),
         TypedKind::Let(_, body) => tail_has_self_call(body, mangled, nparams),
         _ => false,
+    }
+}
+
+/// The element type of a `List a` type, if it is one. Used by kernels that need
+/// the element's canonical type (not just its layout) to compare structurally.
+fn list_elem_type(tipe: &crate::ast::canonical::Type) -> Option<crate::ast::canonical::Type> {
+    match tipe {
+        crate::ast::canonical::Type::Type(home, name, args)
+            if home.as_str() == "List" && name.as_str() == "List" && args.len() == 1 =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
     }
 }
 
