@@ -366,6 +366,11 @@ static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
     unsafe {
+        // DIAG: ALM_NO_POOL=1 falls back to plain Box (GC_malloc) to test
+        // whether pool blocks lack ALL_INTERIOR_POINTERS' extra byte.
+        if std::env::var("ALM_NO_POOL").is_ok() {
+            return Box::into_raw(Box::new(value)) as u64;
+        }
         let mut p = *std::ptr::addr_of!(CELL_POOL);
         if p.is_null() {
             gc_ensure_init();
