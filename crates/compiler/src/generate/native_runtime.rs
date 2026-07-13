@@ -6484,7 +6484,14 @@ unsafe fn build_match(s: &str, buf: &[i64], mut i: usize, num: i64) -> (u64, usi
         let gs = buf[i];
         let ge = buf[i + 1];
         i += 2;
-        gvals.push(if gs < 0 { nothing() } else { just(str_char_slice(s, gs, ge)) });
+        // The elm/regex JS kernel maps a submatch through TRUTHINESS
+        // (`submatch ? Just : Nothing`), so an EMPTY capture ("") comes out
+        // as Nothing, exactly like a non-participating group. Quirk-as-spec.
+        gvals.push(if gs < 0 || gs == ge {
+            nothing()
+        } else {
+            just(str_char_slice(s, gs, ge))
+        });
     }
     let mut subs = nil();
     for mv in gvals.into_iter().rev() {
