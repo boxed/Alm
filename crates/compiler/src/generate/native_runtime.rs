@@ -1356,6 +1356,10 @@ unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
                 }
                 eprintln!("a[{}]'s first 6 words:", i);
                 for k in 0..6u64 {
+                    if w >= 0x7000_0000_0000 {
+                        eprintln!("  (unmapped-looking; skipping reads)");
+                        break;
+                    }
                     let v = *((w + k * 8) as *const u64);
                     let is_tramp = if let Some(set) = &*std::ptr::addr_of!(BOX_TRAMPS) {
                         set.contains(&(v as usize))

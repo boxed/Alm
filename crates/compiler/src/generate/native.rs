@@ -167,6 +167,18 @@ pub(crate) fn finish<'ctx>(
     // symbol is duplicated).
     let bc_path = build_dir.join("alm_runtime.bc");
     std::fs::write(&bc_path, runtime_bc).map_err(|e| e.to_string())?;
+    // The runtime-bitcode merge is DISABLED by default: re-optimizing the
+    // runtime's GC-walking internals together with generated code produced
+    // frames where a live object's last reference was invisible to the
+    // conservative collector's root scan — nondeterministic use-after-
+    // reclaim (elm-tries' amplified reproducer: 9/10 crashes merged, 0/10
+    // unmerged; the same class behind the elm-safe-recursion crashes).
+    // Every rt_* call now crosses a real C-ABI boundary into the static
+    // library, whose rustc-compiled code keeps roots spilled around calls.
+    // ALM_MERGE_RUNTIME=1 re-enables the merge for perf experiments; making
+    // it safe needs selective inlining (leaf-only primitives) or precise
+    // root spilling first.
+    let no_merge = std::env::var("ALM_MERGE_RUNTIME").is_err();
     let runtime_module = Module::parse_bitcode_from_path(&bc_path, context)
         .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
     // The typed backend emits DWARF debug info (line tables mapping generated
@@ -200,9 +212,11 @@ pub(crate) fn finish<'ctx>(
             g.set_linkage(Linkage::AvailableExternally);
         }
     }
-    module
-        .link_in_module(runtime_module)
-        .map_err(|e| format!("could not merge runtime bitcode: {}", e))?;
+    if !no_merge {
+        module
+            .link_in_module(runtime_module)
+            .map_err(|e| format!("could not merge runtime bitcode: {}", e))?;
+    }
 
     // The merged module before optimization: generated code + the runtime's
     // (available_externally) definitions, but no inlining/DCE yet. Reading the
