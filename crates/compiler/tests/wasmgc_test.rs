@@ -594,6 +594,19 @@ fn list_sum_float() {
 }
 
 #[test]
+fn bitwise_and_float_predicates() {
+    assert_str_prog(
+        "bitwise",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         main : String\n\
+         main =\n    \
+            String.join \",\"\n        (List.map String.fromInt\n            [ Bitwise.and 12 10\n            , Bitwise.or 12 10\n            , Bitwise.xor 12 10\n            , Bitwise.complement 0\n            , Bitwise.shiftLeftBy 2 1\n            , Bitwise.shiftRightBy 1 8\n            , Bitwise.shiftRightZfBy 1 -1\n            ]\n        )\n        ++ \"|\" ++ yn (isNaN (0.0 / 0.0)) ++ yn (isNaN 1.0)\n        ++ yn (isInfinite (1.0 / 0.0)) ++ yn (isInfinite 2.0)\n        ++ \"|\" ++ String.fromInt (round (pi * 100)) ++ \",\" ++ String.fromInt (round (e * 100))\n",
+    );
+}
+
+#[test]
 fn tuple_param_patterns() {
     // Tuple destructuring in function params (top-level and lambda).
     assert_str_prog(

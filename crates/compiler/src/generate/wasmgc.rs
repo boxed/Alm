@@ -1378,6 +1378,13 @@ impl<'a> Codegen<'a> {
         tipe: &can::Type,
         f: &mut Function,
     ) -> Result<(), String> {
+        // Nullary numeric constants.
+        if module == "Basics" && (name == "pi" || name == "e") {
+            let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
+            f.instruction(&Instruction::F64Const(v.into()));
+            f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
+        }
         let arity: u32 = match (module, name) {
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
             ("String", "append") => 2,
@@ -5165,6 +5172,65 @@ impl<'a> Codegen<'a> {
                 self.emit_f64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::F64Sqrt);
                 f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "isNaN") => {
+                // NaN is the only value not equal to itself.
+                self.emit_f64(&args[0], ctx, f)?;
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Ne);
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Basics", "isInfinite") => {
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Abs);
+                f.instruction(&Instruction::F64Const(f64::INFINITY.into()));
+                f.instruction(&Instruction::F64Eq);
+                f.instruction(&Instruction::RefI31);
+            }
+            // Bitwise: Elm operates on 32-bit ints (JS `| 0` semantics).
+            ("Bitwise", "and") | ("Bitwise", "or") | ("Bitwise", "xor") => {
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                self.emit_i64(&args[1], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(match name {
+                    "and" => &Instruction::I32And,
+                    "or" => &Instruction::I32Or,
+                    _ => &Instruction::I32Xor,
+                });
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Bitwise", "complement") => {
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(&Instruction::I32Const(-1));
+                f.instruction(&Instruction::I32Xor);
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            // shift ops take `shiftLeftBy offset value` → value shifted by offset
+            ("Bitwise", "shiftLeftBy") | ("Bitwise", "shiftRightBy") => {
+                self.emit_i64(&args[1], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(if name == "shiftLeftBy" {
+                    &Instruction::I32Shl
+                } else {
+                    &Instruction::I32ShrS
+                });
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Bitwise", "shiftRightZfBy") => {
+                self.emit_i64(&args[1], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(&Instruction::I32ShrU);
+                f.instruction(&Instruction::I64ExtendI32U); // zero-fill → unsigned
+                f.instruction(&Instruction::StructNew(T_INT));
             }
             ("Basics", "not") => {
                 self.emit_bool(&args[0], ctx, f)?;
