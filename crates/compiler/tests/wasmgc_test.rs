@@ -502,3 +502,35 @@ fn string_join_from_ints() {
          main = String.join \"-\" (List.map String.fromInt (List.range 1 5))\n",
     );
 }
+
+#[test]
+fn sort_and_compare() {
+    assert_str_prog(
+        "sort",
+        "module Test exposing (main)\n\n\
+         show : List Int -> String\n\
+         show xs = String.join \",\" (List.map String.fromInt xs)\n\n\
+         main : String\n\
+         main =\n    show (List.sort [ 5, 2, 8, 1, 9, 3 ])\n        ++ \"|\" ++ String.fromInt (min 7 3)\n        ++ \",\" ++ String.fromInt (max 7 3)\n",
+    );
+}
+
+#[test]
+fn sort_strings() {
+    assert_str_prog(
+        "sort_str",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main = String.join \" \" (List.sort [ \"banana\", \"apple\", \"cherry\" ])\n",
+    );
+}
+
+#[test]
+fn compare_min_max_float_string() {
+    assert_str_prog(
+        "cmp_misc",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    (if min \"abc\" \"abd\" == \"abc\" then \"y\" else \"n\")\n        ++ (if max 2.5 1.5 == 2.5 then \"y\" else \"n\")\n",
+    );
+}

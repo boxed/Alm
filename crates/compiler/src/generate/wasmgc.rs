@@ -141,6 +141,9 @@ struct Codegen<'a> {
     str_repeat_idx: u32,
     str_starts_with_idx: u32,
     str_ends_with_idx: u32,
+    val_compare_idx: u32,
+    list_insert_idx: u32,
+    list_sort_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -184,6 +187,9 @@ impl<'a> Codegen<'a> {
             str_repeat_idx: 0,
             str_starts_with_idx: 0,
             str_ends_with_idx: 0,
+            val_compare_idx: 0,
+            list_insert_idx: 0,
+            list_sort_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -251,6 +257,9 @@ impl<'a> Codegen<'a> {
         self.str_repeat_idx = next();
         self.str_starts_with_idx = next();
         self.str_ends_with_idx = next();
+        self.val_compare_idx = next();
+        self.list_insert_idx = next();
+        self.list_sort_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -284,7 +293,8 @@ impl<'a> Codegen<'a> {
         }
         let main_int_ty = self.next_type;
         let render_ty = self.next_type + 1;
-        self.next_type += 2;
+        let val_compare_ty = self.next_type + 2; // (eqref, eqref) -> i32
+        self.next_type += 3;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -312,6 +322,9 @@ impl<'a> Codegen<'a> {
         let str_repeat = self.emit_str_repeat();
         let str_starts_with = self.emit_str_affix(false);
         let str_ends_with = self.emit_str_affix(true);
+        let val_compare = self.emit_val_compare();
+        let list_insert = self.emit_list_insert();
+        let list_sort = self.emit_list_sort();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -344,6 +357,7 @@ impl<'a> Codegen<'a> {
         }
         types.ty().function(vec![], vec![ValType::I64]); // main_int
         types.ty().function(vec![], vec![ValType::I32]); // render
+        types.ty().function(vec![eqref(), eqref()], vec![ValType::I32]); // val_compare
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -375,6 +389,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // str_repeat
         funcs.function(ft2); // str_starts_with
         funcs.function(ft2); // str_ends_with
+        funcs.function(val_compare_ty); // val_compare
+        funcs.function(ft2); // list_insert
+        funcs.function(ft1); // list_sort
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -412,6 +429,9 @@ impl<'a> Codegen<'a> {
         code.function(&str_repeat);
         code.function(&str_starts_with);
         code.function(&str_ends_with);
+        code.function(&val_compare);
+        code.function(&list_insert);
+        code.function(&list_sort);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1476,6 +1496,291 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// val_compare(a, b) -> i32 (-1/0/1): ordering over comparables (Int, Float,
+    /// Char, String, List, Tuple), lexicographic for sequences.
+    fn emit_val_compare(&self) -> Function {
+        // a(0), b(1); i(2),la(3),lb(4),c(5): i32; ai(6),bi(7): i64; af(8),bf(9): f64
+        let mut f = Function::new([(4, ValType::I32), (2, ValType::I64), (2, ValType::F64)]);
+        let sign_i = |f: &mut Function, x: u32, y: u32, i64ty: bool| {
+            f.instruction(&Instruction::LocalGet(x));
+            f.instruction(&Instruction::LocalGet(y));
+            f.instruction(if i64ty { &Instruction::I64GtS } else { &Instruction::I32GtS });
+            f.instruction(&Instruction::LocalGet(x));
+            f.instruction(&Instruction::LocalGet(y));
+            f.instruction(if i64ty { &Instruction::I64LtS } else { &Instruction::I32LtS });
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::Return);
+        };
+        // nil ordering
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // i31 (Char)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(4));
+        sign_i(&mut f, 3, 4, false);
+        f.instruction(&Instruction::End);
+        // T_INT
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_INT)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(7));
+        sign_i(&mut f, 6, 7, true);
+        f.instruction(&Instruction::End);
+        // T_FLOAT
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::F64Gt);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::F64Lt);
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // T_STR: lexicographic bytes
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_STR)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // i < la && i < lb
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // x=a[i], y=b[i]
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // return sign(a[i], b[i])
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32GtU);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32LtU);
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // lengths
+        sign_i(&mut f, 3, 4, false);
+        f.instruction(&Instruction::End);
+        // T_CONS: compare heads, then tails
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_CONS)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // T_ARR (tuples): elementwise
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // fallback
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_insert(x, sorted) : insert `x` into an ascending-sorted list.
+    fn emit_list_insert(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_insert_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_sort(xs) : insertion sort using val_compare.
+    fn emit_list_sort(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_sort_idx));
+        f.instruction(&Instruction::Call(self.list_insert_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -2334,19 +2639,34 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_INT));
             }
             ("Basics", "min") | ("Basics", "max") => {
+                // a and b for the select, then compare(a,b) for the condition.
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                let want_lt = name == "min";
-                if is_float(&args[0].tipe) {
-                    self.emit_f64(&args[0], ctx, f)?;
-                    self.emit_f64(&args[1], ctx, f)?;
-                    f.instruction(if want_lt { &Instruction::F64Lt } else { &Instruction::F64Gt });
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.val_compare_idx));
+                f.instruction(&Instruction::I32Const(0));
+                // min: pick a when compare<=0; max: pick a when compare>0.
+                f.instruction(if name == "min" {
+                    &Instruction::I32LeS
                 } else {
-                    self.emit_i64(&args[0], ctx, f)?;
-                    self.emit_i64(&args[1], ctx, f)?;
-                    f.instruction(if want_lt { &Instruction::I64LtS } else { &Instruction::I64GtS });
-                }
+                    &Instruction::I32GtS
+                });
                 f.instruction(&Instruction::TypedSelect(eqref()));
+            }
+            ("Basics", "compare") => {
+                // val_compare -> -1/0/1; Order ctor tag = that + 1 (LT/EQ/GT).
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.val_compare_idx));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::I32Add);
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("List", "sort") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_sort_idx));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {
