@@ -342,6 +342,7 @@ struct Codegen<'a> {
     str_from_list_idx: u32,
     str_from_char_idx: u32,
     str_uncons_idx: u32,
+    str_length_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -409,6 +410,7 @@ impl<'a> Codegen<'a> {
             str_from_list_idx: 0,
             str_from_char_idx: 0,
             str_uncons_idx: 0,
+            str_length_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -500,6 +502,7 @@ impl<'a> Codegen<'a> {
         self.str_from_list_idx = next();
         self.str_from_char_idx = next();
         self.str_uncons_idx = next();
+        self.str_length_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -586,6 +589,7 @@ impl<'a> Codegen<'a> {
         let str_from_list = self.emit_str_from_list();
         let str_from_char = self.emit_str_from_char();
         let str_uncons = self.emit_str_uncons();
+        let str_length = self.emit_str_length();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -674,6 +678,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // str_from_list
         funcs.function(ft1); // str_from_char
         funcs.function(ft1); // str_uncons
+        funcs.function(ft1); // str_length
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -735,6 +740,7 @@ impl<'a> Codegen<'a> {
         code.function(&str_from_list);
         code.function(&str_from_char);
         code.function(&str_uncons);
+        code.function(&str_length);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1237,10 +1243,7 @@ impl<'a> Codegen<'a> {
             }
             ("String", "length") => {
                 lf.instruction(&Instruction::LocalGet(0));
-                lf.instruction(&cast_to(T_STR));
-                lf.instruction(&Instruction::ArrayLen);
-                lf.instruction(&Instruction::I64ExtendI32S);
-                lf.instruction(&Instruction::StructNew(T_INT));
+                lf.instruction(&Instruction::Call(self.str_length_idx));
             }
             ("Char", "toCode") => {
                 lf.instruction(&Instruction::LocalGet(0));
@@ -3019,6 +3022,50 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_length(s) : number of UTF-16 code units (matching JS `.length`, so
+    /// astral code points count as 2), boxed as Int.
+    fn emit_str_length(&self) -> Function {
+        // locals: sstr(1):str, len(2), i(3), cp(4), adv(5), count(6):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        utf8_decode(&mut f, 1, 3, 4, 5);
+        // +1 per code point, +1 more for astral (surrogate pair)
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0x10000));
+        f.instruction(&Instruction::I32GeU);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64ExtendI32U);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3734,10 +3781,7 @@ impl<'a> Codegen<'a> {
             }
             ("String", "length") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_STR));
-                f.instruction(&Instruction::ArrayLen);
-                f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.str_length_idx));
             }
             ("List", "map") => {
                 self.emit_expr(&args[0], ctx, f)?;

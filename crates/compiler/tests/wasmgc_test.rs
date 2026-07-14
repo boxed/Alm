@@ -594,6 +594,18 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_length_utf16() {
+    // Elm String.length counts UTF-16 code units: BMP = 1, astral = 2.
+    assert_str_prog(
+        "len16",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (String.length \"abc\")\n        ++ \",\" ++ String.fromInt (String.length \"a\\u{00E9}o\")\n        ++ \",\" ++ String.fromInt (String.length \"\\u{2603}\")\n        ++ \",\" ++ String.fromInt (String.length \"\\u{1F600}\")\n        ++ \",\" ++ String.fromInt (String.length \"\")\n",
+    );
+}
+
+#[test]
 fn string_char_bridge() {
     assert_str_prog(
         "char_bridge",
