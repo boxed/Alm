@@ -594,6 +594,19 @@ fn list_sum_float() {
 }
 
 #[test]
+fn list_partition_unzip() {
+    assert_str_prog(
+        "partition_unzip",
+        "module Test exposing (main)\n\n\
+         ints : List Int -> String\n\
+         ints xs = String.join \",\" (List.map String.fromInt xs)\n\n\
+         main : String\n\
+         main =\n    \
+            let\n        ( evens, odds ) =\n            List.partition (\\n -> modBy 2 n == 0) [ 1, 2, 3, 4, 5 ]\n\n        ( nums, strs ) =\n            List.unzip [ ( 1, \"a\" ), ( 2, \"b\" ), ( 3, \"c\" ) ]\n    in\n    ints evens ++ \"|\" ++ ints odds ++ \"|\" ++ ints nums ++ \"|\" ++ String.join \",\" strs\n",
+    );
+}
+
+#[test]
 fn bitwise_and_float_predicates() {
     assert_str_prog(
         "bitwise",

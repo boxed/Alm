@@ -413,6 +413,8 @@ struct Codegen<'a> {
     str_pad_right_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
+    list_partition_idx: u32,
+    list_unzip_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -499,6 +501,8 @@ impl<'a> Codegen<'a> {
             str_pad_right_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
+            list_partition_idx: 0,
+            list_unzip_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -609,6 +613,8 @@ impl<'a> Codegen<'a> {
         self.str_pad_right_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
+        self.list_partition_idx = next();
+        self.list_unzip_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -715,6 +721,8 @@ impl<'a> Codegen<'a> {
         let str_pad_right = self.emit_str_pad(false);
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
+        let list_partition = self.emit_list_partition();
+        let list_unzip = self.emit_list_unzip();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -822,6 +830,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // str_pad_right
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
+        funcs.function(ft2); // list_partition
+        funcs.function(ft1); // list_unzip
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -902,6 +912,8 @@ impl<'a> Codegen<'a> {
         code.function(&str_pad_right);
         code.function(&list_intersperse);
         code.function(&list_map3);
+        code.function(&list_partition);
+        code.function(&list_unzip);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -4028,6 +4040,87 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_partition(pred, xs) : `(matching, non-matching)` preserving order.
+    fn emit_list_partition(&self) -> Function {
+        // params: pred(0), xs(1). locals: rest(2), head(3):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Else);
+        // rest = partition(pred, tail); head = xs.head
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_partition_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(3));
+        // pred head ?
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // [cons(head, rest[0]), rest[1]]
+        f.instruction(&Instruction::LocalGet(3));
+        self.load_arr(2, 0, &mut f);
+        f.instruction(&Instruction::StructNew(T_CONS));
+        self.load_arr(2, 1, &mut f);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Else);
+        // [rest[0], cons(head, rest[1])]
+        self.load_arr(2, 0, &mut f);
+        f.instruction(&Instruction::LocalGet(3));
+        self.load_arr(2, 1, &mut f);
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End); // inner if
+        f.instruction(&Instruction::End); // outer if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// list_unzip(xs) : `(firsts, seconds)` from a list of pairs.
+    fn emit_list_unzip(&self) -> Function {
+        // param: xs(0). locals: rest(1), pair(2):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_unzip_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(2));
+        // [cons(pair[0], rest[0]), cons(pair[1], rest[1])]
+        self.load_arr(2, 0, &mut f);
+        self.load_arr(1, 0, &mut f);
+        f.instruction(&Instruction::StructNew(T_CONS));
+        self.load_arr(2, 1, &mut f);
+        self.load_arr(1, 1, &mut f);
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End); // if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -4647,13 +4740,11 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::LocalSet(slot));
             }
             TypedLetDecl::Destruct(pat, expr) => {
-                if let can::Pattern_::Var(name) = &pat.value {
-                    self.emit_expr(expr, ctx, f)?;
-                    let slot = ctx.bind(name.as_str());
-                    f.instruction(&Instruction::LocalSet(slot));
-                } else {
-                    return Err("wasmgc: only simple `let x = ...` destructuring yet".into());
-                }
+                // Evaluate once into a scratch local, then bind the pattern.
+                self.emit_expr(expr, ctx, f)?;
+                let slot = ctx.bind("$destr");
+                f.instruction(&Instruction::LocalSet(slot));
+                self.bind_pat(pat, slot, ctx, f)?;
             }
             // A local function: lift it to a closure and bind the name.
             TypedLetDecl::Def { name, params, body } => {
@@ -5072,6 +5163,15 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_map_idx));
                 f.instruction(&Instruction::Call(self.list_concat_idx));
+            }
+            ("List", "partition") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_partition_idx));
+            }
+            ("List", "unzip") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_unzip_idx));
             }
             ("List", "intersperse") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -5758,14 +5858,14 @@ fn count_bindings(e: &TypedExpr) -> u32 {
                     TypedLetDecl::Def { params, body, .. } => {
                         1 + params.len() as u32 + count_bindings(body)
                     }
-                    TypedLetDecl::Destruct(p, ex) => pat_var_count(p) + count_bindings(ex),
+                    TypedLetDecl::Destruct(p, ex) => 1 + pat_size(p) + count_bindings(ex),
                     TypedLetDecl::Recursive(ds) => ds
                         .iter()
                         .map(|d| match d {
                             TypedLetDecl::Def { params, body, .. } => {
                                 1 + params.len() as u32 + count_bindings(body)
                             }
-                            TypedLetDecl::Destruct(p, ex) => pat_var_count(p) + count_bindings(ex),
+                            TypedLetDecl::Destruct(p, ex) => 1 + pat_size(p) + count_bindings(ex),
                             TypedLetDecl::Recursive(_) => 0,
                         })
                         .sum(),
