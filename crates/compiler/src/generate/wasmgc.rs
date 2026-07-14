@@ -412,6 +412,7 @@ struct Codegen<'a> {
     str_pad_left_idx: u32,
     str_pad_right_idx: u32,
     list_intersperse_idx: u32,
+    list_map3_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -497,6 +498,7 @@ impl<'a> Codegen<'a> {
             str_pad_left_idx: 0,
             str_pad_right_idx: 0,
             list_intersperse_idx: 0,
+            list_map3_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -606,6 +608,7 @@ impl<'a> Codegen<'a> {
         self.str_pad_left_idx = next();
         self.str_pad_right_idx = next();
         self.list_intersperse_idx = next();
+        self.list_map3_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -633,6 +636,7 @@ impl<'a> Codegen<'a> {
         let ft1 = self.fn_type(1); // str_from_int, list_length : eqref -> eqref
         let ft2 = self.fn_type(2); // str_append, apply1, list_map
         let ft3 = self.fn_type(3); // list_foldl
+        let ft4 = self.fn_type(4); // list_map3
         // Ensure a fn-type exists for every arity the apply-dispatcher handles.
         for a in 1..=MAX_ARITY {
             self.fn_type(a);
@@ -710,6 +714,7 @@ impl<'a> Codegen<'a> {
         let str_pad_left = self.emit_str_pad(true);
         let str_pad_right = self.emit_str_pad(false);
         let list_intersperse = self.emit_list_intersperse();
+        let list_map3 = self.emit_list_map3();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -816,6 +821,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // str_pad_left
         funcs.function(ft3); // str_pad_right
         funcs.function(ft2); // list_intersperse
+        funcs.function(ft4); // list_map3
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -895,6 +901,7 @@ impl<'a> Codegen<'a> {
         code.function(&str_pad_left);
         code.function(&str_pad_right);
         code.function(&list_intersperse);
+        code.function(&list_map3);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -3963,6 +3970,54 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_map3(f, xs, ys, zs) : zip-map of three lists, stopping at the
+    /// shortest.
+    fn emit_list_map3(&self) -> Function {
+        // params: f(0), xs(1), ys(2), zs(3)
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // head' = apply1(apply1(apply1(f, xs.head), ys.head), zs.head)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        // tail' = map3(f, xs.tail, ys.tail, zs.tail)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_map3_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -4814,6 +4869,56 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
             }
+            ("Tuple", "mapFirst") => {
+                // (f a, b)
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            }
+            ("Tuple", "mapSecond") => {
+                // (a, f b)
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            }
+            ("Tuple", "mapBoth") => {
+                // mapBoth f g (a, b) = (f a, g b)
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            }
+            ("Basics", "xor") => {
+                self.emit_bool(&args[0], ctx, f)?;
+                self.emit_bool(&args[1], ctx, f)?;
+                f.instruction(&Instruction::I32Ne);
+                f.instruction(&Instruction::RefI31);
+            }
             // Char classifiers: `(code - base) < span` (unsigned).
             ("Char", "isDigit") | ("Char", "isLower") | ("Char", "isUpper") => {
                 let (base, span) = match name {
@@ -4996,6 +5101,13 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_map2_idx));
+            }
+            ("List", "map3") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                self.emit_expr(&args[3], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_map3_idx));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {

@@ -594,6 +594,21 @@ fn list_sum_float() {
 }
 
 #[test]
+fn tuple_map_xor_map3() {
+    assert_str_prog(
+        "tuple_xor_map3",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         showT : ( Int, String ) -> String\n\
+         showT t =\n    \"(\" ++ String.fromInt (Tuple.first t) ++ \",\" ++ Tuple.second t ++ \")\"\n\n\
+         main : String\n\
+         main =\n    \
+            showT (Tuple.mapFirst (\\n -> n + 1) ( 4, \"x\" ))\n        ++ showT (Tuple.mapSecond (\\s -> s ++ \"!\") ( 4, \"x\" ))\n        ++ showT (Tuple.mapBoth (\\n -> n * 2) (\\s -> String.toUpper s) ( 4, \"x\" ))\n        ++ \"|\" ++ yn (xor True False) ++ yn (xor True True)\n        ++ \"|\" ++ String.join \",\" (List.map3 (\\a b c -> String.fromInt (a + b + c)) [ 1, 2, 3 ] [ 10, 20, 30 ] [ 100, 200 ])\n",
+    );
+}
+
+#[test]
 fn string_pad_and_list_more() {
     assert_str_prog(
         "pad_more",
