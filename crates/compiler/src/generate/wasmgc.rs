@@ -1249,7 +1249,12 @@ impl<'a> Codegen<'a> {
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((total, Function::new([])));
 
-        let extra = count_bindings(body);
+        let param_dtor: u32 = params
+            .iter()
+            .filter(|(p, _)| !matches!(p.value, can::Pattern_::Var(_) | can::Pattern_::Anything))
+            .map(|(p, _)| pat_size(p))
+            .sum();
+        let extra = count_bindings(body) + param_dtor;
         let mut lf = Function::new([(extra, eqref())]);
         let mut lctx = FnCtx::new();
         lctx.next_local = total;
@@ -1257,9 +1262,7 @@ impl<'a> Codegen<'a> {
             lctx.scope.push((name.clone(), i as u32));
         }
         for (i, (p, _)) in params.iter().enumerate() {
-            if let can::Pattern_::Var(n) = &p.value {
-                lctx.scope.push((n.to_string(), ncap + i as u32));
-            }
+            self.bind_pat(p, ncap + i as u32, &mut lctx, &mut lf)?;
         }
         self.emit_expr(body, &mut lctx, &mut lf)?;
         lf.instruction(&Instruction::End);
@@ -4277,15 +4280,20 @@ impl<'a> Codegen<'a> {
     /// Emit one function: N eqref params -> eqref body.
     fn emit_fn(&mut self, f: &crate::ir::mono::TypedFn) -> Result<Function, String> {
         let nparams = f.params.len() as u32;
-        // Extra eqref locals for `let`/`case`/destructure bindings.
-        let extra = count_bindings(&f.body);
+        // Extra eqref locals for `let`/`case`/destructure bindings, plus any
+        // temporaries needed to destructure non-trivial parameter patterns.
+        let param_dtor: u32 = f
+            .params
+            .iter()
+            .filter(|(p, _)| !matches!(p.value, can::Pattern_::Var(_) | can::Pattern_::Anything))
+            .map(|(p, _)| pat_size(p))
+            .sum();
+        let extra = count_bindings(&f.body) + param_dtor;
         let mut wf = Function::new([(extra, eqref())]);
         let mut ctx = FnCtx::new();
         ctx.next_local = nparams;
         for (i, (pat, _)) in f.params.iter().enumerate() {
-            if let can::Pattern_::Var(name) = &pat.value {
-                ctx.scope.push((name.to_string(), i as u32));
-            }
+            self.bind_pat(pat, i as u32, &mut ctx, &mut wf)?;
         }
         self.emit_expr(&f.body, &mut ctx, &mut wf)?;
         wf.instruction(&Instruction::End);

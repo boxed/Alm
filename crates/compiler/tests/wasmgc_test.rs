@@ -594,6 +594,22 @@ fn list_sum_float() {
 }
 
 #[test]
+fn tuple_param_patterns() {
+    // Tuple destructuring in function params (top-level and lambda).
+    assert_str_prog(
+        "tuple_params",
+        "module Test exposing (main)\n\n\
+         add : ( Int, Int ) -> Int\n\
+         add ( a, b ) = a + b\n\n\
+         nested : ( Int, ( String, Int ) ) -> String\n\
+         nested ( n, ( s, m ) ) = s ++ String.fromInt (n + m)\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (add ( 3, 4 ))\n        ++ \"|\" ++ nested ( 10, ( \"x\", 5 ) )\n        ++ \"|\" ++ String.join \",\" (List.map (\\( k, v ) -> k ++ String.fromInt v) [ ( \"a\", 1 ), ( \"b\", 2 ) ])\n",
+    );
+}
+
+#[test]
 fn tuple_map_xor_map3() {
     assert_str_prog(
         "tuple_xor_map3",
