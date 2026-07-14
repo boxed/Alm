@@ -152,6 +152,9 @@ struct Codegen<'a> {
     list_sum_idx: u32,
     list_product_idx: u32,
     list_map2_idx: u32,
+    str_upper_idx: u32,
+    str_lower_idx: u32,
+    str_trim_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -206,6 +209,9 @@ impl<'a> Codegen<'a> {
             list_sum_idx: 0,
             list_product_idx: 0,
             list_map2_idx: 0,
+            str_upper_idx: 0,
+            str_lower_idx: 0,
+            str_trim_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -284,6 +290,9 @@ impl<'a> Codegen<'a> {
         self.list_sum_idx = next();
         self.list_product_idx = next();
         self.list_map2_idx = next();
+        self.str_upper_idx = next();
+        self.str_lower_idx = next();
+        self.str_trim_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -357,6 +366,9 @@ impl<'a> Codegen<'a> {
         let list_sum = self.emit_list_sum_prod(false);
         let list_product = self.emit_list_sum_prod(true);
         let list_map2 = self.emit_list_map2();
+        let str_upper = self.emit_str_case(true);
+        let str_lower = self.emit_str_case(false);
+        let str_trim = self.emit_str_trim();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -432,6 +444,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // list_sum
         funcs.function(ft1); // list_product
         funcs.function(ft3); // list_map2
+        funcs.function(ft1); // str_upper
+        funcs.function(ft1); // str_lower
+        funcs.function(ft1); // str_trim
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -480,6 +495,9 @@ impl<'a> Codegen<'a> {
         code.function(&list_sum);
         code.function(&list_product);
         code.function(&list_map2);
+        code.function(&str_upper);
+        code.function(&str_lower);
+        code.function(&str_trim);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -2077,6 +2095,178 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_upper/lower(s) : ASCII-only case fold (matches JS for ASCII; other
+    /// code points pass through unchanged, so non-ASCII parity is partial).
+    fn emit_str_case(&self, upper: bool) -> Function {
+        // locals: sstr(1):str, n(2), i(3), c(4):i32, out(5):str
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (3, ValType::I32),
+            (1, ref_to(T_STR)),
+        ]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
+        // ASCII range test
+        let (lo, hi, delta): (i32, i32, i32) =
+            if upper { (97, 122, -32) } else { (65, 90, 32) };
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(lo));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(hi));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(delta));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_trim(s) : drop leading/trailing ASCII whitespace (space/tab/CR/LF).
+    fn emit_str_trim(&self) -> Function {
+        // locals: sstr(1):str, len(2), start(3), end(4), i(5), c(6):i32, out(7):str
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (5, ValType::I32),
+            (1, ref_to(T_STR)),
+        ]);
+        // is-whitespace test for the byte in local 6, leaving an i32 bool
+        let push_is_ws = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::I32Const(32));
+            f.instruction(&Instruction::I32Eq);
+            for ws in [9, 10, 13] {
+                f.instruction(&Instruction::LocalGet(6));
+                f.instruction(&Instruction::I32Const(ws));
+                f.instruction(&Instruction::I32Eq);
+                f.instruction(&Instruction::I32Or);
+            }
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        // advance start past whitespace
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        push_is_ws(&mut f);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // pull end back past whitespace
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        push_is_ws(&mut f);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // out = new(end - start); copy
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3104,6 +3294,18 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayLen);
                 f.instruction(&Instruction::I32Eqz);
                 f.instruction(&Instruction::RefI31);
+            }
+            ("String", "toUpper") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_upper_idx));
+            }
+            ("String", "toLower") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_lower_idx));
+            }
+            ("String", "trim") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_trim_idx));
             }
             ("List", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;

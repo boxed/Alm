@@ -594,6 +594,17 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_case_trim() {
+    assert_str_prog(
+        "case_trim",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.toUpper \"Hello, World!\"\n        ++ \"|\" ++ String.toLower \"Hello, World!\"\n        ++ \"|\" ++ String.trim \"  \\t spaced \\n \"\n        ++ \"|\" ++ String.trim \"nopad\"\n",
+    );
+}
+
+#[test]
 fn list_map2() {
     assert_str_prog(
         "map2",
