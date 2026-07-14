@@ -213,6 +213,15 @@ pub enum Value {
     /// structural sharing, so `Array.set`/`push` in a loop no longer copies an
     /// O(n) backing each time.
     Array(u64),
+    /// A double-ended queue (robinheghan/elm-deque): elements front-to-back.
+    /// The library implements a chunked finger-tree whose TYPE is non-regular
+    /// (`Deque a` recurses at `Deque (Buffer a)`), which monomorphization
+    /// cannot compile — so alm treats `Deque a` as this opaque sequence and
+    /// maps `Deque.*` to native kernels, never compiling the library source
+    /// (the same treatment as Dict/Set/Array). Holds uniform element words; the
+    /// backing `Vec` is GC-allocated (global allocator is the collector), so its
+    /// element pointers are scanned exactly like `Tuple(Vec<u64>)`.
+    Deque(Vec<u64>),
     /// An `elm/bytes` `Bytes` value: an immutable byte buffer. Mirrors the JS
     /// runtime's `DataView`; `encode` fills one, `read_*` read from it.
     Bytes(Vec<u8>),
@@ -552,6 +561,7 @@ unsafe fn variant_name(w: u64) -> &'static str {
         Value::Dict(_) => "Dict",
         Value::Set(_) => "Set",
         Value::Array(_) => "Array",
+        Value::Deque(_) => "Deque",
         Value::Bytes(_) => "Bytes",
         Value::Floats(_) => "Floats",
         Value::Json(_) => "Json",
@@ -1725,6 +1735,9 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
             tcollect_vals(*x, &mut px);
             tcollect_vals(*y, &mut py);
             px.iter().zip(&py).all(|(&p, &q)| value_eq(p, q))
+        }
+        (Value::Deque(x), Value::Deque(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Bytes(x), Value::Bytes(y)) => x == y,
         // linear-algebra vectors/matrices: element-wise float equality,
@@ -3062,6 +3075,16 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             let mut els = Vec::new();
             tcollect_vals(*root, &mut els);
             out.push_str("Array.fromList [");
+            for (i, &x) in els.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                debug_fmt(out, x);
+            }
+            out.push(']');
+        }
+        Value::Deque(els) => {
+            out.push_str("Deque.fromList [");
             for (i, &x) in els.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
@@ -4619,6 +4642,205 @@ pub unsafe extern "C" fn array_slice(from: u64, to: u64, a: u64) -> u64 {
         &[][..]
     };
     mk_array(tbuild_vals(els))
+}
+
+// -- robinheghan/elm-deque : native double-ended queue --
+//
+// See `Value::Deque`. The library's chunked finger-tree type is non-regular
+// (polymorphic recursion the monomorphizer can't compile), so alm treats a
+// deque as an opaque front-to-back sequence and routes `Deque.*` here, never
+// compiling the library source (like Dict/Set/Array). Elements are uniform
+// words; end operations are O(n) (immutable clone), which is fine for
+// conformance — every observable result matches the JS finger-tree.
+
+unsafe fn deque_elems(d: u64) -> Vec<u64> {
+    match deref(d) {
+        Value::Deque(v) => v.clone(),
+        _ => Vec::new(),
+    }
+}
+#[inline]
+unsafe fn mk_deque(v: Vec<u64>) -> u64 {
+    alloc(Value::Deque(v))
+}
+/// Clamp a possibly-negative count into `0..=len`.
+fn clamp_len(n: i64, len: usize) -> usize {
+    n.clamp(0, len as i64) as usize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn deque_empty() -> u64 {
+    mk_deque(Vec::new())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_singleton(x: u64) -> u64 {
+    mk_deque(vec![x])
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_is_empty(d: u64) -> u64 {
+    rt_bool(deque_elems(d).is_empty())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_length(d: u64) -> u64 {
+    mk_int(deque_elems(d).len() as i64)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_push_front(x: u64, d: u64) -> u64 {
+    let mut v = deque_elems(d);
+    v.insert(0, x);
+    mk_deque(v)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_push_back(x: u64, d: u64) -> u64 {
+    let mut v = deque_elems(d);
+    v.push(x);
+    mk_deque(v)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_pop_front(d: u64) -> u64 {
+    let mut v = deque_elems(d);
+    if v.is_empty() {
+        pair(nothing(), mk_deque(v))
+    } else {
+        let h = v.remove(0);
+        pair(just(h), mk_deque(v))
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_pop_back(d: u64) -> u64 {
+    let mut v = deque_elems(d);
+    match v.pop() {
+        None => pair(nothing(), mk_deque(v)),
+        Some(x) => pair(just(x), mk_deque(v)),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_first(d: u64) -> u64 {
+    match deque_elems(d).first() {
+        Some(&x) => just(x),
+        None => nothing(),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_last(d: u64) -> u64 {
+    match deque_elems(d).last() {
+        Some(&x) => just(x),
+        None => nothing(),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_from_list(xs: u64) -> u64 {
+    mk_deque(to_vec(xs))
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_to_list(d: u64) -> u64 {
+    list_from_slice(&deque_elems(d))
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_append(a: u64, b: u64) -> u64 {
+    let mut v = deque_elems(a);
+    v.extend(deque_elems(b));
+    mk_deque(v)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_member(x: u64, d: u64) -> u64 {
+    rt_bool(deque_elems(d).iter().any(|&e| value_eq(e, x)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_equals(a: u64, b: u64) -> u64 {
+    let (x, y) = (deque_elems(a), deque_elems(b));
+    rt_bool(x.len() == y.len() && x.iter().zip(&y).all(|(&p, &q)| value_eq(p, q)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_initialize(n: u64, f: u64) -> u64 {
+    let n = int_val(n).max(0);
+    mk_deque((0..n).map(|i| ap1(f, mk_int(i))).collect())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_repeat(n: u64, x: u64) -> u64 {
+    let n = int_val(n).max(0) as usize;
+    mk_deque(vec![x; n])
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_range(from: u64, to: u64) -> u64 {
+    let (from, to) = (int_val(from), int_val(to));
+    let v: Vec<u64> = if to < from {
+        Vec::new()
+    } else {
+        (from..=to).map(mk_int).collect()
+    };
+    mk_deque(v)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_left(qty: u64, d: u64) -> u64 {
+    let v = deque_elems(d);
+    let k = clamp_len(int_val(qty), v.len());
+    mk_deque(v[..k].to_vec())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_right(qty: u64, d: u64) -> u64 {
+    let v = deque_elems(d);
+    let k = clamp_len(int_val(qty), v.len());
+    mk_deque(v[v.len() - k..].to_vec())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_drop_left(n: u64, d: u64) -> u64 {
+    let v = deque_elems(d);
+    let k = clamp_len(int_val(n), v.len());
+    mk_deque(v[k..].to_vec())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_drop_right(n: u64, d: u64) -> u64 {
+    let v = deque_elems(d);
+    let k = clamp_len(int_val(n), v.len());
+    mk_deque(v[..v.len() - k].to_vec())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_foldl(f: u64, init: u64, d: u64) -> u64 {
+    let mut acc = init;
+    for &x in &deque_elems(d) {
+        acc = ap2(f, x, acc);
+    }
+    acc
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_foldr(f: u64, init: u64, d: u64) -> u64 {
+    let mut acc = init;
+    for &x in deque_elems(d).iter().rev() {
+        acc = ap2(f, x, acc);
+    }
+    acc
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_map(f: u64, d: u64) -> u64 {
+    mk_deque(deque_elems(d).iter().map(|&x| ap1(f, x)).collect())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_filter(f: u64, d: u64) -> u64 {
+    mk_deque(deque_elems(d).into_iter().filter(|&x| truthy(ap1(f, x))).collect())
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_filter_map(f: u64, d: u64) -> u64 {
+    let mut out = Vec::new();
+    for x in deque_elems(d) {
+        let m = ap1(f, x);
+        if let Value::Ctor { index: 0, .. } = deref(m) {
+            out.push(ctor_get(m, 0));
+        }
+    }
+    mk_deque(out)
+}
+#[no_mangle]
+pub unsafe extern "C" fn deque_partition(f: u64, d: u64) -> u64 {
+    let (mut yes, mut no) = (Vec::new(), Vec::new());
+    for x in deque_elems(d) {
+        if truthy(ap1(f, x)) {
+            yes.push(x);
+        } else {
+            no.push(x);
+        }
+    }
+    pair(mk_deque(yes), mk_deque(no))
 }
 
 // -- elm/bytes --

@@ -115,6 +115,15 @@ pub fn compile_project_native(
 /// Compile a project to a native binary via the *typed* (monomorphized)
 /// backend, which emits unboxed code. Monomorphizes across all project
 /// modules starting from the entry module's `main`.
+/// Whether a module is implemented by a native runtime kernel rather than
+/// compiled from its `.elm` source. Its source still type-checks the program
+/// but is dropped before the backend, so references become kernel calls and its
+/// types are opaque runtime words. Currently only robinheghan/elm-deque, whose
+/// non-regular finger-tree type the monomorphizer cannot compile.
+fn is_native_shunted_module(name: &str) -> bool {
+    name == "Deque"
+}
+
 pub fn compile_project_typed(
     entry: &Path,
     output: &Path,
@@ -123,9 +132,16 @@ pub fn compile_project_typed(
     let checked = check_project(entry)?;
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
+    // Modules alm implements natively instead of compiling from source. Their
+    // `.elm` is used for type-checking (above) but omitted from the backend, so
+    // references to them resolve to kernels and their types lay out as opaque
+    // runtime words. robinheghan/elm-deque's chunked finger-tree is a
+    // non-regular datatype the monomorphizer cannot compile; alm ships a native
+    // double-ended queue instead (`Deque.*` -> `deque_*` kernels).
     let infos: Vec<crate::ir::mono::ModuleInfo> = checked
         .modules
         .iter()
+        .filter(|module| !is_native_shunted_module(module.name.as_str()))
         .map(|module| crate::ir::mono::ModuleInfo {
             name: module.name.clone(),
             module,
@@ -143,7 +159,11 @@ pub fn compile_project_typed(
             message.clone(),
         )]);
     }
-    let module_refs: Vec<&can::Module> = checked.modules.iter().collect();
+    let module_refs: Vec<&can::Module> = checked
+        .modules
+        .iter()
+        .filter(|module| !is_native_shunted_module(module.name.as_str()))
+        .collect();
     let layouts = crate::ir::layout::LayoutCtx::for_modules(&module_refs);
     generate::typed::build(&program, &layouts, output, target).map_err(|message| {
         vec![BuildError::new(
