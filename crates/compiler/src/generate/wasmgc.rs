@@ -133,6 +133,10 @@ struct Codegen<'a> {
     list_take_idx: u32,
     list_drop_idx: u32,
     list_concat_idx: u32,
+    list_head_idx: u32,
+    list_tail_idx: u32,
+    maybe_with_default_idx: u32,
+    maybe_map_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -168,6 +172,10 @@ impl<'a> Codegen<'a> {
             list_take_idx: 0,
             list_drop_idx: 0,
             list_concat_idx: 0,
+            list_head_idx: 0,
+            list_tail_idx: 0,
+            maybe_with_default_idx: 0,
+            maybe_map_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -227,6 +235,10 @@ impl<'a> Codegen<'a> {
         self.list_take_idx = next();
         self.list_drop_idx = next();
         self.list_concat_idx = next();
+        self.list_head_idx = next();
+        self.list_tail_idx = next();
+        self.maybe_with_default_idx = next();
+        self.maybe_map_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -280,6 +292,10 @@ impl<'a> Codegen<'a> {
         let list_take = self.emit_list_take();
         let list_drop = self.emit_list_drop();
         let list_concat = self.emit_list_concat();
+        let list_head = self.emit_list_head(false);
+        let list_tail = self.emit_list_head(true);
+        let maybe_with_default = self.emit_maybe_with_default();
+        let maybe_map = self.emit_maybe_map();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -335,6 +351,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // list_take
         funcs.function(ft2); // list_drop
         funcs.function(ft1); // list_concat
+        funcs.function(ft1); // list_head
+        funcs.function(ft1); // list_tail
+        funcs.function(ft2); // maybe_with_default
+        funcs.function(ft2); // maybe_map
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -364,6 +384,10 @@ impl<'a> Codegen<'a> {
         code.function(&list_take);
         code.function(&list_drop);
         code.function(&list_concat);
+        code.function(&list_head);
+        code.function(&list_tail);
+        code.function(&maybe_with_default);
+        code.function(&maybe_map);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1166,6 +1190,77 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_head/list_tail(xs) : `Nothing` on `[]`, else `Just head`/`Just tail`
+    /// (Maybe: Just=tag 0, Nothing=tag 1). `tail` selects field 1 vs 0.
+    fn emit_list_head(&self, tail: bool) -> Function {
+        let field = if tail { 1 } else { 0 };
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // Nothing
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        // Just (xs.head or xs.tail)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: field });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// maybe_with_default(d, m) : `m ? unwrap : d`.
+    fn emit_maybe_with_default(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz); // tag == 0 (Just)
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::End); // if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// maybe_map(f, m) : `Just (f x)` on `Just x`, else `Nothing`.
+    fn emit_maybe_map(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // Just (apply1(f, x))
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End); // if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -1933,6 +2028,65 @@ impl<'a> Codegen<'a> {
             ("List", "concat") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_concat_idx));
+            }
+            ("List", "head") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_head_idx));
+            }
+            ("List", "tail") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_tail_idx));
+            }
+            ("List", "singleton") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::RefNull(eq_heap()));
+                f.instruction(&Instruction::StructNew(T_CONS));
+            }
+            ("Maybe", "withDefault") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.maybe_with_default_idx));
+            }
+            ("Maybe", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.maybe_map_idx));
+            }
+            ("Tuple", "first") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+            ("Tuple", "second") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+            ("Tuple", "pair") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            }
+            // Char classifiers: `(code - base) < span` (unsigned).
+            ("Char", "isDigit") | ("Char", "isLower") | ("Char", "isUpper") => {
+                let (base, span) = match name {
+                    "isDigit" => (48, 10),
+                    "isLower" => (97, 26),
+                    _ => (65, 26),
+                };
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                f.instruction(&Instruction::I31GetS);
+                f.instruction(&Instruction::I32Const(base));
+                f.instruction(&Instruction::I32Sub);
+                f.instruction(&Instruction::I32Const(span));
+                f.instruction(&Instruction::I32LtU);
+                f.instruction(&Instruction::RefI31);
             }
             ("Basics", "abs") if is_float(&args[0].tipe) => {
                 self.emit_f64(&args[0], ctx, f)?;

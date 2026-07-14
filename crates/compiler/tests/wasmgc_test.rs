@@ -450,3 +450,35 @@ fn basics_abs_min_max_negate() {
          main =\n    String.fromInt (abs (0 - 7))\n        ++ \",\" ++ String.fromInt (min 3 8)\n        ++ \",\" ++ String.fromInt (max 3 8)\n        ++ \",\" ++ String.fromInt (negate 4)\n",
     );
 }
+
+#[test]
+fn maybe_tuple_head() {
+    assert_str_prog(
+        "maybe_tuple",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    let\n        xs = [ 10, 20, 30 ]\n        h = Maybe.withDefault 0 (List.head xs)\n        doubled = Maybe.map (\\n -> n * 2) (List.head xs)\n        p = ( 7, 9 )\n    in\n    String.fromInt h\n        ++ \",\" ++ String.fromInt (Maybe.withDefault 0 doubled)\n        ++ \",\" ++ String.fromInt (Tuple.first p + Tuple.second p)\n",
+    );
+}
+
+#[test]
+fn char_classifiers() {
+    assert_str_prog(
+        "char_class",
+        "module Test exposing (main)\n\n\
+         classify : Char -> String\n\
+         classify c =\n    if Char.isDigit c then \"d\" else if Char.isLower c then \"l\" else if Char.isUpper c then \"u\" else \"?\"\n\n\
+         main : String\n\
+         main = classify '5' ++ classify 'a' ++ classify 'Z' ++ classify '!'\n",
+    );
+}
+
+#[test]
+fn maybe_nothing_paths() {
+    assert_str_prog(
+        "maybe_nothing",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    let\n        empty = List.drop 5 [ 1, 2, 3 ]\n    in\n    String.fromInt (Maybe.withDefault -1 (List.head empty))\n        ++ \",\" ++ String.fromInt (Maybe.withDefault -1 (Maybe.map (\\n -> n + 1) (List.head empty)))\n",
+    );
+}
