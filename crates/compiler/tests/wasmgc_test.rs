@@ -416,3 +416,37 @@ fn list_reverse_filter_foldr() {
          main =\n    let\n        xs = [ 1, 2, 3, 4, 5, 6 ]\n        evens = List.filter (\\n -> modBy 2 n == 0) xs\n    in\n    show (List.reverse xs) ++ \"|\" ++ show evens\n",
     );
 }
+
+#[test]
+fn list_range_member_concat() {
+    assert_str_prog(
+        "list_rmc",
+        "module Test exposing (main)\n\n\
+         sumStr : List Int -> String\n\
+         sumStr xs = List.foldl (\\n acc -> acc ++ String.fromInt n ++ \",\") \"\" xs\n\n\
+         main : String\n\
+         main =\n    let\n        r = List.range 1 5\n        c = List.concat [ [ 1, 2 ], [ 3 ], [ 4, 5 ] ]\n    in\n    sumStr r ++ \"|\" ++ sumStr c ++ \"|\" ++ (if List.member 3 r then \"yes\" else \"no\")\n",
+    );
+}
+
+#[test]
+fn list_take_drop() {
+    assert_str_prog(
+        "list_td",
+        "module Test exposing (main)\n\n\
+         show : List Int -> String\n\
+         show xs = List.foldl (\\n acc -> acc ++ String.fromInt n) \"\" xs\n\n\
+         main : String\n\
+         main =\n    let\n        xs = List.range 1 9\n    in\n    show (List.take 3 xs) ++ \"|\" ++ show (List.drop 6 xs)\n",
+    );
+}
+
+#[test]
+fn basics_abs_min_max_negate() {
+    assert_str_prog(
+        "abs_minmax",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    String.fromInt (abs (0 - 7))\n        ++ \",\" ++ String.fromInt (min 3 8)\n        ++ \",\" ++ String.fromInt (max 3 8)\n        ++ \",\" ++ String.fromInt (negate 4)\n",
+    );
+}

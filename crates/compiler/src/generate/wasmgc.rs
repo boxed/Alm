@@ -128,6 +128,11 @@ struct Codegen<'a> {
     list_filter_idx: u32,
     list_foldr_idx: u32,
     modby_idx: u32,
+    list_range_idx: u32,
+    list_member_idx: u32,
+    list_take_idx: u32,
+    list_drop_idx: u32,
+    list_concat_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -158,6 +163,11 @@ impl<'a> Codegen<'a> {
             list_filter_idx: 0,
             list_foldr_idx: 0,
             modby_idx: 0,
+            list_range_idx: 0,
+            list_member_idx: 0,
+            list_take_idx: 0,
+            list_drop_idx: 0,
+            list_concat_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -212,6 +222,11 @@ impl<'a> Codegen<'a> {
         self.list_filter_idx = next();
         self.list_foldr_idx = next();
         self.modby_idx = next();
+        self.list_range_idx = next();
+        self.list_member_idx = next();
+        self.list_take_idx = next();
+        self.list_drop_idx = next();
+        self.list_concat_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -260,6 +275,11 @@ impl<'a> Codegen<'a> {
         let list_filter = self.emit_list_filter();
         let list_foldr = self.emit_list_foldr();
         let modby = self.emit_modby();
+        let list_range = self.emit_list_range();
+        let list_member = self.emit_list_member();
+        let list_take = self.emit_list_take();
+        let list_drop = self.emit_list_drop();
+        let list_concat = self.emit_list_concat();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -310,6 +330,11 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // list_filter
         funcs.function(ft3); // list_foldr
         funcs.function(ft2); // modby
+        funcs.function(ft2); // list_range
+        funcs.function(ft2); // list_member
+        funcs.function(ft2); // list_take
+        funcs.function(ft2); // list_drop
+        funcs.function(ft1); // list_concat
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -334,6 +359,11 @@ impl<'a> Codegen<'a> {
         code.function(&list_filter);
         code.function(&list_foldr);
         code.function(&modby);
+        code.function(&list_range);
+        code.function(&list_member);
+        code.function(&list_take);
+        code.function(&list_drop);
+        code.function(&list_concat);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -974,6 +1004,164 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_range(lo, hi) : `[lo, lo+1, .., hi]`.
+    fn emit_list_range(&self) -> Function {
+        // lo(0), hi(1); acc(2):eqref, i(3):i64
+        let mut f = Function::new([(1, eqref()), (1, ValType::I64)]);
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(3)); // i = hi
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // acc = cons(box i, acc)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_member(x, xs) : whether `x` structurally equals some element.
+    fn emit_list_member(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_take(n, xs) : the first `n` elements.
+    fn emit_list_take(&self) -> Function {
+        let mut f = Function::new([]);
+        // n <= 0 || xs null → []
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64LeS);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_take_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_drop(n, xs) : all but the first `n` elements.
+    fn emit_list_drop(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64LeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_concat(xss) : concatenate a list of lists.
+    fn emit_list_concat(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_concat_idx));
+        f.instruction(&Instruction::Call(self.list_append_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -1721,6 +1909,75 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_append_idx));
+            }
+            ("List", "range") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_range_idx));
+            }
+            ("List", "member") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_member_idx));
+            }
+            ("List", "take") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_take_idx));
+            }
+            ("List", "drop") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_drop_idx));
+            }
+            ("List", "concat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_concat_idx));
+            }
+            ("Basics", "abs") if is_float(&args[0].tipe) => {
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Abs);
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "abs") => {
+                // -a
+                f.instruction(&Instruction::I64Const(0));
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I64Sub);
+                f.instruction(&Instruction::StructNew(T_INT));
+                // a
+                self.emit_expr(&args[0], ctx, f)?;
+                // cond a < 0
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I64Const(0));
+                f.instruction(&Instruction::I64LtS);
+                f.instruction(&Instruction::TypedSelect(eqref()));
+            }
+            ("Basics", "negate") if is_float(&args[0].tipe) => {
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Neg);
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "negate") => {
+                f.instruction(&Instruction::I64Const(0));
+                self.emit_i64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I64Sub);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Basics", "min") | ("Basics", "max") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                let want_lt = name == "min";
+                if is_float(&args[0].tipe) {
+                    self.emit_f64(&args[0], ctx, f)?;
+                    self.emit_f64(&args[1], ctx, f)?;
+                    f.instruction(if want_lt { &Instruction::F64Lt } else { &Instruction::F64Gt });
+                } else {
+                    self.emit_i64(&args[0], ctx, f)?;
+                    self.emit_i64(&args[1], ctx, f)?;
+                    f.instruction(if want_lt { &Instruction::I64LtS } else { &Instruction::I64GtS });
+                }
+                f.instruction(&Instruction::TypedSelect(eqref()));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {
