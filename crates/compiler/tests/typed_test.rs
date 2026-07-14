@@ -2535,3 +2535,98 @@ fn float_to_int_infinity_and_nan() {
          \x20       ++ String.fromInt (countRange (1 / 0) (1 / 0) 1)\n",
     );
 }
+
+#[test]
+fn tagged_union_roundtrip_through_dict() {
+    // A multi-arity tagged union boxed into the uniform runtime (Dict.fromList),
+    // unboxed back out (Dict.get / Dict.values), and compared (==). Exercises
+    // box_enum (Dot), box_tagged (Line/Rect), unbox_tagged, and equals_tagged
+    // together on one type.
+    assert_same(
+        "tagged_roundtrip_dict",
+        r#"module Test exposing (..)
+
+import Dict
+
+type Shape = Dot | Line Int | Rect Int Int
+
+area : Shape -> Int
+area s =
+    case s of
+        Dot -> 0
+        Line n -> n
+        Rect w h -> w * h
+
+main : String
+main =
+    let
+        d = Dict.fromList [ ( 1, Dot ), ( 2, Line 5 ), ( 3, Rect 3 4 ) ]
+    in
+    [ Debug.toString (Dict.get 2 d)
+    , Debug.toString (Dict.get 3 d == Just (Rect 3 4))
+    , Debug.toString (Dict.get 9 d)
+    , String.fromInt (List.sum (List.map area (Dict.values d)))
+    ]
+        |> String.join "|"
+"#,
+    );
+}
+
+#[test]
+fn record_capturing_closure_through_map() {
+    // A closure that captures a record and takes a record argument, applied
+    // through List.map (the uniform closure ABI). Exercises box_closure /
+    // unbox_closure plus box/unbox of records across the closure boundary.
+    assert_same(
+        "record_closure_map",
+        r#"module Test exposing (..)
+
+type alias P = { x : Int, y : Int }
+
+translate : P -> (P -> P)
+translate d =
+    \p -> { x = p.x + d.x, y = p.y + d.y }
+
+main : String
+main =
+    let
+        move = translate { x = 10, y = 20 }
+    in
+    Debug.toString (List.map move [ { x = 1, y = 2 }, { x = 3, y = 4 } ])
+"#,
+    );
+}
+
+#[test]
+fn record_threaded_through_let_bound_function_values() {
+    // Miniature of elm-flate's Symbol.encode: a record threaded through
+    // let-bound function values (identity, a partial application, a `>>`
+    // composition) via `|>`. Exercises the beta-reduction pass and the
+    // pipe/compose/apply lowering over a non-word (record) value.
+    assert_same(
+        "record_pipe_fnvals",
+        r#"module Test exposing (..)
+
+type alias W = { bits : Int, acc : List Int }
+
+put : Int -> W -> W
+put n w =
+    { bits = w.bits + n, acc = n :: w.acc }
+
+encode : Int -> W -> W
+encode sym w =
+    let
+        maybeExtra =
+            if modBy 2 sym == 0 then put sym else identity
+
+        maybeMore =
+            if sym > 3 then put (sym * 10) >> put 1 else identity
+    in
+    w |> put sym |> maybeExtra |> maybeMore
+
+main : String
+main =
+    Debug.toString (List.foldl encode { bits = 0, acc = [] } [ 1, 2, 4, 5 ])
+"#,
+    );
+}
