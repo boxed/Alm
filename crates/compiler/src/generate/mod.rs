@@ -6,6 +6,7 @@
 
 pub mod native;
 pub mod typed;
+pub mod wasmgc;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;

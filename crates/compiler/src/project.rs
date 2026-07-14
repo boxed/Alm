@@ -190,6 +190,45 @@ pub fn compile_project_typed(
     })
 }
 
+/// Compile a project with the experimental WasmGC backend (see
+/// `generate::wasmgc`). Shares the front end and monomorphizer with the typed
+/// backend; only code generation differs.
+pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    let empty_types = HashMap::new();
+    let empty_nodes = HashMap::new();
+    let infos: Vec<crate::ir::mono::ModuleInfo> = checked
+        .modules
+        .iter()
+        .filter(|module| !is_native_shunted_module(module.name.as_str()))
+        .map(|module| crate::ir::mono::ModuleInfo {
+            name: module.name.clone(),
+            module,
+            types: checked.types.get(&module.name).unwrap_or(&empty_types),
+            node_types: checked.node_types.get(&module.name).unwrap_or(&empty_nodes),
+        })
+        .collect();
+    let program = crate::ir::mono::specialize_project(&infos, &checked.entry);
+    if let Some(message) = &program.error {
+        return Err(vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "NATIVE BACKEND LIMITATION",
+            Region::ZERO,
+            message.clone(),
+        )]);
+    }
+    generate::wasmgc::build(&program, output).map_err(|message| {
+        vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "WASMGC BACKEND",
+            Region::ZERO,
+            message,
+        )]
+    })
+}
+
 /// Run the whole front end — load, parse, canonicalize, type check, and
 /// exhaustiveness check every module — without generating any code.
 pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
