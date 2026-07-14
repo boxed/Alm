@@ -594,6 +594,19 @@ fn list_sum_float() {
 }
 
 #[test]
+fn list_repeat_filtermap_sortby() {
+    assert_str_prog(
+        "repeat_fm_sortby",
+        "module Test exposing (main)\n\n\
+         parity : Int -> Maybe Int\n\
+         parity n =\n    if modBy 2 n == 0 then Just (n * n) else Nothing\n\n\
+         main : String\n\
+         main =\n    \
+            String.join \",\" (List.map String.fromInt (List.repeat 4 7))\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (List.repeat 0 9))\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (List.filterMap parity [ 1, 2, 3, 4, 5, 6 ]))\n        ++ \"|\" ++ String.join \",\" (List.sortBy String.length [ \"ccc\", \"a\", \"bb\", \"dddd\" ])\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (List.sortBy negate [ 3, 1, 2 ]))\n",
+    );
+}
+
+#[test]
 fn kernels_as_values() {
     // Bare kernels passed to higher-order functions (no lambda wrapper).
     assert_str_prog(

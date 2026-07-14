@@ -405,6 +405,10 @@ struct Codegen<'a> {
     str_split_idx: u32,
     str_words_idx: u32,
     str_lines_idx: u32,
+    list_repeat_idx: u32,
+    list_filter_map_idx: u32,
+    list_sortby_idx: u32,
+    list_sortby_insert_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -483,6 +487,10 @@ impl<'a> Codegen<'a> {
             str_split_idx: 0,
             str_words_idx: 0,
             str_lines_idx: 0,
+            list_repeat_idx: 0,
+            list_filter_map_idx: 0,
+            list_sortby_idx: 0,
+            list_sortby_insert_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -585,6 +593,10 @@ impl<'a> Codegen<'a> {
         self.str_split_idx = next();
         self.str_words_idx = next();
         self.str_lines_idx = next();
+        self.list_repeat_idx = next();
+        self.list_filter_map_idx = next();
+        self.list_sortby_idx = next();
+        self.list_sortby_insert_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -682,6 +694,10 @@ impl<'a> Codegen<'a> {
         let str_split = self.emit_str_split();
         let str_words = self.emit_str_words();
         let str_lines = self.emit_str_lines();
+        let list_repeat = self.emit_list_repeat();
+        let list_filter_map = self.emit_list_filter_map();
+        let list_sortby = self.emit_list_sortby();
+        let list_sortby_insert = self.emit_list_sortby_insert();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -781,6 +797,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // str_split
         funcs.function(ft1); // str_words
         funcs.function(ft1); // str_lines
+        funcs.function(ft2); // list_repeat
+        funcs.function(ft2); // list_filter_map
+        funcs.function(ft2); // list_sortby
+        funcs.function(ft3); // list_sortby_insert
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -853,6 +873,10 @@ impl<'a> Codegen<'a> {
         code.function(&str_split);
         code.function(&str_words);
         code.function(&str_lines);
+        code.function(&list_repeat);
+        code.function(&list_filter_map);
+        code.function(&list_sortby);
+        code.function(&list_sortby_insert);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -3697,6 +3721,145 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_repeat(n, x) : a list of `n` copies of `x` (empty if n <= 0).
+    fn emit_list_repeat(&self) -> Function {
+        // params: n(0), x(1). locals: k(2):i32, acc(3):eqref
+        let mut f = Function::new([(1, ValType::I32), (1, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::LocalSet(3));
+        dec(&mut f, 2);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_filterMap(f, xs) : map with `f : a -> Maybe b`, keeping Justs.
+    fn emit_list_filter_map(&self) -> Function {
+        // params: f(0), xs(1). local: r(2):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // r = apply1(f, head)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Eqz); // Just
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_filter_map_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_filter_map_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_sortBy(f, xs) : insertion sort keyed by `f`, stable, ascending.
+    fn emit_list_sortby(&self) -> Function {
+        // params: f(0), xs(1)
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // insert(f, head, sortBy(f, tail))
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_sortby_idx));
+        f.instruction(&Instruction::Call(self.list_sortby_insert_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_sortByInsert(f, x, ys) : insert `x` into key-sorted `ys`.
+    fn emit_list_sortby_insert(&self) -> Function {
+        // params: f(0), x(1), ys(2)
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // [x]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Else);
+        // compare(f x, f head) <= 0 → cons(x, ys)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Else);
+        // cons(head, insert(f, x, tail))
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_sortby_insert_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -4665,6 +4828,21 @@ impl<'a> Codegen<'a> {
             ("List", "sort") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_sort_idx));
+            }
+            ("List", "repeat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_repeat_idx));
+            }
+            ("List", "filterMap") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_filter_map_idx));
+            }
+            ("List", "sortBy") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_sortby_idx));
             }
             ("List", "all") => {
                 self.emit_expr(&args[0], ctx, f)?;
