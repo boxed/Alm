@@ -594,6 +594,17 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_slicing() {
+    assert_str_prog(
+        "slicing",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.left 3 \"abcdef\"\n        ++ \"|\" ++ String.right 2 \"abcdef\"\n        ++ \"|\" ++ String.dropLeft 2 \"abcdef\"\n        ++ \"|\" ++ String.dropRight 2 \"abcdef\"\n        ++ \"|\" ++ String.left 99 \"ab\"\n        ++ \"|\" ++ String.right 99 \"ab\"\n        ++ \"|\" ++ String.dropLeft 99 \"ab\"\n        ++ \"[\" ++ String.left 0 \"ab\" ++ \"]\"\n",
+    );
+}
+
+#[test]
 fn string_case_trim() {
     assert_str_prog(
         "case_trim",

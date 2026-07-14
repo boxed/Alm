@@ -155,6 +155,10 @@ struct Codegen<'a> {
     str_upper_idx: u32,
     str_lower_idx: u32,
     str_trim_idx: u32,
+    str_left_idx: u32,
+    str_right_idx: u32,
+    str_dropleft_idx: u32,
+    str_dropright_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -212,6 +216,10 @@ impl<'a> Codegen<'a> {
             str_upper_idx: 0,
             str_lower_idx: 0,
             str_trim_idx: 0,
+            str_left_idx: 0,
+            str_right_idx: 0,
+            str_dropleft_idx: 0,
+            str_dropright_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -293,6 +301,10 @@ impl<'a> Codegen<'a> {
         self.str_upper_idx = next();
         self.str_lower_idx = next();
         self.str_trim_idx = next();
+        self.str_left_idx = next();
+        self.str_right_idx = next();
+        self.str_dropleft_idx = next();
+        self.str_dropright_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -369,6 +381,10 @@ impl<'a> Codegen<'a> {
         let str_upper = self.emit_str_case(true);
         let str_lower = self.emit_str_case(false);
         let str_trim = self.emit_str_trim();
+        let str_left = self.emit_str_range(false, false);
+        let str_right = self.emit_str_range(true, false);
+        let str_dropleft = self.emit_str_range(true, true);
+        let str_dropright = self.emit_str_range(false, true);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -447,6 +463,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // str_upper
         funcs.function(ft1); // str_lower
         funcs.function(ft1); // str_trim
+        funcs.function(ft2); // str_left
+        funcs.function(ft2); // str_right
+        funcs.function(ft2); // str_dropleft
+        funcs.function(ft2); // str_dropright
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -498,6 +518,10 @@ impl<'a> Codegen<'a> {
         code.function(&str_upper);
         code.function(&str_lower);
         code.function(&str_trim);
+        code.function(&str_left);
+        code.function(&str_right);
+        code.function(&str_dropleft);
+        code.function(&str_dropright);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -2267,6 +2291,117 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_range(n, s) : byte-range slice implementing left/right/dropLeft/
+    /// dropRight (ASCII-correct; byte-indexed, so non-ASCII parity is partial).
+    /// The half-open range [a, b) is `from_end`/`drop`-selected then clamped.
+    fn emit_str_range(&self, from_end: bool, drop: bool) -> Function {
+        // params: n(0), s(1). locals: sstr(2):str, nval(3), len(4), a(5), b(6), i(7):i32, out(8):str
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (5, ValType::I32),
+            (1, ref_to(T_STR)),
+        ]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        // a
+        match (from_end, drop) {
+            (false, _) => {
+                f.instruction(&Instruction::I32Const(0)); // left / dropRight
+            }
+            (true, false) => {
+                f.instruction(&Instruction::LocalGet(4)); // right: len - n
+                f.instruction(&Instruction::LocalGet(3));
+                f.instruction(&Instruction::I32Sub);
+            }
+            (true, true) => {
+                f.instruction(&Instruction::LocalGet(3)); // dropLeft: n
+            }
+        }
+        f.instruction(&Instruction::LocalSet(5));
+        // b
+        match (from_end, drop) {
+            (false, false) => {
+                f.instruction(&Instruction::LocalGet(3)); // left: n
+            }
+            (false, true) => {
+                f.instruction(&Instruction::LocalGet(4)); // dropRight: len - n
+                f.instruction(&Instruction::LocalGet(3));
+                f.instruction(&Instruction::I32Sub);
+            }
+            (true, _) => {
+                f.instruction(&Instruction::LocalGet(4)); // right / dropLeft: len
+            }
+        }
+        f.instruction(&Instruction::LocalSet(6));
+        // clamp a and b into [0, len]; then a = min(a, b)
+        for slot in [5u32, 6] {
+            f.instruction(&Instruction::LocalGet(slot));
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32GtS);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::LocalSet(slot));
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::LocalGet(slot));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32LtS);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::LocalSet(slot));
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        // out = new(b - a); copy sstr[a + i]
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3306,6 +3441,26 @@ impl<'a> Codegen<'a> {
             ("String", "trim") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_trim_idx));
+            }
+            ("String", "left") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_left_idx));
+            }
+            ("String", "right") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_right_idx));
+            }
+            ("String", "dropLeft") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_dropleft_idx));
+            }
+            ("String", "dropRight") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_dropright_idx));
             }
             ("List", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
