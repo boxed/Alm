@@ -178,41 +178,43 @@ pub(crate) fn finish<'ctx>(
     // ALM_MERGE_RUNTIME=1 re-enables the merge for perf experiments; making
     // it safe needs selective inlining (leaf-only primitives) or precise
     // root spilling first.
-    let no_merge = std::env::var("ALM_MERGE_RUNTIME").is_err();
-    let runtime_module = Module::parse_bitcode_from_path(&bc_path, context)
-        .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
-    // The typed backend emits DWARF debug info (line tables mapping generated
-    // code back to `.elm` source) and sets the "Debug Info Version"/"Dwarf
-    // Version" module flags. The runtime bitcode (from rustc) may carry its own
-    // debug info and conflicting flag values, which makes `link_in_module`
-    // fail. Strip the runtime's debug info so only the program's survives; the
-    // program's line tables are preserved through the link and O2.
-    runtime_module.strip_debug_info();
-    // Only exported (external-linkage) definitions live in the static
-    // library, so only those may become `available_externally` (inline-only,
-    // resolved to the .a). Internal helpers (value_eq, the allocator, …) are
-    // not exported, so keep them as internal definitions merged into the
-    // object.
-    // Any externally-visible definition (External, but also the WeakODR /
-    // LinkOnce linkages rustc gives small `#[no_mangle]` fns it wants to inline)
-    // is also in the static library, so make it inline-only here; otherwise it
-    // is emitted in both program.o and runtime.a and the link fails with a
-    // duplicate symbol. Only truly-internal helpers stay as merged definitions.
-    let externally_visible =
-        |l: Linkage| !matches!(l, Linkage::Internal | Linkage::Private | Linkage::AvailableExternally);
-    for function in runtime_module.get_functions() {
-        if function.count_basic_blocks() > 0 && externally_visible(function.get_linkage()) {
-            function.set_linkage(Linkage::AvailableExternally);
+    // ALM_MERGE_RUNTIME=1 re-enables the merge for perf experiments; the parse
+    // and relinkage below are only needed for it, so the default (unmerged)
+    // build skips them entirely.
+    let merge_runtime = std::env::var("ALM_MERGE_RUNTIME").is_ok();
+    if merge_runtime {
+        let runtime_module = Module::parse_bitcode_from_path(&bc_path, context)
+            .map_err(|e| format!("could not parse runtime bitcode: {}", e))?;
+        // The typed backend emits DWARF debug info (line tables mapping
+        // generated code back to `.elm` source) and sets the "Debug Info
+        // Version"/"Dwarf Version" module flags. The runtime bitcode (from
+        // rustc) may carry its own debug info and conflicting flag values, which
+        // makes `link_in_module` fail. Strip the runtime's debug info so only
+        // the program's survives; the program's line tables are preserved
+        // through the link and O2.
+        runtime_module.strip_debug_info();
+        // Any externally-visible definition (External, but also the WeakODR /
+        // LinkOnce linkages rustc gives small `#[no_mangle]` fns it wants to
+        // inline) is also in the static library, so make it inline-only
+        // (`available_externally`, resolved to the .a); otherwise it is emitted
+        // in both program.o and runtime.a and the link fails with a duplicate
+        // symbol. Only truly-internal helpers (value_eq, the allocator, …) stay
+        // as merged definitions.
+        let externally_visible = |l: Linkage| {
+            !matches!(l, Linkage::Internal | Linkage::Private | Linkage::AvailableExternally)
+        };
+        for function in runtime_module.get_functions() {
+            if function.count_basic_blocks() > 0 && externally_visible(function.get_linkage()) {
+                function.set_linkage(Linkage::AvailableExternally);
+            }
         }
-    }
-    let mut global = runtime_module.get_first_global();
-    while let Some(g) = global {
-        global = g.get_next_global();
-        if g.get_initializer().is_some() && externally_visible(g.get_linkage()) {
-            g.set_linkage(Linkage::AvailableExternally);
+        let mut global = runtime_module.get_first_global();
+        while let Some(g) = global {
+            global = g.get_next_global();
+            if g.get_initializer().is_some() && externally_visible(g.get_linkage()) {
+                g.set_linkage(Linkage::AvailableExternally);
+            }
         }
-    }
-    if !no_merge {
         module
             .link_in_module(runtime_module)
             .map_err(|e| format!("could not merge runtime bitcode: {}", e))?;
@@ -670,14 +672,11 @@ impl<'ctx> Codegen<'ctx> {
             .into_int_value()
     }
 
+    /// Call a runtime function returning a boolean word (i1). Same lowering as
+    /// [`Self::call_val`]; the distinct name documents the semantic return type
+    /// at call sites.
     fn call_bool(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) -> IntValue<'ctx> {
-        self.builder
-            .build_call(self.runtime[name], args, "c")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap()
-            .into_int_value()
+        self.call_val(name, args)
     }
 
     fn call_void(&self, name: &str, args: &[BasicMetadataValueEnum<'ctx>]) {

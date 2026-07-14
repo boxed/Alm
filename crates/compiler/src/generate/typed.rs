@@ -94,8 +94,11 @@ struct TypedCodegen<'ctx, 'l> {
     /// calling — turning unbounded tail recursion into a loop (as Elm's own JS
     /// backend does), so it runs in constant stack.
     tco: Option<TcoState<'ctx>>,
-    blk: usize,
-    lam_id: usize,
+    /// Monotonic counter making basic-block labels unique within a function.
+    block_seq: usize,
+    /// Monotonic counter for every generated symbol/local name (`box.`,
+    /// `unbox.`, `clos.`, `lam.`, `eq.`, `pap.`, `$acc`, `$ctor`, …).
+    next_id: usize,
     /// Monotonic counter for fresh variable names introduced when desugaring
     /// destructuring parameters into `\fresh -> case fresh of pat -> body`.
     fresh_id: usize,
@@ -130,9 +133,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let module = ctx.create_module("alm_typed");
 
         // Module-level debug-info flags LLVM requires: DWARF v4 line tables and
-        // debug-info metadata schema v3. `Warning` behavior lets the runtime
-        // bitcode (which carries no debug info after we strip it) merge in
-        // without a flag conflict.
+        // debug-info metadata schema v3. `Warning` behavior (rather than
+        // `Error`) avoids a flag conflict on the opt-in path that merges the
+        // runtime bitcode in (ALM_MERGE_RUNTIME); the default build links the
+        // runtime as a separate archive and never merges.
         module.add_basic_value_flag(
             "Dwarf Version",
             FlagBehavior::Warning,
@@ -180,8 +184,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             locals: HashMap::new(),
             cur_fn: None,
             tco: None,
-            blk: 0,
-            lam_id: 0,
+            block_seq: 0,
+            next_id: 0,
             fresh_id: 0,
             di_builder,
             di_subroutine,
@@ -995,9 +999,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(())
     }
 
-    fn call_box(&self, name: &str, arg: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
-        self.call_named(name, &[arg])
-    }
 
     /// Get or declare a runtime function of `argc` uniform (i64) parameters
     /// returning a uniform word.
@@ -1266,8 +1267,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(phi.as_basic_value())
     }
 
-    /// Box a tagged-union value into a uniform constructor: switch on the tag,
-    /// box each field of the matched constructor, call rt_ctor.
     /// Get (or generate) a recursive helper `box_T(ptr) -> uniform` for a
     /// tagged union. Registered in the cache *before* its body is emitted so a
     /// self-referential field reuses the same function instead of expanding
@@ -1282,8 +1281,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        let fname = format!("box.{}", self.lam_id);
-        self.lam_id += 1;
+        let fname = format!("box.{}", self.next_id);
+        self.next_id += 1;
         let fty = i64_t.fn_type(&[ptr_t.into()], false);
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
         self.box_fns.insert(key, f);
@@ -1324,8 +1323,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        let fname = format!("unbox.{}", self.lam_id);
-        self.lam_id += 1;
+        let fname = format!("unbox.{}", self.next_id);
+        self.next_id += 1;
         let fty = ptr_t.fn_type(&[i64_t.into()], false);
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
         self.unbox_fns.insert(key, f);
@@ -1354,6 +1353,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(f)
     }
 
+    /// Box a tagged-union value into a uniform constructor: switch on the tag,
+    /// box each field of the matched constructor, call `rt_ctor`.
     fn box_tagged(
         &mut self,
         val: BasicValueEnum<'ctx>,
@@ -1455,8 +1456,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         } else {
             let tramp_params: Vec<BasicMetadataTypeEnum> = vec![i64_t.into(); n + 1];
             let tramp_ty = i64_t.fn_type(&tramp_params, false);
-            let name = format!("clos.{}", self.lam_id);
-            self.lam_id += 1;
+            let name = format!("clos.{}", self.next_id);
+            self.next_id += 1;
             let tramp = self.module.add_function(&name, tramp_ty, Some(Linkage::Internal));
 
             let saved_locals = std::mem::take(&mut self.locals);
@@ -1550,8 +1551,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             fn_params.push(self.llvm_type(&self.layouts.layout_of(at)).into());
         }
         let fn_ty = ret_ty.fn_type(&fn_params, false);
-        let name = format!("unclos.{}", self.lam_id);
-        self.lam_id += 1;
+        let name = format!("unclos.{}", self.next_id);
+        self.next_id += 1;
         let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
 
         let saved_locals = std::mem::take(&mut self.locals);
@@ -1736,7 +1737,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .unwrap()
                 .into()),
             Layout::Closure => self.unbox_closure(w, tipe),
-            other => Err(format!("typed backend: cannot unbox layout {:?}", other)),
         }
     }
 
@@ -2006,7 +2006,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                         ))
                     }
                 };
-                let rname = format!("$acc{}", self.lam_id);
+                let rname = format!("$acc{}", self.next_id);
                 let r_local = TypedExpr {
                     tipe: rec_ty.clone(),
                     kind: TypedKind::Local(crate::data::Name::from(rname.clone())),
@@ -2034,7 +2034,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     let mut remaining = field_ty.clone();
                     let mut idx = 0u32;
                     while let Type::Lambda(a, b) = remaining {
-                        let pname = format!("$accp{}_{}", self.lam_id, idx);
+                        let pname = format!("$accp{}_{}", self.next_id, idx);
                         eta_args.push(TypedExpr {
                             tipe: (*a).clone(),
                             kind: TypedKind::Local(crate::data::Name::from(pname.clone())),
@@ -2295,8 +2295,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     /// for every call.
     fn emit_hoisted_const(&mut self, body: &TypedExpr) -> Result<BasicValueEnum<'ctx>, String> {
         let ret_ty = self.llvm_type(&self.layouts.layout_of(&body.tipe));
-        let id = self.lam_id;
-        self.lam_id += 1;
+        let id = self.next_id;
+        self.next_id += 1;
         let memo = self.module.add_global(ret_ty, None, &format!("hoist.{}$memo", id));
         memo.set_initializer(&ret_ty.const_zero());
         memo.set_linkage(Linkage::Internal);
@@ -2523,8 +2523,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 fn_params.push(self.llvm_type(&self.layouts.layout_of(t)).into());
             }
             let fn_ty = ret_ty.fn_type(&fn_params, false);
-            let fname = format!("lam.{}", self.lam_id);
-            self.lam_id += 1;
+            let fname = format!("lam.{}", self.next_id);
+            self.next_id += 1;
             let lifted = self.module.add_function(&fname, fn_ty, Some(Linkage::Internal));
             lifted_fns.push(lifted);
 
@@ -2885,7 +2885,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let mut params = Vec::new();
         let mut arg_exprs = Vec::new();
         for (i, at) in arg_types.iter().enumerate() {
-            let pname = crate::data::Name::from(format!("$ctor{}_{}", self.lam_id, i));
+            let pname = crate::data::Name::from(format!("$ctor{}_{}", self.next_id, i));
             params.push((
                 crate::reporting::Located {
                     region: crate::reporting::Region::ZERO,
@@ -2933,8 +2933,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             t = *b;
         }
         let result_ty = t;
-        let id = self.lam_id;
-        self.lam_id += 1;
+        let id = self.next_id;
+        self.next_id += 1;
         let mut params = Vec::new();
         let mut call_args: Vec<TypedExpr> = applied.to_vec();
         for (i, at) in rest_types.iter().enumerate() {
@@ -2988,8 +2988,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             t = *b;
         }
         let result_ty = t;
-        let id = self.lam_id;
-        self.lam_id += 1;
+        let id = self.next_id;
+        self.next_id += 1;
         // Fresh parameters for the not-yet-supplied arguments.
         let mut params = Vec::new();
         let mut call_args: Vec<TypedExpr> = applied.to_vec();
@@ -3124,12 +3124,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             ("String", "fromInt") => {
                 let n = self.gen(&args[0])?;
-                let boxed = self.call_box("rt_int", n);
+                let boxed = self.call_named("rt_int", &[n]);
                 Ok(self.call_named("rtb$String$fromInt", &[boxed]))
             }
             ("String", "fromFloat") => {
                 let f = self.gen(&args[0])?;
-                let boxed = self.call_box("rt_float", f);
+                let boxed = self.call_named("rt_float", &[f]);
                 Ok(self.call_named("rtb$String$fromFloat", &[boxed]))
             }
             ("String", "toInt") => {
@@ -3835,7 +3835,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     fn kernel_mod_by(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let m = self.gen(&args[0])?.into_int_value();
         let x = self.gen(&args[1])?.into_int_value();
-        let b = &self.builder;
         let zero = self.ctx.i64_type().const_zero();
         // srem by zero is UB; JS modBy 0 yields NaN — 0 is the i64 stand-in
         // (same scheme as remainderBy above).
@@ -3852,8 +3851,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.position_at_end(ok_bb);
         let b = &self.builder;
         // m == -1 would make srem(i64::MIN, -1) overflow UB; x mod -1 == 0.
-        let m_zero = b.build_int_compare(IntPredicate::EQ, m, neg1, "mn1").unwrap();
-        let m = b.build_select(m_zero, one, m, "safem").unwrap().into_int_value();
+        let m_neg1 = b.build_int_compare(IntPredicate::EQ, m, neg1, "mn1").unwrap();
+        let m = b.build_select(m_neg1, one, m, "safem").unwrap().into_int_value();
         let r = b.build_int_signed_rem(x, m, "r").unwrap();
         let r_nz = b.build_int_compare(IntPredicate::NE, r, zero, "rnz").unwrap();
         let r_neg = b.build_int_compare(IntPredicate::SLT, r, zero, "rneg").unwrap();
@@ -3862,7 +3861,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let need = b.build_and(r_nz, diff, "need").unwrap();
         let radd = b.build_int_add(r, m, "radd").unwrap();
         let modv = b.build_select(need, radd, r, "mod").unwrap().into_int_value();
-        Ok(b.build_select(m_zero, zero, modv, "mod0").unwrap())
+        Ok(b.build_select(m_neg1, zero, modv, "mod0").unwrap())
     }
 
     /// `Maybe.map f m`, typed: tag check + one closure call. Without this,
@@ -4261,6 +4260,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let backing = self.list_backing(list);
         let out = self.list_alloc(elem, len);
         let elem = elem.clone();
+        // The loop body is infallible (only loads/stores), so the `Result` from
+        // `for_count` cannot be an error; discard it rather than propagate.
         let _ = self.for_count(len, |s, i| {
             let m1 = s.builder.build_int_sub(len, i64_t.const_int(1, false), "m1").unwrap();
             let src = s.builder.build_int_sub(m1, i, "src").unwrap();
@@ -4523,7 +4524,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
         };
 
-        let xname = format!("$compose{}", self.lam_id);
+        let xname = format!("$compose{}", self.next_id);
         let x_local = TypedExpr {
             tipe: a_ty.clone(),
             kind: TypedKind::Local(crate::data::Name::from(xname.clone())),
@@ -4722,10 +4723,6 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     .unwrap();
                 Ok(self.builder.build_int_compare(IntPredicate::EQ, ai, bi, "refeq").unwrap())
             }
-            other => Err(format!(
-                "typed backend: == on layout {:?} is not supported yet",
-                other
-            )),
         }
     }
 
@@ -4968,8 +4965,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let i1_t = self.ctx.bool_type();
-        let fname = format!("eq.{}", self.lam_id);
-        self.lam_id += 1;
+        let fname = format!("eq.{}", self.next_id);
+        self.next_id += 1;
         let fty = i1_t.fn_type(&[ptr_t.into(), ptr_t.into()], false);
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
         self.eq_fns.insert(key, f);
@@ -5224,8 +5221,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             fn_params.push(self.llvm_type(&self.layouts.layout_of(t)).into());
         }
         let fn_ty = ret_ty.fn_type(&fn_params, false);
-        let name = format!("lam.{}", self.lam_id);
-        self.lam_id += 1;
+        let name = format!("lam.{}", self.next_id);
+        self.next_id += 1;
         let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
 
         // Emit the lifted body with fresh codegen state.
@@ -5323,8 +5320,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             Some(ret) => ret.fn_type(&wparams, false),
             None => self.ctx.void_type().fn_type(&wparams, false),
         };
-        let wname = format!("pap.{}", self.lam_id);
-        self.lam_id += 1;
+        let wname = format!("pap.{}", self.next_id);
+        self.next_id += 1;
         let wrapper = self.module.add_function(&wname, wty, Some(Linkage::Internal));
 
         let saved_block = self.builder.get_insert_block();
@@ -5539,8 +5536,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
         let ret_ty = self.llvm_type(final_layout);
         let wty = ret_ty.fn_type(&wparams, false);
-        let wname = format!("pap.{}", self.lam_id);
-        self.lam_id += 1;
+        let wname = format!("pap.{}", self.next_id);
+        self.next_id += 1;
         let wrapper = self.module.add_function(&wname, wty, Some(Linkage::Internal));
 
         let saved_block = self.builder.get_insert_block();
@@ -6245,9 +6242,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     }
 
     fn new_block(&mut self, base: &str) -> inkwell::basic_block::BasicBlock<'ctx> {
-        self.blk += 1;
+        self.block_seq += 1;
         self.ctx
-            .append_basic_block(self.cur_fn.unwrap(), &format!("{}{}", base, self.blk))
+            .append_basic_block(self.cur_fn.unwrap(), &format!("{}{}", base, self.block_seq))
     }
 }
 

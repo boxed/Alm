@@ -13,9 +13,11 @@
 //! *current* function's scheme variables — is substituted through the current
 //! specialization to yield `g`'s concrete type here.
 //!
-//! What it does *not* yet do: build the specialized function bodies, cross
-//! module boundaries, or choose representations. Those are later phases; this
-//! pass pins down the specialization set and is exercised directly by tests.
+//! This pass does both analysis and specialization across the whole project:
+//! [`analyze_project`] discovers the instance set (crossing module boundaries
+//! at `VarForeign` references into known modules), and [`specialize_project`]
+//! builds a fully typed body for each. Only physical representation is deferred
+//! — that is [`crate::ir::layout`]'s job, consulted later by the backend.
 
 use std::collections::HashMap;
 
@@ -248,30 +250,36 @@ fn default_numbers(tipe: &can::Type) -> can::Type {
     }
 }
 
+/// Type-nesting depth beyond which the monomorphizer gives up. Polymorphic
+/// recursion — a recursive call at a strictly deeper type, legal in Elm via an
+/// annotation — instantiates unboundedly many types and fundamentally cannot be
+/// monomorphized. Past this depth we report a clean error instead of hanging.
+/// (Layout-stationary cases like robinheghan/elm-deque never reach here: they
+/// are implemented natively — see `is_native_shunted_module` in `project.rs`.)
+const POLY_REC_DEPTH_LIMIT: usize = 20;
+
+fn poly_rec_error(module: &Name, name: &Name) -> String {
+    format!(
+        "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
+        module, name
+    )
+}
+
 fn enqueue(
     queue: &mut Vec<Instance>,
     seen: &mut HashMap<(Name, Name, can::Type), ()>,
     set: &mut MonoSet,
     instance: Instance,
 ) {
-    // Key by the type VALUE, not its Debug rendering: formatting every
-    // instance type is O(size) in string building and dominated compile time
-    // on instantiation-heavy packages (elm-geometry burned minutes here).
-    // Watchdog: polymorphic recursion (a recursive call at a more deeply
-    // nested instantiation, legal in Elm via annotation) makes this fixpoint
-    // enqueue `Deque (Buffer^n a)`-style types for unbounded n — the
-    // monomorphizer fundamentally cannot terminate. Diagnose instead of
-    // hanging. (A uniform-representation fallback for the deep tail is
-    // designed but needs closure-convention adaptation at the boundary.)
-    if type_depth(&instance.tipe) > 20 {
+    if type_depth(&instance.tipe) > POLY_REC_DEPTH_LIMIT {
         if set.error.is_none() {
-            set.error = Some(format!(
-                "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
-                instance.module, instance.name
-            ));
+            set.error = Some(poly_rec_error(&instance.module, &instance.name));
         }
         return;
     }
+    // Key by the type VALUE, not its Debug rendering: formatting every instance
+    // type is O(size) and dominated compile time on instantiation-heavy
+    // packages (elm-geometry burned minutes here).
     let key = (
         instance.module.clone(),
         instance.name.clone(),
@@ -550,18 +558,11 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     let mut wi = 0;
     while wi < worklist.len() && error.is_none() {
         let mut instance = worklist[wi].clone();
-        // Watchdog: polymorphic recursion (a recursive call at a LARGER
-        // instantiation, legal in Elm via annotation) makes this fixpoint
-        // enqueue ever-deeper types forever — elm-deque's chunked
-        // `Deque (Buffer^n a)`. Monomorphization fundamentally cannot
-        // terminate on those; report it instead of hanging. (A uniform-
-        // representation fallback for the deep tail is designed but needs
-        // closure-convention adaptation at the boundary first.)
-        if error.is_none() && type_depth(&instance.tipe) > 20 {
-            error = Some(format!(
-                "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
-                instance.module, instance.name
-            ));
+        // Watchdog: specialization discovers further instances (via `sink`), so
+        // a polymorphic recursion can still surface here even when the analysis
+        // seed was shallow. See `POLY_REC_DEPTH_LIMIT`.
+        if type_depth(&instance.tipe) > POLY_REC_DEPTH_LIMIT {
+            error = Some(poly_rec_error(&instance.module, &instance.name));
             break;
         }
         // Specialize at the number-defaulted type (see `default_numbers`); the
@@ -1571,6 +1572,32 @@ impl Specializer<'_> {
     }
 }
 
+/// The constraint-class prefixes of Elm's super-type variables. Treated by
+/// class rather than spelling where it matters: `alpha_normalize` mangles them
+/// by class, and `type_has_free_named_tyvar` ignores them.
+const CONSTRAINT_PREFIXES: [&str; 4] = ["number", "comparable", "appendable", "compappend"];
+
+/// Whether `tipe` contains a type variable that `var_is_free` accepts, or an
+/// open record (a free row variable, whose concrete field set — and therefore
+/// the sorted offsets a record access compiles to — is not yet known).
+fn type_has_free_var(tipe: &can::Type, var_is_free: &impl Fn(&Name) -> bool) -> bool {
+    use can::Type::*;
+    match tipe {
+        Var(name) => var_is_free(name),
+        Lambda(a, b) => type_has_free_var(a, var_is_free) || type_has_free_var(b, var_is_free),
+        Type(_, _, args) => args.iter().any(|t| type_has_free_var(t, var_is_free)),
+        Tuple(a, b, c) => {
+            type_has_free_var(a, var_is_free)
+                || type_has_free_var(b, var_is_free)
+                || c.as_ref().map_or(false, |c| type_has_free_var(c, var_is_free))
+        }
+        Record(fields, ext) => {
+            ext.is_some() || fields.iter().any(|(_, t)| type_has_free_var(t, var_is_free))
+        }
+        Unit => false,
+    }
+}
+
 /// Like [`type_has_free_tyvar`], but `number`/`comparable`-style super
 /// variables do not count. Used to gate MUTUAL-group specialization: a group
 /// that is polymorphic only in `number` compiled correctly before group
@@ -1580,57 +1607,17 @@ impl Specializer<'_> {
 /// unboundedly). A genuinely-polymorphic group (a real type variable) is the
 /// case group specialization exists to fix.
 fn type_has_free_named_tyvar(tipe: &can::Type) -> bool {
-    use can::Type::*;
-    match tipe {
-        Var(name) => {
-            !name.as_str().starts_with("number")
-                && !name.as_str().starts_with("comparable")
-                && !name.as_str().starts_with("appendable")
-                && !name.as_str().starts_with("compappend")
-        }
-        Lambda(a, b) => type_has_free_named_tyvar(a) || type_has_free_named_tyvar(b),
-        Type(_, _, args) => args.iter().any(type_has_free_named_tyvar),
-        Tuple(a, b, c) => {
-            type_has_free_named_tyvar(a)
-                || type_has_free_named_tyvar(b)
-                || c.as_ref().map_or(false, |c| type_has_free_named_tyvar(c))
-        }
-        Record(fields, ext) => {
-            ext.is_some() || fields.iter().any(|(_, t)| type_has_free_named_tyvar(t))
-        }
-        Unit => false,
-    }
+    type_has_free_var(tipe, &|n| {
+        !CONSTRAINT_PREFIXES.iter().any(|p| n.as_str().starts_with(p))
+    })
 }
 
+/// Whether `tipe` has any free variable at all. `number` variables count: a
+/// generalized local used at both Int and Float (or pinned to Float only by a
+/// LATER consumer) needs one copy per numeric instantiation, because natively
+/// Int and Float have different layouts (on JS they share one representation).
 fn type_has_free_tyvar(tipe: &can::Type) -> bool {
-    use can::Type::*;
-    match tipe {
-        // `number` variables count as free: a generalized local used at both
-        // Int and Float (or only pinned to Float by a LATER consumer, e.g.
-        // `let arcs = [ { defaultArc | ... } ] in List.map Shape.arc arcs`)
-        // needs one copy per numeric instantiation. On the JS backend a single
-        // copy works because Int and Float share one representation; natively
-        // their layouts differ, so compiling the binding once at the Int
-        // default feeds an Int-shaped record to Float-typed consumers.
-        Var(_) => true,
-        Lambda(a, b) => type_has_free_tyvar(a) || type_has_free_tyvar(b),
-        Type(_, _, args) => args.iter().any(type_has_free_tyvar),
-        Tuple(a, b, c) => {
-            type_has_free_tyvar(a)
-                || type_has_free_tyvar(b)
-                || c.as_ref().map_or(false, |c| type_has_free_tyvar(c))
-        }
-        // An open record `{ a | field : T, .. }` carries a free row variable
-        // (the extension `a`). It is genuinely polymorphic: its concrete field
-        // set — and therefore the sorted field offsets a record access compiles
-        // to — depends on what `a` resolves to at each use site. A local
-        // function with such a parameter must be specialized per use-site (like
-        // any polymorphic local); otherwise its accesses read fields at the
-        // offsets of the partial (open) field set instead of the concrete
-        // record's, returning the wrong field.
-        Record(fields, ext) => ext.is_some() || fields.iter().any(|(_, t)| type_has_free_tyvar(t)),
-        Unit => false,
-    }
+    type_has_free_var(tipe, &|_| true)
 }
 
 /// Operators the typed backend generates inline (pipes, composition, cons,
@@ -2001,7 +1988,7 @@ fn alpha_normalize(tipe: &can::Type) -> can::Type {
             Var(n) => {
                 // Keep constraint prefixes meaningful: `number*`/`comparable*`
                 // mangle by their constraint class, not their spelling.
-                let class = ["number", "comparable", "appendable", "compappend"]
+                let class = CONSTRAINT_PREFIXES
                     .iter()
                     .find(|c| n.as_str().starts_with(*c));
                 if let Some(c) = class {

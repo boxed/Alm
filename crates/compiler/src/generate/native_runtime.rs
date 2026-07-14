@@ -1354,12 +1354,17 @@ unsafe fn call_fn(func: *const (), arity: usize, a: &[u64]) -> u64 {
         } else {
             false
         };
+        // Heuristic upper bound on a live `Value`'s enum discriminant (its first
+        // byte). A word that isn't a tagged int, is too small to be a pointer,
+        // is misaligned, or whose tag exceeds this is almost certainly not a
+        // Value. Diagnostic-only (ALM_ARG_CHECK); raise if `Value` grows past it.
+        const MAX_VALUE_TAG: u8 = 40;
         for (i, &w) in a.iter().enumerate() {
             if tramp && i == 0 {
                 continue;
             }
-            let bad =
-                !is_int(w) && (w < 0x1_0000 || w % 8 != 0 || (*(w as *const u8)) > 40);
+            let bad = !is_int(w)
+                && (w < 0x1_0000 || w % 8 != 0 || (*(w as *const u8)) > MAX_VALUE_TAG);
             if bad {
                 eprintln!(
                     "=== ALM ARG CHECK (call_fn): bad a[{}]={:#x} arity={} func={:#x} ===",
@@ -2087,6 +2092,10 @@ unsafe extern "C" fn basics_sqrt(x: u64) -> u64 {
 unsafe extern "C" fn basics_log_base(base: u64, x: u64) -> u64 {
     rt_float(num(x).ln() / num(base).ln())
 }
+// `<<` and `>>` differ only in argument order (note the swapped `f`/`g`
+// parameters); both compute `g (f x)`, so the bodies are intentionally
+// identical. They stay separate functions to keep their distinct kernel
+// symbols.
 unsafe extern "C" fn basics_compose_l(g: u64, f: u64, x: u64) -> u64 {
     ap1(g, ap1(f, x))
 }
@@ -3927,7 +3936,7 @@ pub unsafe extern "C" fn set_partition(f: u64, s: u64) -> u64 {
     let mut yes = Vec::new();
     let mut no = Vec::new();
     for x in set_elems(s) {
-        if truthy(ap1(f, x)) {
+        if rt_is_true(ap1(f, x)) {
             yes.push((x, 0));
         } else {
             no.push((x, 0));
@@ -4240,19 +4249,6 @@ unsafe fn arr_elems(v: u64) -> Vec<u64> {
 unsafe fn mk_array(root: u64) -> u64 {
     alloc(Value::Array(root))
 }
-unsafe fn mkbool(b: bool) -> u64 {
-    if b {
-        tru()
-    } else {
-        fls()
-    }
-}
-unsafe fn truthy(v: u64) -> bool {
-    matches!(deref(v), Value::Bool(true))
-}
-fn ord(c: i32) -> std::cmp::Ordering {
-    c.cmp(&0)
-}
 unsafe fn ap3(f: u64, a: u64, b: u64, c: u64) -> u64 {
     let args = [a, b, c];
     rt_apply(f, 3, args.as_ptr())
@@ -4281,11 +4277,11 @@ pub unsafe extern "C" fn dict_remove(k: u64, d: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_member(k: u64, d: u64) -> u64 {
-    mkbool(tfind(dict_root(d), k).is_some())
+    rt_bool(tfind(dict_root(d), k).is_some())
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_is_empty(d: u64) -> u64 {
-    mkbool(dict_root(d) == 0)
+    rt_bool(dict_root(d) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_size(d: u64) -> u64 {
@@ -4317,21 +4313,43 @@ pub unsafe extern "C" fn dict_from_list(list: u64) -> u64 {
     }
     mk_dict(root)
 }
-#[no_mangle]
-pub unsafe extern "C" fn dict_foldl(f: u64, init: u64, d: u64) -> u64 {
+/// Fold `f` over element words in order (`rev` = right fold, tail-to-head).
+/// Backs the `foldl`/`foldr` kernels for Set/Array/Deque.
+unsafe fn fold_words(elems: Vec<u64>, init: u64, f: u64, rev: bool) -> u64 {
     let mut acc = init;
-    for &(k, v) in &dict_pairs(d) {
-        acc = ap3(f, k, v, acc);
+    if rev {
+        for &x in elems.iter().rev() {
+            acc = ap2(f, x, acc);
+        }
+    } else {
+        for &x in &elems {
+            acc = ap2(f, x, acc);
+        }
+    }
+    acc
+}
+/// Fold `f` over key/value pairs in order (`rev` = right fold). Backs the
+/// Dict `foldl`/`foldr` kernels, which pass both key and value to `f`.
+unsafe fn fold_pairs(pairs: Vec<(u64, u64)>, init: u64, f: u64, rev: bool) -> u64 {
+    let mut acc = init;
+    if rev {
+        for &(k, v) in pairs.iter().rev() {
+            acc = ap3(f, k, v, acc);
+        }
+    } else {
+        for &(k, v) in &pairs {
+            acc = ap3(f, k, v, acc);
+        }
     }
     acc
 }
 #[no_mangle]
+pub unsafe extern "C" fn dict_foldl(f: u64, init: u64, d: u64) -> u64 {
+    fold_pairs(dict_pairs(d), init, f, false)
+}
+#[no_mangle]
 pub unsafe extern "C" fn dict_foldr(f: u64, init: u64, d: u64) -> u64 {
-    let mut acc = init;
-    for &(k, v) in dict_pairs(d).iter().rev() {
-        acc = ap3(f, k, v, acc);
-    }
-    acc
+    fold_pairs(dict_pairs(d), init, f, true)
 }
 #[no_mangle]
 pub unsafe extern "C" fn dict_map(f: u64, d: u64) -> u64 {
@@ -4341,7 +4359,7 @@ pub unsafe extern "C" fn dict_map(f: u64, d: u64) -> u64 {
 pub unsafe extern "C" fn dict_filter(f: u64, d: u64) -> u64 {
     let kept: Vec<(u64, u64)> = dict_pairs(d)
         .into_iter()
-        .filter(|&(k, v)| truthy(ap2(f, k, v)))
+        .filter(|&(k, v)| rt_is_true(ap2(f, k, v)))
         .collect();
     mk_dict(tbuild(&kept))
 }
@@ -4386,7 +4404,7 @@ pub unsafe extern "C" fn dict_partition(f: u64, d: u64) -> u64 {
     let mut yes = Vec::new();
     let mut no = Vec::new();
     for (k, v) in dict_pairs(d) {
-        if truthy(ap2(f, k, v)) {
+        if rt_is_true(ap2(f, k, v)) {
             yes.push((k, v));
         } else {
             no.push((k, v));
@@ -4454,11 +4472,11 @@ pub unsafe extern "C" fn set_remove(x: u64, s: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_member(x: u64, s: u64) -> u64 {
-    mkbool(tfind(set_root(s), x).is_some())
+    rt_bool(tfind(set_root(s), x).is_some())
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_is_empty(s: u64) -> u64 {
-    mkbool(set_root(s) == 0)
+    rt_bool(set_root(s) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_size(s: u64) -> u64 {
@@ -4506,19 +4524,11 @@ pub unsafe extern "C" fn set_diff(a: u64, b: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_foldl(f: u64, init: u64, s: u64) -> u64 {
-    let mut acc = init;
-    for &x in &set_elems(s) {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(set_elems(s), init, f, false)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_foldr(f: u64, init: u64, s: u64) -> u64 {
-    let mut acc = init;
-    for &x in set_elems(s).iter().rev() {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(set_elems(s), init, f, true)
 }
 #[no_mangle]
 pub unsafe extern "C" fn set_map(f: u64, s: u64) -> u64 {
@@ -4532,7 +4542,7 @@ pub unsafe extern "C" fn set_map(f: u64, s: u64) -> u64 {
 pub unsafe extern "C" fn set_filter(f: u64, s: u64) -> u64 {
     let kept: Vec<(u64, u64)> = set_elems(s)
         .into_iter()
-        .filter(|&x| truthy(ap1(f, x)))
+        .filter(|&x| rt_is_true(ap1(f, x)))
         .map(|x| (x, 0))
         .collect();
     mk_set(tbuild(&kept))
@@ -4542,7 +4552,7 @@ pub unsafe extern "C" fn set_filter(f: u64, s: u64) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn array_is_empty(a: u64) -> u64 {
-    mkbool(arr_root(a) == 0)
+    rt_bool(arr_root(a) == 0)
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_length(a: u64) -> u64 {
@@ -4594,19 +4604,11 @@ pub unsafe extern "C" fn array_push(v: u64, a: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_foldl(f: u64, init: u64, a: u64) -> u64 {
-    let mut acc = init;
-    for &x in &arr_elems(a) {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(arr_elems(a), init, f, false)
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_foldr(f: u64, init: u64, a: u64) -> u64 {
-    let mut acc = init;
-    for &x in arr_elems(a).iter().rev() {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(arr_elems(a), init, f, true)
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_map(f: u64, a: u64) -> u64 {
@@ -4624,7 +4626,7 @@ pub unsafe extern "C" fn array_indexed_map(f: u64, a: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn array_filter(f: u64, a: u64) -> u64 {
-    let els: Vec<u64> = arr_elems(a).into_iter().filter(|&x| truthy(ap1(f, x))).collect();
+    let els: Vec<u64> = arr_elems(a).into_iter().filter(|&x| rt_is_true(ap1(f, x))).collect();
     mk_array(tbuild_vals(&els))
 }
 #[no_mangle]
@@ -4797,19 +4799,11 @@ pub unsafe extern "C" fn deque_drop_right(n: u64, d: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn deque_foldl(f: u64, init: u64, d: u64) -> u64 {
-    let mut acc = init;
-    for &x in &deque_elems(d) {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(deque_elems(d), init, f, false)
 }
 #[no_mangle]
 pub unsafe extern "C" fn deque_foldr(f: u64, init: u64, d: u64) -> u64 {
-    let mut acc = init;
-    for &x in deque_elems(d).iter().rev() {
-        acc = ap2(f, x, acc);
-    }
-    acc
+    fold_words(deque_elems(d), init, f, true)
 }
 #[no_mangle]
 pub unsafe extern "C" fn deque_map(f: u64, d: u64) -> u64 {
@@ -4817,7 +4811,7 @@ pub unsafe extern "C" fn deque_map(f: u64, d: u64) -> u64 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn deque_filter(f: u64, d: u64) -> u64 {
-    mk_deque(deque_elems(d).into_iter().filter(|&x| truthy(ap1(f, x))).collect())
+    mk_deque(deque_elems(d).into_iter().filter(|&x| rt_is_true(ap1(f, x))).collect())
 }
 #[no_mangle]
 pub unsafe extern "C" fn deque_filter_map(f: u64, d: u64) -> u64 {
@@ -4834,7 +4828,7 @@ pub unsafe extern "C" fn deque_filter_map(f: u64, d: u64) -> u64 {
 pub unsafe extern "C" fn deque_partition(f: u64, d: u64) -> u64 {
     let (mut yes, mut no) = (Vec::new(), Vec::new());
     for x in deque_elems(d) {
-        if truthy(ap1(f, x)) {
+        if rt_is_true(ap1(f, x)) {
             yes.push(x);
         } else {
             no.push(x);
@@ -5780,7 +5774,7 @@ unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
             _ => Err(json_err_expecting("a LIST", jv)),
         },
         Decoder::Array(sub) => {
-            let list = run_decoder(mk_decoder_ref(Decoder::List(*sub)), jv)?;
+            let list = run_decoder(mk_decoder(Decoder::List(*sub)), jv)?;
             Ok(array_from_list(list))
         }
         Decoder::KeyValuePairs(sub) => match jv {
@@ -5797,7 +5791,7 @@ unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
             _ => Err(json_err_expecting("an OBJECT", jv)),
         },
         Decoder::Dict(sub) => {
-            let pairs = run_decoder(mk_decoder_ref(Decoder::KeyValuePairs(*sub)), jv)?;
+            let pairs = run_decoder(mk_decoder(Decoder::KeyValuePairs(*sub)), jv)?;
             Ok(dict_from_list(pairs))
         }
         Decoder::Maybe(sub) => match run_decoder(*sub, jv) {
@@ -5815,7 +5809,7 @@ unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
             Err(json_err_oneof(&errs))
         }
         Decoder::OneOrMore(to_value, sub) => {
-            let list = run_decoder(mk_decoder_ref(Decoder::List(*sub)), jv)?;
+            let list = run_decoder(mk_decoder(Decoder::List(*sub)), jv)?;
             let arr = to_vec(list);
             if arr.is_empty() {
                 Err(json_err_expecting(
@@ -5844,12 +5838,6 @@ unsafe fn run_decoder(dec_w: u64, jv: &JsonValue) -> Result<u64, u64> {
         }
         Decoder::Lazy(thunk) => run_decoder(ap1(*thunk, unit()), jv),
     }
-}
-
-// `run_decoder` needs to run freshly-built sub-decoders (array/dict reuse
-// list/keyValuePairs); allocate them so a `&JsonValue` borrow is not held.
-unsafe fn mk_decoder_ref(d: Decoder) -> u64 {
-    mk_decoder(d)
 }
 
 unsafe fn run_to_result(dec_w: u64, jv: &JsonValue) -> u64 {
@@ -7025,7 +7013,7 @@ unsafe extern "C" fn events_on_submit1(msg: u64) -> u64 {
     // alwaysPreventDefault (Decode.succeed msg))` where `alwaysPreventDefault m
     // = ( m, True )`. The handler is MayPreventDefault (opts 2), whose decoder
     // must yield the `( msg, Bool )` tuple — Test.Html destructures it as one.
-    event(b"submit", mk_decoder(Decoder::Succeed(pair(msg, mkbool(true)))), 2)
+    event(b"submit", mk_decoder(Decoder::Succeed(pair(msg, rt_bool(true)))), 2)
 }
 unsafe extern "C" fn events_on_input1(to_msg: u64) -> u64 {
     event(b"input", mk_decoder(Decoder::Map(to_msg, target_field(b"value", Decoder::Str))), 0)
