@@ -1215,6 +1215,52 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(rec)
     }
 
+    /// Dispatch on a constructor `tag` (0..`nvariants`) to per-variant blocks,
+    /// run `per_variant(self, k)` in each to compute its `phi_ty` result, and
+    /// join them with a phi. The tag always matches a case for a well-formed
+    /// value, so the switch default is unreachable. `per_variant` may itself
+    /// create blocks — the phi takes each variant's value from whichever block
+    /// is current when it finishes. Blocks are named `{prefix}.def/.end/.{k}`.
+    fn switch_variants(
+        &mut self,
+        tag: inkwell::values::IntValue<'ctx>,
+        nvariants: usize,
+        prefix: &str,
+        phi_ty: BasicTypeEnum<'ctx>,
+        mut per_variant: impl FnMut(&mut Self, usize) -> Result<BasicValueEnum<'ctx>, String>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i32_t = self.ctx.i32_type();
+        let default_bb = self.new_block(&format!("{}.def", prefix));
+        let merge = self.new_block(&format!("{}.end", prefix));
+        let blocks: Vec<_> =
+            (0..nvariants).map(|k| self.new_block(&format!("{}.{}", prefix, k))).collect();
+        let cases: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
+            .collect();
+        self.builder.build_switch(tag, default_bb, &cases).unwrap();
+
+        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::new();
+        for k in 0..nvariants {
+            self.builder.position_at_end(blocks[k]);
+            let v = per_variant(self, k)?;
+            let end = self.builder.get_insert_block().unwrap();
+            self.builder.build_unconditional_branch(merge).unwrap();
+            incoming.push((v, end));
+        }
+        self.builder.position_at_end(default_bb);
+        self.builder.build_unreachable().unwrap();
+
+        self.builder.position_at_end(merge);
+        let phi = self.builder.build_phi(phi_ty, prefix).unwrap();
+        for (v, bb) in &incoming {
+            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+        }
+        Ok(phi.as_basic_value())
+    }
+
     /// Box an enum value (i32 tag) into a uniform nullary constructor,
     /// switching on the tag to pick the constructor name.
     fn box_enum(
@@ -1229,22 +1275,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let i32_t = self.ctx.i32_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let tag = val.into_int_value();
-        let default_bb = self.new_block("boxe.def");
-        let merge = self.new_block("boxe.end");
-        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            Vec::new();
-        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("boxe.{}", k))).collect();
-        let cases: Vec<_> = blocks
-            .iter()
-            .enumerate()
-            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
-            .collect();
-        self.builder.build_switch(tag, default_bb, &cases).unwrap();
-
-        for (k, bb) in blocks.iter().enumerate() {
-            self.builder.position_at_end(*bb);
-            let nameptr = self.cstr(ctors[k].0.as_str());
-            let ctor = self.call_named(
+        self.switch_variants(tag, ctors.len(), "boxe", self.ctx.i64_type().into(), |s, k| {
+            let nameptr = s.cstr(ctors[k].0.as_str());
+            Ok(s.call_named(
                 "rt_ctor",
                 &[
                     nameptr.into(),
@@ -1252,19 +1285,38 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     i32_t.const_zero().into(),
                     ptr_t.const_null().into(),
                 ],
-            );
-            self.builder.build_unconditional_branch(merge).unwrap();
-            incoming.push((ctor, *bb));
-        }
-        self.builder.position_at_end(default_bb);
-        self.builder.build_unreachable().unwrap();
+            ))
+        })
+    }
 
-        self.builder.position_at_end(merge);
-        let phi = self.builder.build_phi(self.ctx.i64_type(), "enum").unwrap();
-        for (v, bb) in &incoming {
-            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
+    /// Emit `body` into a fresh function `f`: save the caller's codegen state
+    /// (locals, current function, insertion block, debug location), start `f`'s
+    /// entry block with a cleared location, run `body` — which builds the
+    /// function's body and its `ret` — then restore the caller's state, even if
+    /// `body` errors. A generated helper must leave the surrounding code
+    /// untouched: it must neither leak its own (subprogram-less) debug scope nor
+    /// its inner body's scope into the function it returns to.
+    fn in_function<R>(
+        &mut self,
+        f: FunctionValue<'ctx>,
+        body: impl FnOnce(&mut Self) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_fn = self.cur_fn;
+        let saved_block = self.builder.get_insert_block();
+        let saved_loc = self.cur_loc;
+        self.cur_fn = Some(f);
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        self.clear_loc();
+        let result = body(self);
+        self.locals = saved_locals;
+        self.cur_fn = saved_fn;
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
         }
-        Ok(phi.as_basic_value())
+        self.restore_loc(saved_loc);
+        result
     }
 
     /// Get (or generate) a recursive helper `box_T(ptr) -> uniform` for a
@@ -1287,27 +1339,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
         self.box_fns.insert(key, f);
 
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(f);
-        let entry = self.ctx.append_basic_block(f, "entry");
-        self.builder.position_at_end(entry);
-        self.clear_loc();
-        let param = f.get_nth_param(0).unwrap();
-        let result = self.box_tagged(param, tipe);
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        let boxed = result?;
-        self.builder.build_return(Some(&boxed)).unwrap();
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        // Restore the caller's debug location: a helper must neither leak its
-        // own (subprogram-less) scope nor its inner body's scope into the
-        // function it returns to.
-        self.restore_loc(saved_loc);
+        self.in_function(f, |s| {
+            let param = f.get_nth_param(0).unwrap();
+            let boxed = s.box_tagged(param, tipe)?;
+            s.builder.build_return(Some(&boxed)).unwrap();
+            Ok(())
+        })?;
         Ok(f)
     }
 
@@ -1329,27 +1366,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
         self.unbox_fns.insert(key, f);
 
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(f);
-        let entry = self.ctx.append_basic_block(f, "entry");
-        self.builder.position_at_end(entry);
-        self.clear_loc();
-        let param = f.get_nth_param(0).unwrap();
-        let result = self.unbox_tagged(param, tipe);
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        let unboxed = result?;
-        self.builder.build_return(Some(&unboxed)).unwrap();
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        // Restore the caller's debug location: a helper must neither leak its
-        // own (subprogram-less) scope nor its inner body's scope into the
-        // function it returns to.
-        self.restore_loc(saved_loc);
+        self.in_function(f, |s| {
+            let param = f.get_nth_param(0).unwrap();
+            let unboxed = s.unbox_tagged(param, tipe)?;
+            s.builder.build_return(Some(&unboxed)).unwrap();
+            Ok(())
+        })?;
         Ok(f)
     }
 
@@ -1368,40 +1390,26 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let i64_t = self.ctx.i64_type();
         let ptr = val.into_pointer_value();
         let tag = self.builder.build_load(i32_t, ptr, "tag").unwrap().into_int_value();
-        let default_bb = self.new_block("boxt.def");
-        let merge = self.new_block("boxt.end");
-        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            Vec::new();
-        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("boxt.{}", k))).collect();
-        let cases: Vec<_> = blocks
-            .iter()
-            .enumerate()
-            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
-            .collect();
-        self.builder.build_switch(tag, default_bb, &cases).unwrap();
-
-        for (k, bb) in blocks.iter().enumerate() {
-            self.builder.position_at_end(*bb);
+        self.switch_variants(tag, ctors.len(), "boxt", i64_t.into(), |s, k| {
             let (name, field_types) = &ctors[k];
             let field_layouts: Vec<Layout> =
-                field_types.iter().map(|t| self.layouts.layout_of(t)).collect();
-            let sty = self.ctor_struct(&field_layouts);
+                field_types.iter().map(|t| s.layouts.layout_of(t)).collect();
+            let sty = s.ctor_struct(&field_layouts);
             let argc = field_types.len();
-            let args_arr =
-                self.entry_alloca(i64_t.array_type(argc.max(1) as u32).into(), "args");
+            let args_arr = s.entry_alloca(i64_t.array_type(argc.max(1) as u32).into(), "args");
             for (i, fty) in field_types.iter().enumerate() {
-                let fp = self.builder.build_struct_gep(sty, ptr, (i + 1) as u32, "fp").unwrap();
-                let fv = self.builder.build_load(self.llvm_type(&field_layouts[i]), fp, "fv").unwrap();
-                let boxed = self.box_value(fv, fty)?;
+                let fp = s.builder.build_struct_gep(sty, ptr, (i + 1) as u32, "fp").unwrap();
+                let fv = s.builder.build_load(s.llvm_type(&field_layouts[i]), fp, "fv").unwrap();
+                let boxed = s.box_value(fv, fty)?;
                 let ep = unsafe {
-                    self.builder
+                    s.builder
                         .build_in_bounds_gep(i64_t, args_arr, &[i64_t.const_int(i as u64, false)], "ep")
                         .unwrap()
                 };
-                self.builder.build_store(ep, boxed).unwrap();
+                s.builder.build_store(ep, boxed).unwrap();
             }
-            let nameptr = self.cstr(name.as_str());
-            let ctor = self.call_named(
+            let nameptr = s.cstr(name.as_str());
+            Ok(s.call_named(
                 "rt_ctor",
                 &[
                     nameptr.into(),
@@ -1409,20 +1417,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     i32_t.const_int(argc as u64, false).into(),
                     args_arr.into(),
                 ],
-            );
-            let end = self.builder.get_insert_block().unwrap();
-            self.builder.build_unconditional_branch(merge).unwrap();
-            incoming.push((ctor, end));
-        }
-        self.builder.position_at_end(default_bb);
-        self.builder.build_unreachable().unwrap();
-
-        self.builder.position_at_end(merge);
-        let phi = self.builder.build_phi(i64_t, "union").unwrap();
-        for (v, bb) in &incoming {
-            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
-        }
-        Ok(phi.as_basic_value())
+            ))
+        })
     }
 
     /// Box a typed closure into a uniform runtime closure: generate a
@@ -1433,14 +1429,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         val: BasicValueEnum<'ctx>,
         tipe: &crate::ast::canonical::Type,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::Type;
-        let mut arg_types = Vec::new();
-        let mut t = tipe.clone();
-        while let Type::Lambda(a, b) = t {
-            arg_types.push(*a);
-            t = *b;
-        }
-        let ret_type = t;
+        let (arg_types, ret_type) = peel_lambda(tipe);
         let n = arg_types.len();
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
@@ -1460,35 +1449,20 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             self.next_id += 1;
             let tramp = self.module.add_function(&name, tramp_ty, Some(Linkage::Internal));
 
-            let saved_locals = std::mem::take(&mut self.locals);
-            let saved_fn = self.cur_fn;
-            let saved_block = self.builder.get_insert_block();
-            let saved_loc = self.cur_loc;
-            self.cur_fn = Some(tramp);
-            let entry = self.ctx.append_basic_block(tramp, "entry");
-            self.builder.position_at_end(entry);
-            self.clear_loc();
-            let cap = tramp.get_nth_param(0).unwrap().into_int_value();
-            let clos = self.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
-            let mut typed_args = Vec::new();
-            for (i, at) in arg_types.iter().enumerate() {
-                let uni = tramp.get_nth_param((i + 1) as u32).unwrap();
-                typed_args.push(self.unbox_value(uni, at)?);
-            }
-            let ret_layout = self.layouts.layout_of(&ret_type);
-            let result = self.apply_closure(clos, &typed_args, &ret_layout);
-            let body_result = self.box_value(result, &ret_type);
-            self.locals = saved_locals;
-            self.cur_fn = saved_fn;
-            let boxed = body_result?;
-            self.builder.build_return(Some(&boxed)).unwrap();
-            if let Some(b) = saved_block {
-                self.builder.position_at_end(b);
-            }
-            // Restore the caller's debug location: a helper must neither leak
-            // its own (subprogram-less) scope nor its inner body's scope into
-            // the function it returns to.
-            self.restore_loc(saved_loc);
+            self.in_function(tramp, |s| {
+                let cap = tramp.get_nth_param(0).unwrap().into_int_value();
+                let clos = s.builder.build_int_to_ptr(cap, ptr_t, "clos").unwrap();
+                let mut typed_args = Vec::new();
+                for (i, at) in arg_types.iter().enumerate() {
+                    let uni = tramp.get_nth_param((i + 1) as u32).unwrap();
+                    typed_args.push(s.unbox_value(uni, at)?);
+                }
+                let ret_layout = s.layouts.layout_of(&ret_type);
+                let result = s.apply_closure(clos, &typed_args, &ret_layout);
+                let boxed = s.box_value(result, &ret_type)?;
+                s.builder.build_return(Some(&boxed)).unwrap();
+                Ok(())
+            })?;
             self.box_tramps.insert(key, tramp);
             tramp
         };
@@ -1531,14 +1505,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         w: BasicValueEnum<'ctx>,
         tipe: &crate::ast::canonical::Type,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::Type;
-        let mut arg_types = Vec::new();
-        let mut t = tipe.clone();
-        while let Type::Lambda(a, b) = t {
-            arg_types.push(*a);
-            t = *b;
-        }
-        let ret_type = t;
+        let (arg_types, ret_type) = peel_lambda(tipe);
         let n = arg_types.len();
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
@@ -1555,16 +1522,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.next_id += 1;
         let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
 
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(lifted);
-        let entry = self.ctx.append_basic_block(lifted, "entry");
-        self.builder.position_at_end(entry);
-        self.clear_loc();
-
-        let body = (|s: &mut Self| -> Result<BasicValueEnum<'ctx>, String> {
+        self.in_function(lifted, |s| {
             // The typed closure layout is {fn_ptr, uniform_word}; the captured
             // uniform closure word lives in field 1.
             let clos_ty = s.ctx.struct_type(&[ptr_t.into(), i64_t.into()], false);
@@ -1602,17 +1560,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 .try_as_basic_value()
                 .left()
                 .unwrap();
-            s.unbox_value(uniform, &ret_type)
-        })(self);
-
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        let result = body?;
-        self.builder.build_return(Some(&result)).unwrap();
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        self.restore_loc(saved_loc);
+            let result = s.unbox_value(uniform, &ret_type)?;
+            s.builder.build_return(Some(&result)).unwrap();
+            Ok(())
+        })?;
 
         self.emit_arity_reg(lifted);
         // If `w` is a closure that `box_closure` produced, recover the original
@@ -1856,43 +1807,18 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let i32_t = self.ctx.i32_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let tag = self.call_named("rt_ctor_tag", &[w]).into_int_value();
-        let default_bb = self.new_block("unbt.def");
-        let merge = self.new_block("unbt.end");
-        let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            Vec::new();
-        let blocks: Vec<_> = (0..ctors.len()).map(|k| self.new_block(&format!("unbt.{}", k))).collect();
-        let cases: Vec<_> = blocks
-            .iter()
-            .enumerate()
-            .map(|(k, bb)| (i32_t.const_int(k as u64, false), *bb))
-            .collect();
-        self.builder.build_switch(tag, default_bb, &cases).unwrap();
-
-        for (k, bb) in blocks.iter().enumerate() {
-            self.builder.position_at_end(*bb);
+        self.switch_variants(tag, ctors.len(), "unbt", ptr_t.into(), |s, k| {
             let (_, field_types) = &ctors[k];
             let field_layouts: Vec<Layout> =
-                field_types.iter().map(|t| self.layouts.layout_of(t)).collect();
+                field_types.iter().map(|t| s.layouts.layout_of(t)).collect();
             let mut fields = Vec::new();
             for (i, fty) in field_types.iter().enumerate() {
                 let idx = i32_t.const_int(i as u64, false).into();
-                let arg_u = self.call_named("rt_ctor_arg", &[w, idx]);
-                fields.push(self.unbox_value(arg_u, fty)?);
+                let arg_u = s.call_named("rt_ctor_arg", &[w, idx]);
+                fields.push(s.unbox_value(arg_u, fty)?);
             }
-            let raw: BasicValueEnum = self.alloc_tagged(&field_layouts, k as u32, &fields).into();
-            let end = self.builder.get_insert_block().unwrap();
-            self.builder.build_unconditional_branch(merge).unwrap();
-            incoming.push((raw, end));
-        }
-        self.builder.position_at_end(default_bb);
-        self.builder.build_unreachable().unwrap();
-
-        self.builder.position_at_end(merge);
-        let phi = self.builder.build_phi(ptr_t, "union").unwrap();
-        for (v, bb) in &incoming {
-            phi.add_incoming(&[(v as &dyn BasicValue, *bb)]);
-        }
-        Ok(phi.as_basic_value())
+            Ok(s.alloc_tagged(&field_layouts, k as u32, &fields).into())
+        })
     }
 
     fn call_named(&self, name: &str, args: &[BasicValueEnum<'ctx>]) -> BasicValueEnum<'ctx> {
@@ -2874,14 +2800,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         union: &crate::data::Name,
         ctor: &crate::ast::canonical::Ctor,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::{Pattern_, Type};
-        let mut arg_types = Vec::new();
-        let mut t = whole.tipe.clone();
-        while let Type::Lambda(a, b) = t {
-            arg_types.push(*a);
-            t = *b;
-        }
-        let result_ty = t;
+        use crate::ast::canonical::Pattern_;
+        let (arg_types, result_ty) = peel_lambda(&whole.tipe);
         let mut params = Vec::new();
         let mut arg_exprs = Vec::new();
         for (i, at) in arg_types.iter().enumerate() {
@@ -2924,15 +2844,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         ctor: &crate::ast::canonical::Ctor,
         applied: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::{Pattern_, Type};
+        use crate::ast::canonical::Pattern_;
         // Peel the remaining argument types and the final (constructed) type.
-        let mut rest_types = Vec::new();
-        let mut t = whole.tipe.clone();
-        while let Type::Lambda(a, b) = t {
-            rest_types.push(*a);
-            t = *b;
-        }
-        let result_ty = t;
+        let (rest_types, result_ty) = peel_lambda(&whole.tipe);
         let id = self.next_id;
         self.next_id += 1;
         let mut params = Vec::new();
@@ -2979,15 +2893,9 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         applied: &[TypedExpr],
         region: crate::reporting::Region,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        use crate::ast::canonical::{Pattern_, Type};
+        use crate::ast::canonical::Pattern_;
         // Peel the function type into argument types and the final result type.
-        let mut arg_types = Vec::new();
-        let mut t = full_type.clone();
-        while let Type::Lambda(a, b) = t {
-            arg_types.push(*a);
-            t = *b;
-        }
-        let result_ty = t;
+        let (arg_types, result_ty) = peel_lambda(&full_type);
         let id = self.next_id;
         self.next_id += 1;
         // Fresh parameters for the not-yet-supplied arguments.
@@ -4976,16 +4884,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .union_ctors(tipe)
             .ok_or_else(|| "typed backend: unknown union in ==".to_string())?;
 
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(f);
-        let entry = self.ctx.append_basic_block(f, "entry");
-        self.builder.position_at_end(entry);
-        self.clear_loc();
-
-        let body = (|s: &mut Self| -> Result<(), String> {
+        self.in_function(f, |s| {
             let i32_t = s.ctx.i32_type();
             let ptr_a = f.get_nth_param(0).unwrap().into_pointer_value();
             let ptr_b = f.get_nth_param(1).unwrap().into_pointer_value();
@@ -5041,15 +4940,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             s.builder.build_return(Some(&phi.as_basic_value())).unwrap();
             Ok(())
-        })(self);
-
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        body?;
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        self.restore_loc(saved_loc);
+        })?;
         Ok(f)
     }
 
@@ -5226,65 +5117,49 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let lifted = self.module.add_function(&name, fn_ty, Some(Linkage::Internal));
 
         // Emit the lifted body with fresh codegen state.
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_fn = self.cur_fn;
-        let saved_block = self.builder.get_insert_block();
-        let saved_loc = self.cur_loc;
-        self.cur_fn = Some(lifted);
-        let entry = self.ctx.append_basic_block(lifted, "entry");
-        self.builder.position_at_end(entry);
-        // A subprogram for the lifted lambda so its body carries line info in
-        // the enclosing module's file; without one, clear the location so its
-        // instructions don't inherit the outer function's scope.
-        if let Some(file) = self.cur_file {
-            let line = body.region.start.row;
-            let sp = self.di_builder.create_function(
-                file.as_debug_info_scope(),
-                &name,
-                Some(&name),
-                file,
-                line,
-                self.di_subroutine,
-                true,
-                true,
-                line,
-                DIFlags::ZERO,
-                true,
-            );
-            lifted.set_subprogram(sp);
-        }
-        self.clear_loc();
-        let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
-        for (i, (n, _)) in captures.iter().enumerate() {
-            let fp = self
-                .builder
-                .build_struct_gep(clos_ty, env, (i + 1) as u32, "capp")
-                .unwrap();
-            let v = self.builder.build_load(struct_fields[i + 1], fp, n).unwrap();
-            self.locals.insert(n.clone(), v);
-        }
-        // A recursive function refers to itself through the environment pointer,
-        // which is precisely its own closure value.
-        if let Some(sn) = self_name {
-            self.locals.insert(sn.to_string(), env.into());
-        }
-        for (idx, pn) in param_names.iter().enumerate() {
-            let val = lifted.get_nth_param((idx + 1) as u32).unwrap();
-            self.locals.insert(pn.clone(), val);
-        }
-        let body_result = self.gen(body);
-        // Restore state regardless of outcome.
-        self.locals = saved_locals;
-        self.cur_fn = saved_fn;
-        let ret = body_result?;
-        self.builder.build_return(Some(&ret)).unwrap();
-        if let Some(b) = saved_block {
-            self.builder.position_at_end(b);
-        }
-        // Restore the caller's debug location: a helper must neither leak its
-        // own (subprogram-less) scope nor its inner body's scope into the
-        // function it returns to.
-        self.restore_loc(saved_loc);
+        self.in_function(lifted, |s| {
+            // A subprogram for the lifted lambda so its body carries line info
+            // in the enclosing module's file; without one the location stays
+            // cleared so its instructions don't inherit the outer scope.
+            if let Some(file) = s.cur_file {
+                let line = body.region.start.row;
+                let sp = s.di_builder.create_function(
+                    file.as_debug_info_scope(),
+                    &name,
+                    Some(&name),
+                    file,
+                    line,
+                    s.di_subroutine,
+                    true,
+                    true,
+                    line,
+                    DIFlags::ZERO,
+                    true,
+                );
+                lifted.set_subprogram(sp);
+            }
+            let env = lifted.get_nth_param(0).unwrap().into_pointer_value();
+            for (i, (n, _)) in captures.iter().enumerate() {
+                let fp = s
+                    .builder
+                    .build_struct_gep(clos_ty, env, (i + 1) as u32, "capp")
+                    .unwrap();
+                let v = s.builder.build_load(struct_fields[i + 1], fp, n).unwrap();
+                s.locals.insert(n.clone(), v);
+            }
+            // A recursive function refers to itself through the environment
+            // pointer, which is precisely its own closure value.
+            if let Some(sn) = self_name {
+                s.locals.insert(sn.to_string(), env.into());
+            }
+            for (idx, pn) in param_names.iter().enumerate() {
+                let val = lifted.get_nth_param((idx + 1) as u32).unwrap();
+                s.locals.insert(pn.clone(), val);
+            }
+            let ret = s.gen(body)?;
+            s.builder.build_return(Some(&ret)).unwrap();
+            Ok(())
+        })?;
 
         let capture_vals: Vec<BasicValueEnum> = captures.iter().map(|(_, v)| *v).collect();
         self.emit_arity_reg(lifted);
@@ -5479,13 +5354,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         args: &[BasicValueEnum<'ctx>],
         closure_ty: &crate::ast::canonical::Type,
     ) -> BasicValueEnum<'ctx> {
-        use crate::ast::canonical::Type;
-        let mut arg_tys: Vec<Type> = Vec::new();
-        let mut t = closure_ty.clone();
-        while let Type::Lambda(a, b) = t {
-            arg_tys.push(*a);
-            t = *b;
-        }
+        let (arg_tys, t) = peel_lambda(closure_ty);
         let arity = arg_tys.len();
         if arity == 0 || args.len() == arity {
             let ret_layout = self.layouts.layout_of(&t);
@@ -6353,6 +6222,22 @@ fn collection_symbol(module: &str, name: &str) -> Option<&'static str> {
         ("Deque", "partition") => "deque_partition",
         _ => return None,
     })
+}
+
+/// Split a function type into its argument types and final result: peel every
+/// leading `->`. `A -> B -> C` yields `([A, B], C)`; a non-function yields
+/// `([], tipe)`.
+fn peel_lambda(
+    tipe: &crate::ast::canonical::Type,
+) -> (Vec<crate::ast::canonical::Type>, crate::ast::canonical::Type) {
+    use crate::ast::canonical::Type;
+    let mut args = Vec::new();
+    let mut t = tipe.clone();
+    while let Type::Lambda(a, b) = t {
+        args.push(*a);
+        t = *b;
+    }
+    (args, t)
 }
 
 /// The arity of a built-in from its function type: the number of leading
