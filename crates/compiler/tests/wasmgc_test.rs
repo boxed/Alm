@@ -594,6 +594,34 @@ fn list_sum_float() {
 }
 
 #[test]
+fn result_module() {
+    assert_str_prog(
+        "result",
+        "module Test exposing (main)\n\n\
+         parse : String -> Result String Int\n\
+         parse s =\n    case String.toInt s of\n        Just n ->\n            Ok n\n\n        Nothing ->\n            Err (\"bad: \" ++ s)\n\n\
+         showR : Result String Int -> String\n\
+         showR r =\n    case r of\n        Ok n ->\n            \"ok\" ++ String.fromInt n\n\n        Err e ->\n            \"err(\" ++ e ++ \")\"\n\n\
+         showM : Maybe Int -> String\n\
+         showM m =\n    case m of\n        Just n ->\n            \"j\" ++ String.fromInt n\n\n        Nothing ->\n            \"no\"\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (Result.withDefault 0 (parse \"7\"))\n        ++ \",\" ++ String.fromInt (Result.withDefault 0 (parse \"x\"))\n        ++ \"|\" ++ showR (Result.map (\\n -> n * 2) (parse \"5\"))\n        ++ \",\" ++ showR (Result.map (\\n -> n * 2) (parse \"x\"))\n        ++ \"|\" ++ showR (Result.mapError (\\e -> \"E\") (parse \"x\"))\n        ++ \"|\" ++ showR (Result.andThen (\\n -> Ok (n + 1)) (parse \"9\"))\n        ++ \"|\" ++ showM (Result.toMaybe (parse \"3\"))\n        ++ \",\" ++ showM (Result.toMaybe (parse \"x\"))\n",
+    );
+}
+
+#[test]
+fn basics_clamp() {
+    assert_str_prog(
+        "clamp",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (clamp 0 10 5)\n        ++ \",\" ++ String.fromInt (clamp 0 10 -3)\n        ++ \",\" ++ String.fromInt (clamp 0 10 42)\n        ++ \"|\" ++ (if clamp 1.0 2.0 3.5 == 2.0 then \"y\" else \"n\")\n",
+    );
+}
+
+#[test]
 fn string_length_utf16() {
     // Elm String.length counts UTF-16 code units: BMP = 1, astral = 2.
     assert_str_prog(

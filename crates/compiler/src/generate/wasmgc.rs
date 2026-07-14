@@ -267,6 +267,22 @@ fn utf8_encode(f: &mut Function, out: u32, off: u32, cp: u32) {
     f.instruction(&Instruction::End);
 }
 
+/// Push the `i32` tag of the custom-type value in `local`.
+fn ctor_tag(f: &mut Function, local: u32) {
+    f.instruction(&Instruction::LocalGet(local));
+    f.instruction(&cast_to(T_CTOR));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+}
+
+/// Push argument 0 of the custom-type value in `local`.
+fn ctor_arg0(f: &mut Function, local: u32) {
+    f.instruction(&Instruction::LocalGet(local));
+    f.instruction(&cast_to(T_CTOR));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
 /// Emit `local += n` for an i32 local.
 fn bump(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalGet(local));
@@ -343,6 +359,13 @@ struct Codegen<'a> {
     str_from_char_idx: u32,
     str_uncons_idx: u32,
     str_length_idx: u32,
+    clamp_idx: u32,
+    result_with_default_idx: u32,
+    result_map_idx: u32,
+    result_map_error_idx: u32,
+    result_and_then_idx: u32,
+    result_to_maybe_idx: u32,
+    result_from_maybe_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -411,6 +434,13 @@ impl<'a> Codegen<'a> {
             str_from_char_idx: 0,
             str_uncons_idx: 0,
             str_length_idx: 0,
+            clamp_idx: 0,
+            result_with_default_idx: 0,
+            result_map_idx: 0,
+            result_map_error_idx: 0,
+            result_and_then_idx: 0,
+            result_to_maybe_idx: 0,
+            result_from_maybe_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -503,6 +533,13 @@ impl<'a> Codegen<'a> {
         self.str_from_char_idx = next();
         self.str_uncons_idx = next();
         self.str_length_idx = next();
+        self.clamp_idx = next();
+        self.result_with_default_idx = next();
+        self.result_map_idx = next();
+        self.result_map_error_idx = next();
+        self.result_and_then_idx = next();
+        self.result_to_maybe_idx = next();
+        self.result_from_maybe_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -590,6 +627,13 @@ impl<'a> Codegen<'a> {
         let str_from_char = self.emit_str_from_char();
         let str_uncons = self.emit_str_uncons();
         let str_length = self.emit_str_length();
+        let clamp = self.emit_clamp();
+        let result_with_default = self.emit_result_with_default();
+        let result_map = self.emit_result_map(false);
+        let result_map_error = self.emit_result_map(true);
+        let result_and_then = self.emit_result_and_then();
+        let result_to_maybe = self.emit_result_to_maybe();
+        let result_from_maybe = self.emit_result_from_maybe();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -679,6 +723,13 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // str_from_char
         funcs.function(ft1); // str_uncons
         funcs.function(ft1); // str_length
+        funcs.function(ft3); // clamp
+        funcs.function(ft2); // result_with_default
+        funcs.function(ft2); // result_map
+        funcs.function(ft2); // result_map_error
+        funcs.function(ft2); // result_and_then
+        funcs.function(ft1); // result_to_maybe
+        funcs.function(ft2); // result_from_maybe
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -741,6 +792,13 @@ impl<'a> Codegen<'a> {
         code.function(&str_from_char);
         code.function(&str_uncons);
         code.function(&str_length);
+        code.function(&clamp);
+        code.function(&result_with_default);
+        code.function(&result_map);
+        code.function(&result_map_error);
+        code.function(&result_and_then);
+        code.function(&result_to_maybe);
+        code.function(&result_from_maybe);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -3066,6 +3124,130 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// clamp(low, high, n) : constrain `n` to [low, high] via val_compare
+    /// (works for any comparable).
+    fn emit_clamp(&self) -> Function {
+        // params: low(0), high(1), n(2). local: r(3):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(3));
+        // if n < low → r = low
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        // if r > high → r = high
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// result_with_default(default, r) : the Ok value, or `default` on Err.
+    fn emit_result_with_default(&self) -> Function {
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz); // tag 0 = Ok
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// result_map / result_map_error(f, r) : apply `f` under Ok (resp. Err),
+    /// passing the other constructor through unchanged.
+    fn emit_result_map(&self, on_err: bool) -> Function {
+        // matched tag: Ok=0 for map, Err=1 for mapError; rebuild with same tag
+        let tag: i32 = if on_err { 1 } else { 0 };
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(tag));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(tag));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// result_and_then(f, r) : Ok v -> f v ; Err e -> r.
+    fn emit_result_and_then(&self) -> Function {
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// result_to_maybe(r) : Ok v -> Just v ; Err _ -> Nothing.
+    fn emit_result_to_maybe(&self) -> Function {
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Just
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// result_from_maybe(err, m) : Just v -> Ok v ; Nothing -> Err err.
+    fn emit_result_from_maybe(&self) -> Function {
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz); // Just
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Err
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3864,6 +4046,41 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.maybe_map_idx));
+            }
+            ("Result", "withDefault") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_with_default_idx));
+            }
+            ("Result", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_map_idx));
+            }
+            ("Result", "mapError") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_map_error_idx));
+            }
+            ("Result", "andThen") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_and_then_idx));
+            }
+            ("Result", "toMaybe") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_to_maybe_idx));
+            }
+            ("Result", "fromMaybe") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.result_from_maybe_idx));
+            }
+            ("Basics", "clamp") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.clamp_idx));
             }
             ("Tuple", "first") => {
                 self.emit_expr(&args[0], ctx, f)?;
