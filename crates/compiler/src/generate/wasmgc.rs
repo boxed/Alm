@@ -409,6 +409,9 @@ struct Codegen<'a> {
     list_filter_map_idx: u32,
     list_sortby_idx: u32,
     list_sortby_insert_idx: u32,
+    str_pad_left_idx: u32,
+    str_pad_right_idx: u32,
+    list_intersperse_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -491,6 +494,9 @@ impl<'a> Codegen<'a> {
             list_filter_map_idx: 0,
             list_sortby_idx: 0,
             list_sortby_insert_idx: 0,
+            str_pad_left_idx: 0,
+            str_pad_right_idx: 0,
+            list_intersperse_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -597,6 +603,9 @@ impl<'a> Codegen<'a> {
         self.list_filter_map_idx = next();
         self.list_sortby_idx = next();
         self.list_sortby_insert_idx = next();
+        self.str_pad_left_idx = next();
+        self.str_pad_right_idx = next();
+        self.list_intersperse_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -698,6 +707,9 @@ impl<'a> Codegen<'a> {
         let list_filter_map = self.emit_list_filter_map();
         let list_sortby = self.emit_list_sortby();
         let list_sortby_insert = self.emit_list_sortby_insert();
+        let str_pad_left = self.emit_str_pad(true);
+        let str_pad_right = self.emit_str_pad(false);
+        let list_intersperse = self.emit_list_intersperse();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -801,6 +813,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // list_filter_map
         funcs.function(ft2); // list_sortby
         funcs.function(ft3); // list_sortby_insert
+        funcs.function(ft3); // str_pad_left
+        funcs.function(ft3); // str_pad_right
+        funcs.function(ft2); // list_intersperse
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -877,6 +892,9 @@ impl<'a> Codegen<'a> {
         code.function(&list_filter_map);
         code.function(&list_sortby);
         code.function(&list_sortby_insert);
+        code.function(&str_pad_left);
+        code.function(&str_pad_right);
+        code.function(&list_intersperse);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -3860,6 +3878,91 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_padLeft / padRight(n, ch, s) : pad `s` with `ch` to width `n`
+    /// (UTF-16 length), on the left or right. Shorter targets return `s`.
+    fn emit_str_pad(&self, left: bool) -> Function {
+        // params: n(0), ch(1), s(2). locals: len(3), need(4):i32, pad(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (1, eqref())]);
+        // len = str_length(s)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_length_idx));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        // need = n - len
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        // already wide enough → s
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // pad = repeat(need, fromChar ch)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.str_from_char_idx));
+        f.instruction(&Instruction::Call(self.str_repeat_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        if left {
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::LocalGet(2));
+        } else {
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::LocalGet(5));
+        }
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_intersperse(sep, xs) : `sep` between consecutive elements.
+    fn emit_list_intersperse(&self) -> Function {
+        // params: sep(0), xs(1)
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // head
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        // tail
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalTee(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // [head]
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // cons(sep, intersperse(sep, tail))
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.list_intersperse_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        // cons(head, <the above tail>)
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -4844,6 +4947,17 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_sortby_idx));
             }
+            ("List", "concatMap") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_map_idx));
+                f.instruction(&Instruction::Call(self.list_concat_idx));
+            }
+            ("List", "intersperse") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_intersperse_idx));
+            }
             ("List", "all") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
@@ -5030,6 +5144,18 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_split_idx));
+            }
+            ("String", "padLeft") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_pad_left_idx));
+            }
+            ("String", "padRight") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_pad_right_idx));
             }
             ("String", "words") => {
                 self.emit_expr(&args[0], ctx, f)?;

@@ -594,6 +594,17 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_pad_and_list_more() {
+    assert_str_prog(
+        "pad_more",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            \"[\" ++ String.padLeft 5 '0' \"42\" ++ \"]\"\n        ++ \"[\" ++ String.padRight 5 '.' \"ab\" ++ \"]\"\n        ++ \"[\" ++ String.padLeft 2 '0' \"toolong\" ++ \"]\"\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (List.concatMap (\\n -> [ n, n ]) [ 1, 2, 3 ]))\n        ++ \"|\" ++ String.join \"\" (List.intersperse \"-\" [ \"a\", \"b\", \"c\" ])\n        ++ \"|\" ++ String.join \"\" (List.intersperse \"-\" [ \"solo\" ])\n",
+    );
+}
+
+#[test]
 fn list_repeat_filtermap_sortby() {
     assert_str_prog(
         "repeat_fm_sortby",
