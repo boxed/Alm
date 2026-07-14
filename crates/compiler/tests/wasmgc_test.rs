@@ -594,6 +594,19 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_split() {
+    assert_str_prog(
+        "split",
+        "module Test exposing (main)\n\n\
+         show : List String -> String\n\
+         show xs = \"[\" ++ String.join \"~\" xs ++ \"]\"\n\n\
+         main : String\n\
+         main =\n    \
+            show (String.split \",\" \"a,b,c\")\n        ++ show (String.split \",\" \"a,,b\")\n        ++ show (String.split \",\" \",a,\")\n        ++ show (String.split \",\" \"nocommas\")\n        ++ show (String.split \"\" \"xyz\")\n        ++ show (String.split \", \" \"1, 2, 3\")\n",
+    );
+}
+
+#[test]
 fn result_module() {
     assert_str_prog(
         "result",
