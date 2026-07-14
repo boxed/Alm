@@ -482,3 +482,23 @@ fn maybe_nothing_paths() {
          main =\n    let\n        empty = List.drop 5 [ 1, 2, 3 ]\n    in\n    String.fromInt (Maybe.withDefault -1 (List.head empty))\n        ++ \",\" ++ String.fromInt (Maybe.withDefault -1 (Maybe.map (\\n -> n + 1) (List.head empty)))\n",
     );
 }
+
+#[test]
+fn string_join_repeat_affix() {
+    assert_str_prog(
+        "str_jra",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    String.join \", \" [ \"a\", \"b\", \"c\" ]\n        ++ \"|\" ++ String.repeat 3 \"ab\"\n        ++ \"|\" ++ (if String.startsWith \"foo\" \"foobar\" then \"y\" else \"n\")\n        ++ (if String.endsWith \"bar\" \"foobar\" then \"y\" else \"n\")\n        ++ (if String.startsWith \"xyz\" \"foobar\" then \"y\" else \"n\")\n",
+    );
+}
+
+#[test]
+fn string_join_from_ints() {
+    assert_str_prog(
+        "str_join_ints",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main = String.join \"-\" (List.map String.fromInt (List.range 1 5))\n",
+    );
+}

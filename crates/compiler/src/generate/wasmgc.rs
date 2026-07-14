@@ -137,6 +137,10 @@ struct Codegen<'a> {
     list_tail_idx: u32,
     maybe_with_default_idx: u32,
     maybe_map_idx: u32,
+    str_join_idx: u32,
+    str_repeat_idx: u32,
+    str_starts_with_idx: u32,
+    str_ends_with_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -176,6 +180,10 @@ impl<'a> Codegen<'a> {
             list_tail_idx: 0,
             maybe_with_default_idx: 0,
             maybe_map_idx: 0,
+            str_join_idx: 0,
+            str_repeat_idx: 0,
+            str_starts_with_idx: 0,
+            str_ends_with_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -239,6 +247,10 @@ impl<'a> Codegen<'a> {
         self.list_tail_idx = next();
         self.maybe_with_default_idx = next();
         self.maybe_map_idx = next();
+        self.str_join_idx = next();
+        self.str_repeat_idx = next();
+        self.str_starts_with_idx = next();
+        self.str_ends_with_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -296,6 +308,10 @@ impl<'a> Codegen<'a> {
         let list_tail = self.emit_list_head(true);
         let maybe_with_default = self.emit_maybe_with_default();
         let maybe_map = self.emit_maybe_map();
+        let str_join = self.emit_str_join();
+        let str_repeat = self.emit_str_repeat();
+        let str_starts_with = self.emit_str_affix(false);
+        let str_ends_with = self.emit_str_affix(true);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -355,6 +371,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // list_tail
         funcs.function(ft2); // maybe_with_default
         funcs.function(ft2); // maybe_map
+        funcs.function(ft2); // str_join
+        funcs.function(ft2); // str_repeat
+        funcs.function(ft2); // str_starts_with
+        funcs.function(ft2); // str_ends_with
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -388,6 +408,10 @@ impl<'a> Codegen<'a> {
         code.function(&list_tail);
         code.function(&maybe_with_default);
         code.function(&maybe_map);
+        code.function(&str_join);
+        code.function(&str_repeat);
+        code.function(&str_starts_with);
+        code.function(&str_ends_with);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -851,29 +875,75 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// A kernel used as a value: synthesize a lifted wrapper function and emit a
-    /// (capture-free) closure over it. Currently the binary arithmetic ops.
+    /// A kernel used as a first-class value: synthesize a lifted wrapper that
+    /// performs the kernel on its parameters, and emit a capture-free closure
+    /// over it (so it flows through apply1 / higher-order functions).
     fn emit_foreign_value(&mut self, module: &str, name: &str, f: &mut Function) -> Result<(), String> {
-        let op = match (module, name) {
-            ("Basics", "add") => Instruction::I64Add,
-            ("Basics", "sub") => Instruction::I64Sub,
-            ("Basics", "mul") => Instruction::I64Mul,
+        let arity: u32 = match (module, name) {
+            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
+            ("String", "append") => 2,
+            ("String", "fromInt") | ("String", "length") | ("Char", "toCode") | ("Basics", "not") => 1,
             _ => return Err(format!("wasmgc: `{module}.{name}` is not yet usable as a value")),
         };
-        self.fn_type(2);
+        self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         let mut lf = Function::new([]);
-        lf.instruction(&Instruction::LocalGet(0));
-        lf.instruction(&cast_to(T_INT));
-        lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        lf.instruction(&Instruction::LocalGet(1));
-        lf.instruction(&cast_to(T_INT));
-        lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        lf.instruction(&op);
-        lf.instruction(&Instruction::StructNew(T_INT));
+        match (module, name) {
+            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&cast_to(T_INT));
+                lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+                lf.instruction(&Instruction::LocalGet(1));
+                lf.instruction(&cast_to(T_INT));
+                lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+                lf.instruction(&match name {
+                    "add" => Instruction::I64Add,
+                    "sub" => Instruction::I64Sub,
+                    _ => Instruction::I64Mul,
+                });
+                lf.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("String", "append") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&Instruction::LocalGet(1));
+                lf.instruction(&Instruction::Call(self.str_append_idx));
+            }
+            ("String", "fromInt") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&Instruction::Call(self.str_from_int_idx));
+            }
+            ("String", "length") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&cast_to(T_STR));
+                lf.instruction(&Instruction::ArrayLen);
+                lf.instruction(&Instruction::I64ExtendI32S);
+                lf.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Char", "toCode") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                lf.instruction(&Instruction::I31GetS);
+                lf.instruction(&Instruction::I64ExtendI32S);
+                lf.instruction(&Instruction::StructNew(T_INT));
+            }
+            _ => {
+                // Basics.not
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                lf.instruction(&Instruction::I31GetS);
+                lf.instruction(&Instruction::I32Eqz);
+                lf.instruction(&Instruction::RefI31);
+            }
+        }
         lf.instruction(&Instruction::End);
-        self.lifted.push((2, lf));
-        self.emit_make_closure(lidx, 2, f);
+        self.lifted.push((arity, lf));
+        self.emit_make_closure(lidx, arity, f);
         Ok(())
     }
 
@@ -1258,6 +1328,151 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::End); // if
         f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// str_join(sep, list) : concatenate strings with `sep` between them.
+    fn emit_str_join(&self) -> Function {
+        // sep(0), list(1); acc(2):eqref, first(3):i32
+        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        // if !first: acc = acc ++ sep
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        // acc = acc ++ head
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_repeat(n, s) : `s` concatenated `n` times.
+    fn emit_str_repeat(&self) -> Function {
+        // n(0), s(1); acc(2):eqref, i(3):i32
+        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_affix(a, s) : byte-correct startsWith (suffix=false) / endsWith
+    /// (suffix=true). Valid over UTF-8 since it compares whole affixes.
+    fn emit_str_affix(&self, suffix: bool) -> Function {
+        // a(0), s(1); al(2), sl(3), i(4), off(5): i32
+        let mut f = Function::new([(4, ValType::I32)]);
+        let false_ret = |f: &mut Function| {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::RefI31);
+            f.instruction(&Instruction::Return);
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        if suffix {
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Sub);
+        } else {
+            f.instruction(&Instruction::I32Const(0));
+        }
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
         f
     }
 
@@ -2207,6 +2422,26 @@ impl<'a> Codegen<'a> {
                 self.emit_i64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I32WrapI64);
                 f.instruction(&Instruction::RefI31);
+            }
+            ("String", "join") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_join_idx));
+            }
+            ("String", "repeat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_repeat_idx));
+            }
+            ("String", "startsWith") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_starts_with_idx));
+            }
+            ("String", "endsWith") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_ends_with_idx));
             }
             ("String", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
