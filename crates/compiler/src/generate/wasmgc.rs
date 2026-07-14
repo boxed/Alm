@@ -98,6 +98,183 @@ fn dec(f: &mut Function, local: u32) {
     f.instruction(&Instruction::LocalSet(local));
 }
 
+/// Read one byte `s[i + k]` (unsigned) onto the stack.
+fn byte_at(f: &mut Function, s: u32, i: u32, k: i32) {
+    f.instruction(&Instruction::LocalGet(s));
+    f.instruction(&Instruction::LocalGet(i));
+    if k != 0 {
+        f.instruction(&Instruction::I32Const(k));
+        f.instruction(&Instruction::I32Add);
+    }
+    f.instruction(&Instruction::ArrayGetU(T_STR));
+}
+
+/// Decode one UTF-8 code point from `s` at index `i` (locals), writing the
+/// code point to `cp` and its byte width to `adv`.
+fn utf8_decode(f: &mut Function, s: u32, i: u32, cp: u32, adv: u32) {
+    // cp = b0
+    byte_at(f, s, i, 0);
+    f.instruction(&Instruction::LocalSet(cp));
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x80));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::LocalSet(adv));
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0xE0));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    // 2-byte
+    f.instruction(&Instruction::I32Const(2));
+    f.instruction(&Instruction::LocalSet(adv));
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x1F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(6));
+    f.instruction(&Instruction::I32Shl);
+    byte_at(f, s, i, 1);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Or);
+    f.instruction(&Instruction::LocalSet(cp));
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0xF0));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    // 3-byte
+    f.instruction(&Instruction::I32Const(3));
+    f.instruction(&Instruction::LocalSet(adv));
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x0F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(12));
+    f.instruction(&Instruction::I32Shl);
+    byte_at(f, s, i, 1);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(6));
+    f.instruction(&Instruction::I32Shl);
+    f.instruction(&Instruction::I32Or);
+    byte_at(f, s, i, 2);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Or);
+    f.instruction(&Instruction::LocalSet(cp));
+    f.instruction(&Instruction::Else);
+    // 4-byte
+    f.instruction(&Instruction::I32Const(4));
+    f.instruction(&Instruction::LocalSet(adv));
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x07));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(18));
+    f.instruction(&Instruction::I32Shl);
+    byte_at(f, s, i, 1);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(12));
+    f.instruction(&Instruction::I32Shl);
+    f.instruction(&Instruction::I32Or);
+    byte_at(f, s, i, 2);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Const(6));
+    f.instruction(&Instruction::I32Shl);
+    f.instruction(&Instruction::I32Or);
+    byte_at(f, s, i, 3);
+    f.instruction(&Instruction::I32Const(0x3F));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Or);
+    f.instruction(&Instruction::LocalSet(cp));
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+}
+
+/// Compute the UTF-8 byte width of the code point in local `cp`, into `bl`.
+fn utf8_byte_len(f: &mut Function, cp: u32, bl: u32) {
+    f.instruction(&Instruction::I32Const(4));
+    f.instruction(&Instruction::LocalSet(bl));
+    for (limit, len) in [(0x10000, 3), (0x800, 2), (0x80, 1)] {
+        f.instruction(&Instruction::LocalGet(cp));
+        f.instruction(&Instruction::I32Const(limit));
+        f.instruction(&Instruction::I32LtU);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(len));
+        f.instruction(&Instruction::LocalSet(bl));
+        f.instruction(&Instruction::End);
+    }
+}
+
+/// Write `out[off] = 0x80 | ((cp >> shift) & 0x3F)` (a UTF-8 continuation or,
+/// with the leading bits pre-masked by the caller, any body byte).
+fn write_byte(f: &mut Function, out: u32, off: u32, off_delta: i32, lead: i32, cp: u32, shift: i32, mask: i32) {
+    f.instruction(&Instruction::LocalGet(out));
+    f.instruction(&Instruction::LocalGet(off));
+    if off_delta != 0 {
+        f.instruction(&Instruction::I32Const(off_delta));
+        f.instruction(&Instruction::I32Add);
+    }
+    f.instruction(&Instruction::I32Const(lead));
+    f.instruction(&Instruction::LocalGet(cp));
+    if shift != 0 {
+        f.instruction(&Instruction::I32Const(shift));
+        f.instruction(&Instruction::I32ShrU);
+    }
+    f.instruction(&Instruction::I32Const(mask));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Or);
+    f.instruction(&Instruction::ArraySet(T_STR));
+}
+
+/// Encode the code point in local `cp` into `out` at byte offset `off`,
+/// advancing `off` by the encoded width.
+fn utf8_encode(f: &mut Function, out: u32, off: u32, cp: u32) {
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x80));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    write_byte(f, out, off, 0, 0, cp, 0, 0x7F);
+    bump(f, off, 1);
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x800));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    write_byte(f, out, off, 0, 0xC0, cp, 6, 0x1F);
+    write_byte(f, out, off, 1, 0x80, cp, 0, 0x3F);
+    bump(f, off, 2);
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::LocalGet(cp));
+    f.instruction(&Instruction::I32Const(0x10000));
+    f.instruction(&Instruction::I32LtU);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    write_byte(f, out, off, 0, 0xE0, cp, 12, 0x0F);
+    write_byte(f, out, off, 1, 0x80, cp, 6, 0x3F);
+    write_byte(f, out, off, 2, 0x80, cp, 0, 0x3F);
+    bump(f, off, 3);
+    f.instruction(&Instruction::Else);
+    write_byte(f, out, off, 0, 0xF0, cp, 18, 0x07);
+    write_byte(f, out, off, 1, 0x80, cp, 12, 0x3F);
+    write_byte(f, out, off, 2, 0x80, cp, 6, 0x3F);
+    write_byte(f, out, off, 3, 0x80, cp, 0, 0x3F);
+    bump(f, off, 4);
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+}
+
+/// Emit `local += n` for an i32 local.
+fn bump(f: &mut Function, local: u32, n: i32) {
+    f.instruction(&Instruction::LocalGet(local));
+    f.instruction(&Instruction::I32Const(n));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalSet(local));
+}
+
 pub fn build(mono: &MonoProgram, output: &Path) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     let bytes = cg.build()?;
@@ -161,6 +338,10 @@ struct Codegen<'a> {
     str_dropright_idx: u32,
     str_to_int_idx: u32,
     str_contains_idx: u32,
+    str_to_list_idx: u32,
+    str_from_list_idx: u32,
+    str_from_char_idx: u32,
+    str_uncons_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -224,6 +405,10 @@ impl<'a> Codegen<'a> {
             str_dropright_idx: 0,
             str_to_int_idx: 0,
             str_contains_idx: 0,
+            str_to_list_idx: 0,
+            str_from_list_idx: 0,
+            str_from_char_idx: 0,
+            str_uncons_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -311,6 +496,10 @@ impl<'a> Codegen<'a> {
         self.str_dropright_idx = next();
         self.str_to_int_idx = next();
         self.str_contains_idx = next();
+        self.str_to_list_idx = next();
+        self.str_from_list_idx = next();
+        self.str_from_char_idx = next();
+        self.str_uncons_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -393,6 +582,10 @@ impl<'a> Codegen<'a> {
         let str_dropright = self.emit_str_range(false, true);
         let str_to_int = self.emit_str_to_int();
         let str_contains = self.emit_str_contains();
+        let str_to_list = self.emit_str_to_list();
+        let str_from_list = self.emit_str_from_list();
+        let str_from_char = self.emit_str_from_char();
+        let str_uncons = self.emit_str_uncons();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -477,6 +670,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // str_dropright
         funcs.function(ft1); // str_to_int
         funcs.function(ft2); // str_contains
+        funcs.function(ft1); // str_to_list
+        funcs.function(ft1); // str_from_list
+        funcs.function(ft1); // str_from_char
+        funcs.function(ft1); // str_uncons
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -534,6 +731,10 @@ impl<'a> Codegen<'a> {
         code.function(&str_dropright);
         code.function(&str_to_int);
         code.function(&str_contains);
+        code.function(&str_to_list);
+        code.function(&str_from_list);
+        code.function(&str_from_char);
+        code.function(&str_uncons);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -2615,6 +2816,209 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_to_list(s) : String -> List Char, decoding UTF-8 code points.
+    fn emit_str_to_list(&self) -> Function {
+        // locals: sstr(1):str, len(2), i(3), cp(4), adv(5):i32, acc(6):eqref
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (4, ValType::I32),
+            (1, eqref()),
+        ]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        utf8_decode(&mut f, 1, 3, 4, 5);
+        // acc = cons(Char cp, acc)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_from_list(chars) : List Char -> String, encoding UTF-8. Two passes:
+    /// sum the byte widths, allocate, then fill.
+    fn emit_str_from_list(&self) -> Function {
+        // locals: total(1), off(2), cp(3), bl(4):i32, cur(5):eqref, out(6):str
+        let mut f = Function::new([
+            (4, ValType::I32),
+            (1, eqref()),
+            (1, ref_to(T_STR)),
+        ]);
+        // pass 1: total byte length
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(3));
+        utf8_byte_len(&mut f, 3, 4);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        // pass 2: encode
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(3));
+        utf8_encode(&mut f, 6, 2, 3);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_from_char(c) : Char -> single-code-point String.
+    fn emit_str_from_char(&self) -> Function {
+        // locals: cp(1), bl(2), off(3):i32, out(4):str
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(1));
+        utf8_byte_len(&mut f, 1, 2);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        utf8_encode(&mut f, 4, 3, 1);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_uncons(s) : String -> Maybe (Char, String) — first code point paired
+    /// with the remaining bytes, or Nothing when empty.
+    fn emit_str_uncons(&self) -> Function {
+        // locals: sstr(1):str, len(2), idx(3), cp(4), adv(5):i32, rest(6):str
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (4, ValType::I32),
+            (1, ref_to(T_STR)),
+        ]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        // empty -> Nothing
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        utf8_decode(&mut f, 1, 3, 4, 5);
+        // rest = slice [adv, len)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Just (Char cp, rest)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3733,6 +4137,75 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_contains_idx));
+            }
+            ("String", "toList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+            }
+            ("String", "fromList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_list_idx));
+            }
+            ("String", "fromChar") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_char_idx));
+            }
+            ("String", "cons") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_char_idx));
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_append_idx));
+            }
+            ("String", "uncons") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_uncons_idx));
+            }
+            // code-point-correct string transforms via toList/list-op/fromList
+            ("String", "reverse") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_reverse_idx));
+                f.instruction(&Instruction::Call(self.str_from_list_idx));
+            }
+            ("String", "map") => {
+                self.emit_expr(&args[0], ctx, f)?; // f
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_map_idx));
+                f.instruction(&Instruction::Call(self.str_from_list_idx));
+            }
+            ("String", "filter") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_filter_idx));
+                f.instruction(&Instruction::Call(self.str_from_list_idx));
+            }
+            ("String", "foldl") => {
+                self.emit_expr(&args[0], ctx, f)?; // f
+                self.emit_expr(&args[1], ctx, f)?; // acc
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_foldl_idx));
+            }
+            ("String", "foldr") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_foldr_idx));
+            }
+            ("String", "any") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_any_idx));
+            }
+            ("String", "all") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_list_idx));
+                f.instruction(&Instruction::Call(self.list_all_idx));
             }
             ("List", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;

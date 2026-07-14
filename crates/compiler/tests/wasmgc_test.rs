@@ -594,6 +594,41 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_char_bridge() {
+    assert_str_prog(
+        "char_bridge",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.map (\\c -> Char.toUpper c) \"hello\"\n        ++ \"|\" ++ String.filter (\\c -> Char.isDigit c) \"a1b2c3\"\n        ++ \"|\" ++ String.reverse \"abcde\"\n        ++ \"|\" ++ String.cons 'x' \"yz\"\n        ++ \"|\" ++ String.fromList (String.toList \"roundtrip\")\n        ++ \"|\" ++ String.fromInt (String.foldl (\\c acc -> acc + 1) 0 \"abc\")\n",
+    );
+}
+
+#[test]
+fn string_uncons() {
+    assert_str_prog(
+        "uncons",
+        "module Test exposing (main)\n\n\
+         show : Maybe ( Char, String ) -> String\n\
+         show m =\n    case m of\n        Just ( c, rest ) ->\n            String.fromChar c ++ \"/\" ++ rest\n\n        Nothing ->\n            \"-\"\n\n\
+         main : String\n\
+         main =\n    show (String.uncons \"abc\") ++ \"|\" ++ show (String.uncons \"\")\n",
+    );
+}
+
+#[test]
+fn string_utf8_roundtrip() {
+    // Multi-byte code points must survive decode/re-encode and reverse.
+    assert_str_prog(
+        "utf8",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.reverse \"a\\u{00E9}o\"\n        ++ \"|\" ++ String.fromList (String.toList \"\\u{2603}\\u{1F600}z\")\n",
+    );
+}
+
+#[test]
 fn char_breadth() {
     assert_str_prog(
         "char_breadth",
