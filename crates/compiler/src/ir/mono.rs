@@ -652,7 +652,7 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             module: instance.module.clone(),
             tipe: instance.tipe.clone(),
             params,
-            body,
+            body: Reducer::default().opt(body),
             region: def.name.region,
         });
         // Enqueue every instance this body's references demanded.
@@ -664,6 +664,292 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     }
 
     MonoProgram { functions, error }
+}
+
+/// Beta-reduces statically-known applications so higher-order glue over
+/// non-word values (records/tuples) compiles to direct calls instead of
+/// building and applying a boxed closure. A closure's uniform calling
+/// convention passes every argument as one machine word, so a multi-word value
+/// (a record like elm-flate's `BitWriter`, a tuple) is heap-boxed on the way in
+/// and unboxed on the way out — per application, which is catastrophic in a hot
+/// loop (`Symbol.encode` threads a `BitWriter` through `maybeExtra`/
+/// `maybeDistance` per compressed symbol).
+///
+/// The reductions, all effect-preserving (Elm is pure):
+///   - `x |> f` / `f <| x`      -> apply `f` to `x`
+///   - `identity x`             -> `x`
+///   - `always x _`             -> `x`
+///   - `(f >> g) x`             -> `g (f x)`;  `(f << g) x` -> `f (g x)`
+///   - `(f a…) b…`              -> `f a… b…`   (currying is associative)
+///   - `(case s of … -> fᵢ) x` -> `case s of … -> fᵢ x` (args hoisted so the
+///                                 scrutinee and each argument evaluate once)
+///   - a zero-parameter function-typed `let` binding is inlined at application
+///     sites, so the cases above fire on it (its now-dead binding is DCE'd).
+/// Anything not matched stays an ordinary `Call`, which the backend compiles as
+/// before. Lambdas are left as calls — the backend already inlines a saturated
+/// lambda application without boxing.
+#[derive(Default)]
+struct Reducer {
+    /// Zero-parameter, function-typed local bindings, inlined where applied.
+    inlinable: HashMap<Name, TypedExpr>,
+    fresh: usize,
+}
+
+impl Reducer {
+    fn opt(&mut self, e: TypedExpr) -> TypedExpr {
+        let kind = match e.kind {
+            // `l |> r` is `r l`; `l <| r` is `l r`.
+            TypedKind::Binop(ref op, ..) if op.as_str() == "|>" || op.as_str() == "<|" => {
+                let (op, _h, _f, l, r) = match e.kind {
+                    TypedKind::Binop(op, h, f, l, r) => (op, h, f, l, r),
+                    _ => unreachable!(),
+                };
+                let (l, r) = (self.opt(*l), self.opt(*r));
+                let (func, arg) = if op.as_str() == "|>" { (r, l) } else { (l, r) };
+                return self.apply(func, vec![arg], e.tipe, e.region);
+            }
+            TypedKind::Call(f, args) => {
+                let f = self.opt(*f);
+                let args = args.into_iter().map(|a| self.opt(a)).collect();
+                return self.apply(f, args, e.tipe, e.region);
+            }
+            TypedKind::Let(decls, body) => {
+                // Optimize each declaration; record zero-param function-typed
+                // Defs as inlinable for this let's scope, then restore.
+                let mut added = Vec::new();
+                let decls: Vec<TypedLetDecl> = decls
+                    .into_iter()
+                    .map(|d| self.opt_decl(d, &mut added))
+                    .collect();
+                let body = self.opt(*body);
+                for n in added {
+                    self.inlinable.remove(&n);
+                }
+                TypedKind::Let(decls, Box::new(body))
+            }
+            TypedKind::Case(scrut, branches) => TypedKind::Case(
+                Box::new(self.opt(*scrut)),
+                branches.into_iter().map(|(p, b)| (p, self.opt(b))).collect(),
+            ),
+            TypedKind::If(branches, otherwise) => TypedKind::If(
+                branches
+                    .into_iter()
+                    .map(|(c, b)| (self.opt(c), self.opt(b)))
+                    .collect(),
+                Box::new(self.opt(*otherwise)),
+            ),
+            TypedKind::Lambda(ps, b) => TypedKind::Lambda(ps, Box::new(self.opt(*b))),
+            TypedKind::List(xs) => TypedKind::List(xs.into_iter().map(|x| self.opt(x)).collect()),
+            TypedKind::Negate(x) => TypedKind::Negate(Box::new(self.opt(*x))),
+            TypedKind::Binop(op, h, f, l, r) => {
+                TypedKind::Binop(op, h, f, Box::new(self.opt(*l)), Box::new(self.opt(*r)))
+            }
+            TypedKind::Access(r, n) => TypedKind::Access(Box::new(self.opt(*r)), n),
+            TypedKind::Update(r, fs) => TypedKind::Update(
+                Box::new(self.opt(*r)),
+                fs.into_iter().map(|(n, v)| (n, self.opt(v))).collect(),
+            ),
+            TypedKind::Record(fs) => {
+                TypedKind::Record(fs.into_iter().map(|(n, v)| (n, self.opt(v))).collect())
+            }
+            TypedKind::Tuple(a, b, c) => TypedKind::Tuple(
+                Box::new(self.opt(*a)),
+                Box::new(self.opt(*b)),
+                c.map(|c| Box::new(self.opt(*c))),
+            ),
+            other => other,
+        };
+        TypedExpr { tipe: e.tipe, kind, region: e.region }
+    }
+
+    fn opt_decl(&mut self, d: TypedLetDecl, added: &mut Vec<Name>) -> TypedLetDecl {
+        match d {
+            TypedLetDecl::Def { name, params, body } => {
+                let body = self.opt(body);
+                // A `let f = <function-valued expr>` (no parameters of its own):
+                // inline it at its application sites so pipes/compositions/cases
+                // in its body reduce there.
+                if params.is_empty() && matches!(body.tipe, can::Type::Lambda(..)) {
+                    self.inlinable.insert(name.clone(), body.clone());
+                    added.push(name.clone());
+                }
+                TypedLetDecl::Def { name, params, body }
+            }
+            TypedLetDecl::Recursive(defs) => TypedLetDecl::Recursive(
+                defs.into_iter().map(|d| self.opt_decl(d, added)).collect(),
+            ),
+            TypedLetDecl::Destruct(p, v) => TypedLetDecl::Destruct(p, self.opt(v)),
+        }
+    }
+
+    /// Apply `func` to `args`, reducing structurally where possible. `tipe` is
+    /// the type of the whole application (used only as a fallback).
+    fn apply(
+        &mut self,
+        func: TypedExpr,
+        mut args: Vec<TypedExpr>,
+        tipe: can::Type,
+        region: Region,
+    ) -> TypedExpr {
+        if args.is_empty() {
+            return func;
+        }
+        let result_ty = peel_arrows_ty(&func.tipe, args.len()).unwrap_or_else(|| tipe.clone());
+        match func.kind {
+            // Currying is associative: `(f a…) b…` == `f a… b…`.
+            TypedKind::Call(f, mut a1) => {
+                a1.append(&mut args);
+                self.apply(*f, a1, tipe, region)
+            }
+            TypedKind::Foreign(ref m, ref n)
+                if m.as_str() == "Basics" && n.as_str() == "identity" && args.len() == 1 =>
+            {
+                args.pop().unwrap()
+            }
+            TypedKind::Foreign(ref m, ref n)
+                if m.as_str() == "Basics" && n.as_str() == "always" && args.len() >= 2 =>
+            {
+                let x = args.remove(0);
+                args.remove(0); // the ignored argument
+                self.apply(x, args, tipe, region)
+            }
+            // `(f >> g) x` = `g (f x)`; `(f << g) x` = `f (g x)`.
+            TypedKind::Binop(ref op, .., ref f, ref g)
+                if (op.as_str() == ">>" || op.as_str() == "<<") && args.len() == 1 =>
+            {
+                let compose_r = op.as_str() == ">>";
+                let (f, g) = (f.as_ref().clone(), g.as_ref().clone());
+                let (first, second) = if compose_r { (f, g) } else { (g, f) };
+                let fx = self.apply(first, args, tipe.clone(), region);
+                self.apply(second, vec![fx], tipe, region)
+            }
+            // Nested pipes appearing directly in function position.
+            TypedKind::Binop(ref op, .., ref l, ref r)
+                if op.as_str() == "|>" || op.as_str() == "<|" =>
+            {
+                let pipe_r = op.as_str() == "|>";
+                let (l, r) = (l.as_ref().clone(), r.as_ref().clone());
+                let (func2, arg2) = if pipe_r { (r, l) } else { (l, r) };
+                let inner = self.apply(func2, vec![arg2], func.tipe.clone(), region);
+                self.apply(inner, args, tipe, region)
+            }
+            TypedKind::Local(ref name) if self.inlinable.contains_key(name) => {
+                let body = self.inlinable[name].clone();
+                self.apply(body, args, tipe, region)
+            }
+            // Push the application into every branch, hoisting the arguments (and
+            // scrutinee/condition, already evaluated) so they run once.
+            TypedKind::Case(scrut, branches) => {
+                let (bindings, args) = self.hoist(args);
+                let branches = branches
+                    .into_iter()
+                    .map(|(p, b)| (p, self.apply(b, args.clone(), result_ty.clone(), region)))
+                    .collect();
+                let case = TypedExpr {
+                    tipe: result_ty,
+                    kind: TypedKind::Case(scrut, branches),
+                    region,
+                };
+                wrap_let(bindings, case, region)
+            }
+            TypedKind::If(branches, otherwise) => {
+                let (bindings, args) = self.hoist(args);
+                let branches = branches
+                    .into_iter()
+                    .map(|(c, b)| (c, self.apply(b, args.clone(), result_ty.clone(), region)))
+                    .collect();
+                let otherwise = self.apply(*otherwise, args, result_ty.clone(), region);
+                let iff = TypedExpr {
+                    tipe: result_ty,
+                    kind: TypedKind::If(branches, Box::new(otherwise)),
+                    region,
+                };
+                wrap_let(bindings, iff, region)
+            }
+            TypedKind::Let(decls, body) => {
+                // Hoist args out so a let binding can't shadow their free vars.
+                let (bindings, args) = self.hoist(args);
+                let body = self.apply(*body, args, result_ty.clone(), region);
+                let inner = TypedExpr {
+                    tipe: result_ty,
+                    kind: TypedKind::Let(decls, Box::new(body)),
+                    region,
+                };
+                wrap_let(bindings, inner, region)
+            }
+            _ => TypedExpr {
+                tipe: result_ty,
+                kind: TypedKind::Call(Box::new(func), args),
+                region,
+            },
+        }
+    }
+
+    /// Bind each non-trivial argument to a fresh local so it evaluates once when
+    /// the application is duplicated across branches; trivial arguments (a
+    /// variable, literal, or reference) pass through unbound.
+    fn hoist(&mut self, args: Vec<TypedExpr>) -> (Vec<TypedLetDecl>, Vec<TypedExpr>) {
+        let mut bindings = Vec::new();
+        let mut out = Vec::new();
+        for a in args {
+            if is_trivial(&a) {
+                out.push(a);
+            } else {
+                let name = Name::from(format!("_hoist{}", self.fresh));
+                self.fresh += 1;
+                out.push(TypedExpr {
+                    tipe: a.tipe.clone(),
+                    kind: TypedKind::Local(name.clone()),
+                    region: a.region,
+                });
+                bindings.push(TypedLetDecl::Def { name, params: Vec::new(), body: a });
+            }
+        }
+        (bindings, out)
+    }
+}
+
+/// Whether re-evaluating `e` is free of cost and effect, so it can be
+/// duplicated across branches without hoisting.
+fn is_trivial(e: &TypedExpr) -> bool {
+    matches!(
+        e.kind,
+        TypedKind::Local(_)
+            | TypedKind::Global(_)
+            | TypedKind::Foreign(..)
+            | TypedKind::Int(_)
+            | TypedKind::Float(_)
+            | TypedKind::Str(_)
+            | TypedKind::Chr(_)
+            | TypedKind::Unit
+            | TypedKind::Accessor(_)
+    )
+}
+
+/// Wrap `body` in a `let` binding `bindings`, or return it unchanged if empty.
+fn wrap_let(bindings: Vec<TypedLetDecl>, body: TypedExpr, region: Region) -> TypedExpr {
+    if bindings.is_empty() {
+        body
+    } else {
+        TypedExpr {
+            tipe: body.tipe.clone(),
+            kind: TypedKind::Let(bindings, Box::new(body)),
+            region,
+        }
+    }
+}
+
+/// The result type of applying a function of type `tipe` to `n` arguments:
+/// peel `n` leading `->` arrows. `None` if it is not a function of that arity.
+fn peel_arrows_ty(tipe: &can::Type, n: usize) -> Option<can::Type> {
+    let mut t = tipe;
+    for _ in 0..n {
+        match t {
+            can::Type::Lambda(_, b) => t = b,
+            _ => return None,
+        }
+    }
+    Some(t.clone())
 }
 
 struct Specializer<'a> {
