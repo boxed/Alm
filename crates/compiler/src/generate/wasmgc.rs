@@ -20,6 +20,7 @@ use wasm_encoder::{
 
 use crate::ast::canonical as can;
 use crate::ir::mono::{MonoProgram, TypedExpr, TypedKind, TypedLetDecl};
+use crate::reporting::annotation::Region;
 
 const T_INT: u32 = 0; // struct { i64 }
 const T_FLOAT: u32 = 1; // struct { f64 }
@@ -1318,12 +1319,20 @@ impl<'a> Codegen<'a> {
     /// A kernel used as a first-class value: synthesize a lifted wrapper that
     /// performs the kernel on its parameters, and emit a capture-free closure
     /// over it (so it flows through apply1 / higher-order functions).
-    fn emit_foreign_value(&mut self, module: &str, name: &str, f: &mut Function) -> Result<(), String> {
+    fn emit_foreign_value(
+        &mut self,
+        module: &str,
+        name: &str,
+        tipe: &can::Type,
+        f: &mut Function,
+    ) -> Result<(), String> {
         let arity: u32 = match (module, name) {
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
             ("String", "append") => 2,
             ("String", "fromInt") | ("String", "length") | ("Char", "toCode") | ("Basics", "not") => 1,
-            _ => return Err(format!("wasmgc: `{module}.{name}` is not yet usable as a value")),
+            // Generic fallback: wrap any other kernel by synthesizing local
+            // arguments and reusing the ordinary kernel dispatch (emit_kernel).
+            _ => return self.emit_foreign_value_generic(module, name, tipe, f),
         };
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
@@ -1380,6 +1389,54 @@ impl<'a> Codegen<'a> {
         }
         lf.instruction(&Instruction::End);
         self.lifted.push((arity, lf));
+        self.emit_make_closure(lidx, arity, f);
+        Ok(())
+    }
+
+    /// Wrap an arbitrary kernel as a first-class value by synthesizing a lifted
+    /// function whose parameters become `Local` arguments to the normal kernel
+    /// dispatch. Lets e.g. `Char.toUpper` be passed to `List.map` directly.
+    fn emit_foreign_value_generic(
+        &mut self,
+        module: &str,
+        name: &str,
+        tipe: &can::Type,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        // Peel the function type into argument types.
+        let mut arg_types = Vec::new();
+        let mut cur = tipe;
+        while let can::Type::Lambda(a, b) = cur {
+            arg_types.push((**a).clone());
+            cur = b;
+        }
+        let arity = arg_types.len() as u32;
+        if arity == 0 {
+            return Err(format!("wasmgc: `{module}.{name}` is not yet usable as a value"));
+        }
+        self.fn_type(arity);
+        // Synthesize `Local` args bound to parameter slots 0..arity.
+        let args: Vec<TypedExpr> = arg_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| TypedExpr {
+                tipe: t,
+                kind: TypedKind::Local(format!("$farg{i}").into()),
+                region: Region::ZERO,
+            })
+            .collect();
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity;
+        for (i, _) in args.iter().enumerate() {
+            lctx.scope.push((format!("$farg{i}"), i as u32));
+        }
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+        let mut lf = Function::new([]);
+        self.emit_kernel(module, name, &args, &mut lctx, &mut lf)?;
+        lf.instruction(&Instruction::End);
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
         self.emit_make_closure(lidx, arity, f);
         Ok(())
     }
@@ -3997,7 +4054,7 @@ impl<'a> Codegen<'a> {
             TypedKind::Lambda(params, body) => self.lift(params, body, ctx, f)?,
             // A kernel used as a first-class value (e.g. `(+)` passed to foldl).
             TypedKind::Foreign(module, name) => {
-                self.emit_foreign_value(module.as_str(), name.as_str(), f)?
+                self.emit_foreign_value(module.as_str(), name.as_str(), &e.tipe, f)?
             }
             TypedKind::Negate(x) if is_float(&x.tipe) => {
                 self.emit_f64(x, ctx, f)?;

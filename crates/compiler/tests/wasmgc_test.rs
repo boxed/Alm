@@ -594,6 +594,18 @@ fn list_sum_float() {
 }
 
 #[test]
+fn kernels_as_values() {
+    // Bare kernels passed to higher-order functions (no lambda wrapper).
+    assert_str_prog(
+        "kernel_values",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            String.map Char.toUpper \"hello\"\n        ++ \"|\" ++ String.filter Char.isDigit \"a1b2\"\n        ++ \"|\" ++ String.join \",\" (List.map String.toUpper [ \"ab\", \"cd\" ])\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (List.map String.length [ \"a\", \"abcd\" ]))\n        ++ \"|\" ++ String.join \",\" (List.map String.reverse [ \"ab\", \"cd\" ])\n",
+    );
+}
+
+#[test]
 fn string_words_lines() {
     assert_str_prog(
         "words_lines",
