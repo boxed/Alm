@@ -159,6 +159,8 @@ struct Codegen<'a> {
     str_right_idx: u32,
     str_dropleft_idx: u32,
     str_dropright_idx: u32,
+    str_to_int_idx: u32,
+    str_contains_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -220,6 +222,8 @@ impl<'a> Codegen<'a> {
             str_right_idx: 0,
             str_dropleft_idx: 0,
             str_dropright_idx: 0,
+            str_to_int_idx: 0,
+            str_contains_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -305,6 +309,8 @@ impl<'a> Codegen<'a> {
         self.str_right_idx = next();
         self.str_dropleft_idx = next();
         self.str_dropright_idx = next();
+        self.str_to_int_idx = next();
+        self.str_contains_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -385,6 +391,8 @@ impl<'a> Codegen<'a> {
         let str_right = self.emit_str_range(true, false);
         let str_dropleft = self.emit_str_range(true, true);
         let str_dropright = self.emit_str_range(false, true);
+        let str_to_int = self.emit_str_to_int();
+        let str_contains = self.emit_str_contains();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -467,6 +475,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // str_right
         funcs.function(ft2); // str_dropleft
         funcs.function(ft2); // str_dropright
+        funcs.function(ft1); // str_to_int
+        funcs.function(ft2); // str_contains
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -522,6 +532,8 @@ impl<'a> Codegen<'a> {
         code.function(&str_right);
         code.function(&str_dropleft);
         code.function(&str_dropright);
+        code.function(&str_to_int);
+        code.function(&str_contains);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -2402,6 +2414,207 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_to_int(s) : parse to `Maybe Int` (optional leading +/-, then ASCII
+    /// digits; anything else yields Nothing). Matches Elm's String.toInt.
+    fn emit_str_to_int(&self) -> Function {
+        // locals: sstr(1):str, len(2), i(3), neg(4), c(5):i32, acc(6):i64
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (4, ValType::I32),
+            (1, ValType::I64),
+        ]);
+        // Nothing = ctor tag 1, null args
+        let nothing = |f: &mut Function| {
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        // sign
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(45)); // '-'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(43)); // '+'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // a lone sign is not a number
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        // non-digit → Nothing
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(57));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // acc = acc*10 + (c - 48)
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // apply sign
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        // Just acc
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_contains(sub, s) : whether `s` contains `sub` (naive byte search).
+    fn emit_str_contains(&self) -> Function {
+        // params: sub(0), s(1). locals: substr(2):str, sstr(3):str,
+        // sublen(4), len(5), start(6), j(7):i32
+        let mut f = Function::new([(2, ref_to(T_STR)), (4, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5));
+        // empty needle → true
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty)); // outer_block (depth target 1 from outer_loop)
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // outer_loop
+        // if start + sublen > len → break outer
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::Block(BlockType::Empty)); // inner_block
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // inner_loop
+        // all matched → true
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // substr[j] != sstr[start+j] → break inner (mismatch)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::BrIf(1)); // break inner_block
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Br(0)); // inner_loop
+        f.instruction(&Instruction::End); // inner_loop
+        f.instruction(&Instruction::End); // inner_block
+        // mismatch: reset j, advance start
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Br(0)); // outer_loop
+        f.instruction(&Instruction::End); // outer_loop
+        f.instruction(&Instruction::End); // outer_block
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -3461,6 +3674,15 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_dropright_idx));
+            }
+            ("String", "toInt") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_int_idx));
+            }
+            ("String", "contains") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_contains_idx));
             }
             ("List", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;

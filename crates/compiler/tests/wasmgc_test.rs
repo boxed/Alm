@@ -594,6 +594,32 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_to_int() {
+    assert_str_prog(
+        "toint",
+        "module Test exposing (main)\n\n\
+         show : Maybe Int -> String\n\
+         show m =\n    case m of\n        Just n ->\n            String.fromInt n\n\n        Nothing ->\n            \"x\"\n\n\
+         main : String\n\
+         main =\n    \
+            show (String.toInt \"42\")\n        ++ \",\" ++ show (String.toInt \"-17\")\n        ++ \",\" ++ show (String.toInt \"+5\")\n        ++ \",\" ++ show (String.toInt \"12a\")\n        ++ \",\" ++ show (String.toInt \"\")\n        ++ \",\" ++ show (String.toInt \"-\")\n        ++ \",\" ++ show (String.toInt \"007\")\n",
+    );
+}
+
+#[test]
+fn string_contains() {
+    assert_str_prog(
+        "contains",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         main : String\n\
+         main =\n    \
+            yn (String.contains \"cat\" \"concatenate\")\n        ++ yn (String.contains \"dog\" \"concatenate\")\n        ++ yn (String.contains \"\" \"abc\")\n        ++ yn (String.contains \"abcd\" \"abc\")\n        ++ yn (String.contains \"ate\" \"concatenate\")\n",
+    );
+}
+
+#[test]
 fn string_slicing() {
     assert_str_prog(
         "slicing",
