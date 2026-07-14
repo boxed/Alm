@@ -107,7 +107,7 @@ fn bench_one(label: &str, src: &str) {
     let mono = mono::specialize_program(&canonical, &checked.types, &checked.node_types);
     let layouts = LayoutCtx::new(&canonical);
     let typ = dir.join("typed");
-    typed::build(&mono, &layouts, &typ, Target::Native).unwrap();
+    typed::build(&mono, &layouts, &typ, Target::Native, std::collections::HashMap::new()).unwrap();
 
     // Correctness first: all three agree.
     let expect = String::from_utf8_lossy(&node.output().unwrap().stdout)

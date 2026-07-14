@@ -285,8 +285,28 @@ pub(crate) fn finish<'ctx>(
             // `--undefined=main` forces `main` to be pulled from the runtime
             // archive during its scan, so libc's crt (`__main_void`, listed
             // after) resolves it without needing archive re-scanning.
+            // Export the browser-runtime entry points so the JS shim can drive
+            // a Browser.* program (they live in the runtime archive and are
+            // otherwise unreferenced, so `--export` both pulls them in and
+            // exports them). Harmless for headless/worker programs.
             let result = Command::new(env!("ALM_WASM_LD"))
                 .arg("--undefined=main")
+                .arg("--export=alm_browser_start")
+                .arg("--export=alm_alloc_in")
+                .arg("--export=alm_event")
+                .arg("--export=alm_on_timeout")
+                .arg("--export=alm_on_interval")
+                .arg("--export=alm_on_frame")
+                .arg("--export=alm_on_dom_event")
+                .arg("--export=alm_port_send")
+                .arg("--export=alm_browser_set_url")
+                .arg("--export=alm_on_url_change")
+                .arg("--export=alm_on_http")
+                .arg("--export=alm_browser_set_flags")
+                // The `dom_*` host ops are provided by the JS shim at
+                // instantiation; emit them as wasm imports (from module "env")
+                // rather than failing the link.
+                .arg("--allow-undefined")
                 .arg(&crt)
                 .arg(&object)
                 .arg(&runtime)

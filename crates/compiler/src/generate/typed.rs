@@ -38,9 +38,11 @@ pub fn build(
     layouts: &LayoutCtx,
     output: &Path,
     target: Target,
+    ports: HashMap<String, bool>,
 ) -> Result<(), String> {
     let context = Context::create();
     let mut cg = TypedCodegen::new(&context, layouts);
+    cg.ports = ports;
     cg.emit(mono)?;
     // Resolve all debug-info metadata before verification or optimization —
     // the verifier and passes both walk (and validate) DWARF metadata.
@@ -86,6 +88,11 @@ struct TypedCodegen<'ctx, 'l> {
     /// inline expansion) so codegen terminates; a self-referential field reuses
     /// the same helper. Mirrors [`box_fns`]/[`unbox_fns`].
     eq_fns: HashMap<String, FunctionValue<'ctx>>,
+    /// Module-level ports and whether each is outgoing (`payload -> Cmd msg`,
+    /// true) or incoming (`(payload -> msg) -> Sub msg`, false). A port has no
+    /// definition, so a reference to one builds a `CmdPort`/`SubPort` via a
+    /// runtime kernel with the port's name.
+    ports: HashMap<String, bool>,
     locals: HashMap<String, BasicValueEnum<'ctx>>,
     cur_fn: Option<FunctionValue<'ctx>>,
     /// When emitting a self-tail-recursive function, its loop state: a mutable
@@ -181,6 +188,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             box_fns: HashMap::new(),
             unbox_fns: HashMap::new(),
             eq_fns: HashMap::new(),
+            ports: HashMap::new(),
             locals: HashMap::new(),
             cur_fn: None,
             tco: None,
@@ -461,6 +469,27 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // Effect kernels (TEA): all take/return uniform words.
         for (name, arity) in [
             ("platform_worker", 1),
+            ("browser_sandbox", 1),
+            ("browser_element", 1),
+            ("browser_document", 1),
+            ("browser_application", 1),
+            ("bevents_on_keydown", 1),
+            ("bevents_on_keyup", 1),
+            ("bevents_on_keypress", 1),
+            ("bevents_on_click", 1),
+            ("bevents_on_mousemove", 1),
+            ("bevents_on_mousedown", 1),
+            ("bevents_on_mouseup", 1),
+            ("bevents_on_anim_delta", 1),
+            ("bevents_on_anim", 1),
+            ("nav_push_url", 2),
+            ("nav_replace_url", 2),
+            ("nav_back", 2),
+            ("nav_forward", 2),
+            ("nav_load", 1),
+            ("nav_reload", 0),
+            ("platform_outgoing_port", 2),
+            ("platform_incoming_port", 2),
             ("terminal_write_line", 1),
             ("time_every", 2),
             ("cmd_batch", 1),
@@ -1035,6 +1064,23 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .left()
             .unwrap();
         self.unbox_value(uniform, result_tipe)
+    }
+
+    /// Build a `CmdPort`/`SubPort` for a port applied to its one argument. The
+    /// payload (outgoing) or `toMsg` (incoming) is boxed to a uniform word and
+    /// passed to the port kernel with the port's name. Only `Json.Value`
+    /// payloads are supported (no type-directed encoding yet).
+    fn gen_port_call(
+        &mut self,
+        name: &str,
+        outgoing: bool,
+        arg: &TypedExpr,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let name_val = self.gen_string(name)?;
+        let arg_val = self.gen(arg)?;
+        let arg_boxed = self.box_value(arg_val, &arg.tipe)?;
+        let sym = if outgoing { "platform_outgoing_port" } else { "platform_incoming_port" };
+        Ok(self.call_named(sym, &[name_val, arg_boxed]))
     }
 
     /// Call a runtime effect function: box each argument into a uniform value
@@ -1988,6 +2034,16 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         func: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A port applied to its argument: `outPort payload` builds a `CmdPort`;
+        // `inPort toMsg` builds a `SubPort`. Ports have no definition, so this
+        // is the only place they resolve.
+        if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
+            if let Some(&outgoing) = self.ports.get(name.as_str()) {
+                if args.len() == 1 {
+                    return self.gen_port_call(name.as_str(), outgoing, &args[0]);
+                }
+            }
+        }
         // A saturated constructor application builds a tagged heap value; a
         // partial one (result type still a function) is eta-expanded into a
         // closure that constructs once the remaining arguments arrive.
@@ -3065,6 +3121,27 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             // TEA effects: box the arguments into uniform values and call the
             // runtime. Results (Cmd/Sub/Program) are opaque uniform words.
             ("Platform", "worker") => self.effect_call("platform_worker", args),
+            ("Browser", "sandbox") => self.effect_call("browser_sandbox", args),
+            ("Browser", "element") => self.effect_call("browser_element", args),
+            ("Browser", "document") => self.effect_call("browser_document", args),
+            ("Browser", "application") => self.effect_call("browser_application", args),
+            ("Browser.Events", "onKeyDown") => self.effect_call("bevents_on_keydown", args),
+            ("Browser.Events", "onKeyUp") => self.effect_call("bevents_on_keyup", args),
+            ("Browser.Events", "onKeyPress") => self.effect_call("bevents_on_keypress", args),
+            ("Browser.Events", "onClick") => self.effect_call("bevents_on_click", args),
+            ("Browser.Events", "onMouseMove") => self.effect_call("bevents_on_mousemove", args),
+            ("Browser.Events", "onMouseDown") => self.effect_call("bevents_on_mousedown", args),
+            ("Browser.Events", "onMouseUp") => self.effect_call("bevents_on_mouseup", args),
+            ("Browser.Events", "onAnimationFrameDelta") => {
+                self.effect_call("bevents_on_anim_delta", args)
+            }
+            ("Browser.Events", "onAnimationFrame") => self.effect_call("bevents_on_anim", args),
+            ("Browser.Navigation", "pushUrl") => self.effect_call("nav_push_url", args),
+            ("Browser.Navigation", "replaceUrl") => self.effect_call("nav_replace_url", args),
+            ("Browser.Navigation", "back") => self.effect_call("nav_back", args),
+            ("Browser.Navigation", "forward") => self.effect_call("nav_forward", args),
+            ("Browser.Navigation", "load") => self.effect_call("nav_load", args),
+            ("Browser.Navigation", "reload") => self.effect_call("nav_reload", args),
             ("Terminal", "writeLine") => self.effect_call("terminal_write_line", args),
             ("Time", "every") => self.effect_call("time_every", args),
             ("Platform.Cmd", "batch") => self.effect_call("cmd_batch", args),

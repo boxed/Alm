@@ -36,7 +36,7 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
     let program = mono::specialize_program(&canonical, &checked.types, &checked.node_types);
     let layouts = LayoutCtx::new(&canonical);
     let binary = dir.join(test_name);
-    typed::build(&program, &layouts, &binary, Target::Native)
+    typed::build(&program, &layouts, &binary, Target::Native, std::collections::HashMap::new())
         .unwrap_or_else(|e| panic!("typed build failed: {}", e));
     let native_out = run(&mut Command::new(&binary));
 

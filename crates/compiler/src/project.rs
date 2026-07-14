@@ -165,7 +165,21 @@ pub fn compile_project_typed(
         .filter(|module| !is_native_shunted_module(module.name.as_str()))
         .collect();
     let layouts = crate::ir::layout::LayoutCtx::for_modules(&module_refs);
-    generate::typed::build(&program, &layouts, output, target).map_err(|message| {
+    // Ports have no definition; record each with whether it is outgoing
+    // (`payload -> Cmd msg`) or incoming (`(payload -> msg) -> Sub msg`) so the
+    // backend can resolve a reference to one into a `CmdPort`/`SubPort` kernel.
+    let mut ports: HashMap<String, bool> = HashMap::new();
+    for module in &module_refs {
+        for port in &module.ports {
+            let outgoing = matches!(
+                &port.tipe,
+                can::Type::Lambda(_, r)
+                    if matches!(&**r, can::Type::Type(_, n, _) if n.as_str() == "Cmd")
+            );
+            ports.insert(port.name.to_string(), outgoing);
+        }
+    }
+    generate::typed::build(&program, &layouts, output, target, ports).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),
