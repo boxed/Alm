@@ -3022,6 +3022,17 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
+    /// Emit a `Char`-typed expression, leaving its unboxed code point (`i32`).
+    fn emit_char_code(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
+        self.emit_expr(e, ctx, f)?;
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+            shared: false,
+            ty: AbstractHeapType::I31,
+        }));
+        f.instruction(&Instruction::I31GetS);
+        Ok(())
+    }
+
     /// Emit a `Float`-typed expression, leaving an unboxed `f64`.
     fn emit_f64(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
         self.emit_expr(e, ctx, f)?;
@@ -3430,16 +3441,55 @@ impl<'a> Codegen<'a> {
                     "isLower" => (97, 26),
                     _ => (65, 26),
                 };
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
-                    shared: false,
-                    ty: AbstractHeapType::I31,
-                }));
-                f.instruction(&Instruction::I31GetS);
+                self.emit_char_code(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I32Const(base));
                 f.instruction(&Instruction::I32Sub);
                 f.instruction(&Instruction::I32Const(span));
                 f.instruction(&Instruction::I32LtU);
+                f.instruction(&Instruction::RefI31);
+            }
+            // ASCII-only case fold; other code points pass through (partial
+            // parity on non-ASCII, matching JS on ASCII).
+            ("Char", "toUpper") | ("Char", "toLower") => {
+                let (base, span, delta) = if name == "toUpper" {
+                    (97, 26, -32)
+                } else {
+                    (65, 26, 32)
+                };
+                self.emit_char_code(&args[0], ctx, f)?; // folded
+                f.instruction(&Instruction::I32Const(delta));
+                f.instruction(&Instruction::I32Add);
+                self.emit_char_code(&args[0], ctx, f)?; // unchanged
+                self.emit_char_code(&args[0], ctx, f)?; // in-range test
+                f.instruction(&Instruction::I32Const(base));
+                f.instruction(&Instruction::I32Sub);
+                f.instruction(&Instruction::I32Const(span));
+                f.instruction(&Instruction::I32LtU);
+                f.instruction(&Instruction::Select);
+                f.instruction(&Instruction::RefI31);
+            }
+            // predicates built from unsigned range tests OR'd together
+            ("Char", "isAlpha")
+            | ("Char", "isAlphaNum")
+            | ("Char", "isHexDigit")
+            | ("Char", "isOctDigit") => {
+                // (base, span) ranges whose union defines the class
+                let ranges: &[(i32, i32)] = match name {
+                    "isAlpha" => &[(65, 26), (97, 26)],
+                    "isAlphaNum" => &[(48, 10), (65, 26), (97, 26)],
+                    "isHexDigit" => &[(48, 10), (65, 6), (97, 6)],
+                    _ => &[(48, 8)], // isOctDigit
+                };
+                for (i, &(base, span)) in ranges.iter().enumerate() {
+                    self.emit_char_code(&args[0], ctx, f)?;
+                    f.instruction(&Instruction::I32Const(base));
+                    f.instruction(&Instruction::I32Sub);
+                    f.instruction(&Instruction::I32Const(span));
+                    f.instruction(&Instruction::I32LtU);
+                    if i > 0 {
+                        f.instruction(&Instruction::I32Or);
+                    }
+                }
                 f.instruction(&Instruction::RefI31);
             }
             ("Basics", "abs") if is_float(&args[0].tipe) => {

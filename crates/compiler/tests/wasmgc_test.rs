@@ -594,6 +594,21 @@ fn list_sum_float() {
 }
 
 #[test]
+fn char_breadth() {
+    assert_str_prog(
+        "char_breadth",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         cc : Char -> String\n\
+         cc c = String.fromInt (Char.toCode c)\n\n\
+         main : String\n\
+         main =\n    \
+            cc (Char.toUpper 'a')\n        ++ \",\" ++ cc (Char.toUpper 'Z')\n        ++ \",\" ++ cc (Char.toUpper '3')\n        ++ \",\" ++ cc (Char.toLower 'A')\n        ++ \",\" ++ cc (Char.toLower 'q')\n        ++ \"|\" ++ yn (Char.isAlpha 'q')\n        ++ yn (Char.isAlpha '7')\n        ++ yn (Char.isAlphaNum '7')\n        ++ yn (Char.isHexDigit 'f')\n        ++ yn (Char.isHexDigit 'g')\n        ++ yn (Char.isOctDigit '7')\n        ++ yn (Char.isOctDigit '8')\n",
+    );
+}
+
+#[test]
 fn string_to_int() {
     assert_str_prog(
         "toint",
