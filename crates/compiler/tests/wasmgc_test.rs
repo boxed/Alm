@@ -571,3 +571,35 @@ fn list_indexed_map() {
             [ \"a\", \"b\", \"c\" ]\n        |> List.indexedMap (\\i s -> String.fromInt i ++ s)\n        |> String.join \",\"\n",
     );
 }
+
+#[test]
+fn list_sum_product() {
+    assert_int_prog(
+        "sumprod",
+        "module Test exposing (main)\n\n\
+         main : Int\n\
+         main = List.sum [ 1, 2, 3, 4 ] + List.product [ 1, 2, 3, 4 ] + List.sum []\n",
+    );
+}
+
+#[test]
+fn list_sum_float() {
+    assert_str_prog(
+        "sumf",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            if List.sum [ 1.5, 2.5, 4.0 ] == 8.0 then\n        \"y\"\n\n    else\n        \"n\"\n",
+    );
+}
+
+#[test]
+fn list_map2() {
+    assert_str_prog(
+        "map2",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            List.map2 (\\a b -> a + b) [ 1, 2, 3 ] [ 10, 20, 30, 40 ]\n        |> List.map String.fromInt\n        |> String.join \",\"\n",
+    );
+}

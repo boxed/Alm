@@ -149,6 +149,9 @@ struct Codegen<'a> {
     list_min_idx: u32,
     list_max_idx: u32,
     list_indexed_map_idx: u32,
+    list_sum_idx: u32,
+    list_product_idx: u32,
+    list_map2_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -200,6 +203,9 @@ impl<'a> Codegen<'a> {
             list_min_idx: 0,
             list_max_idx: 0,
             list_indexed_map_idx: 0,
+            list_sum_idx: 0,
+            list_product_idx: 0,
+            list_map2_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -275,6 +281,9 @@ impl<'a> Codegen<'a> {
         self.list_min_idx = next();
         self.list_max_idx = next();
         self.list_indexed_map_idx = next();
+        self.list_sum_idx = next();
+        self.list_product_idx = next();
+        self.list_map2_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -345,6 +354,9 @@ impl<'a> Codegen<'a> {
         let list_min = self.emit_list_min_max(false);
         let list_max = self.emit_list_min_max(true);
         let list_indexed_map = self.emit_list_indexed_map();
+        let list_sum = self.emit_list_sum_prod(false);
+        let list_product = self.emit_list_sum_prod(true);
+        let list_map2 = self.emit_list_map2();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -417,6 +429,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // list_min
         funcs.function(ft1); // list_max
         funcs.function(ft3); // list_indexed_map
+        funcs.function(ft1); // list_sum
+        funcs.function(ft1); // list_product
+        funcs.function(ft3); // list_map2
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -462,6 +477,9 @@ impl<'a> Codegen<'a> {
         code.function(&list_min);
         code.function(&list_max);
         code.function(&list_indexed_map);
+        code.function(&list_sum);
+        code.function(&list_product);
+        code.function(&list_map2);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1942,6 +1960,123 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_sum/product(xs) : numeric fold. Works for both `List Int` and
+    /// `List Float` by dispatching on the runtime type of the first element;
+    /// the empty list yields the Int identity (0 / 1), matching Elm.
+    fn emit_list_sum_prod(&self, product: bool) -> Function {
+        let ident = if product { 1 } else { 0 };
+        // locals: iacc i64 (1), facc f64 (2), cur eqref (3)
+        let mut f = Function::new([(1, ValType::I64), (1, ValType::F64), (1, eqref())]);
+        // empty -> box Int identity
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I64Const(ident));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // float path if head is a Float box
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::F64Const((ident as f64).into()));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(if product { &Instruction::F64Mul } else { &Instruction::F64Add });
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // int path
+        f.instruction(&Instruction::I64Const(ident));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(if product { &Instruction::I64Mul } else { &Instruction::I64Add });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_map2(f, xs, ys) : zip-map, stopping at the shorter list.
+    fn emit_list_map2(&self) -> Function {
+        let mut f = Function::new([]);
+        // if either null -> Nil
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // head' = apply1(apply1(f, xs.head), ys.head)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        // tail' = map2(f, xs.tail, ys.tail)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_map2_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -2853,6 +2988,20 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_INT));
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_indexed_map_idx));
+            }
+            ("List", "sum") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_sum_idx));
+            }
+            ("List", "product") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_product_idx));
+            }
+            ("List", "map2") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_map2_idx));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {
