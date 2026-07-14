@@ -3215,30 +3215,81 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     return dom;
 }
 
-function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
-    // Reuse DOM nodes for matching keys; rebuild the child list in order.
-    var oldByKey = {};
-    for (var i = 0; i < oldV.kids.length; i++) {
-        oldByKey[oldV.kids[i].a] = { vnode: oldV.kids[i].b, dom: dom.childNodes[i] };
+// Longest increasing subsequence over `source` (old positions of the new
+// children; -1 marks a freshly rendered node). Returns a boolean mask marking
+// the reused children whose relative order is already correct, so they can stay
+// put while everything else is moved into place. Standard patience-sorting LIS.
+function _VDom_keyedStable(source) {
+    var n = source.length;
+    var stay = new Array(n);
+    for (var x = 0; x < n; x++) { stay[x] = false; }
+    var parent = new Array(n);
+    var tails = []; // indices into source; source[tails[k]] increasing
+    for (var i = 0; i < n; i++) {
+        if (source[i] === -1) { continue; } // new node: never stays
+        if (tails.length === 0) { tails.push(i); parent[i] = -1; continue; }
+        var last = tails[tails.length - 1];
+        if (source[last] < source[i]) { parent[i] = last; tails.push(i); continue; }
+        var lo = 0, hi = tails.length - 1;
+        while (lo < hi) {
+            var mid = (lo + hi) >> 1;
+            if (source[tails[mid]] < source[i]) { lo = mid + 1; } else { hi = mid; }
+        }
+        parent[i] = lo > 0 ? tails[lo - 1] : -1;
+        tails[lo] = i;
     }
-    var newDoms = [];
+    var u = tails.length;
+    var v = u > 0 ? tails[u - 1] : -1;
+    while (u-- > 0) { stay[v] = true; v = parent[v]; }
+    return stay;
+}
+
+function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
+    // Reuse DOM nodes for matching keys and move only the ones that actually
+    // moved. `source[j]` is the old index of new child j (-1 if freshly
+    // rendered); the LIS of `source` is the set of nodes already in the right
+    // relative order, which we leave untouched.
+    var oldKids = oldV.kids, newKids = newV.kids;
+    var oldByKey = {};
+    for (var i = 0; i < oldKids.length; i++) {
+        oldByKey[oldKids[i].a] = { vnode: oldKids[i].b, dom: dom.childNodes[i], index: i };
+    }
+
+    var n = newKids.length;
+    var newDoms = new Array(n);
+    var source = new Array(n);
     var used = {};
-    for (var j = 0; j < newV.kids.length; j++) {
-        var key = newV.kids[j].a;
-        var newKid = newV.kids[j].b;
+    for (var j = 0; j < n; j++) {
+        var key = newKids[j].a;
+        var newKid = newKids[j].b;
         var old = !used[key] && oldByKey[key];
         if (old) {
             used[key] = true;
-            newDoms.push(_VDom_patch(old.dom, old.vnode, newKid, dispatch, doc));
+            source[j] = old.index;
+            newDoms[j] = _VDom_patch(old.dom, old.vnode, newKid, dispatch, doc);
         } else {
-            newDoms.push(_VDom_render(newKid, dispatch, doc));
+            source[j] = -1;
+            newDoms[j] = _VDom_render(newKid, dispatch, doc);
         }
     }
-    while (dom.childNodes.length > 0) {
-        dom.removeChild(dom.childNodes[dom.childNodes.length - 1]);
+
+    // Drop DOM nodes whose key disappeared.
+    for (var k = 0; k < oldKids.length; k++) {
+        if (!used[oldKids[k].a]) {
+            var gone = oldByKey[oldKids[k].a].dom;
+            if (gone && gone.parentNode === dom) { dom.removeChild(gone); }
+        }
     }
-    for (var n = 0; n < newDoms.length; n++) {
-        dom.appendChild(newDoms[n]);
+
+    // Insert/move from the end so `next` is always an already-placed node.
+    var stay = _VDom_keyedStable(source);
+    var next = null;
+    for (var m = n - 1; m >= 0; m--) {
+        var node = newDoms[m];
+        if (source[m] === -1 || !stay[m]) {
+            dom.insertBefore(node, next);
+        }
+        next = node;
     }
     return dom;
 }
