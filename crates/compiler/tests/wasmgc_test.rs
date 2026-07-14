@@ -594,6 +594,19 @@ fn list_sum_float() {
 }
 
 #[test]
+fn string_words_lines() {
+    assert_str_prog(
+        "words_lines",
+        "module Test exposing (main)\n\n\
+         show : List String -> String\n\
+         show xs = \"[\" ++ String.join \"~\" xs ++ \"]\"\n\n\
+         main : String\n\
+         main =\n    \
+            show (String.words \"  the   quick brown\\tfox \")\n        ++ show (String.words \"\")\n        ++ show (String.lines \"a\\nb\\r\\nc\\rd\")\n        ++ show (String.lines \"trailing\\n\")\n",
+    );
+}
+
+#[test]
 fn string_split() {
     assert_str_prog(
         "split",

@@ -402,6 +402,8 @@ struct Codegen<'a> {
     result_to_maybe_idx: u32,
     result_from_maybe_idx: u32,
     str_split_idx: u32,
+    str_words_idx: u32,
+    str_lines_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -478,6 +480,8 @@ impl<'a> Codegen<'a> {
             result_to_maybe_idx: 0,
             result_from_maybe_idx: 0,
             str_split_idx: 0,
+            str_words_idx: 0,
+            str_lines_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -578,6 +582,8 @@ impl<'a> Codegen<'a> {
         self.result_to_maybe_idx = next();
         self.result_from_maybe_idx = next();
         self.str_split_idx = next();
+        self.str_words_idx = next();
+        self.str_lines_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -673,6 +679,8 @@ impl<'a> Codegen<'a> {
         let result_to_maybe = self.emit_result_to_maybe();
         let result_from_maybe = self.emit_result_from_maybe();
         let str_split = self.emit_str_split();
+        let str_words = self.emit_str_words();
+        let str_lines = self.emit_str_lines();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -770,6 +778,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // result_to_maybe
         funcs.function(ft2); // result_from_maybe
         funcs.function(ft2); // str_split
+        funcs.function(ft1); // str_words
+        funcs.function(ft1); // str_lines
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -840,6 +850,8 @@ impl<'a> Codegen<'a> {
         code.function(&result_to_maybe);
         code.function(&result_from_maybe);
         code.function(&str_split);
+        code.function(&str_words);
+        code.function(&str_lines);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -3432,6 +3444,202 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// str_words(s) : split on runs of ASCII whitespace, dropping empties.
+    fn emit_str_words(&self) -> Function {
+        // locals: sstr(1):str, len(2), i(3), start(4), a(5), b(6), c(7):i32,
+        //   acc(8):eqref, piece(9):str, si(10):i32
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (6, ValType::I32),
+            (1, eqref()),
+            (1, ref_to(T_STR)),
+            (1, ValType::I32),
+        ]);
+        // whitespace test on local 7: space (32) or 9..=13 (tab/LF/VT/FF/CR)
+        let is_ws = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(7));
+            f.instruction(&Instruction::I32Const(32));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::LocalGet(7));
+            f.instruction(&Instruction::I32Const(9));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::I32Const(5));
+            f.instruction(&Instruction::I32LtU);
+            f.instruction(&Instruction::I32Or);
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty)); // outer_block
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // outer_loop
+        // skip whitespace
+        f.instruction(&Instruction::Block(BlockType::Empty)); // skip
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // skipl
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        is_ws(&mut f);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1)); // non-ws → stop skipping
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // skipl
+        f.instruction(&Instruction::End); // skip
+        // if exhausted, done
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1)); // break outer_block
+        // consume a word
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(4)); // start
+        f.instruction(&Instruction::Block(BlockType::Empty)); // word
+        f.instruction(&Instruction::Loop(BlockType::Empty)); // wordl
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        is_ws(&mut f);
+        f.instruction(&Instruction::BrIf(1)); // ws → end of word
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // wordl
+        f.instruction(&Instruction::End); // word
+        // piece = s[start..i]
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(6));
+        slice_into(&mut f, 1, 5, 6, 9, 10);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::Br(0)); // outer_loop
+        f.instruction(&Instruction::End); // outer_loop
+        f.instruction(&Instruction::End); // outer_block
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_lines(s) : split on `\n`, `\r`, or `\r\n` (matching Elm/JS).
+    fn emit_str_lines(&self) -> Function {
+        // locals: sstr(1):str, len(2), i(3), start(4), a(5), b(6), c(7):i32,
+        //   acc(8):eqref, piece(9):str, si(10):i32
+        let mut f = Function::new([
+            (1, ref_to(T_STR)),
+            (6, ValType::I32),
+            (1, eqref()),
+            (1, ref_to(T_STR)),
+            (1, ValType::I32),
+        ]);
+        // emit: piece = s[start..i]; acc = cons(piece, acc)
+        let emit_cut = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::LocalSet(5));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalSet(6));
+            slice_into(f, 1, 5, 6, 9, 10);
+            f.instruction(&Instruction::LocalGet(9));
+            f.instruction(&Instruction::LocalGet(8));
+            f.instruction(&Instruction::StructNew(T_CONS));
+            f.instruction(&Instruction::LocalSet(8));
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        // \n
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        emit_cut(&mut f);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Else);
+        // \r (optionally \r\n)
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(13));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        emit_cut(&mut f);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Else);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::End); // \r if
+        f.instruction(&Instruction::End); // \n if/else
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        // final piece
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(6));
+        slice_into(&mut f, 1, 5, 6, 9, 10);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -4587,6 +4795,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_split_idx));
+            }
+            ("String", "words") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_words_idx));
+            }
+            ("String", "lines") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_lines_idx));
             }
             ("String", "toList") => {
                 self.emit_expr(&args[0], ctx, f)?;
