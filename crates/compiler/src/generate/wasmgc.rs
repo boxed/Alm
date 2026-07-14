@@ -144,6 +144,11 @@ struct Codegen<'a> {
     val_compare_idx: u32,
     list_insert_idx: u32,
     list_sort_idx: u32,
+    list_all_idx: u32,
+    list_any_idx: u32,
+    list_min_idx: u32,
+    list_max_idx: u32,
+    list_indexed_map_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -190,6 +195,11 @@ impl<'a> Codegen<'a> {
             val_compare_idx: 0,
             list_insert_idx: 0,
             list_sort_idx: 0,
+            list_all_idx: 0,
+            list_any_idx: 0,
+            list_min_idx: 0,
+            list_max_idx: 0,
+            list_indexed_map_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -260,6 +270,11 @@ impl<'a> Codegen<'a> {
         self.val_compare_idx = next();
         self.list_insert_idx = next();
         self.list_sort_idx = next();
+        self.list_all_idx = next();
+        self.list_any_idx = next();
+        self.list_min_idx = next();
+        self.list_max_idx = next();
+        self.list_indexed_map_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -325,6 +340,11 @@ impl<'a> Codegen<'a> {
         let val_compare = self.emit_val_compare();
         let list_insert = self.emit_list_insert();
         let list_sort = self.emit_list_sort();
+        let list_all = self.emit_list_all_any(true);
+        let list_any = self.emit_list_all_any(false);
+        let list_min = self.emit_list_min_max(false);
+        let list_max = self.emit_list_min_max(true);
+        let list_indexed_map = self.emit_list_indexed_map();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -392,6 +412,11 @@ impl<'a> Codegen<'a> {
         funcs.function(val_compare_ty); // val_compare
         funcs.function(ft2); // list_insert
         funcs.function(ft1); // list_sort
+        funcs.function(ft2); // list_all
+        funcs.function(ft2); // list_any
+        funcs.function(ft1); // list_min
+        funcs.function(ft1); // list_max
+        funcs.function(ft3); // list_indexed_map
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -432,6 +457,11 @@ impl<'a> Codegen<'a> {
         code.function(&val_compare);
         code.function(&list_insert);
         code.function(&list_sort);
+        code.function(&list_all);
+        code.function(&list_any);
+        code.function(&list_min);
+        code.function(&list_max);
+        code.function(&list_indexed_map);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1781,6 +1811,137 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_all/any(pred, xs) : whether `pred` holds for all / any elements.
+    fn emit_list_all_any(&self, all: bool) -> Function {
+        // early-exit value: all -> return false on first !pred; any -> true on first pred
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(if all { 1 } else { 0 }));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // p = pred(head)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        if all {
+            f.instruction(&Instruction::I32Eqz); // !p → return false
+        }
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(if all { 0 } else { 1 }));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_min/max(xs) : Maybe (least / greatest element) by val_compare.
+    fn emit_list_min_max(&self, max: bool) -> Function {
+        // xs(0); best(1): eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // Nothing
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // best = head; xs = tail
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        // if compare(head, best) (max: >0)(min: <0) → best = head
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(if max { &Instruction::I32GtS } else { &Instruction::I32LtS });
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Just best
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_indexed_map(f, i, xs) : map with the element index (starts at the
+    /// passed `i`, boxed as Int).
+    fn emit_list_indexed_map(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::Else);
+        // head' = apply1(apply1(f, i), xs.head)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        // tail' = indexed(f, i+1, xs.tail)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CONS));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        f.instruction(&Instruction::Call(self.list_indexed_map_idx));
+        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -2667,6 +2828,31 @@ impl<'a> Codegen<'a> {
             ("List", "sort") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_sort_idx));
+            }
+            ("List", "all") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_all_idx));
+            }
+            ("List", "any") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_any_idx));
+            }
+            ("List", "minimum") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_min_idx));
+            }
+            ("List", "maximum") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_max_idx));
+            }
+            ("List", "indexedMap") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I64Const(0));
+                f.instruction(&Instruction::StructNew(T_INT));
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_indexed_map_idx));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {

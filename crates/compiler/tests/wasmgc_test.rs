@@ -534,3 +534,40 @@ fn compare_min_max_float_string() {
          main =\n    (if min \"abc\" \"abd\" == \"abc\" then \"y\" else \"n\")\n        ++ (if max 2.5 1.5 == 2.5 then \"y\" else \"n\")\n",
     );
 }
+
+#[test]
+fn list_all_any() {
+    assert_str_prog(
+        "all_any",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         main : String\n\
+         main =\n    \
+            yn (List.all (\\n -> n > 0) [ 1, 2, 3 ])\n        ++ yn (List.all (\\n -> n > 1) [ 1, 2, 3 ])\n        ++ yn (List.any (\\n -> n > 2) [ 1, 2, 3 ])\n        ++ yn (List.any (\\n -> n > 9) [ 1, 2, 3 ])\n        ++ yn (List.all (\\n -> n > 0) [])\n        ++ yn (List.any (\\n -> n > 0) [])\n",
+    );
+}
+
+#[test]
+fn list_min_max() {
+    assert_str_prog(
+        "minmax",
+        "module Test exposing (main)\n\n\
+         show : Maybe Int -> String\n\
+         show m =\n    case m of\n        Just n ->\n            String.fromInt n\n\n        Nothing ->\n            \"-\"\n\n\
+         main : String\n\
+         main =\n    \
+            show (List.minimum [ 5, 2, 8, 1, 9 ])\n        ++ \",\" ++ show (List.maximum [ 5, 2, 8, 1, 9 ])\n        ++ \",\" ++ show (List.minimum [])\n",
+    );
+}
+
+#[test]
+fn list_indexed_map() {
+    assert_str_prog(
+        "imap",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \
+            [ \"a\", \"b\", \"c\" ]\n        |> List.indexedMap (\\i s -> String.fromInt i ++ s)\n        |> String.join \",\"\n",
+    );
+}
