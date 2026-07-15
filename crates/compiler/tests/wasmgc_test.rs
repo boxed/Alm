@@ -1970,6 +1970,12 @@ fn bench_wasmgc_vs_js() {
         ("string join 200k",
          "main : String\nmain = String.fromInt (String.length (String.join \",\" (List.map String.fromInt (List.range 1 200000))))\n",
          "main : String\nmain = String.fromInt (String.length (String.join \",\" (List.map String.fromInt (List.range 1 1))))\n"),
+        ("string repeat 50k",
+         "main : String\nmain = String.fromInt (String.length (String.repeat 50000 \"ab\"))\n",
+         "main : String\nmain = String.fromInt (String.length (String.repeat 1 \"ab\"))\n"),
+        ("json encode 100k",
+         "import Json.Encode as E\nmain : String\nmain = String.fromInt (String.length (E.encode 0 (E.list E.int (List.range 1 100000))))\n",
+         "import Json.Encode as E\nmain : String\nmain = String.fromInt (String.length (E.encode 0 (E.list E.int (List.range 1 1))))\n"),
     ];
     let dir = common::test_dir("alm-wasmgc", "bench");
     for (name, heavy, base) in workloads {

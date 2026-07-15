@@ -3296,36 +3296,61 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// str_repeat(n, s) : `s` concatenated `n` times.
+    /// str_repeat(n, s) : `s` concatenated `n` times. O(n·|s|): allocate the
+    /// full result once and array.copy `s` into each slot (a naive acc ++ s loop
+    /// would be O(n²)).
     fn emit_str_repeat(&self) -> Function {
-        // n(0), s(1); acc(2):eqref, i(3):i32
-        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayNewDefault(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
+        // n(0), s(1); n32(2),i(3),slen(4),off(5):i32; sc(6),out(7):ref T_STR
+        let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_STR))]);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
         f.instruction(&Instruction::I32WrapI64);
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalSet(2));
+        // clamp n to >= 0
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(6)); // sc
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4)); // slen
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(7)); // out
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5)); // off
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3)); // i
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::I32LeS);
-        f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::End);
         f
     }
@@ -6866,8 +6891,9 @@ impl<'a> Codegen<'a> {
     fn emit_json_enc(&self) -> Function {
         // params v(0), gap(1), prefix(2). locals:
         //   tag(3),len(4),i(5),compact(6):i32,
-        //   childPrefix(7),openSep(8),closeSep(9),colon(10),result(11),sub(12):eqref
-        let mut f = Function::new([(4, ValType::I32), (6, eqref())]);
+        //   childPrefix(7),openSep(8),closeSep(9),colon(10),result(11),sub(12):eqref,
+        //   pieces(13):ref T_ARR, sep(14):eqref (seq builder, see emit_json_seq)
+        let mut f = Function::new([(4, ValType::I32), (6, eqref()), (1, ref_to(T_ARR)), (1, eqref())]);
         ctor_tag(&mut f, 0);
         f.instruction(&Instruction::LocalSet(3));
         // compact = len(gap) == 0
@@ -6977,15 +7003,21 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// Emit the array/object body of json_enc: iterate `sub` (the arg-0 list),
-    /// building `result`. Leaves the finished String on the stack.
+    /// Emit the array/object body of json_enc. Renders each element into a
+    /// `pieces` array, then assembles via the O(n) str_join (a per-element
+    /// `result ++= …` accumulator was O(n²) — catastrophic for large values).
+    /// Leaves the finished String on the stack. Byte-identical to the old
+    /// format: `"[" ++ openSep ++ join(","++openSep, pieces) ++ closeSep ++ "]"`
+    /// when non-empty, else `"[]"`.
     fn emit_json_seq(&self, f: &mut Function, object: bool) {
         ctor_arg0(f, 0);
         f.instruction(&Instruction::LocalSet(12)); // sub = items/pairs
-        push_str_const(f, if object { "{" } else { "[" });
-        f.instruction(&Instruction::LocalSet(11)); // result
         list_len(f, 12);
-        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalSet(4)); // len
+        // pieces = new T_ARR(len)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(13));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::Block(BlockType::Empty));
@@ -6994,33 +7026,17 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        // result ++= (i==0 ? openSep : "," ++ openSep)
-        f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Else);
-        push_str_const(f, ",");
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalGet(13)); // pieces (for ArraySet)
+        f.instruction(&Instruction::LocalGet(5)); // i
         if object {
-            // result ++= escape(pair[0]) ++ colon
-            f.instruction(&Instruction::LocalGet(11));
+            // escape(pair[0]) ++ colon ++ json_enc(pair[1], gap, childPrefix)
             list_elem(f, 12, 5);
             f.instruction(&cast_to(T_ARR));
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::ArrayGet(T_ARR));
             f.instruction(&Instruction::Call(self.json_escape_idx));
+            f.instruction(&Instruction::LocalGet(10)); // colon
             f.instruction(&Instruction::Call(self.str_append_idx));
-            f.instruction(&Instruction::LocalGet(10));
-            f.instruction(&Instruction::Call(self.str_append_idx));
-            f.instruction(&Instruction::LocalSet(11));
-            // result ++= json_enc(pair[1], gap, childPrefix)
-            f.instruction(&Instruction::LocalGet(11));
             list_elem(f, 12, 5);
             f.instruction(&cast_to(T_ARR));
             f.instruction(&Instruction::I32Const(1));
@@ -7029,30 +7045,48 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::LocalGet(7));
             f.instruction(&Instruction::Call(self.json_enc_idx));
             f.instruction(&Instruction::Call(self.str_append_idx));
-            f.instruction(&Instruction::LocalSet(11));
         } else {
-            // result ++= json_enc(item, gap, childPrefix)
-            f.instruction(&Instruction::LocalGet(11));
+            // json_enc(item, gap, childPrefix)
             list_elem(f, 12, 5);
             f.instruction(&Instruction::LocalGet(1));
             f.instruction(&Instruction::LocalGet(7));
             f.instruction(&Instruction::Call(self.json_enc_idx));
-            f.instruction(&Instruction::Call(self.str_append_idx));
-            f.instruction(&Instruction::LocalSet(11));
         }
+        f.instruction(&Instruction::ArraySet(T_ARR)); // pieces[i] = rendered
         bump(f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // closeSep only when non-empty
+        // piecesList = T_LIST{len, T_BACK{0, pieces}}
         f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::LocalSet(12)); // reuse sub as the list
+        // sep = "," ++ openSep
+        push_str_const(f, ",");
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalSet(14));
+        // body = str_join(sep, piecesList)
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::Call(self.str_join_idx));
+        f.instruction(&Instruction::LocalSet(11)); // body
+        // "[" ++ (len>0 ? openSep ++ body ++ closeSep : "") ++ "]"
+        push_str_const(f, if object { "{" } else { "[" });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(8)); // openSep
+        f.instruction(&Instruction::LocalGet(11)); // body
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalGet(9)); // closeSep
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::Else);
+        push_str_const(f, "");
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Call(self.str_append_idx));
         push_str_const(f, if object { "}" } else { "]" });
         f.instruction(&Instruction::Call(self.str_append_idx));
     }
