@@ -1358,6 +1358,62 @@ fn url_from_string_pure() {
 }
 
 #[test]
+fn element_animation_frame() {
+    // onAnimationFrameDelta: advance the clock and flush one frame; the delta
+    // (rounded to avoid the float→string gap) must render the same in both.
+    let dir = common::test_dir("alm-wasmgc", "anim_frame");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Browser.Events\n\
+         import Html exposing (div, text)\n\n\
+         type Msg = Tick Float\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( 0, Cmd.none )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Tick d) n = ( n + round d, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Browser.Events.onAnimationFrameDelta Tick }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m14.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               r.clock.advance(16);r.clock.flushFrame();\
+               const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "onAnimationFrameDelta render disagrees");
+    assert_eq!(parts[1], "<div>16</div>", "expected one 16ms frame");
+}
+
+#[test]
 fn sandbox_keyed_and_lazy() {
     // Html.Keyed.ul with keyed <li>s and Html.Lazy.lazy wrapping a view. Output
     // must match the JS backend at init and after a click that reorders.

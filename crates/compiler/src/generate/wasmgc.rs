@@ -62,7 +62,9 @@ const HOST_ADD_DOM: u32 = 20; // (nameptr,namelen,slot) — add a document liste
 const HOST_PUSH_URL: u32 = 21; // (ptr,len,replace) — history push/replace
 const HOST_GET_URL: u32 = 22; // (outptr) -> len — write current href to memory
 const HOST_LOAD: u32 = 23; // (ptr,len) — full page navigation
-const N_IMPORTS: u32 = 24;
+const HOST_CLEAR_FRAMES: u32 = 24; // () — cancel the animation-frame loop
+const HOST_REQUEST_FRAME: u32 = 25; // (slot) — start an animation-frame loop
+const N_IMPORTS: u32 = 26;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -83,6 +85,8 @@ const G_NEXT_TICK: u32 = 16; // next timer slot (reset each reconcile)
 const G_DOMSUBS: u32 = 17; // active Browser.Events decoders, indexed by slot
 const G_NEXT_DOM: u32 = 18; // next document-sub slot (reset each reconcile)
 const G_URLCHG: u32 = 19; // Browser.application onUrlChange handler (null otherwise)
+const G_FRAMES: u32 = 20; // active onAnimationFrame subs, indexed by slot
+const G_NEXT_FRAME: u32 = 21; // next frame-sub slot (reset each reconcile)
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -774,6 +778,7 @@ struct Codegen<'a> {
     index_byte_idx: u32,
     url_from_string_idx: u32,
     strip_keys_idx: u32,
+    frame_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -924,6 +929,7 @@ impl<'a> Codegen<'a> {
             index_byte_idx: 0,
             url_from_string_idx: 0,
             strip_keys_idx: 0,
+            frame_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1099,6 +1105,7 @@ impl<'a> Codegen<'a> {
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
         self.strip_keys_idx = next();
+        self.frame_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1157,7 +1164,8 @@ impl<'a> Codegen<'a> {
         let e_e_ty = self.next_type + 19; // (eqref) -> eqref (url_from_string)
         let ei_i_ty = self.next_type + 20; // (eqref,i32) -> i32 (index_byte)
         let i_i_ty = self.next_type + 21; // (i32) -> i32 (host_get_url)
-        self.next_type += 22;
+        let iff_v_ty = self.next_type + 22; // (i32,f64,f64) -> () (alm_frame)
+        self.next_type += 23;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1292,6 +1300,7 @@ impl<'a> Codegen<'a> {
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
         let strip_keys = self.emit_strip_keys();
+        let frame = self.emit_frame();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1365,6 +1374,7 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![eqref()], vec![eqref()]); // url_from_string
         types.ty().function(vec![eqref(), ValType::I32], vec![ValType::I32]); // index_byte
         types.ty().function(vec![ValType::I32], vec![ValType::I32]); // host_get_url
+        types.ty().function(vec![ValType::I32, ValType::F64, ValType::F64], vec![]); // alm_frame
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1502,6 +1512,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
         funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
+        funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1648,6 +1659,7 @@ impl<'a> Codegen<'a> {
         code.function(&index_byte);
         code.function(&url_from_string);
         code.function(&strip_keys);
+        code.function(&frame);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1762,6 +1774,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
         );
+        // 20=active animation-frame subs (ref null T_ARR), 21=next slot (i32).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1790,6 +1811,8 @@ impl<'a> Codegen<'a> {
             ("host_push_url", imp_i3_v),
             ("host_get_url", i_i_ty),
             ("host_load", imp_ii_v),
+            ("host_clear_frames", json_void_ty),
+            ("host_request_frame", imp_i_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -1803,6 +1826,7 @@ impl<'a> Codegen<'a> {
         exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
         exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
         exports.export("alm_tick", ExportKind::Func, self.tick_idx);
+        exports.export("alm_frame", ExportKind::Func, self.frame_idx);
         exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
@@ -9589,10 +9613,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(HOST_CLEAR_TIMERS));
         f.instruction(&Instruction::Call(HOST_CLEAR_DOM));
+        f.instruction(&Instruction::Call(HOST_CLEAR_FRAMES));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::GlobalSet(G_NEXT_DOM));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(G_NEXT_FRAME));
         f.instruction(&Instruction::GlobalGet(G_SUBS));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -9656,6 +9683,26 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::Call(HOST_ADD_DOM));
         f.instruction(&Instruction::End);
+        // SubAnimation (tag 6): [toMsg, deltaFlag] → request an animation frame
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_FRAME));
+        f.instruction(&Instruction::LocalSet(4)); // slot
+        f.instruction(&Instruction::GlobalGet(G_NEXT_FRAME));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_FRAME));
+        // G_FRAMES[slot] = sub (keeps toMsg + deltaFlag)
+        f.instruction(&Instruction::GlobalGet(G_FRAMES));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(HOST_REQUEST_FRAME));
+        f.instruction(&Instruction::End);
         // Sub.batch (tag 1): recurse
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(1));
@@ -9703,6 +9750,43 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_INT));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_frame(slot, delta, now) : fire an onAnimationFrame(Delta) sub. The
+    /// stored SubAnimation is tag6 [toMsg, deltaFlag]; deltaFlag true → apply
+    /// toMsg to the frame delta (Float), else to `millisToPosix now`.
+    fn emit_frame(&self) -> Function {
+        // params slot(0):i32, delta(1),now(2):f64. locals: sub(3),toMsg(4):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::GlobalGet(G_FRAMES));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3)); // sub
+        ctor_arg0(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(4)); // toMsg
+        f.instruction(&Instruction::LocalGet(4)); // toMsg (for apply1)
+        // deltaFlag = sub.arg1 (Bool i31)
+        ctor_argn(&mut f, 3, 1);
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // delta as Float
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::Else);
+        // Posix now (opaque: T_CTOR tag0 [Int])
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
@@ -9804,9 +9888,17 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
-        // expectString: Ok body
+        // expectWhatever (kind 2) → Ok () ; expectString → Ok body
         f.instruction(&Instruction::I32Const(0)); // Ok
-        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // ()
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(8)); // body
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
@@ -10083,6 +10175,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_DOMSUBS));
+        // frames = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_FRAMES));
         Self::emit_reset_render(&mut f);
         // run initial cmd (element / document, i.e. G_KIND != 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
@@ -12147,6 +12243,12 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
+            ("Http", "expectWhatever") => {
+                f.instruction(&Instruction::I32Const(2)); // EXPECT_WHATEVER
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             // Browser.Events document listeners → SubDom tag5 [eventName, decoder].
             ("Browser.Events", ev) if browser_event_name(ev).is_some() => {
                 let name = browser_event_name(ev).unwrap();
@@ -12172,6 +12274,17 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(6));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // onAnimationFrame(Delta) → SubAnimation tag6 [toMsg, deltaFlag].
+            ("Browser.Events", "onAnimationFrameDelta")
+            | ("Browser.Events", "onAnimationFrame") => {
+                let is_delta = name == "onAnimationFrameDelta";
+                f.instruction(&Instruction::I32Const(6));
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                f.instruction(&Instruction::I32Const(is_delta as i32));
+                f.instruction(&Instruction::RefI31); // deltaFlag Bool
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Time.every interval toMsg → SubTime tag4 [interval, toMsg].

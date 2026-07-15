@@ -15,6 +15,7 @@ function start(wasmPath, doc, clock) {
   let instance = null;
   let timerIds = []; // active Time.every interval ids (in the virtual clock)
   let domSubs = []; // active document listeners: { name, handler }
+  let frameIds = []; // active animation-frame request ids (in the virtual clock)
   let currentUrl = 'http://localhost/'; // matches js_driver's location stub
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
@@ -81,6 +82,19 @@ function start(wasmPath, doc, clock) {
       };
       doc.addEventListener(name, handler);
       domSubs.push({ name, handler });
+    },
+    host_clear_frames: () => { frameIds.forEach((id) => clock.cancelAnimationFrame(id)); frameIds = []; },
+    host_request_frame: (slot) => {
+      // Mirror runtime.js's rAF loop: track `last`, fire (delta, now), re-request.
+      let last = clock.now();
+      const loop = () => {
+        const now = clock.now();
+        const delta = now - last;
+        last = now;
+        instance.exports.alm_frame(slot, delta, now);
+        frameIds.push(clock.requestAnimationFrame(loop));
+      };
+      frameIds.push(clock.requestAnimationFrame(loop));
     },
     host_push_url: (p, l, _replace) => { currentUrl = new URL(str(p, l), currentUrl).href; },
     host_get_url: (out) => {
