@@ -15,6 +15,7 @@ function start(wasmPath, doc, clock) {
   let instance = null;
   let timerIds = []; // active Time.every interval ids (in the virtual clock)
   let domSubs = []; // active document listeners: { name, handler }
+  let currentUrl = 'http://localhost/'; // matches js_driver's location stub
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
   const reg = (n) => { nodes.push(n); return nodes.length - 1; };
@@ -81,6 +82,13 @@ function start(wasmPath, doc, clock) {
       doc.addEventListener(name, handler);
       domSubs.push({ name, handler });
     },
+    host_push_url: (p, l, _replace) => { currentUrl = new URL(str(p, l), currentUrl).href; },
+    host_get_url: (out) => {
+      const bytes = new TextEncoder().encode(currentUrl);
+      new Uint8Array(memory.buffer, out, bytes.length).set(bytes);
+      return bytes.length;
+    },
+    host_load: (p, l) => { currentUrl = new URL(str(p, l), currentUrl).href; },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });

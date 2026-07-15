@@ -1330,6 +1330,101 @@ fn document_title_and_body() {
 }
 
 #[test]
+fn url_from_string_pure() {
+    // De-risk the hand-written Url.fromString parser as a pure function, diffed
+    // across all three backends, before wiring Browser.application.
+    assert_str_prog(
+        "url_from_string",
+        "module Test exposing (main)\n\n\
+         import Url\n\n\
+         one : String -> String\n\
+         one s =\n    case Url.fromString s of\n\
+         \x20       Nothing -> \"NOTHING\"\n\
+         \x20       Just u ->\n\
+         \x20           u.host ++ \"|\" ++ String.fromInt (Maybe.withDefault 0 u.port_)\n\
+         \x20               ++ \"|\" ++ u.path\n\
+         \x20               ++ \"|\" ++ Maybe.withDefault \"-\" u.query\n\
+         \x20               ++ \"|\" ++ Maybe.withDefault \"-\" u.fragment\n\n\
+         main : String\n\
+         main =\n    String.join \"\\n\"\n\
+         \x20       [ one \"https://example.com:8080/a/b?x=1#frag\"\n\
+         \x20       , one \"http://elm-lang.org/\"\n\
+         \x20       , one \"https://foo.com\"\n\
+         \x20       , one \"ftp://nope.com/\"\n\
+         \x20       , one \"https://a.com/p?q\"\n\
+         \x20       , one \"https://a.com/p#f\"\n\
+         \x20       ]\n",
+    );
+}
+
+#[test]
+fn application_nav() {
+    // Browser.application: init parses the location into the model; clicking
+    // pushes a new URL, whose onUrlChange updates the model. Assert both
+    // backends render the initial path then the navigated path identically.
+    let dir = common::test_dir("alm-wasmgc", "application");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Browser.Navigation as Nav\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\
+         import Url\n\n\
+         type alias Model = { key : Nav.Key, path : String }\n\n\
+         type Msg = Go | Changed Url.Url\n\n\
+         init : () -> Url.Url -> Nav.Key -> ( Model, Cmd Msg )\n\
+         init _ url key = ( { key = key, path = url.path }, Cmd.none )\n\n\
+         update : Msg -> Model -> ( Model, Cmd Msg )\n\
+         update msg model =\n    case msg of\n\
+         \x20       Go -> ( model, Nav.pushUrl model.key \"/page2\" )\n\
+         \x20       Changed url -> ( { model | path = url.path }, Cmd.none )\n\n\
+         view : Model -> Browser.Document Msg\n\
+         view model =\n    { title = \"t\", body = [ button [ onClick Go ] [ text \"go\" ], div [] [ text model.path ] ] }\n\n\
+         main : Program () Model Msg\n\
+         main =\n    Browser.application\n\
+         \x20       { init = init, update = update, view = view\n\
+         \x20       , subscriptions = \\_ -> Sub.none\n\
+         \x20       , onUrlChange = Changed, onUrlRequest = \\_ -> Go\n\
+         \x20       }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m12.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               const a=serializeBody(doc);dispatchEvent(findBtn(doc.body),'click',{{}});\
+               const b=serializeBody(doc);if(r.restore)r.restore();return a+' >> '+b;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "application render disagrees");
+    assert!(parts[1].contains("/page2"), "expected navigation to /page2, got {}", parts[1]);
+}
+
+#[test]
 fn element_browser_events_keydown() {
     // Browser.Events.onKeyDown with a decoder reading the "key" field. Firing a
     // document keydown must decode and render the key identically in both.

@@ -59,7 +59,10 @@ const HOST_CLEAR_TIMERS: u32 = 17; // () — cancel all Time.every intervals
 const HOST_SET_INTERVAL: u32 = 18; // (intervalMs:f64, slot) — register a timer
 const HOST_CLEAR_DOM: u32 = 19; // () — remove all document-event listeners
 const HOST_ADD_DOM: u32 = 20; // (nameptr,namelen,slot) — add a document listener
-const N_IMPORTS: u32 = 21;
+const HOST_PUSH_URL: u32 = 21; // (ptr,len,replace) — history push/replace
+const HOST_GET_URL: u32 = 22; // (outptr) -> len — write current href to memory
+const HOST_LOAD: u32 = 23; // (ptr,len) — full page navigation
+const N_IMPORTS: u32 = 24;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -79,6 +82,7 @@ const G_TICKS: u32 = 15; // active Time.every toMsg callbacks, indexed by slot
 const G_NEXT_TICK: u32 = 16; // next timer slot (reset each reconcile)
 const G_DOMSUBS: u32 = 17; // active Browser.Events decoders, indexed by slot
 const G_NEXT_DOM: u32 = 18; // next document-sub slot (reset each reconcile)
+const G_URLCHG: u32 = 19; // Browser.application onUrlChange handler (null otherwise)
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -745,6 +749,8 @@ struct Codegen<'a> {
     walk_timers_idx: u32,
     tick_idx: u32,
     dom_event_idx: u32,
+    index_byte_idx: u32,
+    url_from_string_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -892,6 +898,8 @@ impl<'a> Codegen<'a> {
             walk_timers_idx: 0,
             tick_idx: 0,
             dom_event_idx: 0,
+            index_byte_idx: 0,
+            url_from_string_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1064,6 +1072,8 @@ impl<'a> Codegen<'a> {
         self.walk_timers_idx = next();
         self.tick_idx = next();
         self.dom_event_idx = next();
+        self.index_byte_idx = next();
+        self.url_from_string_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1119,7 +1129,10 @@ impl<'a> Codegen<'a> {
         let ee_eqref_ty = self.next_type + 16; // (eqref,eqref) -> eqref (sub_find_port)
         let fi_v_ty = self.next_type + 17; // (f64,i32) -> () (host_set_interval)
         let if_v_ty = self.next_type + 18; // (i32,f64) -> () (alm_tick)
-        self.next_type += 19;
+        let e_e_ty = self.next_type + 19; // (eqref) -> eqref (url_from_string)
+        let ei_i_ty = self.next_type + 20; // (eqref,i32) -> i32 (index_byte)
+        let i_i_ty = self.next_type + 21; // (i32) -> i32 (host_get_url)
+        self.next_type += 22;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1251,6 +1264,8 @@ impl<'a> Codegen<'a> {
         let walk_timers = self.emit_walk_timers();
         let tick = self.emit_tick();
         let dom_event = self.emit_dom_event();
+        let index_byte = self.emit_index_byte();
+        let url_from_string = self.emit_url_from_string();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1321,6 +1336,9 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![eqref(), eqref()], vec![eqref()]); // sub_find_port
         types.ty().function(vec![ValType::F64, ValType::I32], vec![]); // host_set_interval
         types.ty().function(vec![ValType::I32, ValType::F64], vec![]); // alm_tick
+        types.ty().function(vec![eqref()], vec![eqref()]); // url_from_string
+        types.ty().function(vec![eqref(), ValType::I32], vec![ValType::I32]); // index_byte
+        types.ty().function(vec![ValType::I32], vec![ValType::I32]); // host_get_url
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1455,6 +1473,8 @@ impl<'a> Codegen<'a> {
         funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
         funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
         funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
+        funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
+        funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1598,6 +1618,8 @@ impl<'a> Codegen<'a> {
         code.function(&walk_timers);
         code.function(&tick);
         code.function(&dom_event);
+        code.function(&index_byte);
+        code.function(&url_from_string);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1707,6 +1729,11 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 19=onUrlChange handler (eqref, null unless Browser.application).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1732,6 +1759,9 @@ impl<'a> Codegen<'a> {
             ("host_set_interval", fi_v_ty),
             ("host_clear_dom", json_void_ty),
             ("host_add_dom", imp_i3_v),
+            ("host_push_url", imp_i3_v),
+            ("host_get_url", i_i_ty),
+            ("host_load", imp_ii_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -8874,6 +8904,51 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(HOST_HTTP));
         f.instruction(&Instruction::End);
+        // CMD_NAV push (4) / replace (5): change history, then fire onUrlChange
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        self.dom_str(&mut f, 5); // [ptr, len]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq); // replace flag
+        f.instruction(&Instruction::Call(HOST_PUSH_URL));
+        // onUrlChange(parse(current href)) if a handler is registered
+        f.instruction(&Instruction::GlobalGet(G_URLCHG));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Call(HOST_GET_URL));
+        f.instruction(&Instruction::LocalSet(2)); // len
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.url_from_string_idx));
+        f.instruction(&Instruction::LocalSet(4)); // Maybe Url
+        f.instruction(&Instruction::GlobalGet(G_URLCHG));
+        ctor_arg0(&mut f, 4); // Just → Url
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // CMD_NAV load (6): full navigation
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        self.dom_str(&mut f, 5);
+        f.instruction(&Instruction::Call(HOST_LOAD));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -9018,12 +9093,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
         f.instruction(&Instruction::End);
-        // new = (document ? doc_vnode() : view model) ; patch against prev
+        // new = (document/application ? doc_vnode() : view model) ; patch
         f.instruction(&Instruction::I32Const(BUMP_BASE));
         f.instruction(&Instruction::GlobalSet(G_BUMP));
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::I32Const(2));
-        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::Call(self.render_document_idx));
         f.instruction(&Instruction::Else);
@@ -9153,6 +9228,284 @@ impl<'a> Codegen<'a> {
         // VNODE[tagName, attrs, kids]
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// index_byte(str, ch) : first index of byte `ch` in the T_STR, or -1.
+    /// (Byte-indexed — matches the backend's byte-based String slicing, which is
+    /// exact for the ASCII delimiters URLs are split on.)
+    fn emit_index_byte(&self) -> Function {
+        // params s(0):eqref, ch(1):i32. locals: i(2),n(3):i32, str(4):ref T_STR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// url_from_string(s) : `Url.fromString` — parse `http(s)://host[:port]/path
+    /// [?query][#fragment]` into `Maybe Url`. Follows elm/url's algorithm
+    /// (chompAfterProtocol → fragment → query → path → host/port). Url is a
+    /// record {fragment,host,path,port_,protocol,query} (sorted); Protocol
+    /// Http=tag0/Https=tag1; Maybe Just=tag0[x]/Nothing=tag1. Byte-indexed
+    /// (ASCII-correct, which covers the delimiter set).
+    fn emit_url_from_string(&self) -> Function {
+        // param s(0). locals: proto(1),idx(2):i32; rest(3),frag(4),beforeFrag(5),
+        //   query(6),beforeQuery(7),path(8),beforePath(9),host(10),portM(11),tmp(12):eqref;
+        //   idx1(13):i32 (idx+1 scratch, appended so eqref indices stay put)
+        let mut f = Function::new([(2, ValType::I32), (10, eqref()), (1, ValType::I32)]);
+        // Maybe: Just = tag 0 [x], Nothing = tag 1 (Elm declares Just first).
+        let nothing = |f: &mut Function| {
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+        };
+        // isEmpty(local) → push i32 (1 if empty)
+        let is_empty = |f: &mut Function, l: u32| {
+            f.instruction(&Instruction::LocalGet(l));
+            f.instruction(&cast_to(T_STR));
+            f.instruction(&Instruction::ArrayLen);
+            f.instruction(&Instruction::I32Eqz);
+        };
+        // str_left(n_i32_local, src_local) → pushes String
+        let str_left_idx = self.str_left_idx;
+        let str_dropleft_idx = self.str_dropleft_idx;
+        let left = move |f: &mut Function, n: u32, src: u32| {
+            f.instruction(&Instruction::LocalGet(n));
+            f.instruction(&Instruction::I64ExtendI32S);
+            f.instruction(&Instruction::StructNew(T_INT));
+            f.instruction(&Instruction::LocalGet(src));
+            f.instruction(&Instruction::Call(str_left_idx));
+        };
+        // str_dropleft(n_i32_local, src_local) → pushes String
+        let dropleft = move |f: &mut Function, n: u32, src: u32| {
+            f.instruction(&Instruction::LocalGet(n));
+            f.instruction(&Instruction::I64ExtendI32S);
+            f.instruction(&Instruction::StructNew(T_INT));
+            f.instruction(&Instruction::LocalGet(src));
+            f.instruction(&Instruction::Call(str_dropleft_idx));
+        };
+        // --- protocol ---
+        push_str_const(&mut f, "http://");
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.str_starts_with_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0)); // Http
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::LocalSet(2));
+        dropleft(&mut f, 2, 0);
+        f.instruction(&Instruction::LocalSet(3)); // rest
+        f.instruction(&Instruction::Else);
+        push_str_const(&mut f, "https://");
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.str_starts_with_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1)); // Https
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::LocalSet(2));
+        dropleft(&mut f, 2, 0);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Else);
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // if isEmpty(rest) → Nothing
+        is_empty(&mut f, 3);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // --- fragment: idx = index_byte(rest, '#') ---
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(35)); // '#'
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // frag = Just(dropLeft(idx+1, rest)); beforeFrag = left(idx, rest)
+        f.instruction(&Instruction::I32Const(0)); // Just tag
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(13));
+        dropleft(&mut f, 13, 3);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::LocalSet(4)); // frag
+        left(&mut f, 2, 3);
+        f.instruction(&Instruction::LocalSet(5)); // beforeFrag
+        f.instruction(&Instruction::Else);
+        nothing(&mut f);
+        f.instruction(&Instruction::LocalSet(4)); // frag = Nothing
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(5)); // beforeFrag = rest
+        f.instruction(&Instruction::End);
+        // if isEmpty(beforeFrag) → Nothing
+        is_empty(&mut f, 5);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // --- query: idx = index_byte(beforeFrag, '?') ---
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(63)); // '?'
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0)); // Just
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(13));
+        dropleft(&mut f, 13, 5);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::LocalSet(6)); // query
+        left(&mut f, 2, 5);
+        f.instruction(&Instruction::LocalSet(7)); // beforeQuery
+        f.instruction(&Instruction::Else);
+        nothing(&mut f);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::End);
+        // if isEmpty(beforeQuery) → Nothing
+        is_empty(&mut f, 7);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // --- path: idx = index_byte(beforeQuery, '/') ---
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(47)); // '/'
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        dropleft(&mut f, 2, 7);
+        f.instruction(&Instruction::LocalSet(8)); // path
+        left(&mut f, 2, 7);
+        f.instruction(&Instruction::LocalSet(9)); // beforePath
+        f.instruction(&Instruction::Else);
+        push_str_const(&mut f, "/");
+        f.instruction(&Instruction::LocalSet(8)); // path = "/"
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalSet(9)); // beforePath = beforeQuery
+        f.instruction(&Instruction::End);
+        // if isEmpty(beforePath) or contains '@' → Nothing
+        is_empty(&mut f, 9);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(64)); // '@'
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // --- host/port: idx = index_byte(beforePath, ':') ---
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(58)); // ':'
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // no colon: host = beforePath, port_ = Nothing
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalSet(10));
+        nothing(&mut f);
+        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::Else);
+        // one colon expected: portStr = dropLeft(idx+1, beforePath)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(13));
+        dropleft(&mut f, 13, 9);
+        f.instruction(&Instruction::LocalSet(12)); // portStr
+        // reject a second colon in portStr
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I32Const(58));
+        f.instruction(&Instruction::Call(self.index_byte_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // portM = str_to_int(portStr) ; if Nothing → Nothing
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::Call(self.str_to_int_idx));
+        f.instruction(&Instruction::LocalSet(11)); // portM (Maybe Int)
+        ctor_tag(&mut f, 11);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq); // Nothing (tag 1)?
+        f.instruction(&Instruction::If(BlockType::Empty));
+        nothing(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // host = left(idx, beforePath)
+        left(&mut f, 2, 9);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::End);
+        // --- build Just (Url record) ---
+        // record = [frag, host, path, port_, protocol, query]
+        f.instruction(&Instruction::I32Const(0)); // Just tag
+        f.instruction(&Instruction::LocalGet(4)); // fragment
+        f.instruction(&Instruction::LocalGet(10)); // host
+        f.instruction(&Instruction::LocalGet(8)); // path
+        f.instruction(&Instruction::LocalGet(11)); // port_
+        f.instruction(&Instruction::LocalGet(1)); // protocol (i32 tag)
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Protocol T_CTOR{proto, null}
+        f.instruction(&Instruction::LocalGet(6)); // query
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 6 });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Just
         f.instruction(&Instruction::End);
         f
     }
@@ -9537,11 +9890,11 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// alm_browser_start() : unpack the program (sandbox / element / document),
-    /// wire model/update/view (+ initial cmd for element), render and mount.
+    /// alm_browser_start() : unpack the program (sandbox / element / document /
+    /// application), wire model/update/view (+ initial cmd), render and mount.
     fn emit_alm_browser_start(&self, main_idx: u32) -> Function {
-        // locals: rec(0), prog(1), initcmd(2):eqref
-        let mut f = Function::new([(3, eqref())]);
+        // locals: rec(0), prog(1), initcmd(2), urlM(3):eqref
+        let mut f = Function::new([(4, eqref())]);
         f.instruction(&Instruction::Call(main_idx));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::LocalSet(1)); // prog
@@ -9558,40 +9911,78 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::I32Const(i));
             f.instruction(&Instruction::ArrayGet(T_ARR));
         };
-        // G_KIND = program tag (0 sandbox, 1 element, 2 document)
+        // re-read the program record into local 0 (used after init overwrites it)
+        let reload_rec = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&cast_to(T_CTOR));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::LocalSet(0));
+        };
+        // unpack a (model, cmd) init tuple: model→G_MODEL, cmd→initcmd(2)
+        let unpack_tuple = |f: &mut Function| {
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::LocalSet(0));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::GlobalSet(G_MODEL));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::LocalSet(2));
+        };
+        // G_KIND = program tag (0 sandbox, 1 element, 2 document, 3 application)
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
         f.instruction(&Instruction::GlobalSet(G_KIND));
-        // element/document (tag != 0) share init and the {init,subscriptions,
-        // update,view} record; sandbox (tag 0) takes the else branch.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // application: {init:0, onUrlChange:1, onUrlRequest:2, subscriptions:3,
+        // update:4, view:5}. tuple = init flags url key.
+        field(&mut f, 0); // init
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // flags = ()
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        // url = Just-value(url_from_string(str_from_mem(0, host_get_url(0))))
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Call(HOST_GET_URL));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.url_from_string_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_arg0(&mut f, 3); // Just → Url
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // key = ()
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        unpack_tuple(&mut f);
+        reload_rec(&mut f);
+        field(&mut f, 4);
+        f.instruction(&Instruction::GlobalSet(G_UPDATE));
+        field(&mut f, 5);
+        f.instruction(&Instruction::GlobalSet(G_VIEW));
+        field(&mut f, 3);
+        f.instruction(&Instruction::GlobalSet(G_SUBS));
+        field(&mut f, 1);
+        f.instruction(&Instruction::GlobalSet(G_URLCHG));
+        f.instruction(&Instruction::Else);
+        // element/document (tag 1/2) vs sandbox (tag 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::If(BlockType::Empty));
-        // record = {init:0, subscriptions:1, update:2, view:3}
-        // tuple = init(()) ; model = tuple[0] ; initcmd = tuple[1]
+        // record = {init:0, subscriptions:1, update:2, view:3}; init(()) → tuple
         field(&mut f, 0);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::LocalSet(0)); // reuse rec slot for tuple
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::GlobalSet(G_MODEL));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(2)); // initcmd
-        // restore record for update/view
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CTOR));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(0));
+        unpack_tuple(&mut f);
+        reload_rec(&mut f);
         field(&mut f, 2);
         f.instruction(&Instruction::GlobalSet(G_UPDATE));
         field(&mut f, 3);
@@ -9606,6 +9997,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_UPDATE));
         field(&mut f, 2);
         f.instruction(&Instruction::GlobalSet(G_VIEW));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // handlers = new T_ARR(MAX_HANDLERS)
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
@@ -9631,10 +10023,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.run_cmd_idx));
         f.instruction(&Instruction::End);
         Self::emit_reset_render(&mut f);
-        // prev = document ? doc_vnode() : view model
+        // prev = document/application ? doc_vnode() : view model
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::I32Const(2));
-        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::Call(self.render_document_idx));
         f.instruction(&Instruction::Else);
@@ -10060,6 +10452,35 @@ impl<'a> Codegen<'a> {
                 f.instruction(&cast_to(T_ARR));
                 f.instruction(&Instruction::I32Const(idx as i32));
                 f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+            TypedKind::Update(rec, updates) => {
+                // Build a fresh record: overridden fields take the new value,
+                // the rest are copied from the old record (fields sorted by name).
+                let names: Vec<String> = match &rec.tipe {
+                    can::Type::Record(fs, _) => {
+                        let mut n: Vec<String> = fs.iter().map(|(n, _)| n.to_string()).collect();
+                        n.sort();
+                        n
+                    }
+                    _ => return Err("wasmgc: record update on a non-record type".into()),
+                };
+                let r = ctx.bind("$upd");
+                self.emit_expr(rec, ctx, f)?;
+                f.instruction(&Instruction::LocalSet(r));
+                for (i, fname) in names.iter().enumerate() {
+                    if let Some((_, ve)) = updates.iter().find(|(n, _)| n.as_str() == fname) {
+                        self.emit_expr(ve, ctx, f)?;
+                    } else {
+                        f.instruction(&Instruction::LocalGet(r));
+                        f.instruction(&cast_to(T_ARR));
+                        f.instruction(&Instruction::I32Const(i as i32));
+                        f.instruction(&Instruction::ArrayGet(T_ARR));
+                    }
+                }
+                f.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: T_ARR,
+                    array_size: names.len() as u32,
+                });
             }
             TypedKind::Case(scrut, branches) => self.emit_case(scrut, branches, ctx, f)?,
             TypedKind::Lambda(params, body) => self.lift(params, body, ctx, f)?,
@@ -11583,6 +12004,13 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
+            ("Browser", "application") => {
+                // Program = T_CTOR tag3 [record].
+                f.instruction(&Instruction::I32Const(3));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             // Http.get { url, expect } → CMD_HTTP tag3 [url, expect].
             // Record fields sorted: expect=0, url=1.
             ("Http", "get") => {
@@ -11622,6 +12050,24 @@ impl<'a> Codegen<'a> {
                 push_str_const(f, name);
                 self.emit_expr(&args[0], ctx, f)?; // decoder
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Url", "fromString") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.url_from_string_idx));
+            }
+            // Browser.Navigation → CMD tag 4 push / 5 replace / 6 load [url].
+            ("Browser.Navigation", "pushUrl") | ("Browser.Navigation", "replaceUrl") => {
+                let tag = if name == "pushUrl" { 4 } else { 5 };
+                f.instruction(&Instruction::I32Const(tag));
+                self.emit_expr(&args[1], ctx, f)?; // url (args[0] is the Key)
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Browser.Navigation", "load") => {
+                f.instruction(&Instruction::I32Const(6));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Time.every interval toMsg → SubTime tag4 [interval, toMsg].
