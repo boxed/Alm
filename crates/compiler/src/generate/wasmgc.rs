@@ -907,6 +907,10 @@ struct Codegen<'a> {
     list_sortby_insert_idx: u32,
     str_pad_left_idx: u32,
     str_pad_right_idx: u32,
+    from_polar_idx: u32,
+    to_polar_idx: u32,
+    str_slice_idx: u32,
+    str_pad_both_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
     list_map4_idx: u32,
@@ -1098,6 +1102,10 @@ impl<'a> Codegen<'a> {
             list_sortby_insert_idx: 0,
             str_pad_left_idx: 0,
             str_pad_right_idx: 0,
+            from_polar_idx: 0,
+            to_polar_idx: 0,
+            str_slice_idx: 0,
+            str_pad_both_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
             list_map4_idx: 0,
@@ -1314,6 +1322,10 @@ impl<'a> Codegen<'a> {
         self.list_sortby_insert_idx = next();
         self.str_pad_left_idx = next();
         self.str_pad_right_idx = next();
+        self.from_polar_idx = next();
+        self.to_polar_idx = next();
+        self.str_slice_idx = next();
+        self.str_pad_both_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
         self.list_map4_idx = next();
@@ -1564,6 +1576,10 @@ impl<'a> Codegen<'a> {
         let list_sortby_insert = self.emit_list_sortby_insert();
         let str_pad_left = self.emit_str_pad(true);
         let str_pad_right = self.emit_str_pad(false);
+        let from_polar = self.emit_from_polar();
+        let to_polar = self.emit_to_polar();
+        let str_slice = self.emit_str_slice();
+        let str_pad_both = self.emit_str_pad_both();
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
         let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
@@ -1840,6 +1856,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // list_sortby_insert
         funcs.function(ft3); // str_pad_left
         funcs.function(ft3); // str_pad_right
+        funcs.function(ft1); // from_polar
+        funcs.function(ft1); // to_polar
+        funcs.function(ft3); // str_slice
+        funcs.function(ft3); // str_pad_both
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
         funcs.function(ft5); // list_map4
@@ -2027,6 +2047,10 @@ impl<'a> Codegen<'a> {
         code.function(&list_sortby_insert);
         code.function(&str_pad_left);
         code.function(&str_pad_right);
+        code.function(&from_polar);
+        code.function(&to_polar);
+        code.function(&str_slice);
+        code.function(&str_pad_both);
         code.function(&list_intersperse);
         code.function(&list_map3);
         code.function(&list_map4);
@@ -4504,6 +4528,161 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// A float element of a 2-tuple expr in `local` (index i), unboxed to f64.
+    fn tuple_f64(&self, f: &mut Function, local: u32, i: i32) {
+        f.instruction(&Instruction::LocalGet(local));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+    }
+
+    /// fromPolar (r, theta) = (r*cos theta, r*sin theta).
+    fn emit_from_polar(&self) -> Function {
+        let mut f = Function::new([]); // param t(0): the (r, theta) tuple
+        self.tuple_f64(&mut f, 0, 0); // r
+        self.tuple_f64(&mut f, 0, 1); // theta
+        f.instruction(&Instruction::Call(MATH_COS));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        self.tuple_f64(&mut f, 0, 0); // r
+        self.tuple_f64(&mut f, 0, 1); // theta
+        f.instruction(&Instruction::Call(MATH_SIN));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// toPolar (x, y) = (sqrt(x*x + y*y), atan2 y x).
+    fn emit_to_polar(&self) -> Function {
+        let mut f = Function::new([]); // param t(0): the (x, y) tuple
+        // r
+        self.tuple_f64(&mut f, 0, 0);
+        self.tuple_f64(&mut f, 0, 0);
+        f.instruction(&Instruction::F64Mul);
+        self.tuple_f64(&mut f, 0, 1);
+        self.tuple_f64(&mut f, 0, 1);
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::F64Sqrt);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        // theta = atan2(y, x)
+        self.tuple_f64(&mut f, 0, 1);
+        self.tuple_f64(&mut f, 0, 0);
+        f.instruction(&Instruction::Call(MATH_ATAN2));
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_slice(start, end, s) : substring over code-point indices `[a, b)`,
+    /// with Elm's negative-from-end + clamping, built from dropLeft + left.
+    fn emit_str_slice(&self) -> Function {
+        // params start(0), end(1), s(2). locals: len(3),a(4),b(5):i32
+        let mut f = Function::new([(3, ValType::I32)]);
+        // len = str_length(s)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_length_idx));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        // normalize each index into a/b
+        let norm = |f: &mut Function, src: u32, dst: u32| {
+            f.instruction(&Instruction::LocalGet(src));
+            f.instruction(&Instruction::Call(self.unbox_int_idx));
+            f.instruction(&Instruction::I32WrapI64);
+            f.instruction(&Instruction::LocalSet(dst));
+            // if < 0: += len
+            f.instruction(&Instruction::LocalGet(dst));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32LtS);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalGet(dst));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalSet(dst));
+            f.instruction(&Instruction::End);
+            // clamp [0, len]
+            f.instruction(&Instruction::LocalGet(dst));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32LtS);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::LocalSet(dst));
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::LocalGet(dst));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32GtS);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalSet(dst));
+            f.instruction(&Instruction::End);
+        };
+        norm(&mut f, 0, 4);
+        norm(&mut f, 1, 5);
+        // if a >= b: ""
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // left(b-a, dropLeft(a, s))
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_dropleft_idx));
+        f.instruction(&Instruction::Call(self.str_left_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_pad_both(n, ch, s) : center `s` to width `n` — left gets floor of the
+    /// deficit, right the rest (Elm's `String.pad`), via padLeft then padRight.
+    fn emit_str_pad_both(&self) -> Function {
+        // params n(0), ch(1), s(2). locals: len(3),left(4):i32
+        let mut f = Function::new([(2, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_length_idx));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3)); // len
+        // leftTarget = len + (n - len)/2
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32DivS);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(4));
+        // padRight(n, ch, padLeft(leftTarget, ch, s))
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_pad_left_idx));
+        f.instruction(&Instruction::Call(self.str_pad_right_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -15378,6 +15557,14 @@ impl<'a> Codegen<'a> {
             ("Basics", "radians") => {
                 self.emit_expr(&args[0], ctx, f)?; // identity (already a Float)
             }
+            ("Basics", "fromPolar") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.from_polar_idx));
+            }
+            ("Basics", "toPolar") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.to_polar_idx));
+            }
             ("Basics", "isNaN") => {
                 // NaN is the only value not equal to itself.
                 self.emit_f64(&args[0], ctx, f)?;
@@ -15543,6 +15730,18 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[2], ctx, f)?; // s
                 f.instruction(&Instruction::Call(self.str_split_idx));
                 f.instruction(&Instruction::Call(self.str_join_idx));
+            }
+            ("String", "slice") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_slice_idx));
+            }
+            ("String", "pad") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_pad_both_idx));
             }
             ("String", "padLeft") => {
                 self.emit_expr(&args[0], ctx, f)?;

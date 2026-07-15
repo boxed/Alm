@@ -287,6 +287,41 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn string_slice_pad() {
+    assert_str_prog(
+        "string_slice_pad",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   [ String.slice 2 5 \"snakes\"\n\
+         \x20   , String.slice -3 -1 \"snakes\"\n\
+         \x20   , String.slice 0 -1 \"hello\"\n\
+         \x20   , String.pad 5 '.' \"1\"\n\
+         \x20   , String.pad 4 '-' \"ab\"\n\
+         \x20   ]\n\
+         \x20       |> String.join \"|\"\n",
+    );
+}
+
+#[test]
+fn basics_polar() {
+    // js<->wasm (both use node Math); native libm can differ by an ulp on trig.
+    assert_str_prog_js_wasm(
+        "basics_polar",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       ( x, y ) = fromPolar ( 2.0, 1.0 )\n\
+         \x20       ( r, t ) = toPolar ( 3.0, 4.0 )\n\
+         \x20   in\n\
+         \x20   [ round (1000000.0 * x), round (1000000.0 * y), round (1000000.0 * r), round (1000000.0 * t) ]\n\
+         \x20       |> List.map String.fromInt\n\
+         \x20       |> String.join \",\"\n",
+    );
+}
+
+#[test]
 fn string_replace() {
     assert_str_prog(
         "string_replace",
