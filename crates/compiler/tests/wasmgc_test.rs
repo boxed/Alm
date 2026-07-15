@@ -1951,6 +1951,66 @@ fn element_time_every() {
 }
 
 #[test]
+fn task_sleep_async() {
+    // init performs `Process.sleep 1000 |> andThen (\_ -> succeed 42)`. Before
+    // the clock advances both show 0; after advancing past 1000ms the suspended
+    // task resumes (via host_set_timeout → alm_task_resume) and both show 42.
+    let dir = common::test_dir("alm-wasmgc", "task_sleep");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Task\n\
+         import Process\n\n\
+         type Msg = Done Int\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ =\n\
+         \x20   ( 0\n\
+         \x20   , Task.perform Done (Process.sleep 1000 |> Task.andThen (\\_ -> Task.succeed 42))\n\
+         \x20   )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Done n) _ = ( n, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n = div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n\
+         \x20   Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    // WasmGC-only: assert the correct elm semantics directly. (alm's JS backend
+    // does not resume a Task-wrapped Process.sleep under the virtual clock in
+    // this harness — a separate alm-js concern — so this isn't a js<->wasm diff.)
+    let script = dir.join("m_sleep.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const wg=require(S+'/wasmgc_driver.cjs');\
+             const doc=new Document();const r=wg.start({w:?},doc);\
+             const before=serializeBody(doc);r.clock.advance(2000);const after=serializeBody(doc);\
+             process.stdout.write(before+'/'+after);",
+            sup = support, w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    assert_eq!(out, "<div>0</div>/<div>42</div>", "async sleep should resolve 0 -> 42");
+}
+
+#[test]
 fn element_http_get() {
     // Browser.element issues an Http.get on click; the host settles it with a
     // 200 body then a 404. Assert both backends render the same Result each time.

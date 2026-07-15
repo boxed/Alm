@@ -232,7 +232,8 @@ const MATH_ATAN: u32 = 31;
 const MATH_LOG: u32 = 32;
 const MATH_ATAN2: u32 = 33;
 const MATH_POW: u32 = 34;
-const N_IMPORTS: u32 = 35;
+const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_task_resume
+const N_IMPORTS: u32 = 36;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -256,6 +257,8 @@ const G_URLCHG: u32 = 19; // Browser.application onUrlChange handler (null other
 const G_FRAMES: u32 = 20; // active onAnimationFrame subs, indexed by slot
 const G_NEXT_FRAME: u32 = 21; // next frame-sub slot (reset each reconcile)
 const G_SORT_CMP: u32 = 22; // List.sortWith comparator (set for the sort's duration)
+const G_TASKS: u32 = 23; // suspended async tasks: [rest, toMsg, isAttempt] by slot
+const G_NEXT_TASK: u32 = 24; // next async-task slot
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -993,6 +996,7 @@ struct Codegen<'a> {
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
     tick_idx: u32,
+    task_resume_idx: u32,
     dom_event_idx: u32,
     index_byte_idx: u32,
     url_from_string_idx: u32,
@@ -1189,6 +1193,7 @@ impl<'a> Codegen<'a> {
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
             tick_idx: 0,
+            task_resume_idx: 0,
             dom_event_idx: 0,
             index_byte_idx: 0,
             url_from_string_idx: 0,
@@ -1410,6 +1415,7 @@ impl<'a> Codegen<'a> {
         self.reconcile_subs_idx = next();
         self.walk_timers_idx = next();
         self.tick_idx = next();
+        self.task_resume_idx = next();
         self.dom_event_idx = next();
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
@@ -1666,6 +1672,7 @@ impl<'a> Codegen<'a> {
         let reconcile_subs = self.emit_reconcile_subs();
         let walk_timers = self.emit_walk_timers();
         let tick = self.emit_tick();
+        let task_resume = self.emit_task_resume();
         let dom_event = self.emit_dom_event();
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
@@ -1946,6 +1953,7 @@ impl<'a> Codegen<'a> {
         funcs.function(json_void_ty); // reconcile_subs : () -> ()
         funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
         funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
+        funcs.function(imp_i_v); // alm_task_resume : (slot) -> ()
         funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
@@ -2138,6 +2146,7 @@ impl<'a> Codegen<'a> {
         code.function(&reconcile_subs);
         code.function(&walk_timers);
         code.function(&tick);
+        code.function(&task_resume);
         code.function(&dom_event);
         code.function(&index_byte);
         code.function(&url_from_string);
@@ -2285,6 +2294,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
         );
+        // 23=suspended async tasks (ref null T_ARR), 24=next slot (i32).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -2325,6 +2343,7 @@ impl<'a> Codegen<'a> {
             ("math_log", f64_f64_ty),
             ("math_atan2", f64f64_f64_ty),
             ("math_pow", f64f64_f64_ty),
+            ("host_set_timeout", fi_v_ty),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -2341,6 +2360,7 @@ impl<'a> Codegen<'a> {
             exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
             exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
             exports.export("alm_tick", ExportKind::Func, self.tick_idx);
+            exports.export("alm_task_resume", ExportKind::Func, self.task_resume_idx);
             exports.export("alm_frame", ExportKind::Func, self.frame_idx);
             exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
         } else {
@@ -2689,8 +2709,8 @@ impl<'a> Codegen<'a> {
         for (i, (name, _)) in captures.iter().enumerate() {
             lctx.scope.push((name.clone(), i as u32));
         }
-        for (i, (p, _)) in params.iter().enumerate() {
-            self.bind_pat(p, ncap + i as u32, &mut lctx, &mut lf)?;
+        for (i, (p, ty)) in params.iter().enumerate() {
+            self.bind_pat(p, ncap + i as u32, Some(ty), &mut lctx, &mut lf)?;
         }
         self.emit_expr(body, &mut lctx, &mut lf)?;
         lf.instruction(&Instruction::End);
@@ -4485,11 +4505,34 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// task_run(task) -> Result x a : interpret a reified Task synchronously.
-    /// Tags: 0 Succeed[x], 1 Fail[e], 2 Map[f,t], 3 AndThen[f,t], 4 MapError[f,t],
-    /// 5 OnError[f,t], 6 Map2[f,ta,tb], 7 Map3[f,ta,tb,tc], 8 Sequence[list].
-    /// (Async leaf tasks — sleep/now/http — are not modeled; those are compile
-    /// errors, so every Task reaching here is synchronous.)
+    /// If the sub-result in local 1 is `Pending[ms, rest]`, return a new Pending
+    /// that re-wraps this single-sub combinator (`tag`, with the fn at the task's
+    /// arg0) around `rest` — i.e. propagate the suspension, deferring the rest of
+    /// this combinator until the async result arrives. Assumes task in local 0.
+    fn emit_task_pending(&self, f: &mut Function, task_tag: i32) {
+        ctor_tag(f, 1);
+        f.instruction(&Instruction::I32Const(2)); // Pending
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(2)); // new Pending
+        ctor_argn(f, 1, 0); // ms
+        f.instruction(&Instruction::I32Const(task_tag));
+        ctor_arg0(f, 0); // the combinator's fn
+        ctor_argn(f, 1, 1); // rest
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // rewrapped task
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Pending[ms, task]
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+    }
+
+    /// task_run(task) -> Result x a : interpret a reified Task. Result tags:
+    /// 0 Ok[v], 1 Err[e], 2 Pending[ms, rest] (suspended on an async leaf).
+    /// Task tags: 0 Succeed 1 Fail 2 Map 3 AndThen 4 MapError 5 OnError 6 Map2
+    /// 7 Map3 8 Sequence 9 Sleep. Async (Pending) propagates through the
+    /// single-sub combinators (map/andThen/mapError/onError); map2/map3/sequence
+    /// are synchronous-only (async there is unsupported — rare).
     fn emit_task_run(&self) -> Function {
         // param t(0). locals: ra(1),rb(2),rc(3):eqref; arr(4):ref T_ARR;
         //   i(5),len(6):i32; lst(7):eqref
@@ -4523,6 +4566,7 @@ impl<'a> Codegen<'a> {
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(1));
+        self.emit_task_pending(&mut f, 2);
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -4545,6 +4589,7 @@ impl<'a> Codegen<'a> {
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(1));
+        self.emit_task_pending(&mut f, 3);
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -4565,6 +4610,7 @@ impl<'a> Codegen<'a> {
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(1));
+        self.emit_task_pending(&mut f, 4);
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -4587,6 +4633,7 @@ impl<'a> Codegen<'a> {
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(1));
+        self.emit_task_pending(&mut f, 5);
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -4668,6 +4715,23 @@ impl<'a> Codegen<'a> {
         ctor_arg0(&mut f, 3);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Sleep (9): suspend — Pending[ms, Succeed ()]. The unit result is fed
+        // to whatever continuation follows (which ignores it).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(9));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(2)); // Pending
+        ctor_arg0(&mut f, 0); // ms
+        f.instruction(&Instruction::I32Const(0)); // Succeed
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // ()
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -12207,31 +12271,48 @@ impl<'a> Codegen<'a> {
         self.dom_str(&mut f, 5);
         f.instruction(&Instruction::Call(HOST_LOAD));
         f.instruction(&Instruction::End);
-        // CMD_TASK_PERFORM (7): [toMsg, task]. Run the (synchronous) task; it
-        // cannot fail (Task Never a), so dispatch toMsg applied to the Ok value.
+        // CMD_TASK_PERFORM (7): [toMsg, task]. Run the task; if it suspends
+        // (Pending), stash the continuation and arm a timer; else it's Ok (Task
+        // Never a can't fail) → dispatch toMsg applied to the value.
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(7));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
-        f.instruction(&Instruction::LocalSet(5)); // r = Ok value
+        f.instruction(&Instruction::LocalSet(5)); // r
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_task_suspend(&mut f, 0);
+        f.instruction(&Instruction::Else);
         ctor_arg0(&mut f, 0); // toMsg
         ctor_arg0(&mut f, 5); // the Ok value
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
-        // CMD_TASK_ATTEMPT (8): [toMsg, task]. dispatch toMsg applied to the
-        // whole Result.
+        f.instruction(&Instruction::End);
+        // CMD_TASK_ATTEMPT (8): [toMsg, task]. Like perform, but on completion
+        // dispatch toMsg applied to the whole Result.
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(8));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
-        ctor_arg0(&mut f, 0); // toMsg
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(5)); // r
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_task_suspend(&mut f, 1);
+        f.instruction(&Instruction::Else);
+        ctor_arg0(&mut f, 0); // toMsg
+        f.instruction(&Instruction::LocalGet(5)); // the whole Result
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -13153,6 +13234,98 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// Suspend a Pending task (result in local 5, Cmd in local 0 of run_cmd):
+    /// stash [rest, toMsg, isAttempt] at a fresh G_TASKS slot and arm a one-shot
+    /// timer that will call alm_task_resume(slot).
+    fn emit_task_suspend(&self, f: &mut Function, is_attempt: i32) {
+        f.instruction(&Instruction::GlobalGet(G_TASKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
+        ctor_argn(f, 5, 1); // rest
+        ctor_arg0(f, 0); // toMsg (Cmd arg0)
+        f.instruction(&Instruction::I32Const(is_attempt));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_set_timeout(ms, slot)
+        ctor_arg0(f, 5); // ms (boxed Float)
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
+        f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_TASK));
+    }
+
+    /// alm_task_resume(slot) : the host fired the one-shot timer — resume the
+    /// suspended task. Re-run it; if it Pends again, re-arm; else dispatch the
+    /// message (toMsg applied to the whole Result for attempt, to the Ok value
+    /// for perform).
+    fn emit_task_resume(&self) -> Function {
+        // param slot(0):i32. locals: entry(1),r(2),toMsg(3):eqref
+        let mut f = Function::new([(3, eqref())]);
+        let i31 = HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 };
+        f.instruction(&Instruction::GlobalGet(G_TASKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(1)); // entry
+        // r = task_run(entry[0])
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        // still Pending? re-arm at the same slot.
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_argn(&mut f, 2, 1); // r.rest
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        ctor_arg0(&mut f, 2); // r.ms
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // toMsg = entry[1]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        // isAttempt = entry[2]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(i31));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // attempt: dispatch(toMsg r)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::Else);
+        // perform: dispatch(toMsg r.value)
+        f.instruction(&Instruction::LocalGet(3));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// alm_frame(slot, delta, now) : fire an onAnimationFrame(Delta) sub. The
     /// stored SubAnimation is tag6 [toMsg, deltaFlag]; deltaFlag true → apply
     /// toMsg to the frame delta (Float), else to `millisToPosix now`.
@@ -13884,6 +14057,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_TICKS));
+        // tasks = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_TASKS));
         // domsubs = new T_ARR(MAX_HANDLERS)
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -14223,8 +14400,8 @@ impl<'a> Codegen<'a> {
         ctx.next_local = nparams;
         ctx.scratch_eqref = nparams + extra;
         ctx.scratch_i64 = nparams + extra + 1;
-        for (i, (pat, _)) in f.params.iter().enumerate() {
-            self.bind_pat(pat, i as u32, &mut ctx, &mut wf)?;
+        for (i, (pat, ty)) in f.params.iter().enumerate() {
+            self.bind_pat(pat, i as u32, Some(ty), &mut ctx, &mut wf)?;
         }
         self.emit_expr(&f.body, &mut ctx, &mut wf)?;
         wf.instruction(&Instruction::End);
@@ -14723,7 +14900,7 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(expr, ctx, f)?;
                 let slot = ctx.bind("$destr");
                 f.instruction(&Instruction::LocalSet(slot));
-                self.bind_pat(pat, slot, ctx, f)?;
+                self.bind_pat(pat, slot, Some(&expr.tipe), ctx, f)?;
             }
             // A local function: lift it to a closure and bind the name.
             TypedLetDecl::Def { name, params, body } => {
@@ -15069,6 +15246,13 @@ impl<'a> Codegen<'a> {
                     array_type_index: T_ARR,
                     array_size: args.len() as u32,
                 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Process.sleep ms → a Sleep task leaf (tag 9).
+            ("Process", "sleep") => {
+                f.instruction(&Instruction::I32Const(9));
+                self.emit_expr(&args[0], ctx, f)?; // ms (Float)
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Task.perform toMsg task → CMD_TASK_PERFORM (7); attempt → (8).
@@ -16528,7 +16712,7 @@ impl<'a> Codegen<'a> {
                 self.emit_test(pat, s, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(eqref())));
                 let mark = ctx.scope.len();
-                self.bind_pat(pat, s, ctx, f)?;
+                self.bind_pat(pat, s, None, ctx, f)?;
                 self.emit_expr(body, ctx, f)?;
                 ctx.scope.truncate(mark);
                 f.instruction(&Instruction::Else);
@@ -16667,6 +16851,10 @@ impl<'a> Codegen<'a> {
         &mut self,
         pat: &can::Pattern,
         s: u32,
+        // Expected type of the value in `s`, when known. Only record patterns
+        // need it (to map field names to their sorted `T_ARR` slot); the other
+        // arms load positionally and ignore it.
+        tipe: Option<&can::Type>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -16676,7 +16864,7 @@ impl<'a> Codegen<'a> {
             Var(name) => ctx.scope.push((name.to_string(), s)),
             Alias(inner, name) => {
                 ctx.scope.push((name.value.to_string(), s));
-                self.bind_pat(inner, s, ctx, f)?;
+                self.bind_pat(inner, s, tipe, ctx, f)?;
             }
             Ctor(_, _, ctor, args) if ctor.name.as_str() == "True" || ctor.name.as_str() == "False" => {
                 let _ = (ctor, args);
@@ -16686,29 +16874,29 @@ impl<'a> Codegen<'a> {
                     let sub = ctx.bind("$ba");
                     self.load_ctor_arg(s, i as u32, f);
                     f.instruction(&Instruction::LocalSet(sub));
-                    self.bind_pat(ap, sub, ctx, f)?;
+                    self.bind_pat(ap, sub, None, ctx, f)?;
                 }
             }
             Cons(h, t) => {
                 let hs = ctx.bind("$bh");
                 self.load_cons(s, 0, f);
                 f.instruction(&Instruction::LocalSet(hs));
-                self.bind_pat(h, hs, ctx, f)?;
+                self.bind_pat(h, hs, None, ctx, f)?;
                 let ts = ctx.bind("$bt");
                 self.load_cons(s, 1, f);
                 f.instruction(&Instruction::LocalSet(ts));
-                self.bind_pat(t, ts, ctx, f)?;
+                self.bind_pat(t, ts, None, ctx, f)?;
             }
             List(items) if items.is_empty() => {}
             List(items) => {
                 let hs = ctx.bind("$bh");
                 self.load_cons(s, 0, f);
                 f.instruction(&Instruction::LocalSet(hs));
-                self.bind_pat(&items[0], hs, ctx, f)?;
+                self.bind_pat(&items[0], hs, None, ctx, f)?;
                 let ts = ctx.bind("$bt");
                 self.load_cons(s, 1, f);
                 f.instruction(&Instruction::LocalSet(ts));
-                self.bind_pat(&make_list_tail(pat, items), ts, ctx, f)?;
+                self.bind_pat(&make_list_tail(pat, items), ts, None, ctx, f)?;
             }
             Tuple(a, b, rest) => {
                 let mut elems: Vec<&can::Pattern> = vec![a, b];
@@ -16717,7 +16905,23 @@ impl<'a> Codegen<'a> {
                     let sub = ctx.bind("$bt");
                     self.load_arr(s, i as u32, f);
                     f.instruction(&Instruction::LocalSet(sub));
-                    self.bind_pat(ep, sub, ctx, f)?;
+                    self.bind_pat(ep, sub, None, ctx, f)?;
+                }
+            }
+            // Record destructuring (`{ id, label }`): each named field becomes a
+            // local, loaded from its sorted position in the `T_ARR`-backed record.
+            Record(fields) => {
+                let tipe = tipe.ok_or_else(|| {
+                    "wasmgc: record pattern needs a known type (supported for function \
+                     and lambda parameters and let bindings)"
+                        .to_string()
+                })?;
+                for field in fields {
+                    let idx = record_field_index(tipe, field.value.as_str())?;
+                    let sub = ctx.bind("$br");
+                    self.load_arr(s, idx as u32, f);
+                    f.instruction(&Instruction::LocalSet(sub));
+                    ctx.scope.push((field.value.to_string(), sub));
                 }
             }
             other => return Err(format!("wasmgc: unsupported pattern in bind: {other:?}")),

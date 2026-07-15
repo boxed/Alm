@@ -67,6 +67,9 @@ function start(wasmPath, doc, clock) {
     host_set_interval: (ms, slot) => {
       timerIds.push(clock.setInterval(() => instance.exports.alm_tick(slot, clock.now()), ms));
     },
+    host_set_timeout: (ms, slot) => {
+      clock.setTimeout(() => instance.exports.alm_task_resume(slot), ms);
+    },
     host_clear_dom: () => {
       domSubs.forEach((s) => doc.removeEventListener && doc.removeEventListener(s.name, s.handler));
       domSubs = [];
