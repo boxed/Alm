@@ -28,13 +28,15 @@ function start(wasmPath, doc, clock) {
     dom_create_text: (s, sl) => reg(doc.createTextNode(str(s, sl))),
     dom_set_attribute: (n, kp, kl, vp, vl) => { nodes[n].setAttribute(str(kp, kl), str(vp, vl)); },
     dom_set_style: (n, kp, kl, vp, vl) => { nodes[n].style[str(kp, kl)] = str(vp, vl); },
+    dom_set_property: (n, p, l) => { nodes[n][str(p, l)] = true; },
     dom_append_child: (p, c) => { nodes[p].appendChild(nodes[c]); },
     dom_add_event_listener: (n, np, nl, hid) => {
       const name = str(np, nl);
       nodes[n].addEventListener(name, (ev) => {
         // Serialize a minimal event object to JSON and hand it to the module in
         // the reserved [0, 64KiB) scratch region (bump strings live above it).
-        const payload = { target: { value: (ev && ev.target && ev.target.value) || '' } };
+        const t = (ev && ev.target) || {};
+        const payload = { target: { value: t.value || '', checked: !!t.checked } };
         const bytes = new TextEncoder().encode(JSON.stringify(payload));
         new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
         instance.exports.alm_event(hid, 0, bytes.length);

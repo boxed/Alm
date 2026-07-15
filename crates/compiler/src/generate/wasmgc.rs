@@ -233,7 +233,8 @@ const MATH_LOG: u32 = 32;
 const MATH_ATAN2: u32 = 33;
 const MATH_POW: u32 = 34;
 const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_task_resume
-const N_IMPORTS: u32 = 36;
+const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM property true
+const N_IMPORTS: u32 = 37;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -657,9 +658,68 @@ fn html_attr_name(a: &str) -> Option<&'static str> {
         "name" => "name",
         "alt" => "alt",
         "type_" => "type",
-        "for_" => "for",
+        "for_" | "for" => "for",
         "rel" => "rel",
         "target" => "target",
+        "action" => "action",
+        "method" => "method",
+        "min" => "min",
+        "max" => "max",
+        "step" => "step",
+        "pattern" => "pattern",
+        "accept" => "accept",
+        "acceptCharset" => "accept-charset",
+        "autocomplete" => "autocomplete",
+        "enctype" => "enctype",
+        "download" => "download",
+        "dir" => "dir",
+        "lang" => "lang",
+        "wrap" => "wrap",
+        "cite" => "cite",
+        "datetime" => "datetime",
+        "accesskey" => "accesskey",
+        _ => return None,
+    })
+}
+
+/// Int-valued Html.Attributes helpers → their DOM attribute name (rendered as
+/// `String.fromInt n`).
+fn html_int_attr_name(a: &str) -> Option<&'static str> {
+    Some(match a {
+        "tabindex" => "tabIndex", // elm/html uses the camelCase DOM name here
+        "width" => "width",
+        "height" => "height",
+        "colspan" => "colspan",
+        "rowspan" => "rowspan",
+        "rows" => "rows",
+        "cols" => "cols",
+        "maxlength" => "maxlength",
+        "minlength" => "minlength",
+        "size" => "size",
+        "start" => "start",
+        "span" => "span",
+        _ => return None,
+    })
+}
+
+/// Boolean Html.Attributes helpers → the DOM *property* name to set (a bare
+/// attribute when true, absent when false — matching elm's boolProperty).
+fn html_bool_attr_name(a: &str) -> Option<&'static str> {
+    Some(match a {
+        "checked" => "checked",
+        "disabled" => "disabled",
+        "hidden" => "hidden",
+        "selected" => "selected",
+        "required" => "required",
+        "autofocus" => "autofocus",
+        "multiple" => "multiple",
+        "readonly" => "readOnly",
+        "spellcheck" => "spellcheck",
+        "autoplay" => "autoplay",
+        "controls" => "controls",
+        "loop" => "loop",
+        "default" => "default",
+        "novalidate" => "novalidate",
         _ => return None,
     })
 }
@@ -2350,6 +2410,7 @@ impl<'a> Codegen<'a> {
             ("math_atan2", f64f64_f64_ty),
             ("math_pow", f64f64_f64_ty),
             ("host_set_timeout", fi_v_ty),
+            ("dom_set_property", imp_i3_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -11711,6 +11772,23 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
+        // ABOOL (tag 3): bare " name" when the Bool is true.
+        ctor_tag(&mut f, 7);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 7, 1);
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        push_str_const(&mut f, " ");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_arg0(&mut f, 7);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
@@ -11930,6 +12008,21 @@ impl<'a> Codegen<'a> {
         self.dom_str(&mut f, 8);
         f.instruction(&Instruction::Call(DOM_SET_STYLE));
         f.instruction(&Instruction::Else);
+        // ABOOL (3): set the DOM property true when the Bool is true (a bare
+        // boolean attribute); false → nothing. Anything else is an AEVENT.
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8)); // the Bool (arg1)
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3)); // node
+        self.dom_str(&mut f, 7); // property name ptr,len
+        f.instruction(&Instruction::Call(DOM_SET_PROPERTY));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
         // AEVENT (2): register decoder at a fresh hid, add listener
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
@@ -11944,6 +12037,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
+        f.instruction(&Instruction::End); // close ABOOL/AEVENT if-else
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         bump(&mut f, 4, 1);
@@ -16538,6 +16632,24 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
+            // Int attributes: AATTR [name, String.fromInt n].
+            ("Html.Attributes", a) if html_int_attr_name(a).is_some() => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, html_int_attr_name(a).unwrap());
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_int_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Bool attributes → ABOOL [name, Bool] (tag 3): a bare attribute when
+            // true, absent when false (elm's boolProperty).
+            ("Html.Attributes", a) if html_bool_attr_name(a).is_some() => {
+                f.instruction(&Instruction::I32Const(3)); // ABOOL
+                push_str_const(f, html_bool_attr_name(a).unwrap());
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             ("Browser", "sandbox") => {
                 // Program = T_CTOR tag0 [record].
                 f.instruction(&Instruction::I32Const(0));
@@ -16701,6 +16813,28 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_CTOR)); // inner DField "value"
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR)); // outer DField "target"
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // AEVENT
+            }
+            ("Html.Events", "onCheck") => {
+                // onCheck toMsg = on "change" (map toMsg (at ["target","checked"] bool)).
+                f.instruction(&Instruction::I32Const(2)); // AEVENT
+                push_str_const(f, "change");
+                f.instruction(&Instruction::I32Const(15)); // DMap
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                f.instruction(&Instruction::I32Const(8)); // DField
+                push_str_const(f, "target");
+                f.instruction(&Instruction::I32Const(8)); // DField
+                push_str_const(f, "checked");
+                f.instruction(&Instruction::I32Const(3)); // DBool
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // DField "checked"
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // DField "target"
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });

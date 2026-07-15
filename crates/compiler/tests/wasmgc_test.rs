@@ -1346,6 +1346,45 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
 }
 
 #[test]
+fn attributes_bool() {
+    assert_sandbox_html(
+        "attrs_bool",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (input, div)\n\
+         import Html.Attributes as A\n\n\
+         view : Int -> Html.Html Never\n\
+         view _ =\n\
+         \x20   div []\n\
+         \x20       [ input [ A.type_ \"checkbox\", A.checked True, A.disabled True, A.required True ] []\n\
+         \x20       , input [ A.disabled False, A.hidden True ] []\n\
+         \x20       ]\n\n\
+         main : Program () Int Never\n\
+         main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+#[test]
+fn attributes_int_and_string() {
+    assert_sandbox_html(
+        "attrs_int_string",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Html.Attributes as A\n\n\
+         view : Int -> Html.Html Never\n\
+         view _ =\n\
+         \x20   div\n\
+         \x20       [ A.tabindex 3, A.width 10, A.colspan 2, A.rowspan 1\n\
+         \x20       , A.for \"y\", A.min \"0\", A.max \"9\", A.step \"2\", A.action \"/x\", A.method \"post\"\n\
+         \x20       ]\n\
+         \x20       [ text \"hi\" ]\n\n\
+         main : Program () Int Never\n\
+         main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+#[test]
 fn attributes_class_list() {
     assert_sandbox_html(
         "class_list",
@@ -1422,6 +1461,63 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
     assert_eq!(parts.len(), 4, "unexpected output: {out}");
     assert_eq!(parts[0], parts[1], "initial render disagrees");
     assert_eq!(parts[2], parts[3], "post-click render disagrees");
+}
+
+#[test]
+fn events_on_check() {
+    // onCheck fires on "change" reading target.checked; dispatch a change with
+    // checked=true and assert both backends update identically.
+    let dir = common::test_dir("alm-wasmgc", "on_check");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, input, text)\n\
+         import Html.Attributes as A\n\
+         import Html.Events as E\n\n\
+         type Msg = Toggle Bool\n\n\
+         update : Msg -> Int -> Int\n\
+         update (Toggle b) _ = if b then 1 else 0\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n\
+         \x20   div [] [ input [ A.type_ \"checkbox\", E.onCheck Toggle ] [], text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m_chk.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findIn(n){{if(n.tagName==='input')return n;for(const c of (n.childNodes||[])){{const r=findIn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               const inp=findIn(doc.body);dispatchEvent(inp,'change',{{target:{{checked:true}}}});\
+               const out=serializeBody(doc);if(r&&r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected: {out}");
+    assert_eq!(parts[0], parts[1], "onCheck render disagrees");
+    assert!(parts[1].contains(">1<"), "checkbox toggle should set model to 1: {}", parts[1]);
 }
 
 #[test]
