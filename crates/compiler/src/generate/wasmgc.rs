@@ -34,7 +34,11 @@ const T_BACK: u32 = 4; // struct { mut i32 head, (ref T_ARR) data } — head = f
 const T_LIST: u32 = 5; // struct { i32 len, (ref null T_BACK) bk }
 const T_CTOR: u32 = 6; // struct { i32 tag, (ref null T_ARR) args }
 const T_CLOS: u32 = 7; // struct { funcref, i32 arity, i32 applied, (ref null T_ARR) args }
-const N_FIXED: u32 = 8;
+// Dict/Set = a persistent treap (BST by key, heap by (priority,key) where
+// priority = val_hash(key) — deterministic, so equal key-sets give identical
+// trees). O(log n) persistent insert/get/remove; in-order traversal is sorted.
+const T_TNODE: u32 = 8; // struct { key, value:eqref, pri:i32, left,right:(ref null T_TNODE) }
+const N_FIXED: u32 = 9;
 
 // Imported DOM host functions occupy the first function indices; defined
 // functions are therefore offset by N_IMPORTS (see build()).
@@ -144,6 +148,11 @@ fn record_field_index(tipe: &can::Type, field: &str) -> Result<usize, String> {
 
 fn cast_to(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNonNull(HeapType::Concrete(idx))
+}
+
+/// Nullable downcast (e.g. an eqref that may be a T_TNODE or null).
+fn cast_null(idx: u32) -> Instruction<'static> {
+    Instruction::RefCastNullable(HeapType::Concrete(idx))
 }
 
 fn struct_type(types: &mut TypeSection, fields: &[FieldType]) {
@@ -741,6 +750,16 @@ struct Codegen<'a> {
     set_from_list_idx: u32,
     set_intersect_idx: u32,
     set_diff_idx: u32,
+    val_hash_idx: u32,
+    treap_get_idx: u32,
+    treap_insert_idx: u32,
+    treap_merge_idx: u32,
+    treap_remove_idx: u32,
+    treap_pairs_idx: u32,
+    treap_foldl_idx: u32,
+    treap_foldr_idx: u32,
+    treap_insert_pairs_idx: u32,
+    treap_insert_elems_idx: u32,
     array_get_idx: u32,
     array_set_idx: u32,
     array_push_idx: u32,
@@ -900,6 +919,16 @@ impl<'a> Codegen<'a> {
             set_from_list_idx: 0,
             set_intersect_idx: 0,
             set_diff_idx: 0,
+            val_hash_idx: 0,
+            treap_get_idx: 0,
+            treap_insert_idx: 0,
+            treap_merge_idx: 0,
+            treap_remove_idx: 0,
+            treap_pairs_idx: 0,
+            treap_foldl_idx: 0,
+            treap_foldr_idx: 0,
+            treap_insert_pairs_idx: 0,
+            treap_insert_elems_idx: 0,
             array_get_idx: 0,
             array_set_idx: 0,
             array_push_idx: 0,
@@ -1084,6 +1113,16 @@ impl<'a> Codegen<'a> {
         self.set_from_list_idx = next();
         self.set_intersect_idx = next();
         self.set_diff_idx = next();
+        self.val_hash_idx = next();
+        self.treap_get_idx = next();
+        self.treap_insert_idx = next();
+        self.treap_merge_idx = next();
+        self.treap_remove_idx = next();
+        self.treap_pairs_idx = next();
+        self.treap_foldl_idx = next();
+        self.treap_foldr_idx = next();
+        self.treap_insert_pairs_idx = next();
+        self.treap_insert_elems_idx = next();
         self.array_get_idx = next();
         self.array_set_idx = next();
         self.array_push_idx = next();
@@ -1289,6 +1328,16 @@ impl<'a> Codegen<'a> {
         let set_from_list = self.emit_set_from_list();
         let set_intersect = self.emit_set_intersect();
         let set_diff = self.emit_set_diff();
+        let val_hash = self.emit_val_hash();
+        let treap_get = self.emit_treap_get();
+        let treap_insert = self.emit_treap_insert();
+        let treap_merge = self.emit_treap_merge();
+        let treap_remove = self.emit_treap_remove();
+        let treap_pairs = self.emit_treap_pairs();
+        let treap_foldl = self.emit_treap_fold(false);
+        let treap_foldr = self.emit_treap_fold(true);
+        let treap_insert_pairs = self.emit_treap_insert_seq(false);
+        let treap_insert_elems = self.emit_treap_insert_seq(true);
         let array_get = self.emit_array_get();
         let array_set = self.emit_array_set();
         let array_push = self.emit_array_push();
@@ -1378,6 +1427,13 @@ impl<'a> Codegen<'a> {
             FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
             FieldType { element_type: StorageType::Val(ref_to(T_ARR)), mutable: false },
         ]); // T_CLOS
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(eqref()), mutable: false },
+            FieldType { element_type: StorageType::Val(eqref()), mutable: false },
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_TNODE)), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_TNODE)), mutable: false },
+        ]); // T_TNODE { key, value, pri, left, right }
         for &arity in &self.fn_type_order {
             types.ty().function(vec![eqref(); arity as usize], vec![eqref()]);
         }
@@ -1515,6 +1571,16 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // set_from_list (xs, acc)
         funcs.function(ft2); // set_intersect
         funcs.function(ft2); // set_diff (toRemove, base)
+        funcs.function(eqref_to_i32_ty); // val_hash
+        funcs.function(ft2); // treap_get (k, t)
+        funcs.function(ft3); // treap_insert (k, v, t)
+        funcs.function(ft2); // treap_merge (l, r)
+        funcs.function(ft2); // treap_remove (k, t)
+        funcs.function(ft2); // treap_pairs (t, acc)
+        funcs.function(ft3); // treap_foldl (f, acc, t)
+        funcs.function(ft3); // treap_foldr (f, acc, t)
+        funcs.function(ft2); // treap_insert_pairs (pairs, t)
+        funcs.function(ft2); // treap_insert_elems (elems, t)
         funcs.function(ft2); // array_get
         funcs.function(ft3); // array_set
         funcs.function(ft2); // array_push
@@ -1670,6 +1736,16 @@ impl<'a> Codegen<'a> {
         code.function(&set_from_list);
         code.function(&set_intersect);
         code.function(&set_diff);
+        code.function(&val_hash);
+        code.function(&treap_get);
+        code.function(&treap_insert);
+        code.function(&treap_merge);
+        code.function(&treap_remove);
+        code.function(&treap_pairs);
+        code.function(&treap_foldl);
+        code.function(&treap_foldr);
+        code.function(&treap_insert_pairs);
+        code.function(&treap_insert_elems);
         code.function(&array_get);
         code.function(&array_set);
         code.function(&array_push);
@@ -2507,8 +2583,13 @@ impl<'a> Codegen<'a> {
             return Ok(());
         }
         // Nullary empty collections.
-        if (module == "Dict" || module == "Set" || module == "Array") && name == "empty" {
+        if module == "Array" && name == "empty" {
             push_empty_list(f);
+            return Ok(());
+        }
+        // Dict/Set are treaps; the empty value is a null node.
+        if (module == "Dict" || module == "Set") && name == "empty" {
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
             return Ok(());
         }
         // Platform.Cmd.none / Platform.Sub.none : CMD_NONE (tag0, no args).
@@ -6973,6 +7054,695 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Dict/Set persistent treap (BST by key, heap by val_hash priority) ----
+
+    /// val_hash(v) : deterministic hash of a comparable key (Int/Float/Char/
+    /// String/Bool/tuple/list). Used as the treap priority so equal key-sets
+    /// balance the same way regardless of insertion order.
+    fn emit_val_hash(&self) -> Function {
+        // param v(0). locals: h(1),i(2),n(3):i32; s(4):ref T_STR
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_STR))]);
+        // i31 (Char/Bool/Unit/small Int) → its scalar value
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Const(-1640531535)); // Knuth mix: scramble
+        f.instruction(&Instruction::I32Mul);                // so sequential keys
+        f.instruction(&Instruction::Else);                  // don't degenerate the treap
+        // T_INT → lo ^ hi
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_INT)));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I64Const(32));
+        f.instruction(&Instruction::I64ShrU);
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::I32Xor);
+        f.instruction(&Instruction::I32Const(-1640531535));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::Else);
+        // T_FLOAT → bits lo ^ hi
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::I64ReinterpretF64);
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::I64ReinterpretF64);
+        f.instruction(&Instruction::I64Const(32));
+        f.instruction(&Instruction::I64ShrU);
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::I32Xor);
+        f.instruction(&Instruction::Else);
+        // T_STR → FNV-1a over bytes
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_STR)));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(-2128831035)); // FNV offset basis
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Xor);
+        f.instruction(&Instruction::I32Const(16777619)); // FNV prime
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        // T_ARR (tuple) → combine element hashes
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(31));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.val_hash_idx));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        // T_LIST (list key) → combine element hashes
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(11));
+        f.instruction(&Instruction::LocalSet(1));
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(31));
+        f.instruction(&Instruction::I32Mul);
+        list_elem(&mut f, 0, 2);
+        f.instruction(&Instruction::Call(self.val_hash_idx));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// treap_get(k, t) : `Maybe v` — iterative BST search by val_compare.
+    fn emit_treap_get(&self) -> Function {
+        // params k(0), t(1):eqref. locals: c(2):i32; cur(3):ref null T_TNODE
+        let mut f = Function::new([(1, ValType::I32), (1, ref_null_to(T_TNODE))]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        // c = val_compare(k, cur.key)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalTee(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // Just(cur.value)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // cur = c < 0 ? cur.left : cur.right
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Nothing
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// mknode: expects [key, value, pri, left, right] on the stack.
+    fn treap_node(f: &mut Function) {
+        f.instruction(&Instruction::StructNew(T_TNODE));
+    }
+
+    /// treap_insert(k, v, t) : persistent insert with priority rotations.
+    fn emit_treap_insert(&self) -> Function {
+        // params k(0), v(1), t(2). locals: c(3):i32; child(4):ref null T_TNODE
+        let mut f = Function::new([(1, ValType::I32), (1, ref_null_to(T_TNODE))]);
+        // t null → new leaf
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0)); // key
+        f.instruction(&Instruction::LocalGet(1)); // value
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.val_hash_idx)); // pri
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // c = val_compare(k, t.key)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalTee(3));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // equal: replace value, keep structure
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // recurse left (c<0) or right
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        // child = insert(k,v,t.left)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::Call(self.treap_insert_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::LocalSet(4));
+        // if child.pri > t.pri → rotate right, else node(t; left=child)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        // rotate right: newRoot = child; child.right = node(t.key,t.val,t.pri, child.right, t.right)
+        // child fields
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 }); // child.left
+        // new right subtree = node(t.key,t.val,t.pri, child.right, t.right)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 }); // child.right
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 }); // t.right
+        Self::treap_node(&mut f);
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::Else);
+        // node(t.key,t.val,t.pri, child, t.right)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
+        // c > 0: child = insert(k,v,t.right)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::Call(self.treap_insert_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        // rotate left: newRoot = child; child.left = node(t.key,t.val,t.pri, t.left, child.left)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        // new left subtree = node(t.key,t.val,t.pri, t.left, child.left)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 }); // t.left
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 }); // child.left
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 }); // child.right
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::Else);
+        // node(t.key,t.val,t.pri, t.left, child)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::LocalGet(4));
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// treap_merge(l, r) : merge two treaps (all keys(l) < all keys(r)).
+    fn emit_treap_merge(&self) -> Function {
+        // params l(0), r(1).
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::Else);
+        // both non-null: higher priority becomes root
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        // l root: node(l.key,l.val,l.pri, l.left, merge(l.right, r))
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.treap_merge_idx));
+        f.instruction(&cast_null(T_TNODE));
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::Else);
+        // r root: node(r.key,r.val,r.pri, merge(l, r.left), r.right)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::Call(self.treap_merge_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// treap_remove(k, t) : persistent delete (merge the two subtrees at the hit).
+    fn emit_treap_remove(&self) -> Function {
+        // params k(0), t(1). locals: c(2):i32
+        let mut f = Function::new([(1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalTee(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        // hit: merge(t.left, t.right)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::Call(self.treap_merge_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::Else);
+        // rebuild: node(t.key, t.val, t.pri, newLeft, newRight)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 2 });
+        // newLeft = c<0 ? remove(k, t.left) : t.left
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::Call(self.treap_remove_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        f.instruction(&Instruction::End);
+        // newRight = c<0 ? t.right : remove(k, t.right)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_TNODE))));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::Call(self.treap_remove_idx));
+        f.instruction(&cast_null(T_TNODE));
+        f.instruction(&Instruction::End);
+        Self::treap_node(&mut f);
+        f.instruction(&Instruction::End); // c==0 If
+        f.instruction(&Instruction::End); // tnull If
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// treap_pairs(t, acc) : prepend this tree's [k,v] pairs (ascending) onto
+    /// `acc`, producing a key-sorted list. In-order, right-to-left cons.
+    fn emit_treap_pairs(&self) -> Function {
+        // params t(0), acc(1).
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        // pairs(t.left, cons([k,v], pairs(t.right, acc)))
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 3 });
+        // [k,v] pair
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        // pairs(t.right, acc)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 4 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// treap_fold(f, acc, t) : in-order fold applying `f key value acc`.
+    /// foldl = ascending (left,node,right); foldr = descending.
+    fn emit_treap_fold(&self, rev: bool) -> Function {
+        // params f(0), acc(1), t(2).
+        let self_idx = if rev { self.treap_foldr_idx } else { self.treap_foldl_idx };
+        let (first, second) = if rev { (4u32, 3u32) } else { (3u32, 4u32) };
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        // acc = fold(f, acc, first); acc = f k v acc; acc = fold(f, acc, second)
+        f.instruction(&Instruction::LocalGet(0));
+        // fold(f, acc, first-subtree)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: first });
+        f.instruction(&Instruction::Call(self_idx));
+        // now stack: [f, acc']; apply f key value acc'
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 0 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: 1 });
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        // fold(f, acc, second-subtree)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_TNODE));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_TNODE, field_index: second });
+        f.instruction(&Instruction::Call(self_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// Set (treap on the stack) → its sorted element list (the treap's keys).
+    fn emit_set_to_list(&self, f: &mut Function) {
+        push_empty_list(f);
+        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+        f.instruction(&Instruction::Call(self.dict_keys_idx));
+    }
+
+    /// treap_insert_seq(xs, t) : fold treap_insert over a list into treap `t`.
+    /// elems=false: `xs` is a list of [k,v] pairs (Dict). elems=true: `xs` is a
+    /// list of bare elements inserted with a Unit value (Set). Later entries win.
+    fn emit_treap_insert_seq(&self, elems: bool) -> Function {
+        // params xs(0), t(1). locals: acc(2),cur(3),x(4):eqref
+        let mut f = Function::new([(3, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(2)); // acc = t
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3)); // cur = xs
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1));
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(4)); // x = head
+        // treap_insert(key, value, acc)
+        if elems {
+            f.instruction(&Instruction::LocalGet(4)); // key = element
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::RefI31); // value = ()
+        } else {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR)); // key = pair[0]
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::ArrayGet(T_ARR)); // value = pair[1]
+        }
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.treap_insert_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     // ---- Json.Encode: Value is a T_CTOR tagged 0=null 1=bool 2=int 3=float
     //      4=string 5=array(List Value) 6=object(List (String,Value)). ----
 
@@ -10843,6 +11613,18 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // T_TNODE (Dict/Set): equal iff their sorted pair-lists are equal.
+        test(&mut f, 0, T_TNODE);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+        f.instruction(&Instruction::LocalGet(1));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         // T_INT (large Int)
         test(&mut f, 0, T_INT);
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -11844,28 +12626,32 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.clamp_idx));
             }
             // Dict: a key-sorted vector of [k,v] pairs.
-            ("Dict", "empty") => push_empty_list(f),
+            // Dict/Set are persistent treaps (see emit_val_hash/emit_treap_*).
+            // Fast ops (insert/get/remove/member) use the treap directly;
+            // bulk ops convert treap→sorted-pair-list, reuse the pair-list
+            // helpers, and rebuild the treap via treap_insert_pairs.
+            ("Dict", "empty") => { f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE))); }
             ("Dict", "singleton") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                push_empty_list(f);
-                f.instruction(&Instruction::Call(self.dict_insert_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_idx));
             }
             ("Dict", "insert") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_insert_idx));
+                f.instruction(&Instruction::Call(self.treap_insert_idx));
             }
             ("Dict", "get") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_get_idx));
+                f.instruction(&Instruction::Call(self.treap_get_idx));
             }
             ("Dict", "member") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_get_idx));
+                f.instruction(&Instruction::Call(self.treap_get_idx));
                 f.instruction(&cast_to(T_CTOR));
                 f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
                 f.instruction(&Instruction::I32Eqz); // Just → True
@@ -11874,167 +12660,244 @@ impl<'a> Codegen<'a> {
             ("Dict", "remove") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_remove_idx));
+                f.instruction(&Instruction::Call(self.treap_remove_idx));
             }
             ("Dict", "update") => {
+                // from_pairs(dict_update(k, f, pairs(d)))
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_update_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
             }
             ("Dict", "size") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_LIST));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
-                f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::Call(self.box_int_idx));
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                f.instruction(&Instruction::Call(self.list_length_idx));
             }
             ("Dict", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_LIST));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
-                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::RefIsNull);
                 f.instruction(&Instruction::RefI31);
             }
-            ("Dict", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Dict", "toList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+            }
             ("Dict", "keys") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_keys_idx));
             }
             ("Dict", "values") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_values_idx));
             }
             ("Dict", "fromList") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_sorted_build_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
             }
             ("Dict", "foldl") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_foldl_idx));
             }
             ("Dict", "foldr") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_foldr_idx));
             }
             ("Dict", "map") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_map_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
             }
             ("Dict", "filter") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_filter_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
             }
             ("Dict", "union") => {
-                // union t1 t2 = insert all of t1 into t2 (t1 wins).
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_from_list_idx));
-            }
-            ("Dict", "intersect") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.dict_intersect_idx));
-            }
-            ("Dict", "diff") => {
-                // diff t1 t2 = remove t2's keys from t1.
-                self.emit_expr(&args[1], ctx, f)?; // toRemove = t2
-                self.emit_expr(&args[0], ctx, f)?; // base = t1
-                f.instruction(&Instruction::Call(self.dict_diff_idx));
-            }
-            // Set: a sorted vector of unique elements (a Set IS its own toList,
-            // so foldl/foldr/filter/partition are the ordinary List kernels).
-            ("Set", "empty") => push_empty_list(f),
-            ("Set", "singleton") => {
+                // insert all of a's pairs into b (a wins)
                 self.emit_expr(&args[0], ctx, f)?;
                 push_empty_list(f);
-                f.instruction(&Instruction::Call(self.set_insert_idx));
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+            }
+            ("Dict", "intersect") => {
+                // from_pairs(dict_intersect(pairs(a), pairs(b)))
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                f.instruction(&Instruction::Call(self.dict_intersect_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+            }
+            ("Dict", "diff") => {
+                // from_pairs(dict_diff(pairs(b) toRemove, pairs(a) base))
+                self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                f.instruction(&Instruction::Call(self.dict_diff_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+            }
+            // Set = a treap of (element → Unit). toList = the treap's keys.
+            ("Set", "empty") => { f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE))); }
+            ("Set", "singleton") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefI31);
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_idx));
             }
             ("Set", "insert") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefI31);
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.set_insert_idx));
+                f.instruction(&Instruction::Call(self.treap_insert_idx));
             }
             ("Set", "remove") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.set_remove_idx));
+                f.instruction(&Instruction::Call(self.treap_remove_idx));
             }
             ("Set", "member") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.set_member_idx));
-            }
-            ("Set", "size") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_LIST));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
-                f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::Call(self.box_int_idx));
-            }
-            ("Set", "isEmpty") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_LIST));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::Call(self.treap_get_idx));
+                f.instruction(&cast_to(T_CTOR));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
                 f.instruction(&Instruction::I32Eqz);
                 f.instruction(&Instruction::RefI31);
             }
-            ("Set", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Set", "size") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_set_to_list(f);
+                f.instruction(&Instruction::Call(self.list_length_idx));
+            }
+            ("Set", "isEmpty") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::RefIsNull);
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Set", "toList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_set_to_list(f);
+            }
             ("Set", "fromList") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::Call(self.set_sorted_build_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
             }
             ("Set", "foldl") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.list_foldl_idx));
             }
             ("Set", "foldr") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.list_foldr_idx));
             }
             ("Set", "filter") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.list_filter_idx));
-            }
-            ("Set", "partition") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.list_partition_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
             }
             ("Set", "map") => {
-                // fromList (List.map f (toList s))
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.list_map_idx));
-                push_empty_list(f);
-                f.instruction(&Instruction::Call(self.set_from_list_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
             }
             ("Set", "union") => {
-                // insert all of s1 into s2
                 self.emit_expr(&args[0], ctx, f)?;
+                self.emit_set_to_list(f);
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.set_from_list_idx));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
             }
             ("Set", "intersect") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                self.emit_set_to_list(f);
                 self.emit_expr(&args[1], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.set_intersect_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
             }
             ("Set", "diff") => {
-                self.emit_expr(&args[1], ctx, f)?; // toRemove = s2
-                self.emit_expr(&args[0], ctx, f)?; // base = s1
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_set_to_list(f);
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_set_to_list(f);
                 f.instruction(&Instruction::Call(self.set_diff_idx));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
+            }
+            ("Set", "partition") => {
+                // list_partition over the elements → (inList, outList); wrap each
+                // element-list back into a Set.
+                let t = ctx.bind("$setpart");
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_set_to_list(f);
+                f.instruction(&Instruction::Call(self.list_partition_idx));
+                f.instruction(&Instruction::LocalSet(t));
+                // ( setOf part[0], setOf part[1] )
+                f.instruction(&Instruction::LocalGet(t));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
+                f.instruction(&Instruction::LocalGet(t));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+                f.instruction(&Instruction::Call(self.treap_insert_elems_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
             }
             // Array: the same T_LIST vector — toList/fromList are identity and
             // most ops reuse the List kernels.

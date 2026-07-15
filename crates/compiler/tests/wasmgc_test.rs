@@ -1996,8 +1996,8 @@ fn bench_wasmgc_vs_js() {
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 1))))\n"),
         // KNOWN O(n²): incremental Dict.insert / Array.push each copy the whole
         // vector (see memory) — small n here just to track the ratio, not hang.
-        ("dict incremental 5k [O(n²)]",
-         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 5000)))\n",
+        ("dict incremental 50k",
+         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 50000)))\n",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 1)))\n"),
         ("array push 200k",
          "import Array\nmain : String\nmain = String.fromInt (Array.length (List.foldl Array.push Array.empty (List.range 1 200000)))\n",
