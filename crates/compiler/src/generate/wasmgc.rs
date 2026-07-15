@@ -713,6 +713,7 @@ struct Codegen<'a> {
     dispatch_msg_idx: u32,
     port_in_idx: u32,
     sub_find_port_idx: u32,
+    html_map_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -854,6 +855,7 @@ impl<'a> Codegen<'a> {
             dispatch_msg_idx: 0,
             port_in_idx: 0,
             sub_find_port_idx: 0,
+            html_map_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1020,6 +1022,7 @@ impl<'a> Codegen<'a> {
         self.dispatch_msg_idx = next();
         self.port_in_idx = next();
         self.sub_find_port_idx = next();
+        self.html_map_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1199,6 +1202,7 @@ impl<'a> Codegen<'a> {
         let dispatch_msg = self.emit_dispatch_msg();
         let port_in = self.emit_port_in();
         let sub_find_port = self.emit_sub_find_port();
+        let html_map = self.emit_html_map();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1395,6 +1399,7 @@ impl<'a> Codegen<'a> {
         funcs.function(eqref_to_void_ty); // dispatch_msg : eqref -> ()
         funcs.function(imp_i4_v); // alm_port_in : (i32,i32,i32,i32) -> ()
         funcs.function(ee_eqref_ty); // sub_find_port : (eqref,eqref) -> eqref
+        funcs.function(ee_eqref_ty); // html_map : (eqref,eqref) -> eqref
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1532,6 +1537,7 @@ impl<'a> Codegen<'a> {
         code.function(&dispatch_msg);
         code.function(&port_in);
         code.function(&sub_find_port);
+        code.function(&html_map);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -8918,6 +8924,118 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// html_map(f, node) : `Html.map f node` — rebuild the vdom so every event
+    /// handler's decoded message is mapped through `f`. VTEXT is unchanged;
+    /// VNODE rewrites each AEVENT attr's decoder to `Json.Decode.map f decoder`
+    /// (DMap tag15) and recurses into children. Attrs/kids lists are rebuilt
+    /// head-first (T_BACK head=0, elements at data[0..len)).
+    fn emit_html_map(&self) -> Function {
+        // params f(0), node(1). locals: tag(2),len(3),i(4):i32,
+        //   arr(5):ref T_ARR, elem(6):eqref
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        // VTEXT (tag 0): unchanged
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VNODE: build VNODE[ node.arg0, mappedAttrs, mappedKids ]
+        f.instruction(&Instruction::I32Const(1)); // VNODE tag
+        ctor_arg0(&mut f, 1); // tagName
+        // --- mapped attrs (node.arg1) ---
+        ctor_argn(&mut f, 1, 1);
+        f.instruction(&Instruction::LocalSet(6)); // reuse elem slot to hold attrs list
+        list_len(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(5)); // arr
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5)); // arr (for ArraySet)
+        f.instruction(&Instruction::LocalGet(4)); // i
+        // attr = attrs[i]; but attrs list is in local 6 — re-fetch each iter
+        ctor_argn(&mut f, 1, 1);
+        f.instruction(&Instruction::LocalSet(6));
+        list_elem(&mut f, 6, 4);
+        f.instruction(&Instruction::LocalSet(6)); // elem = attr
+        // if AEVENT (tag 2): AEVENT[name, DMap[f, decoder]] else elem
+        ctor_tag(&mut f, 6);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(2)); // AEVENT
+        ctor_arg0(&mut f, 6); // event name
+        f.instruction(&Instruction::I32Const(15)); // DMap
+        f.instruction(&Instruction::LocalGet(0)); // f
+        ctor_argn(&mut f, 6, 1); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // AEVENT
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // wrap arr as T_LIST{len, T_BACK{0, arr}}
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        // --- mapped kids (node.arg2), recursively ---
+        ctor_argn(&mut f, 1, 2);
+        f.instruction(&Instruction::LocalSet(6));
+        list_len(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        ctor_argn(&mut f, 1, 2);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(0)); // f
+        list_elem(&mut f, 6, 4); // kid
+        f.instruction(&Instruction::Call(self.html_map_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        // VNODE[tagName, attrs, kids]
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// sub_find_port(sub, name) : return the `toMsg` of the SubPort in `sub`
     /// whose name equals `name`, or null if none. Sub value model: none=tag0,
     /// batch=tag1 [List Sub], SubPort=tag2 [name, toMsg]. Recurses into batches.
@@ -11017,7 +11135,9 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             ("Html", "map") => {
-                return Err("wasmgc: Html.map not yet supported".into());
+                self.emit_expr(&args[0], ctx, f)?; // f
+                self.emit_expr(&args[1], ctx, f)?; // node
+                f.instruction(&Instruction::Call(self.html_map_idx));
             }
             ("Html", tag) => {
                 // element helper: Html.<tag> attrs kids

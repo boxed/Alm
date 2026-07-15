@@ -1330,6 +1330,65 @@ fn document_title_and_body() {
 }
 
 #[test]
+fn sandbox_html_map() {
+    // Html.map wraps a child view's messages. Clicking the mapped button must
+    // route through the outer Msg (Wrap Bump) and increment — identical in both
+    // backends, at init and after a click.
+    let dir = common::test_dir("alm-wasmgc", "html_map");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, text)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Child = Bump\n\n\
+         childView : Html Child\n\
+         childView =\n    button [ onClick Bump ] [ text \"+\" ]\n\n\
+         type Msg = Wrap Child\n\n\
+         update : Msg -> Int -> Int\n\
+         update _ n = n + 1\n\n\
+         view : Int -> Html Msg\n\
+         view n =\n    div [] [ Html.map Wrap childView, div [] [ text (String.fromInt n) ] ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m8.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);\
+               const b=findBtn(doc.body);if(b)dispatchEvent(b,'click',{{}});\
+               return serializeBody(doc);}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "Html.map render disagrees");
+    assert_eq!(parts[1], "<div><button>+</button><div>1</div></div>", "mapped click should increment");
+}
+
+#[test]
 fn sandbox_on_input() {
     // onInput carries the event payload (target.value). Type into the field and
     // assert both backends render the echoed text identically.
