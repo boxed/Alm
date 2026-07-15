@@ -925,6 +925,7 @@ struct Codegen<'a> {
     dict_foldr_idx: u32,
     dict_map_idx: u32,
     dict_filter_idx: u32,
+    dict_partition_idx: u32,
     dict_keys_idx: u32,
     dict_values_idx: u32,
     dict_intersect_idx: u32,
@@ -1120,6 +1121,7 @@ impl<'a> Codegen<'a> {
             dict_foldr_idx: 0,
             dict_map_idx: 0,
             dict_filter_idx: 0,
+            dict_partition_idx: 0,
             dict_keys_idx: 0,
             dict_values_idx: 0,
             dict_intersect_idx: 0,
@@ -1340,6 +1342,7 @@ impl<'a> Codegen<'a> {
         self.dict_foldr_idx = next();
         self.dict_map_idx = next();
         self.dict_filter_idx = next();
+        self.dict_partition_idx = next();
         self.dict_keys_idx = next();
         self.dict_values_idx = next();
         self.dict_intersect_idx = next();
@@ -1594,6 +1597,7 @@ impl<'a> Codegen<'a> {
         let dict_foldr = self.emit_dict_fold(true);
         let dict_map = self.emit_dict_map();
         let dict_filter = self.emit_dict_filter();
+        let dict_partition = self.emit_dict_partition();
         let dict_keys = self.emit_dict_project(0);
         let dict_values = self.emit_dict_project(1);
         let dict_intersect = self.emit_dict_intersect();
@@ -1874,6 +1878,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // dict_foldr
         funcs.function(ft2); // dict_map
         funcs.function(ft2); // dict_filter
+        funcs.function(ft2); // dict_partition
         funcs.function(ft1); // dict_keys
         funcs.function(ft1); // dict_values
         funcs.function(ft2); // dict_intersect
@@ -2065,6 +2070,7 @@ impl<'a> Codegen<'a> {
         code.function(&dict_foldr);
         code.function(&dict_map);
         code.function(&dict_filter);
+        code.function(&dict_partition);
         code.function(&dict_keys);
         code.function(&dict_values);
         code.function(&dict_intersect);
@@ -7577,6 +7583,67 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_partition(pred, pairs) : split a pair list by `pred k v` into a
+    /// `(yes, no)` tuple of two rebuilt treaps.
+    fn emit_dict_partition(&self) -> Function {
+        // params pred(0), pairs(1). locals: len(2),i(3):i32, yes(4),no(5),pair(6):eqref
+        let mut f = Function::new([(2, ValType::I32), (3, eqref())]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(4)); // yes
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(5)); // no
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::LocalSet(6));
+        // pred(pair[0], pair[1])
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(6, 0, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        self.load_arr(6, 1, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ( from_pairs(yes), from_pairs(no) )
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::End);
         f
     }
@@ -14942,6 +15009,13 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.dict_filter_idx));
                 f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
                 f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
+            }
+            ("Dict", "partition") => {
+                self.emit_expr(&args[0], ctx, f)?; // pred
+                self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                f.instruction(&Instruction::Call(self.dict_partition_idx));
             }
             ("Dict", "union") => {
                 // insert all of a's pairs into b (a wins)

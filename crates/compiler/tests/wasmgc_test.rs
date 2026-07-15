@@ -287,6 +287,23 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn dict_partition() {
+    assert_str_prog(
+        "dict_partition",
+        "module Test exposing (main)\n\n\
+         import Dict\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       d = Dict.fromList [ ( 1, \"a\" ), ( 2, \"b\" ), ( 3, \"c\" ), ( 4, \"d\" ) ]\n\
+         \x20       ( evens, odds ) = Dict.partition (\\k _ -> modBy 2 k == 0) d\n\
+         \x20       show dd = Dict.toList dd |> List.map (\\( k, v ) -> String.fromInt k ++ v) |> String.join \",\"\n\
+         \x20   in\n\
+         \x20   show evens ++ \"|\" ++ show odds\n",
+    );
+}
+
+#[test]
 fn string_slice_pad() {
     assert_str_prog(
         "string_slice_pad",
