@@ -15,12 +15,161 @@ use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
     ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType, Function,
     FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, Instruction, MemArg,
-    MemorySection, MemoryType, Module, RefType, StorageType, TypeSection, ValType,
+    MemorySection, MemoryType, Module, RawSection, RefType, StorageType, TypeSection, ValType,
 };
 
 use crate::ast::canonical as can;
 use crate::ir::mono::{MonoProgram, TypedExpr, TypedKind, TypedLetDecl};
 use crate::reporting::annotation::Region;
+
+/// Dead-code-eliminate a finished WasmGC module. The code generator emits every
+/// runtime helper (Dict, Json, Html, DOM, …) unconditionally, so most programs
+/// carry kernel functions they never call. This computes the set of functions
+/// reachable from the module's exports (following `call`/`return_call`/`ref.func`
+/// edges, plus function references taken by globals and active/passive element
+/// segments) and replaces every unreachable function body with a 3-byte
+/// `unreachable` stub. Function *indices* are left untouched — only the Code
+/// section changes — so no call site, export, or element entry needs rewriting.
+fn tree_shake(bytes: &[u8]) -> Vec<u8> {
+    use wasmparser::{ElementKind, Operator, Parser, Payload};
+
+    // The `ref.func` targets reachable from a const-expr (global init / element
+    // init). Returns the referenced function index, if any.
+    fn const_expr_func(reader: wasmparser::OperatorsReader) -> Vec<u32> {
+        let mut out = Vec::new();
+        for op in reader {
+            if let Ok(Operator::RefFunc { function_index }) = op {
+                out.push(function_index);
+            }
+        }
+        out
+    }
+
+    // Every import this generator emits is a host/DOM function (memory is
+    // defined, not imported), so the imported-function count is exactly the
+    // fixed import count and defined functions begin at that index.
+    let num_imported_funcs: u32 = N_IMPORTS;
+    let mut roots: Vec<u32> = Vec::new();
+    // Per defined function (code order): (content_range, callee indices).
+    let mut bodies: Vec<(std::ops::Range<usize>, Vec<u32>)> = Vec::new();
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = match payload {
+            Ok(p) => p,
+            Err(_) => return bytes.to_vec(), // parse failure: leave the module as-is
+        };
+        match payload {
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    if let Ok(ex) = export {
+                        if ex.kind == wasmparser::ExternalKind::Func {
+                            roots.push(ex.index);
+                        }
+                    }
+                }
+            }
+            Payload::StartSection { func, .. } => roots.push(func),
+            Payload::GlobalSection(reader) => {
+                for g in reader {
+                    if let Ok(g) = g {
+                        roots.extend(const_expr_func(g.init_expr.get_operators_reader()));
+                    }
+                }
+            }
+            Payload::ElementSection(reader) => {
+                for el in reader {
+                    if let Ok(el) = el {
+                        // A `declared` segment only permits `ref.func`; it does
+                        // not itself keep functions live. Active/passive segments
+                        // populate a table, so their functions are roots.
+                        if matches!(el.kind, ElementKind::Declared) {
+                            continue;
+                        }
+                        match el.items {
+                            wasmparser::ElementItems::Functions(fs) => {
+                                for fi in fs {
+                                    if let Ok(fi) = fi {
+                                        roots.push(fi);
+                                    }
+                                }
+                            }
+                            wasmparser::ElementItems::Expressions(_, exprs) => {
+                                for e in exprs {
+                                    if let Ok(e) = e {
+                                        roots.extend(const_expr_func(e.get_operators_reader()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                let mut callees = Vec::new();
+                if let Ok(reader) = body.get_operators_reader() {
+                    for op in reader {
+                        match op {
+                            Ok(Operator::Call { function_index })
+                            | Ok(Operator::ReturnCall { function_index })
+                            | Ok(Operator::RefFunc { function_index }) => callees.push(function_index),
+                            _ => {}
+                        }
+                    }
+                }
+                bodies.push((body.range(), callees));
+            }
+            _ => {}
+        }
+    }
+
+    // BFS over the call graph. Defined function `d` owns body `d - num_imported`.
+    let mut reachable = std::collections::HashSet::new();
+    let mut stack = roots;
+    while let Some(f) = stack.pop() {
+        if !reachable.insert(f) {
+            continue;
+        }
+        if f < num_imported_funcs {
+            continue; // imports have no body
+        }
+        if let Some((_, callees)) = bodies.get((f - num_imported_funcs) as usize) {
+            for &c in callees {
+                if !reachable.contains(&c) {
+                    stack.push(c);
+                }
+            }
+        }
+    }
+
+    // Rebuild the module: copy every section verbatim except Code, where dead
+    // bodies become `unreachable` stubs (local-count 0, `unreachable`, `end`).
+    const STUB: &[u8] = &[0x00, 0x00, 0x0b];
+    let mut out = Module::new();
+    let mut emitted_code = false;
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = payload.expect("re-parse of a just-built module cannot fail");
+        // The code section is emitted from `bodies`; skip its per-entry payloads.
+        if matches!(payload, Payload::CodeSectionEntry(_) | Payload::CodeSectionStart { .. }) {
+            if !emitted_code {
+                let mut code = CodeSection::new();
+                for (i, (range, _)) in bodies.iter().enumerate() {
+                    if reachable.contains(&(num_imported_funcs + i as u32)) {
+                        code.raw(&bytes[range.clone()]);
+                    } else {
+                        code.raw(STUB);
+                    }
+                }
+                out.section(&code);
+                emitted_code = true;
+            }
+            continue;
+        }
+        if let Some((id, range)) = payload.as_section() {
+            out.section(&RawSection { id, data: &bytes[range] });
+        }
+    }
+    out.finish()
+}
 
 const T_INT: u32 = 0; // struct { i64 }
 const T_FLOAT: u32 = 1; // struct { f64 }
@@ -686,6 +835,11 @@ struct Codegen<'a> {
     list_tail_idx: u32,
     maybe_with_default_idx: u32,
     maybe_map_idx: u32,
+    maybe_and_then_idx: u32,
+    maybe_map2_idx: u32,
+    maybe_map3_idx: u32,
+    result_map2_idx: u32,
+    result_map3_idx: u32,
     str_join_idx: u32,
     str_repeat_idx: u32,
     str_starts_with_idx: u32,
@@ -862,6 +1016,11 @@ impl<'a> Codegen<'a> {
             list_tail_idx: 0,
             maybe_with_default_idx: 0,
             maybe_map_idx: 0,
+            maybe_and_then_idx: 0,
+            maybe_map2_idx: 0,
+            maybe_map3_idx: 0,
+            result_map2_idx: 0,
+            result_map3_idx: 0,
             str_join_idx: 0,
             str_repeat_idx: 0,
             str_starts_with_idx: 0,
@@ -1063,6 +1222,9 @@ impl<'a> Codegen<'a> {
         self.list_tail_idx = next();
         self.maybe_with_default_idx = next();
         self.maybe_map_idx = next();
+        self.maybe_and_then_idx = next();
+        self.maybe_map2_idx = next();
+        self.maybe_map3_idx = next();
         self.str_join_idx = next();
         self.str_repeat_idx = next();
         self.str_starts_with_idx = next();
@@ -1099,6 +1261,8 @@ impl<'a> Codegen<'a> {
         self.result_and_then_idx = next();
         self.result_to_maybe_idx = next();
         self.result_from_maybe_idx = next();
+        self.result_map2_idx = next();
+        self.result_map3_idx = next();
         self.str_split_idx = next();
         self.str_words_idx = next();
         self.str_lines_idx = next();
@@ -1289,6 +1453,9 @@ impl<'a> Codegen<'a> {
         let list_tail = self.emit_list_head(true);
         let maybe_with_default = self.emit_maybe_with_default();
         let maybe_map = self.emit_maybe_map();
+        let maybe_and_then = self.emit_maybe_and_then();
+        let maybe_map2 = self.emit_maybe_mapn(2);
+        let maybe_map3 = self.emit_maybe_mapn(3);
         let str_join = self.emit_str_join();
         let str_repeat = self.emit_str_repeat();
         let str_starts_with = self.emit_str_affix(false);
@@ -1325,6 +1492,8 @@ impl<'a> Codegen<'a> {
         let result_and_then = self.emit_result_and_then();
         let result_to_maybe = self.emit_result_to_maybe();
         let result_from_maybe = self.emit_result_from_maybe();
+        let result_map2 = self.emit_result_mapn(2);
+        let result_map3 = self.emit_result_mapn(3);
         let str_split = self.emit_str_split();
         let str_words = self.emit_str_words();
         let str_lines = self.emit_str_lines();
@@ -1547,6 +1716,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // list_tail
         funcs.function(ft2); // maybe_with_default
         funcs.function(ft2); // maybe_map
+        funcs.function(ft2); // maybe_and_then
+        funcs.function(ft3); // maybe_map2
+        funcs.function(ft4); // maybe_map3
         funcs.function(ft2); // str_join
         funcs.function(ft2); // str_repeat
         funcs.function(ft2); // str_starts_with
@@ -1583,6 +1755,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // result_and_then
         funcs.function(ft1); // result_to_maybe
         funcs.function(ft2); // result_from_maybe
+        funcs.function(ft3); // result_map2
+        funcs.function(ft4); // result_map3
         funcs.function(ft2); // str_split
         funcs.function(ft1); // str_words
         funcs.function(ft1); // str_lines
@@ -1719,6 +1893,9 @@ impl<'a> Codegen<'a> {
         code.function(&list_tail);
         code.function(&maybe_with_default);
         code.function(&maybe_map);
+        code.function(&maybe_and_then);
+        code.function(&maybe_map2);
+        code.function(&maybe_map3);
         code.function(&str_join);
         code.function(&str_repeat);
         code.function(&str_starts_with);
@@ -1755,6 +1932,8 @@ impl<'a> Codegen<'a> {
         code.function(&result_and_then);
         code.function(&result_to_maybe);
         code.function(&result_from_maybe);
+        code.function(&result_map2);
+        code.function(&result_map3);
         code.function(&str_split);
         code.function(&str_words);
         code.function(&str_lines);
@@ -2037,7 +2216,15 @@ impl<'a> Codegen<'a> {
         module.section(&code);
         module.section(&data);
         let _ = ConstExpr::i32_const(0);
-        Ok(module.finish())
+        let bytes = module.finish();
+        // Tree-shake: the kernel emits every runtime helper unconditionally, so a
+        // program that never touches Dict/Json/Html still carries them. Stub the
+        // bodies unreachable from the exports (`ALM_NO_DCE=1` keeps them all).
+        if std::env::var_os("ALM_NO_DCE").is_some() {
+            Ok(bytes)
+        } else {
+            Ok(tree_shake(&bytes))
+        }
     }
 
     /// str_append(a, b) : (eqref, eqref) -> eqref — concatenate two strings.
@@ -3367,6 +3554,78 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::End); // if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// maybe_and_then(f, m) : `f x` on `Just x` (f returns a Maybe), else `m`.
+    fn emit_maybe_and_then(&self) -> Function {
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz); // Just?
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// maybe_mapN(f, m1..mn) : `Just (f x1 .. xn)` if every argument is `Just`,
+    /// else `Nothing`. Params are f(0) then the n maybes (locals 1..=n).
+    fn emit_maybe_mapn(&self, n: u32) -> Function {
+        let mut f = Function::new([]);
+        for i in 1..=n {
+            ctor_tag(&mut f, i);
+            f.instruction(&Instruction::I32Eqz); // Just?
+            f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        }
+        // Just (apply1(..apply1(f, x1).., xn))
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        for i in 1..=n {
+            ctor_arg0(&mut f, i);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        for _ in 0..n {
+            f.instruction(&Instruction::Else);
+            f.instruction(&Instruction::I32Const(1)); // Nothing
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// result_mapN(f, r1..rn) : `Ok (f x1 .. xn)` if every argument is `Ok`,
+    /// else the leftmost `Err`. Params f(0) then the n results (locals 1..=n).
+    fn emit_result_mapn(&self, n: u32) -> Function {
+        let mut f = Function::new([]);
+        for i in 1..=n {
+            ctor_tag(&mut f, i);
+            f.instruction(&Instruction::I32Eqz); // Ok?
+            f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        }
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::LocalGet(0));
+        for i in 1..=n {
+            ctor_arg0(&mut f, i);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        // Each Else yields the corresponding Err argument (innermost = rn).
+        for i in (1..=n).rev() {
+            f.instruction(&Instruction::Else);
+            f.instruction(&Instruction::LocalGet(i));
+            f.instruction(&Instruction::End);
+        }
         f.instruction(&Instruction::End); // function
         f
     }
@@ -13046,6 +13305,17 @@ impl<'a> Codegen<'a> {
                 push_empty_list(f);
                 f.instruction(&Instruction::Call(self.list_cons_idx));
             }
+            ("List", "cons") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_cons_idx));
+            }
+            // String.concat xs = String.join "" xs (str_join takes sep, then list).
+            ("String", "concat") => {
+                push_str_const(f, "");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_join_idx));
+            }
             ("Maybe", "withDefault") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
@@ -13055,6 +13325,18 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.maybe_map_idx));
+            }
+            ("Maybe", "andThen") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.maybe_and_then_idx));
+            }
+            ("Maybe", "map2") | ("Maybe", "map3") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                let idx = if name == "map2" { self.maybe_map2_idx } else { self.maybe_map3_idx };
+                f.instruction(&Instruction::Call(idx));
             }
             ("Result", "withDefault") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -13070,6 +13352,13 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.result_map_error_idx));
+            }
+            ("Result", "map2") | ("Result", "map3") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                let idx = if name == "map2" { self.result_map2_idx } else { self.result_map3_idx };
+                f.instruction(&Instruction::Call(idx));
             }
             ("Result", "andThen") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -13626,8 +13915,9 @@ impl<'a> Codegen<'a> {
             }
             // ASCII-only case fold; other code points pass through (partial
             // parity on non-ASCII, matching JS on ASCII).
-            ("Char", "toUpper") | ("Char", "toLower") => {
-                let (base, span, delta) = if name == "toUpper" {
+            ("Char", "toUpper") | ("Char", "toLower")
+            | ("Char", "toLocaleUpper") | ("Char", "toLocaleLower") => {
+                let (base, span, delta) = if name.ends_with("Upper") {
                     (97, 26, -32)
                 } else {
                     (65, 26, 32)

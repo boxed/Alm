@@ -257,6 +257,36 @@ fn string_from_int() {
 }
 
 #[test]
+fn maybe_result_combinators() {
+    assert_str_prog(
+        "maybe_result_combinators",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       a = Maybe.andThen (\\x -> if x > 0 then Just (x * 2) else Nothing) (Just 5)\n\
+         \x20       b = Maybe.map2 (\\x y -> x + y) (Just 3) (Just 4)\n\
+         \x20       c = Maybe.map3 (\\x y z -> x + y + z) (Just 1) (Just 2) Nothing\n\
+         \x20       r = Result.map2 (\\x y -> x * y) (Ok 6) (Ok 7)\n\
+         \x20       e = Result.map3 (\\x y z -> String.fromInt (x + y + z)) (Ok 1) (Err \"bad\") (Ok 3)\n\
+         \x20   in\n\
+         \x20   String.concat\n\
+         \x20       [ String.fromInt (Maybe.withDefault -1 a)\n\
+         \x20       , \",\"\n\
+         \x20       , String.fromInt (Maybe.withDefault -1 b)\n\
+         \x20       , \",\"\n\
+         \x20       , String.fromInt (Maybe.withDefault -9 c)\n\
+         \x20       , \",\"\n\
+         \x20       , String.fromInt (Result.withDefault -1 r)\n\
+         \x20       , \",\"\n\
+         \x20       , Result.withDefault \"?\" e\n\
+         \x20       , \",\"\n\
+         \x20       , String.fromInt (List.length (2 :: [ 3, 4 ]))\n\
+         \x20       ]\n",
+    );
+}
+
+#[test]
 fn string_from_int_negative() {
     assert_str_prog(
         "str_from_int_neg",

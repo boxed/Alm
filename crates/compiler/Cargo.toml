@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 inkwell = { version = "0.5", features = ["llvm16-0"] }
 wasm-encoder = "0.253.0"
+wasmparser = "0.253.0"
