@@ -87,6 +87,10 @@ const G_NEXT_DOM: u32 = 18; // next document-sub slot (reset each reconcile)
 const G_URLCHG: u32 = 19; // Browser.application onUrlChange handler (null otherwise)
 const G_FRAMES: u32 = 20; // active onAnimationFrame subs, indexed by slot
 const G_NEXT_FRAME: u32 = 21; // next frame-sub slot (reset each reconcile)
+// Int representation: values in [-2^30, 2^30) live UNBOXED as i31ref (no heap
+// allocation); larger values box as T_INT. `box_int`/`unbox_int` bridge the two.
+const I31_MIN: i64 = -(1 << 30);
+const I31_MAX: i64 = 1 << 30;
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -779,6 +783,8 @@ struct Codegen<'a> {
     url_from_string_idx: u32,
     strip_keys_idx: u32,
     frame_idx: u32,
+    box_int_idx: u32,
+    unbox_int_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -930,6 +936,8 @@ impl<'a> Codegen<'a> {
             url_from_string_idx: 0,
             strip_keys_idx: 0,
             frame_idx: 0,
+            box_int_idx: 0,
+            unbox_int_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1106,6 +1114,8 @@ impl<'a> Codegen<'a> {
         self.url_from_string_idx = next();
         self.strip_keys_idx = next();
         self.frame_idx = next();
+        self.box_int_idx = next();
+        self.unbox_int_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1165,7 +1175,9 @@ impl<'a> Codegen<'a> {
         let ei_i_ty = self.next_type + 20; // (eqref,i32) -> i32 (index_byte)
         let i_i_ty = self.next_type + 21; // (i32) -> i32 (host_get_url)
         let iff_v_ty = self.next_type + 22; // (i32,f64,f64) -> () (alm_frame)
-        self.next_type += 23;
+        let i64_e_ty = self.next_type + 23; // (i64) -> eqref (box_int)
+        let e_i64_ty = self.next_type + 24; // (eqref) -> i64 (unbox_int)
+        self.next_type += 25;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1301,12 +1313,13 @@ impl<'a> Codegen<'a> {
         let url_from_string = self.emit_url_from_string();
         let strip_keys = self.emit_strip_keys();
         let frame = self.emit_frame();
+        let box_int = self.emit_box_int();
+        let unbox_int = self.emit_unbox_int();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
-        mi.instruction(&cast_to(T_INT));
-        mi.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        mi.instruction(&Instruction::Call(self.unbox_int_idx));
         mi.instruction(&Instruction::End);
         let render = self.emit_render(main_idx);
 
@@ -1375,6 +1388,8 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![eqref(), ValType::I32], vec![ValType::I32]); // index_byte
         types.ty().function(vec![ValType::I32], vec![ValType::I32]); // host_get_url
         types.ty().function(vec![ValType::I32, ValType::F64, ValType::F64], vec![]); // alm_frame
+        types.ty().function(vec![ValType::I64], vec![eqref()]); // box_int
+        types.ty().function(vec![eqref()], vec![ValType::I64]); // unbox_int
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1513,6 +1528,8 @@ impl<'a> Codegen<'a> {
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
         funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
         funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
+        funcs.function(i64_e_ty); // box_int : (i64) -> eqref
+        funcs.function(e_i64_ty); // unbox_int : (eqref) -> i64
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1660,6 +1677,8 @@ impl<'a> Codegen<'a> {
         code.function(&url_from_string);
         code.function(&strip_keys);
         code.function(&frame);
+        code.function(&box_int);
+        code.function(&unbox_int);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1899,8 +1918,7 @@ impl<'a> Codegen<'a> {
         ]);
         // n = unbox
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(1));
         // neg = n < 0 ; if neg n = -n
         f.instruction(&Instruction::LocalGet(1));
@@ -2155,9 +2173,11 @@ impl<'a> Codegen<'a> {
             .map(|(p, _)| pat_size(p))
             .sum();
         let extra = count_bindings(body) + param_dtor;
-        let mut lf = Function::new([(extra, eqref())]);
+        let mut lf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
         let mut lctx = FnCtx::new();
         lctx.next_local = total;
+        lctx.scratch_eqref = total + extra;
+        lctx.scratch_i64 = total + extra + 1;
         for (i, (name, _)) in captures.iter().enumerate() {
             lctx.scope.push((name.clone(), i as u32));
         }
@@ -2423,7 +2443,7 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([]);
         list_len(&mut f, 0);
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -2496,17 +2516,15 @@ impl<'a> Codegen<'a> {
         match (module, name) {
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 lf.instruction(&Instruction::LocalGet(0));
-                lf.instruction(&cast_to(T_INT));
-                lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+                lf.instruction(&Instruction::Call(self.unbox_int_idx));
                 lf.instruction(&Instruction::LocalGet(1));
-                lf.instruction(&cast_to(T_INT));
-                lf.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+                lf.instruction(&Instruction::Call(self.unbox_int_idx));
                 lf.instruction(&match name {
                     "add" => Instruction::I64Add,
                     "sub" => Instruction::I64Sub,
                     _ => Instruction::I64Mul,
                 });
-                lf.instruction(&Instruction::StructNew(T_INT));
+                lf.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("String", "append") => {
                 lf.instruction(&Instruction::LocalGet(0));
@@ -2529,7 +2547,7 @@ impl<'a> Codegen<'a> {
                 }));
                 lf.instruction(&Instruction::I31GetS);
                 lf.instruction(&Instruction::I64ExtendI32S);
-                lf.instruction(&Instruction::StructNew(T_INT));
+                lf.instruction(&Instruction::Call(self.box_int_idx));
             }
             _ => {
                 // Basics.not
@@ -2795,12 +2813,10 @@ impl<'a> Codegen<'a> {
         // m(0), x(1); mm(2):i64, r(3):i64
         let mut f = Function::new([(2, ValType::I64)]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(2)); // mm
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I64RemS);
         f.instruction(&Instruction::LocalSet(3)); // r = x rem m
@@ -2821,7 +2837,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -2832,13 +2848,11 @@ impl<'a> Codegen<'a> {
         //   data(6):ref T_ARR
         let mut f = Function::new([(2, ValType::I64), (2, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(2)); // loi
         // cnt = hi - lo + 1
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I64Sub);
         f.instruction(&Instruction::I64Const(1));
@@ -2874,7 +2888,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::I64Add);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
@@ -2943,8 +2957,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         // n2 = clamp(unbox n, 0, len)
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         // if n2 < 0 { 0 }
@@ -3009,8 +3022,7 @@ impl<'a> Codegen<'a> {
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -3303,8 +3315,7 @@ impl<'a> Codegen<'a> {
         // n(0), s(1); n32(2),i(3),slen(4),off(5):i32; sc(6),out(7):ref T_STR
         let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_STR))]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         // clamp n to >= 0
@@ -3456,31 +3467,28 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // i31 (Char)
+        // i31 (Char/Bool/Unit, or a small Int) — unbox BOTH as i64 so a small
+        // i31 Int orders correctly against a large boxed-T_INT Int.
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::LocalSet(4));
-        sign_i(&mut f, 3, 4, false);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        sign_i(&mut f, 6, 7, true);
         f.instruction(&Instruction::End);
-        // T_INT
+        // T_INT (large Int)
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_INT)));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(7));
         sign_i(&mut f, 6, 7, true);
         f.instruction(&Instruction::End);
@@ -3832,8 +3840,7 @@ impl<'a> Codegen<'a> {
         //   xdata(7), ndata(8):ref T_ARR
         let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(6));
         list_len(&mut f, 2);
@@ -3863,7 +3870,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(4));
@@ -3905,7 +3912,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I64Const(ident));
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         list_data(&mut f, 0);
@@ -3963,8 +3970,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(if product { &Instruction::I64Mul } else { &Instruction::I64Add });
         f.instruction(&Instruction::LocalSet(5));
         bump(&mut f, 3, 1);
@@ -3972,7 +3978,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -4232,8 +4238,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(3));
         // a
@@ -4439,7 +4444,7 @@ impl<'a> Codegen<'a> {
         // Just acc
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
@@ -4804,7 +4809,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::I64ExtendI32U);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -5277,8 +5282,7 @@ impl<'a> Codegen<'a> {
         // params n(0), x(1). locals: n2(2), i(3):i32, data(4):ref T_ARR
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -5412,14 +5416,12 @@ impl<'a> Codegen<'a> {
         // len = str_length(s)
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(self.str_length_idx));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(3));
         // need = n - len
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Sub);
@@ -5435,7 +5437,7 @@ impl<'a> Codegen<'a> {
         // pad = repeat(need, fromChar ch)
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.str_from_char_idx));
         f.instruction(&Instruction::Call(self.str_repeat_idx));
@@ -6145,8 +6147,7 @@ impl<'a> Codegen<'a> {
         // params i(0), a(1). locals: ii(2), len(3):i32
         let mut f = Function::new([(2, ValType::I32)]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         list_len(&mut f, 1);
@@ -6179,8 +6180,7 @@ impl<'a> Codegen<'a> {
         // params i(0), x(1), a(2). locals: ii(3),len(4),j(5):i32, ndata(6):ref T_ARR
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 2);
@@ -6343,8 +6343,7 @@ impl<'a> Codegen<'a> {
     /// (negative = from end, clamp to [0,len]), store into local `out`.
     fn emit_slice_index(&self, f: &mut Function, arg: u32, len: u32, out: u32) {
         f.instruction(&Instruction::LocalGet(arg));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(out));
         // if out < 0 { out += len }
@@ -6379,8 +6378,7 @@ impl<'a> Codegen<'a> {
         // params n(0), gen(1). locals: n2(2),i(3):i32, ndata(4):ref T_ARR
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -6407,7 +6405,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 3, 1);
@@ -6445,7 +6443,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         list_elem(&mut f, 0, 2);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
@@ -6973,7 +6971,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_FLOAT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
         f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.str_from_int_idx));
         f.instruction(&Instruction::Else);
         // string
@@ -7544,7 +7542,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::I64Mul);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         wrap1(&mut f);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -7856,7 +7854,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(13));
         f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         wrap1(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -7877,8 +7875,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
         ctor_arg0(&mut f, 1);
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::F64ConvertI64S);
         f.instruction(&Instruction::StructNew(T_FLOAT));
         wrap1(&mut f);
@@ -8023,8 +8020,7 @@ impl<'a> Codegen<'a> {
         ctor_arg0(&mut f, 1);
         f.instruction(&Instruction::LocalSet(9));
         ctor_arg0(&mut f, 0);
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(6));
         list_len(&mut f, 9);
@@ -9450,7 +9446,7 @@ impl<'a> Codegen<'a> {
         let left = move |f: &mut Function, n: u32, src: u32| {
             f.instruction(&Instruction::LocalGet(n));
             f.instruction(&Instruction::I64ExtendI32S);
-            f.instruction(&Instruction::StructNew(T_INT));
+            f.instruction(&Instruction::Call(self.box_int_idx));
             f.instruction(&Instruction::LocalGet(src));
             f.instruction(&Instruction::Call(str_left_idx));
         };
@@ -9458,7 +9454,7 @@ impl<'a> Codegen<'a> {
         let dropleft = move |f: &mut Function, n: u32, src: u32| {
             f.instruction(&Instruction::LocalGet(n));
             f.instruction(&Instruction::I64ExtendI32S);
-            f.instruction(&Instruction::StructNew(T_INT));
+            f.instruction(&Instruction::Call(self.box_int_idx));
             f.instruction(&Instruction::LocalGet(src));
             f.instruction(&Instruction::Call(str_dropleft_idx));
         };
@@ -9845,7 +9841,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -9881,12 +9877,57 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// box_int(v) : represent an i64 as an Int value. Small values [-2^30, 2^30)
+    /// become an UNBOXED i31ref (no heap allocation — the whole point); larger
+    /// values fall back to a boxed T_INT. `unbox_int` reads either form.
+    fn emit_box_int(&self) -> Function {
+        // param v(0):i64
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I64Const(I31_MIN));
+        f.instruction(&Instruction::I64GeS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I64Const(I31_MAX));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// unbox_int(v) : read an Int (either i31ref or boxed T_INT) as an i64.
+    fn emit_unbox_int(&self) -> Function {
+        // param v(0):eqref
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -10016,7 +10057,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(3)); // BadStatus
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
@@ -10339,29 +10380,26 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         false_ret(&mut f);
         f.instruction(&Instruction::End);
-        // i31 (Bool/Char/Unit)
+        // i31 (Bool/Char/Unit, or a small Int) — unbox BOTH as i64 so a small
+        // i31 Int compares correctly against a large boxed-T_INT Int.
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Eq);
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // T_INT
+        // T_INT (large Int)
         test(&mut f, 0, T_INT);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I64Eq);
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
@@ -10592,9 +10630,13 @@ impl<'a> Codegen<'a> {
             .map(|(p, _)| pat_size(p))
             .sum();
         let extra = count_bindings(&f.body) + param_dtor;
-        let mut wf = Function::new([(extra, eqref())]);
+        // Reserve two scratch locals after the binding block: one eqref + one
+        // i64 for inlining unbox_int/box_int on the arithmetic hot path.
+        let mut wf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
         let mut ctx = FnCtx::new();
         ctx.next_local = nparams;
+        ctx.scratch_eqref = nparams + extra;
+        ctx.scratch_i64 = nparams + extra + 1;
         for (i, (pat, _)) in f.params.iter().enumerate() {
             self.bind_pat(pat, i as u32, &mut ctx, &mut wf)?;
         }
@@ -10608,7 +10650,7 @@ impl<'a> Codegen<'a> {
         match &e.kind {
             TypedKind::Int(n) => {
                 f.instruction(&Instruction::I64Const(*n));
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             TypedKind::Float(x) => {
                 f.instruction(&Instruction::F64Const((*x).into()));
@@ -10759,7 +10801,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I64Const(0));
                 self.emit_i64(x, ctx, f)?;
                 f.instruction(&Instruction::I64Sub);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             TypedKind::Binop(op, _, _, l, r) => self.emit_binop(op.as_str(), l, r, ctx, f)?,
             TypedKind::If(branches, otherwise) => self.emit_if(branches, otherwise, ctx, f)?,
@@ -10792,10 +10834,58 @@ impl<'a> Codegen<'a> {
 
     /// Emit an `Int`-typed expression, leaving an unboxed `i64`.
     fn emit_i64(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
+        // Literal operand: emit the raw i64, skipping a pointless box→unbox.
+        if let TypedKind::Int(n) = &e.kind {
+            f.instruction(&Instruction::I64Const(*n));
+            return Ok(());
+        }
         self.emit_expr(e, ctx, f)?;
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_INT)));
+        // Int is i31ref (small) or boxed T_INT (large). Inline the read when a
+        // scratch local is reserved (hot path), else call the out-of-line helper.
+        let s = ctx.scratch_eqref;
+        if s == u32::MAX {
+            f.instruction(&Instruction::Call(self.unbox_int_idx));
+            return Ok(());
+        }
+        f.instruction(&Instruction::LocalTee(s));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::End);
         Ok(())
+    }
+
+    /// Box an i64 (on the stack) as an Int, inlining the i31 fast path when a
+    /// scratch local is reserved, else calling box_int.
+    fn emit_box_int_inline(&self, ctx: &FnCtx, f: &mut Function) {
+        let s = ctx.scratch_i64;
+        if s == u32::MAX {
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            return;
+        }
+        f.instruction(&Instruction::LocalSet(s));
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&Instruction::I64Const(I31_MIN));
+        f.instruction(&Instruction::I64GeS);
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&Instruction::I64Const(I31_MAX));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::End);
     }
 
     /// Emit a `Char`-typed expression, leaving its unboxed code point (`i32`).
@@ -10857,7 +10947,7 @@ impl<'a> Codegen<'a> {
                     "*" => Instruction::I64Mul,
                     _ => Instruction::I64DivS,
                 });
-                f.instruction(&Instruction::StructNew(T_INT));
+                self.emit_box_int_inline(ctx, f);
             }
             "/" => {
                 self.emit_f64(l, ctx, f)?;
@@ -11325,7 +11415,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&cast_to(T_LIST));
                 f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Dict", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -11415,7 +11505,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&cast_to(T_LIST));
                 f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Set", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -11485,7 +11575,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&cast_to(T_LIST));
                 f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Array", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -11555,7 +11645,7 @@ impl<'a> Codegen<'a> {
             ("Array", "indexedMap") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I64Const(0));
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_indexed_map_idx));
             }
@@ -11768,7 +11858,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I64Const(0));
                 self.emit_i64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I64Sub);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
                 // a
                 self.emit_expr(&args[0], ctx, f)?;
                 // cond a < 0
@@ -11786,7 +11876,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I64Const(0));
                 self.emit_i64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I64Sub);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Basics", "min") | ("Basics", "max") => {
                 // a and b for the select, then compare(a,b) for the condition.
@@ -11874,7 +11964,7 @@ impl<'a> Codegen<'a> {
             ("List", "indexedMap") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I64Const(0));
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_indexed_map_idx));
             }
@@ -11917,7 +12007,7 @@ impl<'a> Codegen<'a> {
                 self.emit_i64(&args[1], ctx, f)?;
                 self.emit_i64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::I64RemS);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Basics", "toFloat") => {
                 self.emit_i64(&args[0], ctx, f)?;
@@ -11931,7 +12021,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::F64Add);
                 f.instruction(&Instruction::F64Floor);
                 f.instruction(&Instruction::I64TruncF64S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Basics", "floor") | ("Basics", "ceiling") | ("Basics", "truncate") => {
                 self.emit_f64(&args[0], ctx, f)?;
@@ -11941,7 +12031,7 @@ impl<'a> Codegen<'a> {
                     _ => f.instruction(&Instruction::F64Trunc),
                 };
                 f.instruction(&Instruction::I64TruncF64S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Basics", "sqrt") => {
                 self.emit_f64(&args[0], ctx, f)?;
@@ -11974,7 +12064,7 @@ impl<'a> Codegen<'a> {
                     _ => &Instruction::I32Xor,
                 });
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Bitwise", "complement") => {
                 self.emit_i64(&args[0], ctx, f)?;
@@ -11982,7 +12072,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(-1));
                 f.instruction(&Instruction::I32Xor);
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             // shift ops take `shiftLeftBy offset value` → value shifted by offset
             ("Bitwise", "shiftLeftBy") | ("Bitwise", "shiftRightBy") => {
@@ -11996,7 +12086,7 @@ impl<'a> Codegen<'a> {
                     &Instruction::I32ShrS
                 });
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Bitwise", "shiftRightZfBy") => {
                 self.emit_i64(&args[1], ctx, f)?;
@@ -12005,7 +12095,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32WrapI64);
                 f.instruction(&Instruction::I32ShrU);
                 f.instruction(&Instruction::I64ExtendI32U); // zero-fill → unsigned
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Basics", "not") => {
                 self.emit_bool(&args[0], ctx, f)?;
@@ -12026,7 +12116,7 @@ impl<'a> Codegen<'a> {
                 }));
                 f.instruction(&Instruction::I31GetS);
                 f.instruction(&Instruction::I64ExtendI32S);
-                f.instruction(&Instruction::StructNew(T_INT));
+                f.instruction(&Instruction::Call(self.box_int_idx));
             }
             ("Char", "fromCode") => {
                 self.emit_i64(&args[0], ctx, f)?;
@@ -12543,8 +12633,7 @@ impl<'a> Codegen<'a> {
             Alias(inner, _) => self.emit_test(inner, s, ctx, f)?,
             Int(n) => {
                 f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&cast_to(T_INT));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+                f.instruction(&Instruction::Call(self.unbox_int_idx));
                 f.instruction(&Instruction::I64Const(*n));
                 f.instruction(&Instruction::I64Eq);
             }
@@ -12749,11 +12838,16 @@ struct FnCtx {
     /// Scope stack of (name, local index); shadowing = last match wins.
     scope: Vec<(String, u32)>,
     next_local: u32,
+    /// Reserved scratch locals for inlining box_int/unbox_int on the arithmetic
+    /// hot path (avoids a function call per operation). u32::MAX = not reserved
+    /// (fall back to the out-of-line helper).
+    scratch_eqref: u32,
+    scratch_i64: u32,
 }
 
 impl FnCtx {
     fn new() -> Self {
-        FnCtx { scope: Vec::new(), next_local: 0 }
+        FnCtx { scope: Vec::new(), next_local: 0, scratch_eqref: u32::MAX, scratch_i64: u32::MAX }
     }
     fn lookup(&self, name: &str) -> Option<u32> {
         self.scope.iter().rev().find(|(n, _)| n == name).map(|(_, i)| *i)
