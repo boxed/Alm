@@ -1330,6 +1330,21 @@ fn document_title_and_body() {
 }
 
 #[test]
+fn accessor_function() {
+    // `.field` used as a first-class function (List.map .name / .age).
+    assert_str_prog(
+        "accessor",
+        "module Test exposing (main)\n\n\
+         people : List { name : String, age : Int }\n\
+         people = [ { name = \"ann\", age = 3 }, { name = \"bo\", age = 1 } ]\n\n\
+         main : String\n\
+         main =\n    String.join \",\" (List.map .name people)\n\
+         \x20       ++ \"|\"\n\
+         \x20       ++ String.fromInt (List.sum (List.map .age people))\n",
+    );
+}
+
+#[test]
 fn url_from_string_pure() {
     // De-risk the hand-written Url.fromString parser as a pure function, diffed
     // across all three backends, before wiring Browser.application.

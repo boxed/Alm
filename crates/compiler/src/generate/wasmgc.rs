@@ -11094,6 +11094,28 @@ impl<'a> Codegen<'a> {
             }
             TypedKind::Case(scrut, branches) => self.emit_case(scrut, branches, ctx, f)?,
             TypedKind::Lambda(params, body) => self.lift(params, body, ctx, f)?,
+            // `.field` as a first-class function → a lambda `\$acc -> $acc.field`.
+            TypedKind::Accessor(field) => {
+                let (rec_ty, field_ty) = match &e.tipe {
+                    can::Type::Lambda(a, b) => ((**a).clone(), (**b).clone()),
+                    _ => return Err("wasmgc: accessor has non-function type".into()),
+                };
+                let acc = TypedExpr {
+                    tipe: rec_ty.clone(),
+                    kind: TypedKind::Local("$acc".into()),
+                    region: e.region,
+                };
+                let body = TypedExpr {
+                    tipe: field_ty,
+                    kind: TypedKind::Access(Box::new(acc), field.clone()),
+                    region: e.region,
+                };
+                let pat = crate::reporting::annotation::Located {
+                    region: Region::ZERO,
+                    value: can::Pattern_::Var("$acc".into()),
+                };
+                self.lift(&[(pat, rec_ty)], &body, ctx, f)?;
+            }
             // A kernel used as a first-class value (e.g. `(+)` passed to foldl).
             TypedKind::Foreign(module, name) => {
                 self.emit_foreign_value(module.as_str(), name.as_str(), &e.tipe, f)?
