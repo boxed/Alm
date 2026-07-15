@@ -1031,3 +1031,27 @@ fn array_indexed() {
             String.join \",\" (List.map showPair (Array.toIndexedList arr))\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (Array.toList (Array.indexedMap (\\i x -> i + x) arr)))\n",
     );
 }
+
+#[test]
+fn json_encode_compact() {
+    assert_str_prog(
+        "json_compact",
+        "module Test exposing (main)\n\n\
+         import Json.Encode as E\n\n\
+         main : String\n\
+         main =\n    \
+            E.encode 0\n        (E.object\n            [ ( \"name\", E.string \"Ann \\\"Q\\\"\" )\n            , ( \"age\", E.int 30 )\n            , ( \"ratio\", E.float 2.0 )\n            , ( \"tags\", E.list E.string [ \"a\", \"b\" ] )\n            , ( \"active\", E.bool True )\n            , ( \"note\", E.null )\n            , ( \"empty\", E.object [] )\n            ]\n        )\n",
+    );
+}
+
+#[test]
+fn json_encode_pretty() {
+    assert_str_prog(
+        "json_pretty",
+        "module Test exposing (main)\n\n\
+         import Json.Encode as E\n\n\
+         main : String\n\
+         main =\n    \
+            E.encode 2\n        (E.object\n            [ ( \"a\", E.int 1 )\n            , ( \"nested\", E.list E.int [ 1, 2, 3 ] )\n            ]\n        )\n",
+    );
+}
