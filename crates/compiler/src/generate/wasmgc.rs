@@ -1379,6 +1379,10 @@ impl<'a> Codegen<'a> {
         if !main.params.is_empty() {
             return Err("wasmgc: `main` must be nullary".into());
         }
+        // A browser program is `main : Program flags model msg`; anything else
+        // (String / Html / Int) is a plain value. This decides which entry
+        // points we export — and hence what the DCE pass keeps live.
+        let is_browser = matches!(&main.tipe, can::Type::Type(_, n, _) if n.as_str() == "Program");
         let main_idx = self.func_index[main.mangled.as_str()];
 
         // Emit user bodies (discovers fn-types via calls; interns string
@@ -2190,17 +2194,24 @@ impl<'a> Codegen<'a> {
             imports.import("env", name, EntityType::Function(ty));
         }
 
+        // Export only the entry points the program kind actually uses, so the
+        // DCE pass can prune the rest. A value program (`main : String/Int/…`)
+        // never touches the browser runtime; a browser program never uses the
+        // value entries. `memory` is always exported (the JS boundary reads it).
         let mut exports = ExportSection::new();
-        exports.export("main_int", ExportKind::Func, main_int_idx);
-        exports.export("render", ExportKind::Func, render_idx);
-        exports.export("render_html", ExportKind::Func, render_html_idx);
-        exports.export("alm_browser_start", ExportKind::Func, alm_browser_start_idx);
-        exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
-        exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
-        exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
-        exports.export("alm_tick", ExportKind::Func, self.tick_idx);
-        exports.export("alm_frame", ExportKind::Func, self.frame_idx);
-        exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
+        if is_browser {
+            exports.export("render_html", ExportKind::Func, render_html_idx);
+            exports.export("alm_browser_start", ExportKind::Func, alm_browser_start_idx);
+            exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
+            exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
+            exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
+            exports.export("alm_tick", ExportKind::Func, self.tick_idx);
+            exports.export("alm_frame", ExportKind::Func, self.frame_idx);
+            exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
+        } else {
+            exports.export("main_int", ExportKind::Func, main_int_idx);
+            exports.export("render", ExportKind::Func, render_idx);
+        }
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
