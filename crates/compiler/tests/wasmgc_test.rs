@@ -287,6 +287,29 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn random_generators() {
+    assert_str_prog(
+        "random_generators",
+        "module Test exposing (main)\n\n\
+         import Random\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       s0 = Random.initialSeed 42\n\
+         \x20       (a, s1) = Random.step (Random.int 1 100) s0\n\
+         \x20       (b, s2) = Random.step (Random.int 1 100) s1\n\
+         \x20       (c, s3) = Random.step (Random.map (\\x -> x * 2) (Random.int 0 10)) s2\n\
+         \x20       (d, _) = Random.step (Random.map2 (\\x y -> x - y) (Random.int 0 9) (Random.int 0 9)) s3\n\
+         \x20       (p, _) = Random.step (Random.pair (Random.int 1 6) (Random.int 1 6)) s0\n\
+         \x20       (f, _) = Random.step (Random.andThen (\\n -> Random.int 0 n) (Random.int 5 5)) s0\n\
+         \x20   in\n\
+         \x20   [ a, b, c, d, Tuple.first p, Tuple.second p, f ]\n\
+         \x20       |> List.map String.fromInt\n\
+         \x20       |> String.join \",\"\n",
+    );
+}
+
+#[test]
 fn list_map4_map5() {
     assert_str_prog(
         "list_map4_map5",

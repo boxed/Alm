@@ -988,6 +988,10 @@ struct Codegen<'a> {
     msort_key_idx: u32,
     msort_cmp_idx: u32,
     list_sort_with_idx: u32,
+    random_peel_idx: u32,
+    random_next_seed_idx: u32,
+    random_initial_seed_idx: u32,
+    random_step_idx: u32,
     dict_sorted_build_idx: u32,
     set_sorted_build_idx: u32,
     alm_event_idx: u32,
@@ -1173,6 +1177,10 @@ impl<'a> Codegen<'a> {
             msort_key_idx: 0,
             msort_cmp_idx: 0,
             list_sort_with_idx: 0,
+            random_peel_idx: 0,
+            random_next_seed_idx: 0,
+            random_initial_seed_idx: 0,
+            random_step_idx: 0,
             dict_sorted_build_idx: 0,
             set_sorted_build_idx: 0,
             alm_event_idx: 0,
@@ -1383,6 +1391,10 @@ impl<'a> Codegen<'a> {
         self.msort_key_idx = next();
         self.msort_cmp_idx = next();
         self.list_sort_with_idx = next();
+        self.random_peel_idx = next();
+        self.random_next_seed_idx = next();
+        self.random_initial_seed_idx = next();
+        self.random_step_idx = next();
         self.dict_sorted_build_idx = next();
         self.set_sorted_build_idx = next();
         self.alm_event_idx = next();
@@ -1625,6 +1637,10 @@ impl<'a> Codegen<'a> {
         let msort_key = self.emit_msort_rec(SortMode::ByKey);
         let msort_cmp = self.emit_msort_rec(SortMode::Cmp);
         let list_sort_with = self.emit_list_sort_with();
+        let random_peel = self.emit_random_peel();
+        let random_next_seed = self.emit_random_next_seed();
+        let random_initial_seed = self.emit_random_initial_seed();
+        let random_step = self.emit_random_step();
         let dict_sorted_build = self.emit_sorted_build(true);
         let set_sorted_build = self.emit_sorted_build(false);
         let alm_event = self.emit_alm_event();
@@ -1891,6 +1907,10 @@ impl<'a> Codegen<'a> {
         funcs.function(msort_ty); // msort_key (by pair[0])
         funcs.function(msort_ty); // msort_cmp (by user comparator)
         funcs.function(ft2); // list_sort_with (cmp, list)
+        funcs.function(e_i64_ty); // random_peel (seed) -> i64
+        funcs.function(ft1); // random_next_seed (seed) -> seed
+        funcs.function(ft1); // random_initial_seed (x) -> seed
+        funcs.function(ft2); // random_step (gen, seed) -> (value, seed)
         funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
         funcs.function(e_e_ty); // set_sorted_build : elems -> Set
         funcs.function(alm_event_ty); // alm_event
@@ -2072,6 +2092,10 @@ impl<'a> Codegen<'a> {
         code.function(&msort_key);
         code.function(&msort_cmp);
         code.function(&list_sort_with);
+        code.function(&random_peel);
+        code.function(&random_next_seed);
+        code.function(&random_initial_seed);
+        code.function(&random_step);
         code.function(&dict_sorted_build);
         code.function(&set_sorted_build);
         code.function(&alm_event);
@@ -2922,6 +2946,13 @@ impl<'a> Codegen<'a> {
                 return Ok(());
             }
         }
+        // Random.minInt / maxInt : the 32-bit signed bounds, as boxed Ints.
+        if module == "Random" && (name == "minInt" || name == "maxInt") {
+            let v: i64 = if name == "minInt" { -2147483648 } else { 2147483647 };
+            f.instruction(&Instruction::I64Const(v));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            return Ok(());
+        }
         let arity: u32 = match (module, name) {
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
             ("String", "append") => 2,
@@ -3680,6 +3711,406 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::End);
         }
         f.instruction(&Instruction::End); // function
+        f
+    }
+
+    // ---- Random (elm/random PCG) ----
+    // A Seed is a 2-tuple T_ARR [a, b] of boxed Ints holding u32 state/increment.
+    // A Generator is a reified T_CTOR: tag 0 GInt[lo,hi], 1 GFloat[a,b],
+    // 2 GConst[x], 3 GMap[f,g], 4 GMap2[f,ga,gb], 5 GMap3[f,ga,gb,gc],
+    // 6 GAndThen[f,g], 7 GPair[ga,gb]. `random_step` interprets it, returning
+    // the (value, nextSeed) 2-tuple.
+
+    /// random_peel(seed) -> i64 : the PCG output word (a u32, in an i64). The
+    /// `* 277803737` MUST be done in f64 on the *signed* int32 xor result, to
+    /// match elm/random's JS (the product exceeds 2^53, so its low bits are lost
+    /// to float rounding — an exact i64 multiply diverges from JS and native).
+    fn emit_random_peel(&self) -> Function {
+        // param seed(0). locals a(1), word(2): i64
+        let mut f = Function::new([(2, ValType::I64)]);
+        const M: i64 = 0xFFFF_FFFF;
+        // a = seed[0] & 0xFFFFFFFF
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Const(M));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::LocalSet(1));
+        // tmp = a ^ (a >>u ((a >>u 28) + 4)), as a signed int32
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64Const(28));
+        f.instruction(&Instruction::I64ShrU);
+        f.instruction(&Instruction::I64Const(4));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I64ShrU);
+        f.instruction(&Instruction::I64Xor);
+        f.instruction(&Instruction::I64Extend32S);
+        // word = ToUint32((f64)tmp * 277803737.0)  (float rounding is significant)
+        f.instruction(&Instruction::F64ConvertI64S);
+        f.instruction(&Instruction::F64Const(277803737.0.into()));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::I64Const(M));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::LocalSet(2));
+        // ((word >>u 22) ^ word) & 0xFFFFFFFF
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(22));
+        f.instruction(&Instruction::I64ShrU);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Xor);
+        f.instruction(&Instruction::I64Const(M));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// random_next_seed(seed) -> seed : advance the LCG state, keep the increment.
+    fn emit_random_next_seed(&self) -> Function {
+        let mut f = Function::new([]);
+        const M: i64 = 0xFFFF_FFFF;
+        // box((seed[0]*1664525 + seed[1]) & 0xFFFFFFFF)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Const(1664525));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I64Const(M));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        // seed[1] (unchanged)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// random_initial_seed(x) -> seed : Random.initialSeed.
+    fn emit_random_initial_seed(&self) -> Function {
+        // param x(0). local seed1(1): eqref
+        let mut f = Function::new([(1, eqref())]);
+        const M: i64 = 0xFFFF_FFFF;
+        // seed1 = next_seed([0, 1013904223])
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::I64Const(1013904223));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        // state2 = (seed1[0] + x) & 0xFFFFFFFF
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I64Const(M));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        // next_seed([state2, seed1[1]])
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// random_step(gen, seed) -> (value, seed) : interpret a reified Generator.
+    fn emit_random_step(&self) -> Function {
+        // params gen(0), seed(1). locals: ta(2),tb(3),tc(4),cur(5):eqref;
+        //   lo(6),hi(7),range(8),x(9),thr(10):i64; tag(11):i32
+        let mut f = Function::new([(4, eqref()), (5, ValType::I64), (1, ValType::I32)]);
+        const M32: i64 = 0x1_0000_0000;
+        // element i of the tuple/ctor-args held in `local`
+        let telem = |f: &mut Function, local: u32, i: i32| {
+            f.instruction(&Instruction::LocalGet(local));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+        };
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(11));
+
+        // GConst (2): (x, seed)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GMap (3): t = step(g, seed); (f t.0, t.1)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_argn(&mut f, 0, 0); // f
+        telem(&mut f, 2, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GMap2 (4): ta=step(ga,seed); tb=step(gb,ta.1); (f ta.0 tb.0, tb.1)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_argn(&mut f, 0, 2);
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_argn(&mut f, 0, 0); // f
+        telem(&mut f, 2, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 3, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 3, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GMap3 (5)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_argn(&mut f, 0, 2);
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_argn(&mut f, 0, 3);
+        telem(&mut f, 3, 1);
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        ctor_argn(&mut f, 0, 0); // f
+        telem(&mut f, 2, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 3, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 4, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        telem(&mut f, 4, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GAndThen (6): t = step(g, seed); step(f t.0, t.1)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_argn(&mut f, 0, 0); // f
+        telem(&mut f, 2, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx)); // new generator
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GPair (7): ta=step(ga,seed); tb=step(gb,ta.1); ((ta.0,tb.0), tb.1)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_argn(&mut f, 0, 1);
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        telem(&mut f, 2, 0);
+        telem(&mut f, 3, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        telem(&mut f, 3, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GFloat (1)
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // cur = next_seed(seed)  (= seed1)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        // val = (hi*2^27 + lo)/2^53 where hi=peel(seed)&0x03FFFFFF, lo=peel(seed1)&0x07FFFFFF
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::I64Const(0x03FF_FFFF));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::F64ConvertI64U);
+        f.instruction(&Instruction::F64Const(134217728.0.into()));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::I64Const(0x07FF_FFFF));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::F64ConvertI64U);
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::F64Const(9007199254740992.0.into()));
+        f.instruction(&Instruction::F64Div);
+        // range = abs(b - a)
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Sub);
+        f.instruction(&Instruction::F64Abs);
+        f.instruction(&Instruction::F64Mul);
+        // + a
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        // seed' = next_seed(seed1)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GInt (0): lo/hi from args; rejection-sample to match elm/random.
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        // if lo > hi, swap → 6=min, 7=max
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I64GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::End);
+        // range = hi - lo + 1
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(8));
+        // power-of-two fast path: ((range-1) & range) == 0
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::I64Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // val = ((range-1) & peel(seed)) + lo ; seed' = next_seed(seed)
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // rejection loop: threshold = (2^32 - range) % range ; cur = seed
+        f.instruction(&Instruction::I64Const(M32));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64RemU);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // x = peel(cur)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I64LtU);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // reject: cur = next_seed(cur); retry
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(1));
+        f.instruction(&Instruction::End);
+        // accept: ((x % range) + lo, next_seed(cur))
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64RemU);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        f.instruction(&Instruction::End); // if tag==0
+        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
         f
     }
 
@@ -13510,6 +13941,39 @@ impl<'a> Codegen<'a> {
                 }
                 let idx = if name == "map2" { self.result_map2_idx } else { self.result_map3_idx };
                 f.instruction(&Instruction::Call(idx));
+            }
+            // Random: reify each generator as a tagged ctor; random_step runs it.
+            ("Random", "int") | ("Random", "float") | ("Random", "constant")
+            | ("Random", "map") | ("Random", "map2") | ("Random", "map3")
+            | ("Random", "andThen") | ("Random", "pair") => {
+                let tag: i32 = match name {
+                    "int" => 0,
+                    "float" => 1,
+                    "constant" => 2,
+                    "map" => 3,
+                    "map2" => 4,
+                    "map3" => 5,
+                    "andThen" => 6,
+                    _ => 7, // pair
+                };
+                f.instruction(&Instruction::I32Const(tag));
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: T_ARR,
+                    array_size: args.len() as u32,
+                });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Random", "step") => {
+                self.emit_expr(&args[0], ctx, f)?; // generator
+                self.emit_expr(&args[1], ctx, f)?; // seed
+                f.instruction(&Instruction::Call(self.random_step_idx));
+            }
+            ("Random", "initialSeed") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.random_initial_seed_idx));
             }
             ("Result", "andThen") => {
                 self.emit_expr(&args[0], ctx, f)?;
