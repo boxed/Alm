@@ -1346,6 +1346,24 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
 }
 
 #[test]
+fn attributes_class_list() {
+    assert_sandbox_html(
+        "class_list",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Html.Attributes as A\n\n\
+         type Msg = Noop\n\n\
+         view : Int -> Html.Html Msg\n\
+         view _ =\n\
+         \x20   div [ A.classList [ ( \"active\", True ), ( \"hidden\", False ), ( \"big\", True ) ] ]\n\
+         \x20       [ text \"hi\" ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+#[test]
 fn sandbox_static_render() {
     assert_sandbox_html(
         "sandbox",

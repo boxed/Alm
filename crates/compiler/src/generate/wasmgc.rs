@@ -914,6 +914,7 @@ struct Codegen<'a> {
     to_polar_idx: u32,
     str_slice_idx: u32,
     str_pad_both_idx: u32,
+    class_list_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
     list_map4_idx: u32,
@@ -1111,6 +1112,7 @@ impl<'a> Codegen<'a> {
             to_polar_idx: 0,
             str_slice_idx: 0,
             str_pad_both_idx: 0,
+            class_list_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
             list_map4_idx: 0,
@@ -1333,6 +1335,7 @@ impl<'a> Codegen<'a> {
         self.to_polar_idx = next();
         self.str_slice_idx = next();
         self.str_pad_both_idx = next();
+        self.class_list_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
         self.list_map4_idx = next();
@@ -1589,6 +1592,7 @@ impl<'a> Codegen<'a> {
         let to_polar = self.emit_to_polar();
         let str_slice = self.emit_str_slice();
         let str_pad_both = self.emit_str_pad_both();
+        let class_list = self.emit_class_list();
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
         let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
@@ -1871,6 +1875,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // to_polar
         funcs.function(ft3); // str_slice
         funcs.function(ft3); // str_pad_both
+        funcs.function(ft1); // class_list
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
         funcs.function(ft5); // list_map4
@@ -2064,6 +2069,7 @@ impl<'a> Codegen<'a> {
         code.function(&to_polar);
         code.function(&str_slice);
         code.function(&str_pad_both);
+        code.function(&class_list);
         code.function(&list_intersperse);
         code.function(&list_map3);
         code.function(&list_map4);
@@ -5048,6 +5054,52 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(self.str_pad_left_idx));
         f.instruction(&Instruction::Call(self.str_pad_right_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// class_list(pairs) : the `class` string for `Html.Attributes.classList` —
+    /// `String.join " "` of each `(name, True)` pair's name, in original order.
+    fn emit_class_list(&self) -> Function {
+        // param pairs(0). locals: len(1),i(2):i32; acc(3),pair(4):eqref
+        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(3)); // acc
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(2)); // i = len-1 (cons builds forward)
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalSet(4)); // pair (name, Bool)
+        // if pair[1] is True: acc = cons(pair[0], acc)
+        self.load_arr(4, 1, &mut f);
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.load_arr(4, 0, &mut f);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // String.join " " acc
+        push_str_const(&mut f, " ");
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.str_join_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -16466,6 +16518,15 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(1)); // ASTYLE
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // classList pairs → AATTR ["class", join " " (true names)].
+            ("Html.Attributes", "classList") => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, "class");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.class_list_idx));
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
