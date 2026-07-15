@@ -744,6 +744,8 @@ struct Codegen<'a> {
     array_get_idx: u32,
     array_set_idx: u32,
     array_push_idx: u32,
+    array_tighten_idx: u32,
+    list_to_array_idx: u32,
     array_slice_idx: u32,
     array_initialize_idx: u32,
     array_to_indexed_idx: u32,
@@ -901,6 +903,8 @@ impl<'a> Codegen<'a> {
             array_get_idx: 0,
             array_set_idx: 0,
             array_push_idx: 0,
+            array_tighten_idx: 0,
+            list_to_array_idx: 0,
             array_slice_idx: 0,
             array_initialize_idx: 0,
             array_to_indexed_idx: 0,
@@ -1083,6 +1087,8 @@ impl<'a> Codegen<'a> {
         self.array_get_idx = next();
         self.array_set_idx = next();
         self.array_push_idx = next();
+        self.array_tighten_idx = next();
+        self.list_to_array_idx = next();
         self.array_slice_idx = next();
         self.array_initialize_idx = next();
         self.array_to_indexed_idx = next();
@@ -1286,6 +1292,8 @@ impl<'a> Codegen<'a> {
         let array_get = self.emit_array_get();
         let array_set = self.emit_array_set();
         let array_push = self.emit_array_push();
+        let array_tighten = self.emit_array_tighten();
+        let list_to_array = self.emit_list_to_array();
         let array_slice = self.emit_array_slice();
         let array_initialize = self.emit_array_initialize();
         let array_to_indexed = self.emit_array_to_indexed();
@@ -1510,6 +1518,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // array_get
         funcs.function(ft3); // array_set
         funcs.function(ft2); // array_push
+        funcs.function(ft1); // array_tighten
+        funcs.function(ft1); // list_to_array
         funcs.function(ft3); // array_slice
         funcs.function(ft2); // array_initialize
         funcs.function(ft1); // array_to_indexed
@@ -1663,6 +1673,8 @@ impl<'a> Codegen<'a> {
         code.function(&array_get);
         code.function(&array_set);
         code.function(&array_push);
+        code.function(&array_tighten);
+        code.function(&list_to_array);
         code.function(&array_slice);
         code.function(&array_initialize);
         code.function(&array_to_indexed);
@@ -6214,7 +6226,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32And);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::I32Const(0)); // Just
-        list_elem(&mut f, 1, 2);
+        // front-anchored: element i is data[i] (start = 0)
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
@@ -6285,43 +6300,172 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// array_push(x, a) : append `x` at the end.
+    /// array_push(x, a) : amortized-O(1) append. Arrays are FRONT-anchored
+    /// (elements at data[0..len), back slack [len,cap)); `bk.head` is the
+    /// back water-mark (highest used index, the push-ownership marker, mirroring
+    /// how cons uses it for the front). In-place when this view owns the tail
+    /// slot and slack exists; otherwise grow (double) and copy.
     fn emit_array_push(&self) -> Function {
-        // params x(0), a(1). locals: len(2),j(3):i32, ndata(4):ref T_ARR
-        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        // params x(0), a(1). locals: len(2),cap(3),k(4):i32; bk(5):ref null T_BACK;
+        //   data(6),ndata(7):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (1, ref_null_to(T_BACK)), (2, ref_to(T_ARR))]);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
+        list_bk(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        // in-place fast path when bk != null, len == bk.head (owns tail), len < cap
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(6)); // data
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3)); // cap
+        // len == bk.head && len < cap
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
-        f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 0 });
+        f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
-        list_elem(&mut f, 1, 3);
-        f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        // ndata[len] = x
-        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // data[len] = x ; bk.head = len+1 ; return {len+1, bk}
+        f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_BACK));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_BACK, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // grow: ndata = fresh[2*(len+1)]; copy [0..len); ndata[len] = x
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        // copy existing elements data[0..len) (front-anchored) when bk != null
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // return {len+1, {head: len+1, ndata}}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// array_tighten(a) : return a front-anchored array whose backing is exactly
+    /// `len` long (no back slack), so ops that assume tight vectors (start=0=
+    /// cap-len) can reuse the List helpers. Identity when already tight/empty.
+    fn emit_array_tighten(&self) -> Function {
+        // param a(0). locals: len(1):i32, ndata(2):ref T_ARR
+        let mut f = Function::new([(1, ValType::I32), (1, ref_to(T_ARR))]);
+        list_bk(&mut f, 0);
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // already tight (cap == len)? return a
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // ndata[0..len) <- data[0..len)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_to_array(list) : `Array.fromList` — copy a (back-anchored) List's
+    /// elements into a fresh front-anchored, tight Array backing.
+    fn emit_list_to_array(&self) -> Function {
+        // param list(0). locals: len(1),start(2):i32, ndata(3):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        // ndata[0..len) <- listdata[start..start+len)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        // {len, {head:len, ndata}}
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
@@ -11895,7 +12039,15 @@ impl<'a> Codegen<'a> {
             // Array: the same T_LIST vector — toList/fromList are identity and
             // most ops reuse the List kernels.
             ("Array", "empty") => push_empty_list(f),
-            ("Array", "fromList") | ("Array", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Array", "fromList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_to_array_idx));
+            }
+            ("Array", "toList") => {
+                // a tight front-anchored array is a valid (tight) List
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
+            }
             ("Array", "length") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&cast_to(T_LIST));
@@ -11924,6 +12076,7 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.array_set_idx));
             }
             ("Array", "push") => {
@@ -11933,13 +12086,16 @@ impl<'a> Codegen<'a> {
             }
             ("Array", "append") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_append_idx));
             }
             ("Array", "slice") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.array_slice_idx));
             }
             ("Array", "initialize") => {
@@ -11949,23 +12105,27 @@ impl<'a> Codegen<'a> {
             }
             ("Array", "toIndexedList") => {
                 self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.array_to_indexed_idx));
             }
             ("Array", "foldl") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_foldl_idx));
             }
             ("Array", "foldr") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_foldr_idx));
             }
             ("Array", "map") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_map_idx));
             }
             ("Array", "indexedMap") => {
@@ -11973,12 +12133,17 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I64Const(0));
                 f.instruction(&Instruction::Call(self.box_int_idx));
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_indexed_map_idx));
             }
             ("Array", "filter") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_tighten_idx));
                 f.instruction(&Instruction::Call(self.list_filter_idx));
+                // filter's result is a (non-tight, back-anchored) List — copy it
+                // into a proper front-anchored Array backing.
+                f.instruction(&Instruction::Call(self.list_to_array_idx));
             }
             // Json.Encode: build a tagged Value (0 null 1 bool 2 int 3 float
             // 4 string 5 array 6 object), then encode via json_enc.
