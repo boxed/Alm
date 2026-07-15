@@ -38,7 +38,11 @@ const T_CLOS: u32 = 7; // struct { funcref, i32 arity, i32 applied, (ref null T_
 // priority = val_hash(key) — deterministic, so equal key-sets give identical
 // trees). O(log n) persistent insert/get/remove; in-order traversal is sorted.
 const T_TNODE: u32 = 8; // struct { key, value:eqref, pri:i32, left,right:(ref null T_TNODE) }
-const N_FIXED: u32 = 9;
+// A growable byte buffer for O(n) JSON serialization: `json_write` appends
+// primitives straight into `buf` (amortized doubling) instead of allocating an
+// intermediate String per node and joining them.
+const T_SB: u32 = 9; // struct { mut buf: (ref T_STR), mut len: i32 }
+const N_FIXED: u32 = 10;
 
 // Imported DOM host functions occupy the first function indices; defined
 // functions are therefore offset by N_IMPORTS (see build()).
@@ -771,6 +775,13 @@ struct Codegen<'a> {
     json_enc_idx: u32,
     json_escape_idx: u32,
     json_dict_pairs_idx: u32,
+    json_write_idx: u32,
+    sb_ensure_idx: u32,
+    sb_push_byte_idx: u32,
+    sb_push_str_idx: u32,
+    sb_escape_idx: u32,
+    sb_push_int_idx: u32,
+    sb_finish_idx: u32,
     json_skipws_idx: u32,
     json_pstr_idx: u32,
     json_pnum_idx: u32,
@@ -940,6 +951,13 @@ impl<'a> Codegen<'a> {
             json_enc_idx: 0,
             json_escape_idx: 0,
             json_dict_pairs_idx: 0,
+            json_write_idx: 0,
+            sb_ensure_idx: 0,
+            sb_push_byte_idx: 0,
+            sb_push_str_idx: 0,
+            sb_escape_idx: 0,
+            sb_push_int_idx: 0,
+            sb_finish_idx: 0,
             json_skipws_idx: 0,
             json_pstr_idx: 0,
             json_pnum_idx: 0,
@@ -1134,6 +1152,13 @@ impl<'a> Codegen<'a> {
         self.json_enc_idx = next();
         self.json_escape_idx = next();
         self.json_dict_pairs_idx = next();
+        self.json_write_idx = next();
+        self.sb_ensure_idx = next();
+        self.sb_push_byte_idx = next();
+        self.sb_push_str_idx = next();
+        self.sb_escape_idx = next();
+        self.sb_push_int_idx = next();
+        self.sb_finish_idx = next();
         self.json_skipws_idx = next();
         self.json_pstr_idx = next();
         self.json_pnum_idx = next();
@@ -1235,7 +1260,11 @@ impl<'a> Codegen<'a> {
         let i64_e_ty = self.next_type + 23; // (i64) -> eqref (box_int)
         let e_i64_ty = self.next_type + 24; // (eqref) -> i64 (unbox_int)
         let msort_ty = self.next_type + 25; // (arr, buf, lo, hi) -> () (merge sort)
-        self.next_type += 26;
+        let jw_ty = self.next_type + 26; // (ref T_SB, eqref, eqref, eqref) -> () (json_write)
+        let sb_i_v_ty = self.next_type + 27; // (ref T_SB, i32) -> () (sb_ensure, sb_push_byte)
+        let sb_e_v_ty = self.next_type + 28; // (ref T_SB, eqref) -> () (sb_push_str, sb_escape)
+        let sb_ret_ty = self.next_type + 29; // (ref T_SB) -> eqref (sb_finish)
+        self.next_type += 30;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1349,6 +1378,13 @@ impl<'a> Codegen<'a> {
         let json_enc = self.emit_json_enc();
         let json_escape = self.emit_json_escape();
         let json_dict_pairs = self.emit_json_dict_pairs();
+        let json_write = self.emit_json_write();
+        let sb_ensure = self.emit_sb_ensure();
+        let sb_push_byte = self.emit_sb_push_byte();
+        let sb_push_str = self.emit_sb_push_str();
+        let sb_escape = self.emit_sb_escape();
+        let sb_push_int = self.emit_sb_push_int();
+        let sb_finish = self.emit_sb_finish();
         let json_skipws = self.emit_json_skipws();
         let json_pstr = self.emit_json_pstr();
         let json_pnum = self.emit_json_pnum();
@@ -1434,6 +1470,10 @@ impl<'a> Codegen<'a> {
             FieldType { element_type: StorageType::Val(ref_null_to(T_TNODE)), mutable: false },
             FieldType { element_type: StorageType::Val(ref_null_to(T_TNODE)), mutable: false },
         ]); // T_TNODE { key, value, pri, left, right }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ref_to(T_STR)), mutable: true },
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+        ]); // T_SB { mut buf: (ref T_STR), mut len }
         for &arity in &self.fn_type_order {
             types.ty().function(vec![eqref(); arity as usize], vec![eqref()]);
         }
@@ -1475,6 +1515,10 @@ impl<'a> Codegen<'a> {
             vec![ref_null_to(T_ARR), ref_null_to(T_ARR), ValType::I32, ValType::I32],
             vec![],
         ); // msort_rec
+        types.ty().function(vec![ref_to(T_SB), eqref(), eqref(), eqref()], vec![]); // json_write
+        types.ty().function(vec![ref_to(T_SB), ValType::I32], vec![]); // sb_i_v
+        types.ty().function(vec![ref_to(T_SB), eqref()], vec![]); // sb_e_v
+        types.ty().function(vec![ref_to(T_SB)], vec![eqref()]); // sb_ret
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1592,6 +1636,13 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // json_enc (value, gap, prefix)
         funcs.function(ft1); // json_escape
         funcs.function(ft3); // json_dict_pairs
+        funcs.function(jw_ty); // json_write
+        funcs.function(sb_i_v_ty); // sb_ensure
+        funcs.function(sb_i_v_ty); // sb_push_byte
+        funcs.function(sb_e_v_ty); // sb_push_str
+        funcs.function(sb_e_v_ty); // sb_escape
+        funcs.function(sb_e_v_ty); // sb_push_int
+        funcs.function(sb_ret_ty); // sb_finish
         funcs.function(json_void_ty); // json_skipws : () -> ()
         funcs.function(json_ret_ty); // json_pstr : () -> eqref
         funcs.function(json_ret_ty); // json_pnum : () -> eqref
@@ -1757,6 +1808,13 @@ impl<'a> Codegen<'a> {
         code.function(&json_enc);
         code.function(&json_escape);
         code.function(&json_dict_pairs);
+        code.function(&json_write);
+        code.function(&sb_ensure);
+        code.function(&sb_push_byte);
+        code.function(&sb_push_str);
+        code.function(&sb_escape);
+        code.function(&sb_push_int);
+        code.function(&sb_finish);
         code.function(&json_skipws);
         code.function(&json_pstr);
         code.function(&json_pnum);
@@ -7849,69 +7907,64 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
     }
 
-    /// json_enc(value, gap, prefix) : recursively encode a JSON Value, matching
-    /// `JSON.stringify(v, null, indent)`. `gap` is the per-level indent string
-    /// (empty ⇒ compact); `prefix` is the current line's indentation.
+    /// json_enc(value, gap, prefix) -> String : the public entry. Allocates one
+    /// growable buffer and serializes into it via `json_write` — O(n), with no
+    /// per-node intermediate String and no final join. `gap` is the per-level
+    /// indent (empty ⇒ compact); `prefix` is the current line's indentation.
     fn emit_json_enc(&self) -> Function {
-        // params v(0), gap(1), prefix(2). locals:
-        //   tag(3),len(4),i(5),compact(6):i32,
-        //   childPrefix(7),openSep(8),closeSep(9),colon(10),result(11),sub(12):eqref,
-        //   pieces(13):ref T_ARR, sep(14):eqref (seq builder, see emit_json_seq)
-        let mut f = Function::new([(4, ValType::I32), (6, eqref()), (1, ref_to(T_ARR)), (1, eqref())]);
-        ctor_tag(&mut f, 0);
+        // params v(0), gap(1), prefix(2); local sb(3): ref T_SB
+        let mut f = Function::new([(1, ref_to(T_SB))]);
+        // sb = T_SB { buf: new T_STR(64), len: 0 }
+        f.instruction(&Instruction::I32Const(64));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::StructNew(T_SB));
         f.instruction(&Instruction::LocalSet(3));
-        // compact = len(gap) == 0
+        // json_write(sb, v, gap, prefix)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.json_write_idx));
+        // return the tightened buffer
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_finish_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_write(sb, value, gap, prefix) : append the JSON rendering of `value`
+    /// straight into buffer `sb`. Byte-identical to `JSON.stringify(v, null,
+    /// indent)`; recurses for arrays/objects. Compact when `gap` is empty.
+    fn emit_json_write(&self) -> Function {
+        // params sb(0), v(1), gap(2), prefix(3). locals:
+        //   tag(4),compact(5):i32, childPrefix(6):eqref, len(7),i(8):i32, sub(9):eqref
+        let mut f = Function::new([(2, ValType::I32), (1, eqref()), (2, ValType::I32), (1, eqref())]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4));
+        // compact = len(gap) == 0
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&cast_to(T_STR));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::LocalSet(6));
-        // childPrefix = prefix ++ gap
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(7));
-        // openSep = compact ? "" : "\n" ++ childPrefix
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        push_str_const(&mut f, "");
-        f.instruction(&Instruction::Else);
-        push_str_const(&mut f, "\n");
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalSet(8));
-        // closeSep = compact ? "" : "\n" ++ prefix
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        push_str_const(&mut f, "");
-        f.instruction(&Instruction::Else);
-        push_str_const(&mut f, "\n");
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalSet(9));
-        // colon = compact ? ":" : ": "
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        push_str_const(&mut f, ":");
-        f.instruction(&Instruction::Else);
-        push_str_const(&mut f, ": ");
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalSet(10));
-        // ---- dispatch on tag ----
-        // null
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(5));
+        // --- scalars: write then return ---
+        // null (tag 0)
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
         push_str_const(&mut f, "null");
-        f.instruction(&Instruction::Else);
-        // bool
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_push_str_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // bool (tag 1)
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -7919,140 +7972,553 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Else);
         push_str_const(&mut f, "false");
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Else);
-        // int
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_push_str_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // int (tag 2)
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        ctor_arg0(&mut f, 0);
-        f.instruction(&Instruction::Call(self.str_from_int_idx));
-        f.instruction(&Instruction::Else);
-        // float (integral formatted exactly; non-integral is a known gap)
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.sb_push_int_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // float (tag 3) — integral formatted exactly; non-integral is a known gap
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(3));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
         f.instruction(&cast_to(T_FLOAT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
         f.instruction(&Instruction::I64TruncF64S);
         f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::Call(self.str_from_int_idx));
-        f.instruction(&Instruction::Else);
-        // string
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_push_int_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // string (tag 4)
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(4));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        ctor_arg0(&mut f, 0);
-        f.instruction(&Instruction::Call(self.json_escape_idx));
-        f.instruction(&Instruction::Else);
-        // array
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.sb_escape_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // --- array (tag 5) / object (tag 6): shared sequence machinery ---
+        // childPrefix = compact ? (unused null) : prefix ++ gap
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        // sub = items/pairs; len = list_len(sub)
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(9));
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(7));
+        // array?
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(5));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        self.emit_json_seq(&mut f, false);
-        f.instruction(&Instruction::Else);
-        // object
-        self.emit_json_seq(&mut f, true);
-        f.instruction(&Instruction::End); // array
-        f.instruction(&Instruction::End); // string
-        f.instruction(&Instruction::End); // float
-        f.instruction(&Instruction::End); // int
-        f.instruction(&Instruction::End); // bool
-        f.instruction(&Instruction::End); // null
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_json_seq_body(&mut f, false);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // else object
+        self.emit_json_seq_body(&mut f, true);
         f.instruction(&Instruction::End); // function
         f
     }
 
-    /// Emit the array/object body of json_enc. Renders each element into a
-    /// `pieces` array, then assembles via the O(n) str_join (a per-element
-    /// `result ++= …` accumulator was O(n²) — catastrophic for large values).
-    /// Leaves the finished String on the stack. Byte-identical to the old
-    /// format: `"[" ++ openSep ++ join(","++openSep, pieces) ++ closeSep ++ "]"`
-    /// when non-empty, else `"[]"`.
-    fn emit_json_seq(&self, f: &mut Function, object: bool) {
-        ctor_arg0(f, 0);
-        f.instruction(&Instruction::LocalSet(12)); // sub = items/pairs
-        list_len(f, 12);
-        f.instruction(&Instruction::LocalSet(4)); // len
-        // pieces = new T_ARR(len)
+    /// The array/object loop of `json_write`, comptime-specialized by `object`.
+    /// Appends `"[" (openSep item (sep item)* closeSep) "]"` (braces + `key:`
+    /// prefixes for objects) into `sb` (local 0). Uses locals gap(2),prefix(3),
+    /// compact(5),childPrefix(6),len(7),i(8),sub(9) set up by the caller.
+    fn emit_json_seq_body(&self, f: &mut Function, object: bool) {
+        // opening bracket
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(if object { 123 } else { 91 }));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // "," between elements
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(44));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::End);
+        // "\n" ++ childPrefix when pretty
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.sb_push_str_idx));
+        f.instruction(&Instruction::End);
+        if object {
+            // escape(pair[0]) ++ colon ++ json_write(pair[1])
+            f.instruction(&Instruction::LocalGet(0));
+            list_elem(f, 9, 8);
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::Call(self.sb_escape_idx));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::I32Const(58)); // ':'
+            f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Eqz);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::I32Const(32)); // ' '
+            f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::LocalGet(0));
+            list_elem(f, 9, 8);
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::Call(self.json_write_idx));
+        } else {
+            // json_write(sb, item, gap, childPrefix)
+            f.instruction(&Instruction::LocalGet(0));
+            list_elem(f, 9, 8);
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::Call(self.json_write_idx));
+        }
+        bump(f, 8, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        // closeSep: "\n" ++ prefix when pretty and non-empty
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_push_str_idx));
+        f.instruction(&Instruction::End);
+        // closing bracket
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(if object { 125 } else { 93 }));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+    }
+
+    /// sb_ensure(sb, extra) : grow `sb.buf` (doubling) so `sb.len + extra` bytes
+    /// fit, copying the live prefix. No-op when there's already room.
+    fn emit_sb_ensure(&self) -> Function {
+        // params sb(0), extra(1). locals: need(2),newcap(3):i32, newbuf(4):ref T_STR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_STR))]);
+        // need = sb.len + extra
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        // if need > buf.len
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // newcap = buf.len * 2
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Shl);
+        f.instruction(&Instruction::LocalSet(3));
+        // if newcap < need: newcap = need
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        // newbuf = new T_STR(newcap); copy [0,len)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
-        f.instruction(&Instruction::LocalSet(13));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        // sb.buf = newbuf
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructSet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sb_push_byte(sb, c) : append one byte.
+    fn emit_sb_push_byte(&self) -> Function {
+        // params sb(0), c(1)
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Call(self.sb_ensure_idx));
+        // buf[len] = c
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        // len += 1
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sb_push_str(sb, s) : append all bytes of String `s` (bulk array.copy).
+    fn emit_sb_push_str(&self) -> Function {
+        // params sb(0), s(1). locals: ss(2):ref T_STR, slen(3):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_ensure_idx));
+        // array.copy buf[len..] <- ss[0..slen]
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        // len += slen
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Append `ss[a..b)` (all local indices) straight into `sb`'s buffer. A zero
+    /// or empty run is a harmless no-op (array.copy of length 0).
+    fn sb_flush_run(&self, f: &mut Function, sb: u32, ss: u32, a: u32, b: u32) {
+        f.instruction(&Instruction::LocalGet(sb));
+        f.instruction(&Instruction::LocalGet(b));
+        f.instruction(&Instruction::LocalGet(a));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Call(self.sb_ensure_idx));
+        f.instruction(&Instruction::LocalGet(sb));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(sb));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(ss));
+        f.instruction(&Instruction::LocalGet(a));
+        f.instruction(&Instruction::LocalGet(b));
+        f.instruction(&Instruction::LocalGet(a));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(sb));
+        f.instruction(&Instruction::LocalGet(sb));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(b));
+        f.instruction(&Instruction::LocalGet(a));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_SB, field_index: 1 });
+    }
+
+    /// Append the escape sequence for byte `c` (a local index; known to need
+    /// escaping) into `sb`; `d` is a scratch i32 local for hex nibbles.
+    fn emit_escape_char(&self, f: &mut Function, sb: u32, c: u32, d: u32) {
+        let simple: &[(i32, i32)] = &[
+            (34, 34), (92, 92), (10, 110), (9, 116), (13, 114), (8, 98), (12, 102),
+        ];
+        let mut depth = 0u32;
+        for (code, second) in simple {
+            f.instruction(&Instruction::LocalGet(c));
+            f.instruction(&Instruction::I32Const(*code));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(sb));
+            f.instruction(&Instruction::I32Const(92)); // '\'
+            f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+            f.instruction(&Instruction::LocalGet(sb));
+            f.instruction(&Instruction::I32Const(*second));
+            f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+            f.instruction(&Instruction::Else);
+            depth += 1;
+        }
+        // \u00XX
+        for b in [92, 117, 48, 48] {
+            f.instruction(&Instruction::LocalGet(sb));
+            f.instruction(&Instruction::I32Const(b));
+            f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        }
+        // hi nibble
+        f.instruction(&Instruction::LocalGet(c));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32ShrU);
+        f.instruction(&Instruction::LocalSet(d));
+        f.instruction(&Instruction::LocalGet(sb));
+        self.hex_digit(f, d);
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        // lo nibble
+        f.instruction(&Instruction::LocalGet(c));
+        f.instruction(&Instruction::I32Const(15));
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::LocalSet(d));
+        f.instruction(&Instruction::LocalGet(sb));
+        self.hex_digit(f, d);
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        for _ in 0..depth {
+            f.instruction(&Instruction::End);
+        }
+    }
+
+    /// sb_escape(sb, s) : append the JSON-quoted, escaped form of `s`, copying
+    /// unescaped runs in bulk and emitting escapes only where needed.
+    fn emit_sb_escape(&self) -> Function {
+        // params sb(0), s(1). locals: ss(2):ref T_STR, len(3),i(4),run(5),c(6),d(7):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        // opening quote
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(34));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(13)); // pieces (for ArraySet)
-        f.instruction(&Instruction::LocalGet(5)); // i
-        if object {
-            // escape(pair[0]) ++ colon ++ json_enc(pair[1], gap, childPrefix)
-            list_elem(f, 12, 5);
-            f.instruction(&cast_to(T_ARR));
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::ArrayGet(T_ARR));
-            f.instruction(&Instruction::Call(self.json_escape_idx));
-            f.instruction(&Instruction::LocalGet(10)); // colon
-            f.instruction(&Instruction::Call(self.str_append_idx));
-            list_elem(f, 12, 5);
-            f.instruction(&cast_to(T_ARR));
-            f.instruction(&Instruction::I32Const(1));
-            f.instruction(&Instruction::ArrayGet(T_ARR));
-            f.instruction(&Instruction::LocalGet(1));
-            f.instruction(&Instruction::LocalGet(7));
-            f.instruction(&Instruction::Call(self.json_enc_idx));
-            f.instruction(&Instruction::Call(self.str_append_idx));
-        } else {
-            // json_enc(item, gap, childPrefix)
-            list_elem(f, 12, 5);
-            f.instruction(&Instruction::LocalGet(1));
-            f.instruction(&Instruction::LocalGet(7));
-            f.instruction(&Instruction::Call(self.json_enc_idx));
-        }
-        f.instruction(&Instruction::ArraySet(T_ARR)); // pieces[i] = rendered
-        bump(f, 5, 1);
+        // c = ss[i]
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        // needsEscape = c<32 || c==34 || c==92
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(32));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(34));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(92));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // flush clean run [run, i)
+        self.sb_flush_run(&mut f, 0, 2, 5, 4);
+        // escape c
+        self.emit_escape_char(&mut f, 0, 6, 7);
+        // run = i + 1
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // piecesList = T_LIST{len, T_BACK{0, pieces}}
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::StructNew(T_LIST));
-        f.instruction(&Instruction::LocalSet(12)); // reuse sub as the list
-        // sep = "," ++ openSep
-        push_str_const(f, ",");
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(14));
-        // body = str_join(sep, piecesList)
-        f.instruction(&Instruction::LocalGet(14));
-        f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&Instruction::Call(self.str_join_idx));
-        f.instruction(&Instruction::LocalSet(11)); // body
-        // "[" ++ (len>0 ? openSep ++ body ++ closeSep : "") ++ "]"
-        push_str_const(f, if object { "{" } else { "[" });
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(8)); // openSep
-        f.instruction(&Instruction::LocalGet(11)); // body
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalGet(9)); // closeSep
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::Else);
-        push_str_const(f, "");
+        // flush trailing run [run, len)
+        self.sb_flush_run(&mut f, 0, 2, 5, 3);
+        // closing quote
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(34));
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        push_str_const(f, if object { "}" } else { "]" });
-        f.instruction(&Instruction::Call(self.str_append_idx));
+        f
+    }
+
+    /// sb_push_int(sb, boxedInt) : format an Int in decimal straight into the
+    /// buffer (itoa — no intermediate String). Digits are written MSD-first into
+    /// reserved space, then `len` is advanced.
+    fn emit_sb_push_int(&self) -> Function {
+        // params sb(0), v(1). locals: n(2),tmp(4):i64; d(3),start(5),idx(6):i32
+        let mut f = Function::new([(1, ValType::I64), (1, ValType::I32), (1, ValType::I64), (2, ValType::I32)]);
+        // n = unbox_int(v)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        // if n < 0: emit '-', n = -n
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(45)); // '-'
+        f.instruction(&Instruction::Call(self.sb_push_byte_idx));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        // count digits: d = 1; tmp = n / 10; while tmp > 0 { d++; tmp /= 10 }
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64LeS);
+        f.instruction(&Instruction::BrIf(1));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // reserve d bytes; start = len
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.sb_ensure_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(5));
+        // idx = start + d - 1; write digits LSD-first backward to idx == start
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // buf[idx] = '0' + (n % 10)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64RemS);
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArraySet(T_STR));
+        // n /= 10; idx--
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // len += d
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sb_finish(sb) -> String : the buffer's live bytes as a `T_STR`. Returns
+    /// the backing array directly when exactly full, else an exact-size copy.
+    fn emit_sb_finish(&self) -> Function {
+        // params sb(0). locals: out(1):ref T_STR
+        let mut f = Function::new([(1, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::Else);
+        // out = new T_STR(len); copy [0,len)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 0 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_SB, field_index: 1 });
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
     }
 
     /// json_dict_pairs(toKey, toVal, d) : `List (String, Value)` from a Dict.
