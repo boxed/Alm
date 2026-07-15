@@ -1004,6 +1004,7 @@ struct Codegen<'a> {
     random_next_seed_idx: u32,
     random_initial_seed_idx: u32,
     random_step_idx: u32,
+    task_run_idx: u32,
     dict_sorted_build_idx: u32,
     set_sorted_build_idx: u32,
     alm_event_idx: u32,
@@ -1194,6 +1195,7 @@ impl<'a> Codegen<'a> {
             random_next_seed_idx: 0,
             random_initial_seed_idx: 0,
             random_step_idx: 0,
+            task_run_idx: 0,
             dict_sorted_build_idx: 0,
             set_sorted_build_idx: 0,
             alm_event_idx: 0,
@@ -1409,6 +1411,7 @@ impl<'a> Codegen<'a> {
         self.random_next_seed_idx = next();
         self.random_initial_seed_idx = next();
         self.random_step_idx = next();
+        self.task_run_idx = next();
         self.dict_sorted_build_idx = next();
         self.set_sorted_build_idx = next();
         self.alm_event_idx = next();
@@ -1659,6 +1662,7 @@ impl<'a> Codegen<'a> {
         let random_next_seed = self.emit_random_next_seed();
         let random_initial_seed = self.emit_random_initial_seed();
         let random_step = self.emit_random_step();
+        let task_run = self.emit_task_run();
         let dict_sorted_build = self.emit_sorted_build(true);
         let set_sorted_build = self.emit_sorted_build(false);
         let alm_event = self.emit_alm_event();
@@ -1933,6 +1937,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // random_next_seed (seed) -> seed
         funcs.function(ft1); // random_initial_seed (x) -> seed
         funcs.function(ft2); // random_step (gen, seed) -> (value, seed)
+        funcs.function(ft1); // task_run (task) -> Result
         funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
         funcs.function(e_e_ty); // set_sorted_build : elems -> Set
         funcs.function(alm_event_ty); // alm_event
@@ -2119,6 +2124,7 @@ impl<'a> Codegen<'a> {
         code.function(&random_next_seed);
         code.function(&random_initial_seed);
         code.function(&random_step);
+        code.function(&task_run);
         code.function(&dict_sorted_build);
         code.function(&set_sorted_build);
         code.function(&alm_event);
@@ -4150,6 +4156,237 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // block
         f.instruction(&Instruction::End); // if tag==0
         f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// task_run(task) -> Result x a : interpret a reified Task synchronously.
+    /// Tags: 0 Succeed[x], 1 Fail[e], 2 Map[f,t], 3 AndThen[f,t], 4 MapError[f,t],
+    /// 5 OnError[f,t], 6 Map2[f,ta,tb], 7 Map3[f,ta,tb,tc], 8 Sequence[list].
+    /// (Async leaf tasks — sleep/now/http — are not modeled; those are compile
+    /// errors, so every Task reaching here is synchronous.)
+    fn emit_task_run(&self) -> Function {
+        // param t(0). locals: ra(1),rb(2),rc(3):eqref; arr(4):ref T_ARR;
+        //   i(5),len(6):i32; lst(7):eqref
+        let mut f = Function::new([(3, eqref()), (1, ref_to(T_ARR)), (2, ValType::I32), (1, eqref())]);
+        ctor_tag(&mut f, 0);
+        // Succeed (0) → Ok(arg0) ; Fail (1) → Err(arg0)
+        f.instruction(&Instruction::LocalTee(5)); // reuse i as tag scratch
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Map (2): ra = run(arg1); Ok → Ok(f ra.v) else ra
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // AndThen (3): ra = run(arg1); Ok → run(f ra.v) else ra
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // MapError (4): ra = run(arg1); Err → Err(f e) else ra
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1));
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // OnError (5): ra = run(arg1); Err → run(f e) else ra
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Map2 (6): ra=run(arg1); Err→ra; rb=run(arg2); Err→rb; Ok(f a b)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Map3 (7)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_argn(&mut f, 0, 3);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_tag(&mut f, 3);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 3);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Sequence (8): run each; first Err short-circuits; else Ok(list of values)
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7)); // lst
+        list_len(&mut f, 7);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 7, 5);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Ok(T_LIST{len, T_BACK{0, arr}})
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f
     }
@@ -11429,6 +11666,32 @@ impl<'a> Codegen<'a> {
         self.dom_str(&mut f, 5);
         f.instruction(&Instruction::Call(HOST_LOAD));
         f.instruction(&Instruction::End);
+        // CMD_TASK_PERFORM (7): [toMsg, task]. Run the (synchronous) task; it
+        // cannot fail (Task Never a), so dispatch toMsg applied to the Ok value.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(5)); // r = Ok value
+        ctor_arg0(&mut f, 0); // toMsg
+        ctor_arg0(&mut f, 5); // the Ok value
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        // CMD_TASK_ATTEMPT (8): [toMsg, task]. dispatch toMsg applied to the
+        // whole Result.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0); // toMsg
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -14234,6 +14497,40 @@ impl<'a> Codegen<'a> {
             ("Random", "initialSeed") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.random_initial_seed_idx));
+            }
+            // Task: reify combinators as tagged ctors; task_run interprets them.
+            ("Task", "succeed") | ("Task", "fail") | ("Task", "map")
+            | ("Task", "andThen") | ("Task", "mapError") | ("Task", "onError")
+            | ("Task", "map2") | ("Task", "map3") | ("Task", "sequence") => {
+                let tag: i32 = match name {
+                    "succeed" => 0,
+                    "fail" => 1,
+                    "map" => 2,
+                    "andThen" => 3,
+                    "mapError" => 4,
+                    "onError" => 5,
+                    "map2" => 6,
+                    "map3" => 7,
+                    _ => 8, // sequence
+                };
+                f.instruction(&Instruction::I32Const(tag));
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: T_ARR,
+                    array_size: args.len() as u32,
+                });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Task.perform toMsg task → CMD_TASK_PERFORM (7); attempt → (8).
+            ("Task", "perform") | ("Task", "attempt") => {
+                let tag: i32 = if name == "perform" { 7 } else { 8 };
+                f.instruction(&Instruction::I32Const(tag));
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                self.emit_expr(&args[1], ctx, f)?; // task
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             ("Result", "andThen") => {
                 self.emit_expr(&args[0], ctx, f)?;

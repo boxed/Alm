@@ -1316,6 +1316,40 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
 }
 
 #[test]
+fn task_perform_chain() {
+    // Clicking runs Task.perform over a succeed |> map |> andThen |> map2 chain;
+    // the resulting message updates the model. Exercises task_run + the
+    // CMD_TASK_PERFORM path in run_cmd. Both backends must agree.
+    assert_sandbox_click(
+        "task_perform",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\
+         import Task\n\n\
+         type Msg = Go | Got Int\n\n\
+         task : Task.Task Never Int\n\
+         task =\n\
+         \x20   Task.succeed 10\n\
+         \x20       |> Task.map (\\x -> x + 5)\n\
+         \x20       |> Task.andThen (\\x -> Task.succeed (x * 2))\n\
+         \x20       |> (\\t -> Task.map2 (+) t (Task.succeed 100))\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update msg n =\n\
+         \x20   case msg of\n\
+         \x20       Go -> ( n, Task.perform Got task )\n\
+         \x20       Got v -> ( v, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n\
+         \x20   div [] [ button [ onClick Go ] [ text \"go\" ], div [] [ text (String.fromInt n) ] ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n\
+         \x20   Browser.element\n\
+         \x20       { init = \\_ -> ( 0, Cmd.none ), update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    );
+}
+
+#[test]
 fn keyed_reorder() {
     // Html.Keyed.node with a reordering update: the initial render and the
     // post-click (rotated) render must match the JS backend. Exercises VKEYED
