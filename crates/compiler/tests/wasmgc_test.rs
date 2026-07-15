@@ -11,7 +11,7 @@ use alm_compiler::{generate, project};
 const RUNNER: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({},{get:()=>()=>0})});
 console.log(instance.exports.main_int().toString());
 "#;
 
@@ -20,7 +20,7 @@ console.log(instance.exports.main_int().toString());
 const STR_RUNNER: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({},{get:()=>()=>0})});
 const len = instance.exports.render();
 const mem = new Uint8Array(instance.exports.memory.buffer, 0, len);
 process.stdout.write(Buffer.from(mem).toString('utf8'));
@@ -1122,7 +1122,7 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
     std::fs::write(
         &runner,
         "const fs=require('fs');const b=fs.readFileSync(process.argv[2]);\
-         const i=new WebAssembly.Instance(new WebAssembly.Module(b),{});\
+         const i=new WebAssembly.Instance(new WebAssembly.Module(b),{env:new Proxy({},{get:()=>()=>0})});\
          const n=i.exports.render_html();\
          process.stdout.write(Buffer.from(new Uint8Array(i.exports.memory.buffer,0,n)).toString('utf8'));",
     )
@@ -1146,6 +1146,66 @@ fn sandbox_static_render() {
          view : Int -> Html.Html Msg\n\
          view _ =\n    \
             div [ attribute \"id\" \"root\" ]\n        [ span [] [ text \"hi <b> & x\" ]\n        , div [ style \"color\" \"red\", attribute \"data-n\" \"1\" ] [ text \"y\" ]\n        , text \"tail\"\n        ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    );
+}
+
+/// Browser.sandbox event parity: initial render + after a click, WasmGC (real
+/// DOM via host imports) vs the JS backend, both driven through the DOM stub.
+fn assert_sandbox_click(test_name: &str, source: &str) {
+    let dir = common::test_dir("alm-wasmgc", test_name);
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|errors| {
+        panic!("check failed:\n{}", errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+
+    let script = dir.join("m2.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);\
+               const a=serializeBody(doc);const b=findBtn(doc.body);if(b)dispatchEvent(b,'click',{{}});\
+               const c=serializeBody(doc);return [a,c];}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write([j[0],w[0],j[1],w[1]].join('\\u001e'));",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 4, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "initial render disagrees");
+    assert_eq!(parts[2], parts[3], "post-click render disagrees");
+}
+
+#[test]
+fn sandbox_click_counter() {
+    assert_sandbox_click(
+        "sandbox_click",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Inc\n\n\
+         update : Msg -> Int -> Int\n\
+         update _ n = n + 1\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ button [ onClick Inc ] [ text \"+\" ], div [] [ text (String.fromInt n) ] ]\n\n\
          main : Program () Int Msg\n\
          main = Browser.sandbox { init = 0, update = update, view = view }\n",
     );

@@ -13,9 +13,9 @@ use std::path::Path;
 
 use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
-    ElementSection, Elements, ExportKind, ExportSection, FieldType, Function, FunctionSection,
-    GlobalSection, GlobalType, HeapType, Instruction, MemArg, MemorySection, MemoryType, Module,
-    RefType, StorageType, TypeSection, ValType,
+    ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType, Function,
+    FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, Instruction, MemArg,
+    MemorySection, MemoryType, Module, RefType, StorageType, TypeSection, ValType,
 };
 
 use crate::ast::canonical as can;
@@ -35,6 +35,29 @@ const T_LIST: u32 = 5; // struct { i32 len, (ref null T_BACK) bk }
 const T_CTOR: u32 = 6; // struct { i32 tag, (ref null T_ARR) args }
 const T_CLOS: u32 = 7; // struct { funcref, i32 arity, i32 applied, (ref null T_ARR) args }
 const N_FIXED: u32 = 8;
+
+// Imported DOM host functions occupy the first function indices; defined
+// functions are therefore offset by N_IMPORTS (see build()).
+const DOM_CREATE_ELEMENT: u32 = 0; // (ptr,len) -> handle
+const DOM_CREATE_TEXT: u32 = 1; // (ptr,len) -> handle
+const DOM_SET_ATTRIBUTE: u32 = 2; // (node,kp,kl,vp,vl)
+const DOM_SET_STYLE: u32 = 3; // (node,kp,kl,vp,vl)
+const DOM_APPEND_CHILD: u32 = 4; // (parent,child)
+const DOM_ADD_EVENT_LISTENER: u32 = 5; // (node,np,nl,hid)
+const DOM_MOUNT: u32 = 6; // (root)
+const DOM_REPLACE_ROOT: u32 = 7; // (root)
+const N_IMPORTS: u32 = 8;
+
+// Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
+// running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
+const G_MODEL: u32 = 3;
+const G_UPDATE: u32 = 4;
+const G_VIEW: u32 = 5;
+const G_HANDLERS: u32 = 6;
+const G_NEXT_HID: u32 = 7;
+const G_BUMP: u32 = 8;
+const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
+const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
 const MAX_ARITY: u32 = 6;
 
@@ -378,6 +401,25 @@ fn bump(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalSet(local));
 }
 
+/// The DOM event name for a plain-message `Html.Events.on*` helper (those whose
+/// handler is just `Decode.succeed msg`), or None for the rest.
+fn html_event_name(ev: &str) -> Option<&'static str> {
+    Some(match ev {
+        "onClick" => "click",
+        "onDoubleClick" => "dblclick",
+        "onMouseDown" => "mousedown",
+        "onMouseUp" => "mouseup",
+        "onMouseEnter" => "mouseenter",
+        "onMouseLeave" => "mouseleave",
+        "onMouseOver" => "mouseover",
+        "onMouseOut" => "mouseout",
+        "onSubmit" => "submit",
+        "onBlur" => "blur",
+        "onFocus" => "focus",
+        _ => return None,
+    })
+}
+
 /// A nullable reference to concrete type `idx`.
 fn ref_null_to(idx: u32) -> ValType {
     ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(idx) })
@@ -642,6 +684,10 @@ struct Codegen<'a> {
     html_esc_attr_idx: u32,
     serialize_html_idx: u32,
     view_html_idx: u32,
+    marshal_idx: u32,
+    render_dom_idx: u32,
+    rerender_idx: u32,
+    alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -772,6 +818,10 @@ impl<'a> Codegen<'a> {
             html_esc_attr_idx: 0,
             serialize_html_idx: 0,
             view_html_idx: 0,
+            marshal_idx: 0,
+            render_dom_idx: 0,
+            rerender_idx: 0,
+            alm_event_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -802,13 +852,13 @@ impl<'a> Codegen<'a> {
 
     fn build(&mut self) -> Result<Vec<u8>, String> {
         for (i, f) in self.mono.functions.iter().enumerate() {
-            self.func_index.insert(f.mangled.to_string(), i as u32);
+            self.func_index.insert(f.mangled.to_string(), N_IMPORTS + i as u32);
             self.func_arity.insert(f.mangled.to_string(), f.params.len() as u32);
         }
         let n = self.mono.functions.len() as u32;
-        // Synthesized helper function indices, appended after the user funcs
+        // Synthesized helper function indices, after the imports and user funcs
         // (a running counter, so adding a helper needs no manual re-indexing).
-        let mut s = n;
+        let mut s = N_IMPORTS + n;
         let mut next = || {
             let i = s;
             s += 1;
@@ -926,9 +976,14 @@ impl<'a> Codegen<'a> {
         self.html_esc_attr_idx = next();
         self.serialize_html_idx = next();
         self.view_html_idx = next();
+        self.marshal_idx = next();
+        self.render_dom_idx = next();
+        self.rerender_idx = next();
+        self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         let render_html_idx = next();
+        let alm_browser_start_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
@@ -964,7 +1019,15 @@ impl<'a> Codegen<'a> {
         let val_compare_ty = self.next_type + 2; // (eqref, eqref) -> i32
         let json_void_ty = self.next_type + 3; // () -> ()
         let json_ret_ty = self.next_type + 4; // () -> eqref
-        self.next_type += 5;
+        // Import + browser-runtime fn types.
+        let imp_ii_i = self.next_type + 5; // (i32,i32) -> i32
+        let imp_i5_v = self.next_type + 6; // (i32,i32,i32,i32,i32) -> ()
+        let imp_ii_v = self.next_type + 7; // (i32,i32) -> ()
+        let imp_i4_v = self.next_type + 8; // (i32,i32,i32,i32) -> ()
+        let imp_i_v = self.next_type + 9; // (i32) -> ()
+        let eqref_to_i32_ty = self.next_type + 10; // eqref -> i32 (marshal, render_dom)
+        let alm_event_ty = self.next_type + 11; // (i32,i32,i32) -> i32
+        self.next_type += 12;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1080,6 +1143,11 @@ impl<'a> Codegen<'a> {
         let serialize_html = self.emit_serialize_html();
         let view_html = self.emit_view_html(main_idx);
         let render_html = self.emit_render(self.view_html_idx);
+        let marshal = self.emit_marshal();
+        let render_dom = self.emit_render_dom();
+        let rerender = self.emit_rerender();
+        let alm_event = self.emit_alm_event();
+        let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -1125,6 +1193,22 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![eqref(), eqref()], vec![ValType::I32]); // val_compare
         types.ty().function(vec![], vec![]); // json_void: () -> ()
         types.ty().function(vec![], vec![eqref()]); // json_ret: () -> eqref
+        types.ty().function(vec![ValType::I32, ValType::I32], vec![ValType::I32]); // imp_ii_i
+        types.ty().function(
+            vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            vec![],
+        ); // imp_i5_v
+        types.ty().function(vec![ValType::I32, ValType::I32], vec![]); // imp_ii_v
+        types.ty().function(
+            vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            vec![],
+        ); // imp_i4_v
+        types.ty().function(vec![ValType::I32], vec![]); // imp_i_v
+        types.ty().function(vec![eqref()], vec![ValType::I32]); // eqref_to_i32
+        types.ty().function(
+            vec![ValType::I32, ValType::I32, ValType::I32],
+            vec![ValType::I32],
+        ); // alm_event
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1243,9 +1327,14 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // html_esc_attr
         funcs.function(ft1); // serialize_html
         funcs.function(json_ret_ty); // view_html : () -> eqref
+        funcs.function(eqref_to_i32_ty); // marshal
+        funcs.function(eqref_to_i32_ty); // render_dom
+        funcs.function(json_void_ty); // rerender
+        funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
         funcs.function(render_ty); // render_html
+        funcs.function(json_void_ty); // alm_browser_start
         let lifted_types: Vec<u32> =
             self.lifted.iter().map(|(a, _)| self.fn_types[a]).collect();
         for &t in &lifted_types {
@@ -1368,9 +1457,14 @@ impl<'a> Codegen<'a> {
         code.function(&html_esc_attr);
         code.function(&serialize_html);
         code.function(&view_html);
+        code.function(&marshal);
+        code.function(&render_dom);
+        code.function(&rerender);
+        code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
         code.function(&render_html);
+        code.function(&alm_browser_start);
         for (_, body) in &self.lifted {
             code.function(body);
         }
@@ -1409,15 +1503,54 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 3=model, 4=update, 5=view (eqref, null until a program starts).
+        for _ in 0..3 {
+            globals.global(
+                GlobalType { val_type: eqref(), mutable: true, shared: false },
+                &ConstExpr::ref_null(eq_heap()),
+            );
+        }
+        // 6=handlers (ref null T_ARR).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        // 7=next handler id, 8=mem bump pointer.
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(BUMP_BASE),
+        );
+
+        // DOM host imports (function indices 0..N_IMPORTS).
+        let mut imports = ImportSection::new();
+        for (name, ty) in [
+            ("dom_create_element", imp_ii_i),
+            ("dom_create_text", imp_ii_i),
+            ("dom_set_attribute", imp_i5_v),
+            ("dom_set_style", imp_i5_v),
+            ("dom_append_child", imp_ii_v),
+            ("dom_add_event_listener", imp_i4_v),
+            ("dom_mount", imp_i_v),
+            ("dom_replace_root", imp_i_v),
+        ] {
+            imports.import("env", name, EntityType::Function(ty));
+        }
 
         let mut exports = ExportSection::new();
         exports.export("main_int", ExportKind::Func, main_int_idx);
         exports.export("render", ExportKind::Func, render_idx);
         exports.export("render_html", ExportKind::Func, render_html_idx);
+        exports.export("alm_browser_start", ExportKind::Func, alm_browser_start_idx);
+        exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
         module.section(&types);
+        module.section(&imports);
         module.section(&funcs);
         module.section(&mems);
         module.section(&globals);
@@ -7989,7 +8122,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Else);
-        // ASTYLE: styleAcc ++= key ++ ":" ++ val ++ ";"
+        // ASTYLE (tag 1): styleAcc ++= key ++ ":" ++ val ++ ";" (AEVENT skipped)
+        ctor_tag(&mut f, 7);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(5));
         ctor_arg0(&mut f, 7);
         f.instruction(&Instruction::Call(self.str_append_idx));
@@ -8000,6 +8137,7 @@ impl<'a> Codegen<'a> {
         push_str_const(&mut f, ";");
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
@@ -8087,6 +8225,267 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.serialize_html_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    // ---- Browser runtime (real DOM via host imports) ----
+
+    /// marshal(s) : copy a T_STR into linear memory at the bump pointer and
+    /// return its offset (length is `s.len`, read separately by the caller).
+    fn emit_marshal(&self) -> Function {
+        // param s(0). locals: sstr(1):str, len(2),i(3),ptr(4):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (3, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Store8(mem0()));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // bump += len
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Push `[ptr, len]` for the string in local `s_local` (marshal + arraylen).
+    fn dom_str(&self, f: &mut Function, s_local: u32) {
+        f.instruction(&Instruction::LocalGet(s_local));
+        f.instruction(&Instruction::Call(self.marshal_idx));
+        f.instruction(&Instruction::LocalGet(s_local));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+    }
+
+    /// render_dom(node) : build a real DOM subtree via host imports, returning
+    /// the node handle. Attrs → set_attribute/set_style; events register a
+    /// handler id; children recurse.
+    fn emit_render_dom(&self) -> Function {
+        // param node(0). locals: tag(1),i(2),h(3),hid(4):i32,
+        //   attr(5),sub(6),key(7),val(8):eqref
+        let mut f = Function::new([(4, ValType::I32), (4, eqref())]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // VTEXT
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7));
+        self.dom_str(&mut f, 7);
+        f.instruction(&Instruction::Call(DOM_CREATE_TEXT));
+        f.instruction(&Instruction::Else);
+        // VNODE: create element
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7)); // tagName
+        self.dom_str(&mut f, 7);
+        f.instruction(&Instruction::Call(DOM_CREATE_ELEMENT));
+        f.instruction(&Instruction::LocalSet(3)); // h
+        // attrs
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(6));
+        list_len(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(2)); // len
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // i (hid slot reused as attr counter)
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 6, 4);
+        f.instruction(&Instruction::LocalSet(5)); // attr
+        ctor_arg0(&mut f, 5);
+        f.instruction(&Instruction::LocalSet(7)); // attr key/name (arg0)
+        ctor_argn(&mut f, 5, 1);
+        f.instruction(&Instruction::LocalSet(8)); // attr val/decoder (arg1)
+        // AATTR (0)
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        self.dom_str(&mut f, 7);
+        self.dom_str(&mut f, 8);
+        f.instruction(&Instruction::Call(DOM_SET_ATTRIBUTE));
+        f.instruction(&Instruction::Else);
+        // ASTYLE (1)
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        self.dom_str(&mut f, 7);
+        self.dom_str(&mut f, 8);
+        f.instruction(&Instruction::Call(DOM_SET_STYLE));
+        f.instruction(&Instruction::Else);
+        // AEVENT (2): register decoder at a fresh hid, add listener
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::LocalGet(8)); // decoder
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(3)); // node
+        self.dom_str(&mut f, 7); // event name
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID)); // hid
+        f.instruction(&Instruction::Call(DOM_ADD_EVENT_LISTENER));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // kids
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalSet(6));
+        list_len(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        list_elem(&mut f, 6, 4);
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End); // top-level if
+        f.instruction(&Instruction::End); // function
+        f
+    }
+
+    /// Reset the per-render scratch (bump + handler ids) and set the model /
+    /// handler-table globals; shared by browser_start and rerender.
+    fn emit_reset_render(f: &mut Function) {
+        f.instruction(&Instruction::I32Const(BUMP_BASE));
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
+    }
+
+    /// rerender() : re-render the current model and replace the mounted root.
+    fn emit_rerender(&self) -> Function {
+        let mut f = Function::new([]);
+        Self::emit_reset_render(&mut f);
+        f.instruction(&Instruction::GlobalGet(G_VIEW));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::Call(DOM_REPLACE_ROOT));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_event(hid, ptr, len) : run the handler decoder, update the model,
+    /// re-render. (Payload parsing is a later milestone; onClick-style handlers
+    /// use `Decode.succeed` and ignore it.)
+    fn emit_alm_event(&self) -> Function {
+        // params hid(0),ptr(1),len(2). locals: dec(3),r(4):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3)); // decoder
+        // r = json_run(decoder, JNULL)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        ctor_tag(&mut f, 4);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // model = update msg model
+        f.instruction(&Instruction::GlobalGet(G_UPDATE));
+        ctor_arg0(&mut f, 4); // msg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::GlobalSet(G_MODEL));
+        f.instruction(&Instruction::Call(self.rerender_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_browser_start() : unpack the sandbox program, do the initial render,
+    /// mount it.
+    fn emit_alm_browser_start(&self, main_idx: u32) -> Function {
+        // local: rec(0):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::Call(main_idx));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(0)); // record
+        // model = rec[0], update = rec[1], view = rec[2]
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_MODEL));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_UPDATE));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_VIEW));
+        // handlers = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_HANDLERS));
+        Self::emit_reset_render(&mut f);
+        // root = render_dom(view model); mount
+        f.instruction(&Instruction::GlobalGet(G_VIEW));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::Call(DOM_MOUNT));
         f.instruction(&Instruction::End);
         f
     }
@@ -9952,6 +10351,26 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(0));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Html.Events: plain-message handlers → AEVENT [name, succeed msg].
+            ("Html.Events", ev) if html_event_name(ev).is_some() => {
+                let name = html_event_name(ev).unwrap();
+                f.instruction(&Instruction::I32Const(2)); // AEVENT
+                push_str_const(f, name);
+                f.instruction(&Instruction::I32Const(20)); // DSucceed
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html.Events", "on") => {
+                // on name decoder → AEVENT [name, decoder]
+                f.instruction(&Instruction::I32Const(2));
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
