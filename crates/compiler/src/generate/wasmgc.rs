@@ -57,7 +57,9 @@ const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
 const HOST_HTTP: u32 = 16; // (urlptr,urllen,reqId) — start an HTTP GET
 const HOST_CLEAR_TIMERS: u32 = 17; // () — cancel all Time.every intervals
 const HOST_SET_INTERVAL: u32 = 18; // (intervalMs:f64, slot) — register a timer
-const N_IMPORTS: u32 = 19;
+const HOST_CLEAR_DOM: u32 = 19; // () — remove all document-event listeners
+const HOST_ADD_DOM: u32 = 20; // (nameptr,namelen,slot) — add a document listener
+const N_IMPORTS: u32 = 21;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -75,6 +77,8 @@ const G_HTTP: u32 = 13; // in-flight HTTP expects, indexed by request id
 const G_NEXT_REQ: u32 = 14; // next HTTP request id
 const G_TICKS: u32 = 15; // active Time.every toMsg callbacks, indexed by slot
 const G_NEXT_TICK: u32 = 16; // next timer slot (reset each reconcile)
+const G_DOMSUBS: u32 = 17; // active Browser.Events decoders, indexed by slot
+const G_NEXT_DOM: u32 = 18; // next document-sub slot (reset each reconcile)
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -439,6 +443,21 @@ fn html_event_name(ev: &str) -> Option<&'static str> {
     })
 }
 
+/// Browser.Events decoder subscriptions → the document event name they listen
+/// for. (onResize/onAnimationFrame* take a different shape and are separate.)
+fn browser_event_name(ev: &str) -> Option<&'static str> {
+    Some(match ev {
+        "onKeyDown" => "keydown",
+        "onKeyUp" => "keyup",
+        "onKeyPress" => "keypress",
+        "onClick" => "click",
+        "onMouseMove" => "mousemove",
+        "onMouseDown" => "mousedown",
+        "onMouseUp" => "mouseup",
+        _ => return None,
+    })
+}
+
 /// A nullable reference to concrete type `idx`.
 fn ref_null_to(idx: u32) -> ValType {
     ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(idx) })
@@ -725,6 +744,7 @@ struct Codegen<'a> {
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
     tick_idx: u32,
+    dom_event_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -871,6 +891,7 @@ impl<'a> Codegen<'a> {
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
             tick_idx: 0,
+            dom_event_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1042,6 +1063,7 @@ impl<'a> Codegen<'a> {
         self.reconcile_subs_idx = next();
         self.walk_timers_idx = next();
         self.tick_idx = next();
+        self.dom_event_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1228,6 +1250,7 @@ impl<'a> Codegen<'a> {
         let reconcile_subs = self.emit_reconcile_subs();
         let walk_timers = self.emit_walk_timers();
         let tick = self.emit_tick();
+        let dom_event = self.emit_dom_event();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1431,6 +1454,7 @@ impl<'a> Codegen<'a> {
         funcs.function(json_void_ty); // reconcile_subs : () -> ()
         funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
         funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
+        funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1573,6 +1597,7 @@ impl<'a> Codegen<'a> {
         code.function(&reconcile_subs);
         code.function(&walk_timers);
         code.function(&tick);
+        code.function(&dom_event);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1673,6 +1698,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 17=active document-event decoders (ref null T_ARR), 18=next slot (i32).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1696,6 +1730,8 @@ impl<'a> Codegen<'a> {
             ("host_http", imp_i3_v),
             ("host_clear_timers", json_void_ty),
             ("host_set_interval", fi_v_ty),
+            ("host_clear_dom", json_void_ty),
+            ("host_add_dom", imp_i3_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -1709,6 +1745,7 @@ impl<'a> Codegen<'a> {
         exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
         exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
         exports.export("alm_tick", ExportKind::Func, self.tick_idx);
+        exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
@@ -9130,8 +9167,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(HOST_CLEAR_TIMERS));
+        f.instruction(&Instruction::Call(HOST_CLEAR_DOM));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(G_NEXT_DOM));
         f.instruction(&Instruction::GlobalGet(G_SUBS));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -9170,6 +9210,30 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::Call(HOST_SET_INTERVAL));
+        f.instruction(&Instruction::End);
+        // SubDom (tag 5): document-event decoder [name, decoder]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_DOM));
+        f.instruction(&Instruction::LocalSet(4)); // slot
+        f.instruction(&Instruction::GlobalGet(G_NEXT_DOM));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_DOM));
+        // G_DOMSUBS[slot] = decoder (sub.arg1)
+        f.instruction(&Instruction::GlobalGet(G_DOMSUBS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(4));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_add_dom(marshal(name=sub.arg0), len, slot)
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        self.dom_str(&mut f, 5);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(HOST_ADD_DOM));
         f.instruction(&Instruction::End);
         // Sub.batch (tag 1): recurse
         f.instruction(&Instruction::LocalGet(1));
@@ -9220,6 +9284,40 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_dom_event(slot, ptr, len) : fire a Browser.Events document listener —
+    /// parse the event JSON at [ptr,len), run the stored decoder, and dispatch
+    /// the message on success (a failed decode is silently ignored, as in Elm).
+    fn emit_dom_event(&self) -> Function {
+        // params slot(0),ptr(1),len(2). locals: decoder(3),val(4),r(5):eqref
+        let mut f = Function::new([(3, eqref())]);
+        f.instruction(&Instruction::GlobalGet(G_DOMSUBS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3)); // decoder
+        // val = Ok-value(json_parse(str_from_mem(ptr,len)))
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.json_parse_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        ctor_arg0(&mut f, 4);
+        f.instruction(&Instruction::LocalSet(4));
+        // r = json_run(decoder, val)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Eqz); // Ok?
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 5);
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -9521,6 +9619,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_TICKS));
+        // domsubs = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_DOMSUBS));
         Self::emit_reset_render(&mut f);
         // run initial cmd (element / document, i.e. G_KIND != 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
@@ -11510,6 +11612,15 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(1));
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 self.emit_expr(&args[1], ctx, f)?; // decoder
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Browser.Events document listeners → SubDom tag5 [eventName, decoder].
+            ("Browser.Events", ev) if browser_event_name(ev).is_some() => {
+                let name = browser_event_name(ev).unwrap();
+                f.instruction(&Instruction::I32Const(5));
+                push_str_const(f, name);
+                self.emit_expr(&args[0], ctx, f)?; // decoder
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }

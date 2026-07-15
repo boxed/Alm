@@ -14,6 +14,7 @@ function start(wasmPath, doc, clock) {
   let memory = null;
   let instance = null;
   let timerIds = []; // active Time.every interval ids (in the virtual clock)
+  let domSubs = []; // active document listeners: { name, handler }
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
   const reg = (n) => { nodes.push(n); return nodes.length - 1; };
@@ -63,6 +64,22 @@ function start(wasmPath, doc, clock) {
     host_clear_timers: () => { timerIds.forEach((id) => clock.clearInterval(id)); timerIds = []; },
     host_set_interval: (ms, slot) => {
       timerIds.push(clock.setInterval(() => instance.exports.alm_tick(slot, clock.now()), ms));
+    },
+    host_clear_dom: () => {
+      domSubs.forEach((s) => doc.removeEventListener && doc.removeEventListener(s.name, s.handler));
+      domSubs = [];
+    },
+    host_add_dom: (np, nl, slot) => {
+      const name = str(np, nl);
+      const handler = (ev) => {
+        // Serialize the event's own JSON-able props (functions are skipped) into
+        // the reserved inbound region and run the decoder on the wasm side.
+        const bytes = new TextEncoder().encode(JSON.stringify(ev || {}));
+        new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
+        instance.exports.alm_dom_event(slot, 0, bytes.length);
+      };
+      doc.addEventListener(name, handler);
+      domSubs.push({ name, handler });
     },
   };
 

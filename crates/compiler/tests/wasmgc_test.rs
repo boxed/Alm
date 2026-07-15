@@ -1330,6 +1330,65 @@ fn document_title_and_body() {
 }
 
 #[test]
+fn element_browser_events_keydown() {
+    // Browser.Events.onKeyDown with a decoder reading the "key" field. Firing a
+    // document keydown must decode and render the key identically in both.
+    let dir = common::test_dir("alm-wasmgc", "browser_events");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Browser.Events\n\
+         import Html exposing (div, text)\n\
+         import Json.Decode as D\n\n\
+         type Msg = Key String\n\n\
+         init : () -> ( String, Cmd Msg )\n\
+         init _ = ( \"none\", Cmd.none )\n\n\
+         update : Msg -> String -> ( String, Cmd Msg )\n\
+         update (Key k) _ = ( k, Cmd.none )\n\n\
+         view : String -> Html.Html Msg\n\
+         view s =\n    div [] [ text s ]\n\n\
+         subs : String -> Sub Msg\n\
+         subs _ =\n    Browser.Events.onKeyDown (D.map Key (D.field \"key\" D.string))\n\n\
+         main : Program () String Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = subs }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m11.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchDocEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               dispatchDocEvent(doc,'keydown',{{key:'x'}});\
+               const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "onKeyDown render disagrees");
+    assert_eq!(parts[1], "<div>x</div>", "expected decoded key 'x'");
+}
+
+#[test]
 fn element_time_every() {
     // Time.every subscription. Advancing the (shared, deterministic) virtual
     // clock past two intervals must leave both backends showing the last tick's
