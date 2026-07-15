@@ -1212,6 +1212,62 @@ fn sandbox_click_counter() {
 }
 
 #[test]
+fn element_incoming_port() {
+    // An incoming port subscription: send a value from the host, decode it in
+    // update, and assert both backends render the delivered value identically.
+    let dir = common::test_dir("alm-wasmgc", "incoming_port");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "port module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Json.Decode as D\n\n\
+         port fromJs : (D.Value -> msg) -> Sub msg\n\n\
+         type Msg = Got D.Value\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( 0, Cmd.none )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Got v) _ =\n    ( case D.decodeValue D.int v of\n        Ok n -> n\n        Err _ -> -1\n    , Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> fromJs Got }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m7.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               r.sendPort('fromJs',42);return serializeBody(doc);}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "incoming-port render disagrees");
+    assert_eq!(parts[1], "<div>42</div>", "expected delivered value 42");
+}
+
+#[test]
 fn document_title_and_body() {
     // Browser.document: view returns { title, body }. Assert both backends set
     // the same title and render the same body, at init and after a click.

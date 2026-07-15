@@ -60,7 +60,17 @@ function start(wasmPath, doc) {
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
   memory = instance.exports.memory;
   instance.exports.alm_browser_start();
-  return { instance, nodes, outgoing };
+  // Deliver an incoming-port message. Name goes at offset 0, JSON at 32 KiB —
+  // both inside the reserved [0, 64 KiB) inbound region (below the bump base).
+  function sendPort(name, value) {
+    const enc = new TextEncoder();
+    const nb = enc.encode(name);
+    const jb = enc.encode(JSON.stringify(value));
+    new Uint8Array(memory.buffer, 0, nb.length).set(nb);
+    new Uint8Array(memory.buffer, 32768, jb.length).set(jb);
+    instance.exports.alm_port_in(0, nb.length, 32768, jb.length);
+  }
+  return { instance, nodes, outgoing, sendPort };
 }
 
 module.exports = { start };

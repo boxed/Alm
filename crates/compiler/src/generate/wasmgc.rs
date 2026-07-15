@@ -66,7 +66,8 @@ const G_NEXT_HID: u32 = 7;
 const G_BUMP: u32 = 8;
 const G_PREV: u32 = 9; // previously-rendered vdom (for diff/patch)
 const G_ROOT: u32 = 10; // mounted root DOM handle
-const G_KIND: u32 = 11; // program kind: 0 = sandbox, 1 = element
+const G_KIND: u32 = 11; // program kind: 0 = sandbox, 1 = element, 2 = document
+const G_SUBS: u32 = 12; // subscriptions function (null for sandbox)
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -709,6 +710,9 @@ struct Codegen<'a> {
     run_cmd_idx: u32,
     str_from_mem_idx: u32,
     render_document_idx: u32,
+    dispatch_msg_idx: u32,
+    port_in_idx: u32,
+    sub_find_port_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -847,6 +851,9 @@ impl<'a> Codegen<'a> {
             run_cmd_idx: 0,
             str_from_mem_idx: 0,
             render_document_idx: 0,
+            dispatch_msg_idx: 0,
+            port_in_idx: 0,
+            sub_find_port_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1010,6 +1017,9 @@ impl<'a> Codegen<'a> {
         self.run_cmd_idx = next();
         self.str_from_mem_idx = next();
         self.render_document_idx = next();
+        self.dispatch_msg_idx = next();
+        self.port_in_idx = next();
+        self.sub_find_port_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1062,7 +1072,8 @@ impl<'a> Codegen<'a> {
         let patch_ty = self.next_type + 13; // (i32,eqref,eqref) -> i32
         let eqref_to_void_ty = self.next_type + 14; // eqref -> () (run_cmd)
         let ii_eqref_ty = self.next_type + 15; // (i32,i32) -> eqref (str_from_mem)
-        self.next_type += 16;
+        let ee_eqref_ty = self.next_type + 16; // (eqref,eqref) -> eqref (sub_find_port)
+        self.next_type += 17;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1185,6 +1196,9 @@ impl<'a> Codegen<'a> {
         let run_cmd = self.emit_run_cmd();
         let str_from_mem = self.emit_str_from_mem();
         let render_document = self.emit_render_document();
+        let dispatch_msg = self.emit_dispatch_msg();
+        let port_in = self.emit_port_in();
+        let sub_find_port = self.emit_sub_find_port();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1252,6 +1266,7 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![ValType::I32]); // patch
         types.ty().function(vec![eqref()], vec![]); // run_cmd: eqref -> ()
         types.ty().function(vec![ValType::I32, ValType::I32], vec![eqref()]); // str_from_mem
+        types.ty().function(vec![eqref(), eqref()], vec![eqref()]); // sub_find_port
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1377,6 +1392,9 @@ impl<'a> Codegen<'a> {
         funcs.function(eqref_to_void_ty); // run_cmd
         funcs.function(ii_eqref_ty); // str_from_mem
         funcs.function(json_ret_ty); // doc_vnode : () -> eqref
+        funcs.function(eqref_to_void_ty); // dispatch_msg : eqref -> ()
+        funcs.function(imp_i4_v); // alm_port_in : (i32,i32,i32,i32) -> ()
+        funcs.function(ee_eqref_ty); // sub_find_port : (eqref,eqref) -> eqref
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1511,6 +1529,9 @@ impl<'a> Codegen<'a> {
         code.function(&run_cmd);
         code.function(&str_from_mem);
         code.function(&render_document);
+        code.function(&dispatch_msg);
+        code.function(&port_in);
+        code.function(&sub_find_port);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1588,6 +1609,11 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 12=subscriptions fn (eqref, null for sandbox).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1618,6 +1644,7 @@ impl<'a> Codegen<'a> {
         exports.export("render_html", ExportKind::Func, render_html_idx);
         exports.export("alm_browser_start", ExportKind::Func, alm_browser_start_idx);
         exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
+        exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
@@ -8828,28 +8855,42 @@ impl<'a> Codegen<'a> {
         ctor_tag(&mut f, 4);
         f.instruction(&Instruction::I32Eqz); // Ok
         f.instruction(&Instruction::If(BlockType::Empty));
+        // dispatch the decoded msg (Result Ok [msg] → msg)
+        ctor_arg0(&mut f, 4);
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dispatch_msg(msg) : run `update msg model`, apply any resulting Cmd, then
+    /// re-render (diff/patch). Shared by DOM events and incoming ports.
+    fn emit_dispatch_msg(&self) -> Function {
+        // param msg(0). locals: upd(1), new(2):eqref
+        let mut f = Function::new([(2, eqref())]);
         // upd = update msg model
         f.instruction(&Instruction::GlobalGet(G_UPDATE));
-        ctor_arg0(&mut f, 4);
+        f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalSet(6));
-        // element/document (G_KIND != 0): upd is a (model, cmd) tuple; sandbox: upd is the model
+        f.instruction(&Instruction::LocalSet(1));
+        // element/document (G_KIND != 0): upd is a (model, cmd) tuple
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.run_cmd_idx));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
         f.instruction(&Instruction::End);
         // new = (document ? doc_vnode() : view model) ; patch against prev
@@ -8865,16 +8906,129 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::GlobalGet(G_ROOT));
         f.instruction(&Instruction::GlobalGet(G_PREV));
-        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(self.patch_idx));
         f.instruction(&Instruction::GlobalSet(G_ROOT));
-        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::GlobalSet(G_PREV));
         f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sub_find_port(sub, name) : return the `toMsg` of the SubPort in `sub`
+    /// whose name equals `name`, or null if none. Sub value model: none=tag0,
+    /// batch=tag1 [List Sub], SubPort=tag2 [name, toMsg]. Recurses into batches.
+    fn emit_sub_find_port(&self) -> Function {
+        // params sub(0), name(1). locals: tag(2),len(3),i(4):i32, list(5),r(6):eqref
+        let mut f = Function::new([(3, ValType::I32), (2, eqref())]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // SubPort (tag 2): compare names
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0); // sub name
+        f.instruction(&Instruction::LocalGet(1)); // target name
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+            shared: false,
+            ty: AbstractHeapType::I31,
+        }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1); // toMsg
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // batch (tag 1): search each child
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5)); // list
+        list_len(&mut f, 5);
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 5, 4);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.sub_find_port_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // none / not found
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_port_in(np, nl, jp, jl) : deliver an incoming-port message. Parse the
+    /// JSON payload, walk the current subscriptions for a SubPort whose name
+    /// matches, apply its `toMsg` to the value, and dispatch. `sub_find_port`
+    /// recurses into Sub.batch (tag1); SubPort is tag2 [name, toMsg].
+    fn emit_port_in(&self) -> Function {
+        // params np(0),nl(1),jp(2),jl(3). locals: name(4), val(5), sub(6), toMsg(7):eqref
+        let mut f = Function::new([(4, eqref())]);
+        // subscriptions must exist (element/document with a Sub)
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // name = str_from_mem(np, nl)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        // sub = subscriptions(model)
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        // toMsg = sub_find_port(sub, name)  (null if none)
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.sub_find_port_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // val = Ok-value(json_parse(str_from_mem(jp, jl)))
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.json_parse_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        ctor_arg0(&mut f, 5); // Result Ok [value] → value
+        f.instruction(&Instruction::LocalSet(5));
+        // dispatch_msg(toMsg value)
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -8938,6 +9092,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_UPDATE));
         field(&mut f, 3);
         f.instruction(&Instruction::GlobalSet(G_VIEW));
+        field(&mut f, 1);
+        f.instruction(&Instruction::GlobalSet(G_SUBS)); // subscriptions fn
         f.instruction(&Instruction::Else);
         // sandbox: record = {init:0, update:1, view:2}
         field(&mut f, 0);
@@ -9680,8 +9836,10 @@ impl<'a> Codegen<'a> {
         // (T_CTOR tag2 [name, jsonValue]). Ports have no definition.
         if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
             if let Some(&outgoing) = self.ports.get(name.as_str()) {
-                if args.len() == 1 && outgoing {
-                    f.instruction(&Instruction::I32Const(2)); // CMD_PORT
+                if args.len() == 1 {
+                    // outgoing → CMD_PORT [name, value]; incoming → SubPort
+                    // [name, toMsg]. Both are T_CTOR tag2 (in the Cmd/Sub space).
+                    f.instruction(&Instruction::I32Const(2));
                     push_str_const(f, name.as_str());
                     self.emit_expr(&args[0], ctx, f)?;
                     f.instruction(&Instruction::ArrayNewFixed {
@@ -9689,6 +9847,7 @@ impl<'a> Codegen<'a> {
                         array_size: 2,
                     });
                     f.instruction(&Instruction::StructNew(T_CTOR));
+                    let _ = outgoing;
                     return Ok(());
                 }
             }
