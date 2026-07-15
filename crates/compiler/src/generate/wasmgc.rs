@@ -706,6 +706,7 @@ struct Codegen<'a> {
     rerender_idx: u32,
     patch_idx: u32,
     run_cmd_idx: u32,
+    str_from_mem_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -842,6 +843,7 @@ impl<'a> Codegen<'a> {
             rerender_idx: 0,
             patch_idx: 0,
             run_cmd_idx: 0,
+            str_from_mem_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1003,6 +1005,7 @@ impl<'a> Codegen<'a> {
         self.rerender_idx = next();
         self.patch_idx = next();
         self.run_cmd_idx = next();
+        self.str_from_mem_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1054,7 +1057,8 @@ impl<'a> Codegen<'a> {
         let imp_i3_v = self.next_type + 12; // (i32,i32,i32) -> ()
         let patch_ty = self.next_type + 13; // (i32,eqref,eqref) -> i32
         let eqref_to_void_ty = self.next_type + 14; // eqref -> () (run_cmd)
-        self.next_type += 15;
+        let ii_eqref_ty = self.next_type + 15; // (i32,i32) -> eqref (str_from_mem)
+        self.next_type += 16;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1175,6 +1179,7 @@ impl<'a> Codegen<'a> {
         let rerender = self.emit_rerender();
         let patch = self.emit_patch();
         let run_cmd = self.emit_run_cmd();
+        let str_from_mem = self.emit_str_from_mem();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1241,6 +1246,7 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ValType::I32, ValType::I32, ValType::I32], vec![]); // imp_i3_v
         types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![ValType::I32]); // patch
         types.ty().function(vec![eqref()], vec![]); // run_cmd: eqref -> ()
+        types.ty().function(vec![ValType::I32, ValType::I32], vec![eqref()]); // str_from_mem
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1364,6 +1370,7 @@ impl<'a> Codegen<'a> {
         funcs.function(json_void_ty); // rerender
         funcs.function(patch_ty); // patch
         funcs.function(eqref_to_void_ty); // run_cmd
+        funcs.function(ii_eqref_ty); // str_from_mem
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1496,6 +1503,7 @@ impl<'a> Codegen<'a> {
         code.function(&rerender);
         code.function(&patch);
         code.function(&run_cmd);
+        code.function(&str_from_mem);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -8710,21 +8718,67 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// alm_event(hid, ptr, len) : run the handler decoder, update the model,
-    /// and diff/patch the DOM. (Payload parsing is a later milestone; onClick
-    /// handlers use `Decode.succeed` and ignore it.)
+    /// str_from_mem(ptr, len) : copy `len` bytes of linear memory into a fresh
+    /// T_STR GC array (the inverse of `marshal`). Used to lift a host-written
+    /// event-JSON payload into a String the JSON parser can consume.
+    fn emit_str_from_mem(&self) -> Function {
+        // params ptr(0), len(1). locals: i(2):i32, arr(3):T_STR
+        let mut f = Function::new([(1, ValType::I32), (1, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Load8U(mem0()));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_event(hid, ptr, len) : run the handler decoder against the event
+    /// payload (JSON text at [ptr, len) in linear memory, or `null` when
+    /// len==0), update the model, and diff/patch the DOM.
     fn emit_alm_event(&self) -> Function {
-        // params hid(0),ptr(1),len(2). locals: dec(3),r(4),new(5),upd(6):eqref
-        let mut f = Function::new([(4, eqref())]);
+        // params hid(0),ptr(1),len(2). locals: dec(3),r(4),new(5),upd(6),val(7):eqref
+        let mut f = Function::new([(5, eqref())]);
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::LocalGet(3));
+        // val = len>0 ? Ok-value(json_parse(str_from_mem(ptr,len))) : JSON null
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.json_parse_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        ctor_arg0(&mut f, 7); // Result Ok [value] → value
+        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(3)); // dec
+        f.instruction(&Instruction::LocalGet(7)); // val
         f.instruction(&Instruction::Call(self.json_run_idx));
         f.instruction(&Instruction::LocalSet(4));
         ctor_tag(&mut f, 4);
@@ -9204,8 +9258,37 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::RefI31);
             }
-            // A nullary constructor value (e.g. `Nothing`, `Red`).
-            TypedKind::Ctor(_, _, ctor) => self.emit_ctor(ctor.index, &[], ctx, f)?,
+            // A constructor used as a value: nullary (`Nothing`, `Red`) builds
+            // the tagged value directly; one with arguments (e.g. `Just`,
+            // `Typed` passed to `map`) becomes a closure that constructs it.
+            TypedKind::Ctor(_, _, ctor) => {
+                let arity = ctor.arity as u32;
+                if arity == 0 {
+                    self.emit_ctor(ctor.index, &[], ctx, f)?;
+                } else {
+                    self.fn_type(arity);
+                    let args: Vec<TypedExpr> = (0..arity)
+                        .map(|i| TypedExpr {
+                            tipe: e.tipe.clone(),
+                            kind: TypedKind::Local(format!("$carg{i}").into()),
+                            region: Region::ZERO,
+                        })
+                        .collect();
+                    let mut lctx = FnCtx::new();
+                    lctx.next_local = arity;
+                    for i in 0..arity {
+                        lctx.scope.push((format!("$carg{i}"), i));
+                    }
+                    let lidx = self.lifted_base + self.lifted.len() as u32;
+                    self.lifted.push((arity, Function::new([])));
+                    let mut lf = Function::new([]);
+                    self.emit_ctor(ctor.index, &args, &mut lctx, &mut lf)?;
+                    lf.instruction(&Instruction::End);
+                    let slot = (lidx - self.lifted_base) as usize;
+                    self.lifted[slot] = (arity, lf);
+                    self.emit_make_closure(lidx, arity, f);
+                }
+            }
             TypedKind::List(items) => {
                 // Build a tight vector: push len and head-index (constants),
                 // then the elements head-first, then fold into T_ARR/T_BACK/T_LIST.
@@ -10779,6 +10862,29 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_CTOR));
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html.Events", "onInput") => {
+                // onInput toMsg = on "input" (map toMsg (at ["target","value"] string)).
+                // AEVENT ["input", DMap[toMsg, DField "target" (DField "value" DString)]].
+                f.instruction(&Instruction::I32Const(2)); // AEVENT
+                push_str_const(f, "input");
+                f.instruction(&Instruction::I32Const(15)); // DMap
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                f.instruction(&Instruction::I32Const(8)); // DField
+                push_str_const(f, "target");
+                f.instruction(&Instruction::I32Const(8)); // DField
+                push_str_const(f, "value");
+                f.instruction(&Instruction::I32Const(0)); // DString
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // inner DField "value"
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // outer DField "target"
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // AEVENT
             }
             ("Html.Events", "on") => {
                 // on name decoder → AEVENT [name, decoder]

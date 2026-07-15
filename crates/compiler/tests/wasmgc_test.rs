@@ -1212,6 +1212,61 @@ fn sandbox_click_counter() {
 }
 
 #[test]
+fn sandbox_on_input() {
+    // onInput carries the event payload (target.value). Type into the field and
+    // assert both backends render the echoed text identically.
+    let dir = common::test_dir("alm-wasmgc", "on_input");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, input, text)\n\
+         import Html.Events exposing (onInput)\n\n\
+         type Msg = Typed String\n\n\
+         update : Msg -> String -> String\n\
+         update (Typed s) _ = s\n\n\
+         view : String -> Html.Html Msg\n\
+         view s =\n    div [] [ input [ onInput Typed ] [], div [] [ text s ] ]\n\n\
+         main : Program () String Msg\n\
+         main = Browser.sandbox { init = \"\", update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m5.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findInput(n){{if(n.tagName==='input')return n;for(const c of (n.childNodes||[])){{const r=findInput(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);\
+               const i=findInput(doc.body);dispatchEvent(i,'input',{{target:{{value:'héllo'}}}});\
+               return serializeBody(doc);}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "onInput render disagrees");
+    assert!(parts[1].contains("héllo"), "expected echoed input, got {}", parts[1]);
+}
+
+#[test]
 fn element_outgoing_port() {
     // Browser.element whose update returns a Cmd that sends an outgoing port.
     // Assert the WasmGC backend produces the same outgoing JSON as the JS one,

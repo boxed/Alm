@@ -24,7 +24,14 @@ function start(wasmPath, doc) {
     dom_append_child: (p, c) => { nodes[p].appendChild(nodes[c]); },
     dom_add_event_listener: (n, np, nl, hid) => {
       const name = str(np, nl);
-      nodes[n].addEventListener(name, () => instance.exports.alm_event(hid, 0, 0));
+      nodes[n].addEventListener(name, (ev) => {
+        // Serialize a minimal event object to JSON and hand it to the module in
+        // the reserved [0, 64KiB) scratch region (bump strings live above it).
+        const payload = { target: { value: (ev && ev.target && ev.target.value) || '' } };
+        const bytes = new TextEncoder().encode(JSON.stringify(payload));
+        new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
+        instance.exports.alm_event(hid, 0, bytes.length);
+      });
     },
     dom_mount: (r) => { mountedRoot = nodes[r]; doc.body.appendChild(mountedRoot); },
     dom_replace_root: (r) => {
