@@ -1358,6 +1358,68 @@ fn url_from_string_pure() {
 }
 
 #[test]
+fn sandbox_keyed_and_lazy() {
+    // Html.Keyed.ul with keyed <li>s and Html.Lazy.lazy wrapping a view. Output
+    // must match the JS backend at init and after a click that reorders.
+    let dir = common::test_dir("alm-wasmgc", "keyed_lazy");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, li, text)\n\
+         import Html.Attributes exposing (id)\n\
+         import Html.Events exposing (onClick)\n\
+         import Html.Keyed as Keyed\n\
+         import Html.Lazy exposing (lazy)\n\n\
+         type Msg = Flip\n\n\
+         row : Int -> ( String, Html Msg )\n\
+         row n = ( String.fromInt n, li [ id (String.fromInt n) ] [ text (String.fromInt n) ] )\n\n\
+         listView : Bool -> Html Msg\n\
+         listView flipped =\n    Keyed.ul []\n\
+         \x20       (if flipped then [ row 2, row 1 ] else [ row 1, row 2 ])\n\n\
+         update : Msg -> Bool -> Bool\n\
+         update _ b = not b\n\n\
+         view : Bool -> Html Msg\n\
+         view b =\n    div [] [ button [ onClick Flip ] [ text \"f\" ], lazy listView b ]\n\n\
+         main : Program () Bool Msg\n\
+         main = Browser.sandbox { init = False, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m13.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);\
+               const a=serializeBody(doc);dispatchEvent(findBtn(doc.body),'click',{{}});\
+               const b=serializeBody(doc);return a+' >> '+b;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "keyed/lazy render disagrees");
+}
+
+#[test]
 fn application_nav() {
     // Browser.application: init parses the location into the model; clicking
     // pushes a new URL, whose onUrlChange updates the model. Assert both

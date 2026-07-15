@@ -447,6 +447,28 @@ fn html_event_name(ev: &str) -> Option<&'static str> {
     })
 }
 
+/// Common string-valued Html.Attributes helpers → their DOM attribute name.
+/// (attribute/style are handled separately; boolean/property attrs are not
+/// here.) Elm's trailing-underscore names (type_) map to the bare attribute.
+fn html_attr_name(a: &str) -> Option<&'static str> {
+    Some(match a {
+        "id" => "id",
+        "class" => "class",
+        "href" => "href",
+        "src" => "src",
+        "title" => "title",
+        "placeholder" => "placeholder",
+        "value" => "value",
+        "name" => "name",
+        "alt" => "alt",
+        "type_" => "type",
+        "for_" => "for",
+        "rel" => "rel",
+        "target" => "target",
+        _ => return None,
+    })
+}
+
 /// Browser.Events decoder subscriptions → the document event name they listen
 /// for. (onResize/onAnimationFrame* take a different shape and are separate.)
 fn browser_event_name(ev: &str) -> Option<&'static str> {
@@ -751,6 +773,7 @@ struct Codegen<'a> {
     dom_event_idx: u32,
     index_byte_idx: u32,
     url_from_string_idx: u32,
+    strip_keys_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -900,6 +923,7 @@ impl<'a> Codegen<'a> {
             dom_event_idx: 0,
             index_byte_idx: 0,
             url_from_string_idx: 0,
+            strip_keys_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1074,6 +1098,7 @@ impl<'a> Codegen<'a> {
         self.dom_event_idx = next();
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
+        self.strip_keys_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1266,6 +1291,7 @@ impl<'a> Codegen<'a> {
         let dom_event = self.emit_dom_event();
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
+        let strip_keys = self.emit_strip_keys();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1475,6 +1501,7 @@ impl<'a> Codegen<'a> {
         funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
+        funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1620,6 +1647,7 @@ impl<'a> Codegen<'a> {
         code.function(&dom_event);
         code.function(&index_byte);
         code.function(&url_from_string);
+        code.function(&strip_keys);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -9510,6 +9538,46 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// strip_keys(list) : `List (key, Html) -> List Html` — drop each keyed
+    /// pair's key (tuple index 1 is the node), rebuilt head-first. Output is
+    /// correct for position-based diffing; keys are an optimization we skip.
+    fn emit_strip_keys(&self) -> Function {
+        // param list(0). locals: len(1),i(2):i32, arr(3):ref T_ARR, elem(4):eqref
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3)); // arr (for ArraySet)
+        f.instruction(&Instruction::LocalGet(2)); // i
+        list_elem(&mut f, 0, 2); // the (key, html) tuple
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR)); // tuple[1] = html
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // T_LIST{len, T_BACK{0, arr}}
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// reconcile_subs() : recompute subscriptions and re-register Time.every
     /// timers with the host (clear-all + recreate, matching the JS runtime).
     fn emit_reconcile_subs(&self) -> Function {
@@ -11960,6 +12028,34 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?; // node
                 f.instruction(&Instruction::Call(self.html_map_idx));
             }
+            // Html.Lazy.lazyN f a…: no memoization — just apply f to the args.
+            ("Html.Lazy", n) if n.starts_with("lazy") => {
+                self.emit_expr(&args[0], ctx, f)?; // f
+                for a in &args[1..] {
+                    self.emit_expr(a, ctx, f)?;
+                    f.instruction(&Instruction::Call(self.apply1_idx));
+                }
+            }
+            // Html.Keyed.node tag attrs keyed → VNODE[tag, attrs, strip_keys keyed].
+            ("Html.Keyed", "node") => {
+                f.instruction(&Instruction::I32Const(1)); // VNODE
+                self.emit_expr(&args[0], ctx, f)?; // tag
+                self.emit_expr(&args[1], ctx, f)?; // attrs
+                self.emit_expr(&args[2], ctx, f)?; // keyed children
+                f.instruction(&Instruction::Call(self.strip_keys_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html.Keyed", tag) => {
+                // Keyed.ul/ol attrs keyed → VNODE[<tag>, attrs, strip_keys keyed].
+                f.instruction(&Instruction::I32Const(1));
+                push_str_const(f, tag);
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.strip_keys_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             ("Html", tag) => {
                 // element helper: Html.<tag> attrs kids
                 f.instruction(&Instruction::I32Const(1));
@@ -11980,6 +12076,14 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(1)); // ASTYLE
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Common string attributes: Html.Attributes.<name> value → AATTR.
+            ("Html.Attributes", a) if html_attr_name(a).is_some() => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, html_attr_name(a).unwrap());
+                self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
