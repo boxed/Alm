@@ -785,6 +785,10 @@ struct Codegen<'a> {
     frame_idx: u32,
     box_int_idx: u32,
     unbox_int_idx: u32,
+    msort_idx: u32,
+    msort_key_idx: u32,
+    dict_sorted_build_idx: u32,
+    set_sorted_build_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -938,6 +942,10 @@ impl<'a> Codegen<'a> {
             frame_idx: 0,
             box_int_idx: 0,
             unbox_int_idx: 0,
+            msort_idx: 0,
+            msort_key_idx: 0,
+            dict_sorted_build_idx: 0,
+            set_sorted_build_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1116,6 +1124,10 @@ impl<'a> Codegen<'a> {
         self.frame_idx = next();
         self.box_int_idx = next();
         self.unbox_int_idx = next();
+        self.msort_idx = next();
+        self.msort_key_idx = next();
+        self.dict_sorted_build_idx = next();
+        self.set_sorted_build_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1177,7 +1189,8 @@ impl<'a> Codegen<'a> {
         let iff_v_ty = self.next_type + 22; // (i32,f64,f64) -> () (alm_frame)
         let i64_e_ty = self.next_type + 23; // (i64) -> eqref (box_int)
         let e_i64_ty = self.next_type + 24; // (eqref) -> i64 (unbox_int)
-        self.next_type += 25;
+        let msort_ty = self.next_type + 25; // (arr, buf, lo, hi) -> () (merge sort)
+        self.next_type += 26;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1315,6 +1328,10 @@ impl<'a> Codegen<'a> {
         let frame = self.emit_frame();
         let box_int = self.emit_box_int();
         let unbox_int = self.emit_unbox_int();
+        let msort = self.emit_msort_rec(false);
+        let msort_key = self.emit_msort_rec(true);
+        let dict_sorted_build = self.emit_sorted_build(true);
+        let set_sorted_build = self.emit_sorted_build(false);
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1390,6 +1407,10 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ValType::I32, ValType::F64, ValType::F64], vec![]); // alm_frame
         types.ty().function(vec![ValType::I64], vec![eqref()]); // box_int
         types.ty().function(vec![eqref()], vec![ValType::I64]); // unbox_int
+        types.ty().function(
+            vec![ref_null_to(T_ARR), ref_null_to(T_ARR), ValType::I32, ValType::I32],
+            vec![],
+        ); // msort_rec
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1530,6 +1551,10 @@ impl<'a> Codegen<'a> {
         funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
         funcs.function(i64_e_ty); // box_int : (i64) -> eqref
         funcs.function(e_i64_ty); // unbox_int : (eqref) -> i64
+        funcs.function(msort_ty); // msort (by element)
+        funcs.function(msort_ty); // msort_key (by pair[0])
+        funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
+        funcs.function(e_e_ty); // set_sorted_build : elems -> Set
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1679,6 +1704,10 @@ impl<'a> Codegen<'a> {
         code.function(&frame);
         code.function(&box_int);
         code.function(&unbox_int);
+        code.function(&msort);
+        code.function(&msort_key);
+        code.function(&dict_sorted_build);
+        code.function(&set_sorted_build);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -3707,19 +3736,42 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// list_sort(xs) : insertion sort using val_compare.
+    /// list_sort(xs) : O(n log n) merge sort using val_compare. Copies the
+    /// elements into a fresh contiguous backing, sorts, and re-wraps.
     fn emit_list_sort(&self) -> Function {
-        let mut f = Function::new([]);
-        list_is_empty(&mut f, 0);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        push_empty_list(&mut f);
-        f.instruction(&Instruction::Else);
-        // insert(head, sort(tail))
-        list_head(&mut f, 0);
-        list_tail(&mut f, 0);
-        f.instruction(&Instruction::Call(self.list_sort_idx));
-        f.instruction(&Instruction::Call(self.list_insert_idx));
-        f.instruction(&Instruction::End);
+        // param list(0). locals: n(1),start(2):i32; arr(3),buf(4),data(5):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (3, ref_to(T_ARR))]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // arr = fresh[n]; arr[0..n] <- data[start..start+n]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        // buf = fresh[n]; msort(arr, buf, 0, n)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.msort_idx));
+        // T_LIST{n, T_BACK{0, arr}}
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
@@ -9932,6 +9984,260 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// msort_rec(arr, buf, lo, hi) : stable recursive merge sort of arr[lo,hi)
+    /// using buf[lo,hi) as scratch, ordering by val_compare. `by_key` compares
+    /// element[0] (for Dict/Set pairs) instead of the element itself. O(n log n)
+    /// — replaces the old O(n²) insertion sort / fold-insert.
+    fn emit_msort_rec(&self, by_key: bool) -> Function {
+        // params arr(0),buf(1):ref null T_ARR, lo(2),hi(3):i32.
+        // locals mid(4),li(5),ri(6),di(7):i32
+        let mut f = Function::new([(4, ValType::I32)]);
+        let self_idx = if by_key { self.msort_key_idx } else { self.msort_idx };
+        // push arr[idx] (or arr[idx][0] when by_key) as eqref, for comparison
+        let operand = |f: &mut Function, idx_local: u32| {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::LocalGet(idx_local));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            if by_key {
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+        };
+        // if hi - lo <= 1: return
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // mid = (lo + hi) / 2
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32ShrS);
+        f.instruction(&Instruction::LocalSet(4));
+        // sort halves
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self_idx));
+        // merge into buf: li=lo, ri=mid, di=lo
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(7));
+        // set buf[di] = arr[src], then di++/src++
+        let take = |f: &mut Function, src_local: u32| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::LocalGet(7));
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::LocalGet(src_local));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::ArraySet(T_ARR));
+            bump(f, 7, 1);
+            bump(f, src_local, 1);
+        };
+        // main merge loop
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // if val_compare(arr[li], arr[ri]) <= 0: take li else take ri
+        operand(&mut f, 5);
+        operand(&mut f, 6);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        take(&mut f, 5);
+        f.instruction(&Instruction::Else);
+        take(&mut f, 6);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // drain left
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        take(&mut f, 5);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // drain right
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        take(&mut f, 6);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // copy buf[lo,hi) back into arr[lo,hi)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sorted_build(list) : build a Dict (by_key=true; `list` = (k,v) pairs) or
+    /// Set (elements) as a key-sorted vector in O(n log n) — merge sort then
+    /// dedup, keeping the LAST of each equal-key run (matches Elm fromList's
+    /// last-wins, since a stable sort preserves input order within a run).
+    /// Replaces the old O(n²) fold-insert.
+    fn emit_sorted_build(&self, by_key: bool) -> Function {
+        // param list(0). locals: n(1),i(2),oi(3),start(4):i32;
+        //   arr(5),buf(6),data(7),out(8):ref T_ARR
+        let mut f = Function::new([(4, ValType::I32), (4, ref_to(T_ARR))]);
+        let sort_idx = if by_key { self.msort_key_idx } else { self.msort_idx };
+        // push the compare-key of arr[i] (+1 for the next element)
+        let key = |f: &mut Function, plus1: bool| {
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::LocalGet(2));
+            if plus1 {
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::I32Add);
+            }
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            if by_key {
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+        };
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // empty input → empty result (an empty list's backing is null)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        // arr = fresh[n]; arr[0..n] <- data[start..start+n]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        // buf = fresh[n]; sort arr[0,n)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(sort_idx));
+        // dedup keep-last into out[0..oi)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // keep = (i+1 >= n) || key(i) != key(i+1)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Else);
+        key(&mut f, false);
+        key(&mut f, true);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // out[oi] = arr[i]; oi++
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Copy the oi kept elements into a tight backing (the vector invariant
+        // is head+len==cap; reuse buf local 6 for the final array).
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        // T_LIST{oi, T_BACK{0, final}}
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// alm_dom_event(slot, ptr, len) : fire a Browser.Events document listener —
     /// parse the event JSON at [ptr,len), run the stored decoder, and dispatch
     /// the message on success (a failed decode is silently ignored, as in Elm).
@@ -11435,8 +11741,7 @@ impl<'a> Codegen<'a> {
             }
             ("Dict", "fromList") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                push_empty_list(f);
-                f.instruction(&Instruction::Call(self.dict_from_list_idx));
+                f.instruction(&Instruction::Call(self.dict_sorted_build_idx));
             }
             ("Dict", "foldl") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -11517,8 +11822,7 @@ impl<'a> Codegen<'a> {
             ("Set", "toList") => self.emit_expr(&args[0], ctx, f)?,
             ("Set", "fromList") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                push_empty_list(f);
-                f.instruction(&Instruction::Call(self.set_from_list_idx));
+                f.instruction(&Instruction::Call(self.set_sorted_build_idx));
             }
             ("Set", "foldl") => {
                 self.emit_expr(&args[0], ctx, f)?;

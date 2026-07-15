@@ -1976,6 +1976,12 @@ fn bench_wasmgc_vs_js() {
         ("json encode 100k",
          "import Json.Encode as E\nmain : String\nmain = String.fromInt (String.length (E.encode 0 (E.list E.int (List.range 1 100000))))\n",
          "import Json.Encode as E\nmain : String\nmain = String.fromInt (String.length (E.encode 0 (E.list E.int (List.range 1 1))))\n"),
+        ("dict build+get 30k",
+         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 30000))))\n",
+         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 1))))\n"),
+        ("record update 500k",
+         "type alias R = { a : Int, b : Int }\nstep : Int -> R -> R\nstep i r = { r | a = r.a + i, b = r.b - i }\nmain : String\nmain = String.fromInt ((\\r -> r.a) (List.foldl step { a = 0, b = 0 } (List.range 1 500000)))\n",
+         "type alias R = { a : Int, b : Int }\nstep : Int -> R -> R\nstep i r = { r | a = r.a + i, b = r.b - i }\nmain : String\nmain = String.fromInt ((\\r -> r.a) (List.foldl step { a = 0, b = 0 } (List.range 1 1)))\n"),
     ];
     let dir = common::test_dir("alm-wasmgc", "bench");
     for (name, heavy, base) in workloads {
