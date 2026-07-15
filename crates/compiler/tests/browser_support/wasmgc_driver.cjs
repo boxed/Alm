@@ -15,6 +15,7 @@ function start(wasmPath, doc) {
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
   const reg = (n) => { nodes.push(n); return nodes.length - 1; };
   const outgoing = {}; // port name -> list of JSON strings (matches js_driver)
+  const parkedHttp = []; // in-flight HTTP requests: { reqId, url }
 
   const env = {
     dom_create_element: (t, tl) => reg(doc.createElement(str(t, tl))),
@@ -55,6 +56,7 @@ function start(wasmPath, doc) {
       (outgoing[name] = outgoing[name] || []).push(str(jp, jl));
     },
     host_set_title: (p, l) => { doc.title = str(p, l); },
+    host_http: (up, ul, reqId) => { parkedHttp.push({ reqId, url: str(up, ul) }); },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
@@ -70,7 +72,16 @@ function start(wasmPath, doc) {
     new Uint8Array(memory.buffer, 32768, jb.length).set(jb);
     instance.exports.alm_port_in(0, nb.length, 32768, jb.length);
   }
-  return { instance, nodes, outgoing, sendPort };
+  // Settle the oldest in-flight request. Body goes at offset 0 (the reserved
+  // inbound region); alm_http_response reads it synchronously.
+  function resolveHttp(status, body) {
+    const req = parkedHttp.shift();
+    if (!req) return;
+    const jb = new TextEncoder().encode(body || '');
+    new Uint8Array(memory.buffer, 0, jb.length).set(jb);
+    instance.exports.alm_http_response(req.reqId, status, 0, jb.length);
+  }
+  return { instance, nodes, outgoing, sendPort, resolveHttp };
 }
 
 module.exports = { start };

@@ -54,7 +54,8 @@ const DOM_REPLACE: u32 = 12; // (old,new) — replace old with new in its parent
 const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len,hid)
 const HOST_PORT_OUT: u32 = 14; // (nameptr,namelen,jsonptr,jsonlen) — outgoing port
 const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
-const N_IMPORTS: u32 = 16;
+const HOST_HTTP: u32 = 16; // (urlptr,urllen,reqId) — start an HTTP GET
+const N_IMPORTS: u32 = 17;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -68,6 +69,8 @@ const G_PREV: u32 = 9; // previously-rendered vdom (for diff/patch)
 const G_ROOT: u32 = 10; // mounted root DOM handle
 const G_KIND: u32 = 11; // program kind: 0 = sandbox, 1 = element, 2 = document
 const G_SUBS: u32 = 12; // subscriptions function (null for sandbox)
+const G_HTTP: u32 = 13; // in-flight HTTP expects, indexed by request id
+const G_NEXT_REQ: u32 = 14; // next HTTP request id
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -714,6 +717,7 @@ struct Codegen<'a> {
     port_in_idx: u32,
     sub_find_port_idx: u32,
     html_map_idx: u32,
+    http_response_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -856,6 +860,7 @@ impl<'a> Codegen<'a> {
             port_in_idx: 0,
             sub_find_port_idx: 0,
             html_map_idx: 0,
+            http_response_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1023,6 +1028,7 @@ impl<'a> Codegen<'a> {
         self.port_in_idx = next();
         self.sub_find_port_idx = next();
         self.html_map_idx = next();
+        self.http_response_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1203,6 +1209,7 @@ impl<'a> Codegen<'a> {
         let port_in = self.emit_port_in();
         let sub_find_port = self.emit_sub_find_port();
         let html_map = self.emit_html_map();
+        let http_response = self.emit_http_response();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1400,6 +1407,7 @@ impl<'a> Codegen<'a> {
         funcs.function(imp_i4_v); // alm_port_in : (i32,i32,i32,i32) -> ()
         funcs.function(ee_eqref_ty); // sub_find_port : (eqref,eqref) -> eqref
         funcs.function(ee_eqref_ty); // html_map : (eqref,eqref) -> eqref
+        funcs.function(imp_i4_v); // alm_http_response : (reqId,status,ptr,len) -> ()
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1538,6 +1546,7 @@ impl<'a> Codegen<'a> {
         code.function(&port_in);
         code.function(&sub_find_port);
         code.function(&html_map);
+        code.function(&http_response);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1620,6 +1629,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
         );
+        // 13=in-flight HTTP expects (ref null T_ARR), 14=next request id (i32).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1640,6 +1658,7 @@ impl<'a> Codegen<'a> {
             ("dom_remove_event_listener", imp_i4_v),
             ("host_port_out", imp_i4_v),
             ("host_set_title", imp_ii_v),
+            ("host_http", imp_i3_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -1651,6 +1670,7 @@ impl<'a> Codegen<'a> {
         exports.export("alm_browser_start", ExportKind::Func, alm_browser_start_idx);
         exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
         exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
+        exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
@@ -8755,6 +8775,30 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        // CMD_HTTP (3): [url, expect]. Register expect by request id, start GET.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::LocalSet(2)); // reqId
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_REQ));
+        // G_HTTP[reqId] = expect (cmd.arg1)
+        f.instruction(&Instruction::GlobalGet(G_HTTP));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_http(marshal(url=cmd.arg0), len, reqId)
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        self.dom_str(&mut f, 5);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(HOST_HTTP));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -9036,6 +9080,106 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// alm_http_response(reqId, status, ptr, len) : settle an in-flight request.
+    /// Look up the stored Expect, build a `Result Http.Error a` (Http.Error tags:
+    /// BadUrl=0, Timeout=1, NetworkError=2, BadStatus=3, BadBody=4), apply the
+    /// Expect's `toMsg`, and dispatch. Supports expectString (tag0) and
+    /// expectJson (tag1 [toMsg, decoder]). status 0 = network error.
+    fn emit_http_response(&self) -> Function {
+        // params reqId(0),status(1),ptr(2),len(3). locals: tag(4),is2xx(5):i32,
+        //   expect(6),toMsg(7),body(8),result(9):eqref
+        let mut f = Function::new([(2, ValType::I32), (4, eqref())]);
+        // expect = G_HTTP[reqId]
+        f.instruction(&Instruction::GlobalGet(G_HTTP));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        ctor_tag(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(4)); // expect kind
+        ctor_arg0(&mut f, 6);
+        f.instruction(&Instruction::LocalSet(7)); // toMsg
+        // body = str_from_mem(ptr, len)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        // is2xx = 200 <= status < 300
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(200));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(300));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::LocalSet(5));
+        // result:
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // 2xx: json vs string
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // expectJson: r = decodeString(decoder, body)
+        ctor_argn(&mut f, 6, 1); // decoder
+        f.instruction(&Instruction::LocalGet(8)); // body
+        f.instruction(&Instruction::Call(self.json_decstr_idx));
+        f.instruction(&Instruction::LocalSet(9));
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::I32Eqz); // Ok?
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(9)); // Ok val — already a Result
+        f.instruction(&Instruction::Else);
+        // Err (BadBody "")
+        f.instruction(&Instruction::I32Const(1)); // Err
+        f.instruction(&Instruction::I32Const(4)); // BadBody
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
+        // expectString: Ok body
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
+        // non-2xx: status 0 → NetworkError, else BadStatus status
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(1)); // Err
+        f.instruction(&Instruction::I32Const(2)); // NetworkError
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Err
+        f.instruction(&Instruction::I32Const(3)); // BadStatus
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(9)); // result
+        // msg = toMsg result ; dispatch
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// sub_find_port(sub, name) : return the `toMsg` of the SubPort in `sub`
     /// whose name equals `name`, or null if none. Sub value model: none=tag0,
     /// batch=tag1 [List Sub], SubPort=tag2 [name, toMsg]. Recurses into batches.
@@ -9225,6 +9369,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_HANDLERS));
+        // http = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_HTTP));
         Self::emit_reset_render(&mut f);
         // run initial cmd (element / document, i.e. G_KIND != 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
@@ -11181,6 +11329,38 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(2));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Http.get { url, expect } → CMD_HTTP tag3 [url, expect].
+            // Record fields sorted: expect=0, url=1.
+            ("Http", "get") => {
+                let r = ctx.bind("$httpcfg");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::LocalSet(r));
+                f.instruction(&Instruction::I32Const(3));
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Http.Expect: expectString tag0 [toMsg], expectJson tag1 [toMsg, decoder].
+            ("Http", "expectString") => {
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Http", "expectJson") => {
+                f.instruction(&Instruction::I32Const(1));
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                self.emit_expr(&args[1], ctx, f)?; // decoder
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Platform.Cmd.batch / Platform.Sub.batch → tag1 [List].
