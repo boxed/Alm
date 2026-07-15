@@ -34,14 +34,23 @@ pub fn generate(module: &can::Module) -> String {
 /// Generate a single JavaScript file from all the modules of a project,
 /// given in dependency order (dependencies first).
 pub fn generate_project(modules: &[can::Module]) -> String {
-    generate_project_typed(modules, HashMap::new())
+    generate_project_typed(modules, HashMap::new(), true)
+}
+
+/// Generate a bundle with dead-code elimination disabled — the whole runtime
+/// kernel is emitted verbatim. Used by tests that reach into kernel internals
+/// the app itself never references (e.g. `Elm.Kernel.HtmlAsJson`).
+pub fn generate_no_dce(module: &can::Module) -> String {
+    generate_project_typed(std::slice::from_ref(module), HashMap::new(), false)
 }
 
 /// Like `generate_project`, but with per-module expression types so comparison
-/// operators can inline to native JS operators on scalar comparables.
+/// operators can inline to native JS operators on scalar comparables. `dce`
+/// tree-shakes unreachable definitions out of the bundle (see `tree_shake`).
 pub fn generate_project_typed(
     modules: &[can::Module],
     mut node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    dce: bool,
 ) -> String {
     let mut gen = Generator {
         out: String::new(),
@@ -287,7 +296,145 @@ pub fn generate_project_typed(
     )
     .unwrap();
 
-    gen.out
+    if dce {
+        tree_shake(&gen.out)
+    } else {
+        gen.out
+    }
+}
+
+/// Dead-code elimination over the fully-assembled bundle.
+///
+/// Unlike elm, alm's standard library is a single hand-written kernel
+/// (`runtime.js`) that we would otherwise emit verbatim into every bundle —
+/// hundreds of stdlib functions the app never touches. This pass tree-shakes
+/// them out.
+///
+/// The bundle is a flat sequence of top-level *units*. Most units are a single
+/// definition beginning at column 0 with `var NAME` or `function NAME`, running
+/// until the next such line — bodies are always indented, and neither the
+/// hand-written runtime nor generated code has top-level IIFEs, multi-line
+/// template strings, or block comments that could hide a column-0
+/// `var`/`function`, so this split is exact.
+///
+/// The one multi-name unit is the cyclic-value force block emitted by
+/// `recursive_group`: a column-0 `try { var $M$x = $M$cyclic$x(); ... } catch`.
+/// Because `var` is function-scoped, those indented bindings are real top-level
+/// definitions, so the whole `try` block is one unit that *defines* every
+/// `var NAME` inside it and is kept if any of them is reachable.
+///
+/// We build a reference graph over units by scanning each unit's text for
+/// identifier tokens, then keep only units reachable from `Elm`, the program's
+/// single entry/export object. The effect runtime dispatches on Cmd/Sub
+/// *variant tags* inside `_Platform_initialize` (reached transitively from `Elm`
+/// via `_Platform_wrap`) and names every executor directly — there is no
+/// string-keyed manager registry — so a textual reference graph is a sound
+/// over-approximation: over-matching a name inside a comment or string only
+/// keeps extra code, it never drops something live. Set `ALM_NO_DCE=1` to emit
+/// the whole kernel.
+fn tree_shake(bundle: &str) -> String {
+    // The name bound by a column-0 `var NAME`/`function NAME`, if any.
+    fn def_name(line: &str) -> Option<&str> {
+        let rest = line
+            .strip_prefix("var ")
+            .or_else(|| line.strip_prefix("function "))?;
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(rest.len());
+        (end > 0).then(|| &rest[..end])
+    }
+
+    let lines: Vec<&str> = bundle.lines().collect();
+
+    // Unit starts: column-0 `var`/`function` defs, and cyclic-value `try` blocks.
+    let starts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| (def_name(l).is_some() || *l == "try {").then_some(i))
+        .collect();
+    if starts.is_empty() {
+        return bundle.to_string();
+    }
+    let span = |k: usize| (starts[k], starts.get(k + 1).copied().unwrap_or(lines.len()));
+
+    // The names each unit defines, and a name -> owning-unit map. A single-def
+    // unit binds one name; a `try` block binds every function-scoped `var NAME`
+    // inside it (found at any indentation).
+    let mut name_to_unit: HashMap<&str, usize> = HashMap::new();
+    for k in 0..starts.len() {
+        let (s, e) = span(k);
+        if let Some(n) = def_name(lines[s]) {
+            name_to_unit.insert(n, k);
+        } else {
+            for line in &lines[s..e] {
+                if let Some(n) = def_name(line.trim_start()) {
+                    name_to_unit.insert(n, k);
+                }
+            }
+        }
+    }
+
+    // Reference graph: which units each unit names in its body.
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); starts.len()];
+    for k in 0..starts.len() {
+        let (s, e) = span(k);
+        let mut token = String::new();
+        let flush = |token: &mut String, adj: &mut Vec<usize>| {
+            if !token.is_empty() {
+                if let Some(&t) = name_to_unit.get(token.as_str()) {
+                    if t != k {
+                        adj.push(t);
+                    }
+                }
+                token.clear();
+            }
+        };
+        for line in &lines[s..e] {
+            for c in line.chars() {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                    token.push(c);
+                } else {
+                    flush(&mut token, &mut adj[k]);
+                }
+            }
+            flush(&mut token, &mut adj[k]);
+        }
+    }
+
+    // Reachability from `Elm` — the object the bundle exports and the loader
+    // boots from (`Elm.Main.main.init(...)`).
+    let mut live = vec![false; starts.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    if let Some(&root) = name_to_unit.get("Elm") {
+        live[root] = true;
+        stack.push(root);
+    }
+    while let Some(k) = stack.pop() {
+        for &t in &adj[k] {
+            if !live[t] {
+                live[t] = true;
+                stack.push(t);
+            }
+        }
+    }
+
+    // Re-emit prologue (before the first unit) + live units, in source order.
+    let mut out = String::with_capacity(bundle.len());
+    for line in &lines[..starts[0]] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    for k in 0..starts.len() {
+        if !live[k] {
+            continue;
+        }
+        let (s, e) = span(k);
+        for line in &lines[s..e] {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn mangle_module(name: &Name) -> String {

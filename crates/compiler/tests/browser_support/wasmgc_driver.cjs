@@ -14,6 +14,7 @@ function start(wasmPath, doc) {
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
   const reg = (n) => { nodes.push(n); return nodes.length - 1; };
+  const outgoing = {}; // port name -> list of JSON strings (matches js_driver)
 
   const env = {
     dom_create_element: (t, tl) => reg(doc.createElement(str(t, tl))),
@@ -42,12 +43,16 @@ function start(wasmPath, doc) {
       if (old === mountedRoot) mountedRoot = nodes[nw];
     },
     dom_remove_event_listener: () => {},
+    host_port_out: (np, nl, jp, jl) => {
+      const name = str(np, nl);
+      (outgoing[name] = outgoing[name] || []).push(str(jp, jl));
+    },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
   memory = instance.exports.memory;
   instance.exports.alm_browser_start();
-  return { instance, nodes };
+  return { instance, nodes, outgoing };
 }
 
 module.exports = { start };

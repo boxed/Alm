@@ -86,9 +86,13 @@ pub struct CheckedProject {
 
 pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    // Tree-shake by default; `ALM_NO_DCE=1` emits the whole runtime kernel as a
+    // field kill-switch should DCE ever drop something an app needs.
+    let dce = std::env::var_os("ALM_NO_DCE").is_none();
     Ok(generate::generate_project_typed(
         &checked.modules,
         checked.node_types,
+        dce,
     ))
 }
 
@@ -218,7 +222,19 @@ pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<Bui
             message.clone(),
         )]);
     }
-    generate::wasmgc::build(&program, output).map_err(|message| {
+    // Ports: name -> outgoing? (matches compile_project_typed).
+    let mut ports: HashMap<String, bool> = HashMap::new();
+    for module in &checked.modules {
+        for port in &module.ports {
+            let outgoing = matches!(
+                &port.tipe,
+                can::Type::Lambda(_, r)
+                    if matches!(&**r, can::Type::Type(_, n, _) if n.as_str() == "Cmd")
+            );
+            ports.insert(port.name.to_string(), outgoing);
+        }
+    }
+    generate::wasmgc::build(&program, output, &ports).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

@@ -20,6 +20,18 @@ use reporting::Report;
 
 /// Compile one Elm module to JavaScript, or produce friendly error reports.
 pub fn compile(source: &str) -> Result<String, Vec<Report>> {
+    Ok(generate::generate(&check(source)?))
+}
+
+/// Like [`compile`], but without dead-code elimination — the whole runtime
+/// kernel is emitted. Only for tests that reach into kernel internals the app
+/// itself never references.
+pub fn compile_no_dce(source: &str) -> Result<String, Vec<Report>> {
+    Ok(generate::generate_no_dce(&check(source)?))
+}
+
+/// Parse, canonicalize, type-check and nitpick a single module.
+fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
     let module = parse::parse_module(source).map_err(|e| {
         vec![Report {
             title: "SYNTAX PROBLEM".to_string(),
@@ -62,5 +74,5 @@ pub fn compile(source: &str) -> Result<String, Vec<Report>> {
             .collect::<Vec<_>>()
     })?;
 
-    Ok(generate::generate(&canonical))
+    Ok(canonical)
 }

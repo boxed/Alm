@@ -1212,6 +1212,66 @@ fn sandbox_click_counter() {
 }
 
 #[test]
+fn element_outgoing_port() {
+    // Browser.element whose update returns a Cmd that sends an outgoing port.
+    // Assert the WasmGC backend produces the same outgoing JSON as the JS one,
+    // both at init and after a click.
+    let dir = common::test_dir("alm-wasmgc", "element_port");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "port module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\
+         import Json.Encode as E\n\n\
+         port out : E.Value -> Cmd msg\n\n\
+         type Msg = Inc\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( 0, Cmd.none )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update _ n = ( n + 1, out (E.int (n + 1)) )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ button [ onClick Inc ] [ text \"+\" ], div [] [ text (String.fromInt n) ] ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m4.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               const b=findBtn(doc.body);if(b)dispatchEvent(b,'click',{{}});\
+               return (r.outgoing.out||[]).join(',');}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "outgoing port stream disagrees");
+    assert_eq!(parts[0], "1", "expected click to send out (E.int 1)");
+}
+
+#[test]
 fn sandbox_diff_preserves_identity() {
     // After a click that only changes a text node, the diff/patch must keep the
     // unchanged <button> DOM node (a full rebuild would replace it).
