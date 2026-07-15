@@ -638,6 +638,10 @@ struct Codegen<'a> {
     json_parse_idx: u32,
     json_run_idx: u32,
     json_decstr_idx: u32,
+    html_esc_text_idx: u32,
+    html_esc_attr_idx: u32,
+    serialize_html_idx: u32,
+    view_html_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -764,6 +768,10 @@ impl<'a> Codegen<'a> {
             json_parse_idx: 0,
             json_run_idx: 0,
             json_decstr_idx: 0,
+            html_esc_text_idx: 0,
+            html_esc_attr_idx: 0,
+            serialize_html_idx: 0,
+            view_html_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -914,8 +922,13 @@ impl<'a> Codegen<'a> {
         self.json_parse_idx = next();
         self.json_run_idx = next();
         self.json_decstr_idx = next();
+        self.html_esc_text_idx = next();
+        self.html_esc_attr_idx = next();
+        self.serialize_html_idx = next();
+        self.view_html_idx = next();
         let main_int_idx = next();
         let render_idx = next();
+        let render_html_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
@@ -1062,6 +1075,11 @@ impl<'a> Codegen<'a> {
         let json_parse = self.emit_json_parse();
         let json_run = self.emit_json_run();
         let json_decstr = self.emit_json_decstr();
+        let html_esc_text = self.emit_html_escape(false);
+        let html_esc_attr = self.emit_html_escape(true);
+        let serialize_html = self.emit_serialize_html();
+        let view_html = self.emit_view_html(main_idx);
+        let render_html = self.emit_render(self.view_html_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -1221,8 +1239,13 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // json_parse : String -> Result
         funcs.function(ft2); // json_run : (decoder, value) -> Result
         funcs.function(ft2); // json_decstr : (decoder, string) -> Result
+        funcs.function(ft1); // html_esc_text
+        funcs.function(ft1); // html_esc_attr
+        funcs.function(ft1); // serialize_html
+        funcs.function(json_ret_ty); // view_html : () -> eqref
         funcs.function(main_int_ty);
-        funcs.function(render_ty);
+        funcs.function(render_ty); // render
+        funcs.function(render_ty); // render_html
         let lifted_types: Vec<u32> =
             self.lifted.iter().map(|(a, _)| self.fn_types[a]).collect();
         for &t in &lifted_types {
@@ -1341,8 +1364,13 @@ impl<'a> Codegen<'a> {
         code.function(&json_parse);
         code.function(&json_run);
         code.function(&json_decstr);
+        code.function(&html_esc_text);
+        code.function(&html_esc_attr);
+        code.function(&serialize_html);
+        code.function(&view_html);
         code.function(&mi);
         code.function(&render);
+        code.function(&render_html);
         for (_, body) in &self.lifted {
             code.function(body);
         }
@@ -1385,6 +1413,7 @@ impl<'a> Codegen<'a> {
         let mut exports = ExportSection::new();
         exports.export("main_int", ExportKind::Func, main_int_idx);
         exports.export("render", ExportKind::Func, render_idx);
+        exports.export("render_html", ExportKind::Func, render_html_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
@@ -7847,6 +7876,221 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Html static render: vdom is a T_CTOR (VTEXT tag0 [str]; VNODE tag1
+    //      [tagName, attrs, kids]); attrs are AATTR tag0 [k,v] / ASTYLE tag1
+    //      [k,v]. render_html serializes to the exact HTML the DOM stub emits.
+
+    /// html_escape(s) : escape text (`&<>`) or an attribute value (`&"<`).
+    fn emit_html_escape(&self, attr: bool) -> Function {
+        // param s(0). locals: sstr(1):str, len(2),i(3),c(4):i32, out(5):eqref
+        let mut f = Function::new([(1, ref_to(T_STR)), (3, ValType::I32), (1, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        // escapes: '&' always; text also '<'/'>'; attr also '"'/'<'
+        let escs: &[(i32, &str)] = if attr {
+            &[(38, "&amp;"), (34, "&quot;"), (60, "&lt;")]
+        } else {
+            &[(38, "&amp;"), (60, "&lt;"), (62, "&gt;")]
+        };
+        for (code, rep) in escs {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Const(*code));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Result(eqref())));
+            push_str_const(&mut f, rep);
+            f.instruction(&Instruction::Else);
+        }
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_STR, array_size: 1 });
+        for _ in escs {
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// serialize_html(node) : the HTML string for a vdom node.
+    fn emit_serialize_html(&self) -> Function {
+        // param node(0). locals: tag(1),len(2),i(3):i32,
+        //   out(4),styleAcc(5),attrsAcc(6),attr(7),sub(8),tagName(9):eqref
+        let mut f = Function::new([(3, ValType::I32), (6, eqref())]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // VTEXT (tag 0)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Call(self.html_esc_text_idx));
+        f.instruction(&Instruction::Else);
+        // VNODE (tag 1): tagName=arg0, attrs=arg1, kids=arg2
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(9)); // tagName
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::LocalSet(6)); // attrsAcc
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::LocalSet(5)); // styleAcc
+        // iterate attrs
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(8)); // sub = attrs
+        list_len(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 8, 3);
+        f.instruction(&Instruction::LocalSet(7)); // attr
+        ctor_tag(&mut f, 7);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // AATTR: attrsAcc ++= " " ++ key ++ "=\"" ++ escAttr(val) ++ "\""
+        f.instruction(&Instruction::LocalGet(6));
+        push_str_const(&mut f, " ");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_arg0(&mut f, 7);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, "=\"");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_argn(&mut f, 7, 1);
+        f.instruction(&Instruction::Call(self.html_esc_attr_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, "\"");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Else);
+        // ASTYLE: styleAcc ++= key ++ ":" ++ val ++ ";"
+        f.instruction(&Instruction::LocalGet(5));
+        ctor_arg0(&mut f, 7);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, ":");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_argn(&mut f, 7, 1);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, ";");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // if styleAcc non-empty: attrsAcc ++= " style=\"" ++ escAttr(styleAcc) ++ "\""
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        push_str_const(&mut f, " style=\"");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.html_esc_attr_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, "\"");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        // out = "<" ++ tagName ++ attrsAcc ++ ">"
+        push_str_const(&mut f, "<");
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, ">");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(4)); // out
+        // kids
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalSet(8)); // sub = kids
+        list_len(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        list_elem(&mut f, 8, 3);
+        f.instruction(&Instruction::Call(self.serialize_html_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // out ++= "</" ++ tagName ++ ">"
+        f.instruction(&Instruction::LocalGet(4));
+        push_str_const(&mut f, "</");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, ">");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// view_html() : run the Browser.sandbox program's `view` on its initial
+    /// model and serialize the resulting Html. Program = T_CTOR tag0 [record];
+    /// record fields (sorted) are init(0), update(1), view(2).
+    fn emit_view_html(&self, main_idx: u32) -> Function {
+        let mut f = Function::new([(1, eqref())]); // rec(0)
+        // rec = main().args[0]  (program = T_CTOR tag0 [record])
+        f.instruction(&Instruction::Call(main_idx));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(0));
+        // view (rec[2]) applied to model (rec[0]) → Html → serialize
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.serialize_html_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -9657,8 +9901,58 @@ impl<'a> Codegen<'a> {
             }
             ("List", "isEmpty") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::RefIsNull);
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I32Eqz);
                 f.instruction(&Instruction::RefI31);
+            }
+            // Html static vdom (VTEXT tag0 [str]; VNODE tag1 [tag, attrs, kids]).
+            ("Html", "text") => {
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html", "node") => {
+                f.instruction(&Instruction::I32Const(1));
+                self.emit_expr(&args[0], ctx, f)?; // tag name
+                self.emit_expr(&args[1], ctx, f)?; // attrs
+                self.emit_expr(&args[2], ctx, f)?; // kids
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html", "map") => {
+                return Err("wasmgc: Html.map not yet supported".into());
+            }
+            ("Html", tag) => {
+                // element helper: Html.<tag> attrs kids
+                f.instruction(&Instruction::I32Const(1));
+                push_str_const(f, tag);
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html.Attributes", "attribute") => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Html.Attributes", "style") => {
+                f.instruction(&Instruction::I32Const(1)); // ASTYLE
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Browser", "sandbox") => {
+                // Program = T_CTOR tag0 [record].
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
         }

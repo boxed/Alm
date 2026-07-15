@@ -1083,3 +1083,70 @@ fn json_decode_combinators() {
             (case D.decodeString (D.maybe (D.field \"x\" D.int)) \"{\\\"y\\\":1}\" of\n        Ok m -> showMaybe m\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.oneOf [ D.int, D.succeed 0 ]) \"\\\"hi\\\"\" of\n        Ok n -> String.fromInt n\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.index 1 D.string) \"[\\\"a\\\",\\\"b\\\"]\" of\n        Ok s -> s\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.at [ \"a\", \"b\" ] D.int) \"{\\\"a\\\":{\\\"b\\\":7}}\" of\n        Ok n -> String.fromInt n\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.nullable D.int) \"null\" of\n        Ok m -> showMaybe m\n\n        Err _ -> \"ERR\"\n    )\n",
     );
 }
+
+/// Browser.sandbox static-render parity: the WasmGC `render_html` export vs the
+/// JS backend rendering the same program into the shared DOM stub.
+fn assert_sandbox_html(test_name: &str, source: &str) {
+    let dir = common::test_dir("alm-wasmgc", test_name);
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|errors| {
+        panic!("check failed:\n{}", errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+
+    // JS oracle: render the program into the DOM stub, serialize the body.
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let oracle = dir.join("oracle.cjs");
+    std::fs::write(
+        &oracle,
+        format!(
+            "const {{Document,serializeBody}}=require({sup:?}+'/dom_stub.cjs');\
+             const {{start}}=require({sup:?}+'/js_driver.cjs');\
+             const doc=new Document();start({b:?},doc);\
+             process.stdout.write(serializeBody(doc));",
+            sup = support, b = bundle.display()
+        ),
+    )
+    .expect("oracle");
+    let js = run(Command::new("node").arg(&oracle));
+
+    // WasmGC: call render_html and read the string out of linear memory.
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let runner = dir.join("run_html.cjs");
+    std::fs::write(
+        &runner,
+        "const fs=require('fs');const b=fs.readFileSync(process.argv[2]);\
+         const i=new WebAssembly.Instance(new WebAssembly.Module(b),{});\
+         const n=i.exports.render_html();\
+         process.stdout.write(Buffer.from(new Uint8Array(i.exports.memory.buffer,0,n)).toString('utf8'));",
+    )
+    .expect("runner");
+    let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
+
+    assert_eq!(js, wasm_out, "JS and WasmGC sandbox render disagree");
+}
+
+#[test]
+fn sandbox_static_render() {
+    assert_sandbox_html(
+        "sandbox",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, span, text)\n\
+         import Html.Attributes exposing (attribute, style)\n\n\
+         type Msg = Noop\n\n\
+         update : Msg -> Int -> Int\n\
+         update _ m = m\n\n\
+         view : Int -> Html.Html Msg\n\
+         view _ =\n    \
+            div [ attribute \"id\" \"root\" ]\n        [ span [] [ text \"hi <b> & x\" ]\n        , div [ style \"color\" \"red\", attribute \"data-n\" \"1\" ] [ text \"y\" ]\n        , text \"tail\"\n        ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    );
+}
