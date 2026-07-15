@@ -244,6 +244,17 @@ const G_NEXT_DOM: u32 = 18; // next document-sub slot (reset each reconcile)
 const G_URLCHG: u32 = 19; // Browser.application onUrlChange handler (null otherwise)
 const G_FRAMES: u32 = 20; // active onAnimationFrame subs, indexed by slot
 const G_NEXT_FRAME: u32 = 21; // next frame-sub slot (reset each reconcile)
+const G_SORT_CMP: u32 = 22; // List.sortWith comparator (set for the sort's duration)
+
+/// How the merge sort orders elements. `Value`: `val_compare` on the element.
+/// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
+/// user comparator in `G_SORT_CMP`, reading its `Order` result (LT=0/EQ=1/GT=2).
+#[derive(Clone, Copy, PartialEq)]
+enum SortMode {
+    Value,
+    ByKey,
+    Cmp,
+}
 // Int representation: values in [-2^30, 2^30) live UNBOXED as i31ref (no heap
 // allocation); larger values box as T_INT. `box_int`/`unbox_int` bridge the two.
 const I31_MIN: i64 = -(1 << 30);
@@ -887,6 +898,8 @@ struct Codegen<'a> {
     str_pad_right_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
+    list_map4_idx: u32,
+    list_map5_idx: u32,
     list_partition_idx: u32,
     list_unzip_idx: u32,
     dict_get_idx: u32,
@@ -973,6 +986,8 @@ struct Codegen<'a> {
     unbox_int_idx: u32,
     msort_idx: u32,
     msort_key_idx: u32,
+    msort_cmp_idx: u32,
+    list_sort_with_idx: u32,
     dict_sorted_build_idx: u32,
     set_sorted_build_idx: u32,
     alm_event_idx: u32,
@@ -1068,6 +1083,8 @@ impl<'a> Codegen<'a> {
             str_pad_right_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
+            list_map4_idx: 0,
+            list_map5_idx: 0,
             list_partition_idx: 0,
             list_unzip_idx: 0,
             dict_get_idx: 0,
@@ -1154,6 +1171,8 @@ impl<'a> Codegen<'a> {
             unbox_int_idx: 0,
             msort_idx: 0,
             msort_key_idx: 0,
+            msort_cmp_idx: 0,
+            list_sort_with_idx: 0,
             dict_sorted_build_idx: 0,
             set_sorted_build_idx: 0,
             alm_event_idx: 0,
@@ -1274,6 +1293,8 @@ impl<'a> Codegen<'a> {
         self.str_pad_right_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
+        self.list_map4_idx = next();
+        self.list_map5_idx = next();
         self.list_partition_idx = next();
         self.list_unzip_idx = next();
         self.dict_get_idx = next();
@@ -1360,6 +1381,8 @@ impl<'a> Codegen<'a> {
         self.unbox_int_idx = next();
         self.msort_idx = next();
         self.msort_key_idx = next();
+        self.msort_cmp_idx = next();
+        self.list_sort_with_idx = next();
         self.dict_sorted_build_idx = next();
         self.set_sorted_build_idx = next();
         self.alm_event_idx = next();
@@ -1397,6 +1420,8 @@ impl<'a> Codegen<'a> {
         let ft2 = self.fn_type(2); // str_append, apply1, list_map
         let ft3 = self.fn_type(3); // list_foldl
         let ft4 = self.fn_type(4); // list_map3
+        let ft5 = self.fn_type(5); // list_map4
+        let ft6 = self.fn_type(6); // list_map5
         // Ensure a fn-type exists for every arity the apply-dispatcher handles.
         for a in 1..=MAX_ARITY {
             self.fn_type(a);
@@ -1509,6 +1534,8 @@ impl<'a> Codegen<'a> {
         let str_pad_right = self.emit_str_pad(false);
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
+        let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
+        let list_map5 = self.emit_list_mapn(5, self.list_map5_idx);
         let list_partition = self.emit_list_partition();
         let list_unzip = self.emit_list_unzip();
         let dict_get = self.emit_dict_get();
@@ -1594,8 +1621,10 @@ impl<'a> Codegen<'a> {
         let frame = self.emit_frame();
         let box_int = self.emit_box_int();
         let unbox_int = self.emit_unbox_int();
-        let msort = self.emit_msort_rec(false);
-        let msort_key = self.emit_msort_rec(true);
+        let msort = self.emit_msort_rec(SortMode::Value);
+        let msort_key = self.emit_msort_rec(SortMode::ByKey);
+        let msort_cmp = self.emit_msort_rec(SortMode::Cmp);
+        let list_sort_with = self.emit_list_sort_with();
         let dict_sorted_build = self.emit_sorted_build(true);
         let set_sorted_build = self.emit_sorted_build(false);
         let alm_event = self.emit_alm_event();
@@ -1772,6 +1801,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // str_pad_right
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
+        funcs.function(ft5); // list_map4
+        funcs.function(ft6); // list_map5
         funcs.function(ft2); // list_partition
         funcs.function(ft1); // list_unzip
         funcs.function(ft2); // dict_get
@@ -1858,6 +1889,8 @@ impl<'a> Codegen<'a> {
         funcs.function(e_i64_ty); // unbox_int : (eqref) -> i64
         funcs.function(msort_ty); // msort (by element)
         funcs.function(msort_ty); // msort_key (by pair[0])
+        funcs.function(msort_ty); // msort_cmp (by user comparator)
+        funcs.function(ft2); // list_sort_with (cmp, list)
         funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
         funcs.function(e_e_ty); // set_sorted_build : elems -> Set
         funcs.function(alm_event_ty); // alm_event
@@ -1949,6 +1982,8 @@ impl<'a> Codegen<'a> {
         code.function(&str_pad_right);
         code.function(&list_intersperse);
         code.function(&list_map3);
+        code.function(&list_map4);
+        code.function(&list_map5);
         code.function(&list_partition);
         code.function(&list_unzip);
         code.function(&dict_get);
@@ -2035,6 +2070,8 @@ impl<'a> Codegen<'a> {
         code.function(&unbox_int);
         code.function(&msort);
         code.function(&msort_key);
+        code.function(&msort_cmp);
+        code.function(&list_sort_with);
         code.function(&dict_sorted_build);
         code.function(&set_sorted_build);
         code.function(&alm_event);
@@ -2159,6 +2196,11 @@ impl<'a> Codegen<'a> {
         globals.global(
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
+        );
+        // 22=List.sortWith comparator (eqref, null except during a sortWith).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
         );
 
         // DOM host imports (function indices 0..N_IMPORTS).
@@ -4197,6 +4239,56 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// list_sort_with(cmp, list) : stable merge sort using the user comparator
+    /// `cmp : a -> a -> Order`. The comparator is stashed in G_SORT_CMP for the
+    /// duration (saved/restored so a comparator that itself sorts still works).
+    fn emit_list_sort_with(&self) -> Function {
+        // params cmp(0), list(1). locals: n(2),start(3):i32;
+        //   arr(4),buf(5),data(6):ref T_ARR; oldcmp(7):eqref
+        let mut f = Function::new([(2, ValType::I32), (3, ref_to(T_ARR)), (1, eqref())]);
+        // save + install the comparator
+        f.instruction(&Instruction::GlobalGet(G_SORT_CMP));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::GlobalSet(G_SORT_CMP));
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(6));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        // arr = fresh[n]; arr[0..n] <- data[start..start+n]
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        // buf = fresh[n]; msort_cmp(arr, buf, 0, n)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.msort_cmp_idx));
+        // restore the previous comparator
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::GlobalSet(G_SORT_CMP));
+        // T_LIST{n, T_BACK{0, arr}}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// list_all/any(pred, xs) : whether `pred` holds for all / any elements.
     fn emit_list_all_any(&self, all: bool) -> Function {
         // params pred(0), xs(1). locals: len(2), start(3), i(4):i32, data(5):ref T_ARR
@@ -5984,6 +6076,37 @@ impl<'a> Codegen<'a> {
         list_tail(&mut f, 2);
         list_tail(&mut f, 3);
         f.instruction(&Instruction::Call(self.list_map3_idx));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_mapN(f, l1..ln) : zip-map over n lists, stopping at the shortest
+    /// (recursive cons; `self_idx` is this function's own index). Params are
+    /// f(0) then the n lists (locals 1..=n).
+    fn emit_list_mapn(&self, n: u32, self_idx: u32) -> Function {
+        let mut f = Function::new([]);
+        // empty if ANY input is empty
+        list_is_empty(&mut f, 1);
+        for i in 2..=n {
+            list_is_empty(&mut f, i);
+            f.instruction(&Instruction::I32Or);
+        }
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Else);
+        // cons(f h1 .. hn, mapN(f, t1 .. tn))
+        f.instruction(&Instruction::LocalGet(0));
+        for i in 1..=n {
+            list_head(&mut f, i);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        f.instruction(&Instruction::LocalGet(0));
+        for i in 1..=n {
+            list_tail(&mut f, i);
+        }
+        f.instruction(&Instruction::Call(self_idx));
         f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -11638,18 +11761,22 @@ impl<'a> Codegen<'a> {
     /// using buf[lo,hi) as scratch, ordering by val_compare. `by_key` compares
     /// element[0] (for Dict/Set pairs) instead of the element itself. O(n log n)
     /// — replaces the old O(n²) insertion sort / fold-insert.
-    fn emit_msort_rec(&self, by_key: bool) -> Function {
+    fn emit_msort_rec(&self, mode: SortMode) -> Function {
         // params arr(0),buf(1):ref null T_ARR, lo(2),hi(3):i32.
         // locals mid(4),li(5),ri(6),di(7):i32
         let mut f = Function::new([(4, ValType::I32)]);
-        let self_idx = if by_key { self.msort_key_idx } else { self.msort_idx };
+        let self_idx = match mode {
+            SortMode::Value => self.msort_idx,
+            SortMode::ByKey => self.msort_key_idx,
+            SortMode::Cmp => self.msort_cmp_idx,
+        };
         // push arr[idx] (or arr[idx][0] when by_key) as eqref, for comparison
         let operand = |f: &mut Function, idx_local: u32| {
             f.instruction(&Instruction::LocalGet(0));
             f.instruction(&cast_to(T_ARR));
             f.instruction(&Instruction::LocalGet(idx_local));
             f.instruction(&Instruction::ArrayGet(T_ARR));
-            if by_key {
+            if mode == SortMode::ByKey {
                 f.instruction(&cast_to(T_ARR));
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::ArrayGet(T_ARR));
@@ -11713,12 +11840,25 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        // if val_compare(arr[li], arr[ri]) <= 0: take li else take ri
-        operand(&mut f, 5);
-        operand(&mut f, 6);
-        f.instruction(&Instruction::Call(self.val_compare_idx));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::I32LeS);
+        // take_left iff arr[li] should not come after arr[ri] (stable on ties).
+        if mode == SortMode::Cmp {
+            // cmp li ri == LT|EQ  (Order tag < GT=2)
+            f.instruction(&Instruction::GlobalGet(G_SORT_CMP));
+            operand(&mut f, 5);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+            operand(&mut f, 6);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+            f.instruction(&cast_to(T_CTOR));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+            f.instruction(&Instruction::I32Const(2));
+            f.instruction(&Instruction::I32LtS);
+        } else {
+            operand(&mut f, 5);
+            operand(&mut f, 6);
+            f.instruction(&Instruction::Call(self.val_compare_idx));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32LeS);
+        }
         f.instruction(&Instruction::If(BlockType::Empty));
         take(&mut f, 5);
         f.instruction(&Instruction::Else);
@@ -14044,6 +14184,11 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_sortby_idx));
             }
+            ("List", "sortWith") => {
+                self.emit_expr(&args[0], ctx, f)?; // comparator
+                self.emit_expr(&args[1], ctx, f)?; // list
+                f.instruction(&Instruction::Call(self.list_sort_with_idx));
+            }
             ("List", "concatMap") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
@@ -14109,6 +14254,13 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[2], ctx, f)?;
                 self.emit_expr(&args[3], ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_map3_idx));
+            }
+            ("List", "map4") | ("List", "map5") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                let idx = if name == "map4" { self.list_map4_idx } else { self.list_map5_idx };
+                f.instruction(&Instruction::Call(idx));
             }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
                 let op = match name {

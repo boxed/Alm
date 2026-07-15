@@ -287,6 +287,37 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn list_map4_map5() {
+    assert_str_prog(
+        "list_map4_map5",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       four = List.map4 (\\a b c d -> a + b + c + d) [1,2,3] [10,20,30] [100,200] [1000,2000,3000]\n\
+         \x20       five = List.map5 (\\a b c d e -> a * b + c - d + e) [2] [3] [4] [5] [6]\n\
+         \x20   in\n\
+         \x20   String.join \";\" (List.map String.fromInt (four ++ five))\n",
+    );
+}
+
+#[test]
+fn list_sort_with() {
+    assert_str_prog(
+        "list_sort_with",
+        "module Test exposing (main)\n\n\
+         descend : Int -> Int -> Order\n\
+         descend a b = compare b a\n\n\
+         main : String\n\
+         main =\n\
+         \x20   [ 3, 1, 4, 1, 5, 9, 2, 6 ]\n\
+         \x20       |> List.sortWith descend\n\
+         \x20       |> List.map String.fromInt\n\
+         \x20       |> String.join \",\"\n",
+    );
+}
+
+#[test]
 fn string_from_int_negative() {
     assert_str_prog(
         "str_from_int_neg",
