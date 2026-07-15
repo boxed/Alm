@@ -2495,7 +2495,7 @@ impl<'a> Codegen<'a> {
             return Ok(());
         }
         // Nullary empty collections.
-        if (module == "Dict" || module == "Set") && name == "empty" {
+        if (module == "Dict" || module == "Set" || module == "Array") && name == "empty" {
             push_empty_list(f);
             return Ok(());
         }

@@ -1994,6 +1994,17 @@ fn bench_wasmgc_vs_js() {
         ("dict build+get 30k",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 30000))))\n",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 1))))\n"),
+        // KNOWN O(n²): incremental Dict.insert / Array.push each copy the whole
+        // vector (see memory) — small n here just to track the ratio, not hang.
+        ("dict incremental 5k [O(n²)]",
+         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 5000)))\n",
+         "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 1)))\n"),
+        ("array push 5k [O(n²)]",
+         "import Array\nmain : String\nmain = String.fromInt (Array.length (List.foldl Array.push Array.empty (List.range 1 5000)))\n",
+         "import Array\nmain : String\nmain = String.fromInt (Array.length (List.foldl Array.push Array.empty (List.range 1 1)))\n"),
+        ("string split 100k",
+         "main : String\nmain = String.fromInt (List.length (String.split \",\" (String.repeat 100000 \"a,\")))\n",
+         "main : String\nmain = String.fromInt (List.length (String.split \",\" (String.repeat 1 \"a,\")))\n"),
         ("record update 500k",
          "type alias R = { a : Int, b : Int }\nstep : Int -> R -> R\nstep i r = { r | a = r.a + i, b = r.b - i }\nmain : String\nmain = String.fromInt ((\\r -> r.a) (List.foldl step { a = 0, b = 0 } (List.range 1 500000)))\n",
          "type alias R = { a : Int, b : Int }\nstep : Int -> R -> R\nstep i r = { r | a = r.a + i, b = r.b - i }\nmain : String\nmain = String.fromInt ((\\r -> r.a) (List.foldl step { a = 0, b = 0 } (List.range 1 1)))\n"),
