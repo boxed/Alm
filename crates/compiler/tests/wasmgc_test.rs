@@ -1362,6 +1362,33 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
 }
 
 #[test]
+fn svg_elements() {
+    // SVG elements/attributes render like HTML (namespace doesn't affect the
+    // serialized string). Also exercises a Unit case pattern.
+    assert_sandbox_html(
+        "svg_elements",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div)\n\
+         import Svg\n\
+         import Svg.Attributes as SvgAttr\n\n\
+         classify : () -> String\n\
+         classify u =\n\
+         \x20   case u of\n\
+         \x20       () -> \"unit\"\n\n\
+         view : Int -> Html.Html Never\n\
+         view _ =\n\
+         \x20   div []\n\
+         \x20       [ Svg.svg [ SvgAttr.viewBox \"0 0 10 10\", SvgAttr.width \"10\" ]\n\
+         \x20           [ Svg.circle [ SvgAttr.cx \"5\", SvgAttr.cy \"5\", SvgAttr.r \"4\", SvgAttr.fill \"red\" ] [] ]\n\
+         \x20       , Html.text (classify ())\n\
+         \x20       ]\n\n\
+         main : Program () Int Never\n\
+         main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+#[test]
 fn attributes_property() {
     assert_sandbox_html(
         "attrs_property",

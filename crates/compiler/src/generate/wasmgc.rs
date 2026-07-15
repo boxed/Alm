@@ -16778,6 +16778,24 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
+            // SVG elements render like HTML for serialization (the namespace
+            // doesn't affect the serialized string); Svg.<tag> attrs kids → VNODE.
+            ("Svg", tag) if args.len() == 2 => {
+                f.instruction(&Instruction::I32Const(1));
+                push_str_const(f, tag);
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Svg.Attributes.<name> value → AATTR [name, value] (all string-valued).
+            ("Svg.Attributes", a) if args.len() == 1 => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, a.strip_suffix('_').unwrap_or(a));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             ("Html.Attributes", "attribute") => {
                 f.instruction(&Instruction::I32Const(0)); // AATTR
                 self.emit_expr(&args[0], ctx, f)?;
@@ -17127,7 +17145,8 @@ impl<'a> Codegen<'a> {
     ) -> Result<(), String> {
         use can::Pattern_::*;
         match &pat.value {
-            Anything | Var(_) | Record(_) => {
+            // Unit / record / var / wildcard are irrefutable — always match.
+            Anything | Var(_) | Record(_) | Unit => {
                 f.instruction(&Instruction::I32Const(1));
             }
             Alias(inner, _) => self.emit_test(inner, s, ctx, f)?,
@@ -17254,7 +17273,7 @@ impl<'a> Codegen<'a> {
     ) -> Result<(), String> {
         use can::Pattern_::*;
         match &pat.value {
-            Anything | Int(_) | Chr(_) | Str(_) => {}
+            Anything | Int(_) | Chr(_) | Str(_) | Unit => {}
             Var(name) => ctx.scope.push((name.to_string(), s)),
             Alias(inner, name) => {
                 ctx.scope.push((name.value.to_string(), s));
