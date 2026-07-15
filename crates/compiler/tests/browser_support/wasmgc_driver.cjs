@@ -5,12 +5,15 @@
 // WasmGC module is self-contained.
 
 const fs = require('fs');
+const { makeClock } = require('./clock.cjs');
 
-function start(wasmPath, doc) {
+function start(wasmPath, doc, clock) {
+  clock = clock || makeClock();
   const nodes = [null]; // handle 0 == null
   let mountedRoot = null;
   let memory = null;
   let instance = null;
+  let timerIds = []; // active Time.every interval ids (in the virtual clock)
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
   const reg = (n) => { nodes.push(n); return nodes.length - 1; };
@@ -57,6 +60,10 @@ function start(wasmPath, doc) {
     },
     host_set_title: (p, l) => { doc.title = str(p, l); },
     host_http: (up, ul, reqId) => { parkedHttp.push({ reqId, url: str(up, ul) }); },
+    host_clear_timers: () => { timerIds.forEach((id) => clock.clearInterval(id)); timerIds = []; },
+    host_set_interval: (ms, slot) => {
+      timerIds.push(clock.setInterval(() => instance.exports.alm_tick(slot, clock.now()), ms));
+    },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
@@ -81,7 +88,7 @@ function start(wasmPath, doc) {
     new Uint8Array(memory.buffer, 0, jb.length).set(jb);
     instance.exports.alm_http_response(req.reqId, status, 0, jb.length);
   }
-  return { instance, nodes, outgoing, sendPort, resolveHttp };
+  return { instance, nodes, outgoing, sendPort, resolveHttp, clock };
 }
 
 module.exports = { start };

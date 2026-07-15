@@ -55,7 +55,9 @@ const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len,hid)
 const HOST_PORT_OUT: u32 = 14; // (nameptr,namelen,jsonptr,jsonlen) — outgoing port
 const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
 const HOST_HTTP: u32 = 16; // (urlptr,urllen,reqId) — start an HTTP GET
-const N_IMPORTS: u32 = 17;
+const HOST_CLEAR_TIMERS: u32 = 17; // () — cancel all Time.every intervals
+const HOST_SET_INTERVAL: u32 = 18; // (intervalMs:f64, slot) — register a timer
+const N_IMPORTS: u32 = 19;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -71,6 +73,8 @@ const G_KIND: u32 = 11; // program kind: 0 = sandbox, 1 = element, 2 = document
 const G_SUBS: u32 = 12; // subscriptions function (null for sandbox)
 const G_HTTP: u32 = 13; // in-flight HTTP expects, indexed by request id
 const G_NEXT_REQ: u32 = 14; // next HTTP request id
+const G_TICKS: u32 = 15; // active Time.every toMsg callbacks, indexed by slot
+const G_NEXT_TICK: u32 = 16; // next timer slot (reset each reconcile)
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -718,6 +722,9 @@ struct Codegen<'a> {
     sub_find_port_idx: u32,
     html_map_idx: u32,
     http_response_idx: u32,
+    reconcile_subs_idx: u32,
+    walk_timers_idx: u32,
+    tick_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -861,6 +868,9 @@ impl<'a> Codegen<'a> {
             sub_find_port_idx: 0,
             html_map_idx: 0,
             http_response_idx: 0,
+            reconcile_subs_idx: 0,
+            walk_timers_idx: 0,
+            tick_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1029,6 +1039,9 @@ impl<'a> Codegen<'a> {
         self.sub_find_port_idx = next();
         self.html_map_idx = next();
         self.http_response_idx = next();
+        self.reconcile_subs_idx = next();
+        self.walk_timers_idx = next();
+        self.tick_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1082,7 +1095,9 @@ impl<'a> Codegen<'a> {
         let eqref_to_void_ty = self.next_type + 14; // eqref -> () (run_cmd)
         let ii_eqref_ty = self.next_type + 15; // (i32,i32) -> eqref (str_from_mem)
         let ee_eqref_ty = self.next_type + 16; // (eqref,eqref) -> eqref (sub_find_port)
-        self.next_type += 17;
+        let fi_v_ty = self.next_type + 17; // (f64,i32) -> () (host_set_interval)
+        let if_v_ty = self.next_type + 18; // (i32,f64) -> () (alm_tick)
+        self.next_type += 19;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1210,6 +1225,9 @@ impl<'a> Codegen<'a> {
         let sub_find_port = self.emit_sub_find_port();
         let html_map = self.emit_html_map();
         let http_response = self.emit_http_response();
+        let reconcile_subs = self.emit_reconcile_subs();
+        let walk_timers = self.emit_walk_timers();
+        let tick = self.emit_tick();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1278,6 +1296,8 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![eqref()], vec![]); // run_cmd: eqref -> ()
         types.ty().function(vec![ValType::I32, ValType::I32], vec![eqref()]); // str_from_mem
         types.ty().function(vec![eqref(), eqref()], vec![eqref()]); // sub_find_port
+        types.ty().function(vec![ValType::F64, ValType::I32], vec![]); // host_set_interval
+        types.ty().function(vec![ValType::I32, ValType::F64], vec![]); // alm_tick
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1408,6 +1428,9 @@ impl<'a> Codegen<'a> {
         funcs.function(ee_eqref_ty); // sub_find_port : (eqref,eqref) -> eqref
         funcs.function(ee_eqref_ty); // html_map : (eqref,eqref) -> eqref
         funcs.function(imp_i4_v); // alm_http_response : (reqId,status,ptr,len) -> ()
+        funcs.function(json_void_ty); // reconcile_subs : () -> ()
+        funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
+        funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1547,6 +1570,9 @@ impl<'a> Codegen<'a> {
         code.function(&sub_find_port);
         code.function(&html_map);
         code.function(&http_response);
+        code.function(&reconcile_subs);
+        code.function(&walk_timers);
+        code.function(&tick);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1638,6 +1664,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 15=active timer toMsg callbacks (ref null T_ARR), 16=next slot (i32).
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1659,6 +1694,8 @@ impl<'a> Codegen<'a> {
             ("host_port_out", imp_i4_v),
             ("host_set_title", imp_ii_v),
             ("host_http", imp_i3_v),
+            ("host_clear_timers", json_void_ty),
+            ("host_set_interval", fi_v_ty),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -1671,6 +1708,7 @@ impl<'a> Codegen<'a> {
         exports.export("alm_event", ExportKind::Func, self.alm_event_idx);
         exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
         exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
+        exports.export("alm_tick", ExportKind::Func, self.tick_idx);
         exports.export("memory", ExportKind::Memory, 0);
 
         let mut module = Module::new();
@@ -8964,6 +9002,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_ROOT));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::GlobalSet(G_PREV));
+        // subscriptions may have changed → re-register timers
+        f.instruction(&Instruction::Call(self.reconcile_subs_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -9076,6 +9116,110 @@ impl<'a> Codegen<'a> {
         // VNODE[tagName, attrs, kids]
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// reconcile_subs() : recompute subscriptions and re-register Time.every
+    /// timers with the host (clear-all + recreate, matching the JS runtime).
+    fn emit_reconcile_subs(&self) -> Function {
+        let mut f = Function::new([(1, eqref())]); // sub(0)
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Call(HOST_CLEAR_TIMERS));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.walk_timers_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// walk_timers(sub) : register each SubTime (tag4 [interval, toMsg]) with the
+    /// host, recursing into Sub.batch (tag1). Stores toMsg in G_TICKS by slot.
+    fn emit_walk_timers(&self) -> Function {
+        // param sub(0). locals: tag(1),len(2),i(3),slot(4):i32, list(5):eqref
+        let mut f = Function::new([(4, ValType::I32), (1, eqref())]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // SubTime (tag 4)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
+        f.instruction(&Instruction::LocalSet(4)); // slot
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
+        // G_TICKS[slot] = toMsg (sub.arg1)
+        f.instruction(&Instruction::GlobalGet(G_TICKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(4));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_set_interval(interval(sub.arg0) as f64, slot)
+        ctor_arg0(&mut f, 0);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(HOST_SET_INTERVAL));
+        f.instruction(&Instruction::End);
+        // Sub.batch (tag 1): recurse
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(5));
+        list_len(&mut f, 5);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 5, 3);
+        f.instruction(&Instruction::Call(self.walk_timers_idx));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_tick(slot, millis) : fire a Time.every timer — apply its toMsg to
+    /// `millisToPosix millis` (Posix is opaque: T_CTOR tag0 [Int millis]) and
+    /// dispatch.
+    fn emit_tick(&self) -> Function {
+        // params slot(0):i32, millis(1):f64. local toMsg(2):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::GlobalGet(G_TICKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(2)); // toMsg
+        f.instruction(&Instruction::LocalGet(2));
+        // posix = T_CTOR tag0 [ Int (trunc millis) ]
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -9373,6 +9517,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_HTTP));
+        // ticks = new T_ARR(MAX_HANDLERS)
+        f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_TICKS));
         Self::emit_reset_render(&mut f);
         // run initial cmd (element / document, i.e. G_KIND != 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
@@ -9399,6 +9547,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_ROOT));
         f.instruction(&Instruction::GlobalGet(G_ROOT));
         f.instruction(&Instruction::Call(DOM_MOUNT));
+        // register initial timer subscriptions
+        f.instruction(&Instruction::Call(self.reconcile_subs_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -11362,6 +11512,28 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?; // decoder
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Time.every interval toMsg → SubTime tag4 [interval, toMsg].
+            ("Time", "every") => {
+                f.instruction(&Instruction::I32Const(4));
+                self.emit_expr(&args[0], ctx, f)?; // interval (Float)
+                self.emit_expr(&args[1], ctx, f)?; // toMsg
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Posix is opaque: T_CTOR tag0 [Int millis].
+            ("Time", "millisToPosix") => {
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Time", "posixToMillis") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_CTOR));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
             }
             // Platform.Cmd.batch / Platform.Sub.batch → tag1 [List].
             ("Platform.Cmd", "batch") | ("Platform.Sub", "batch") => {

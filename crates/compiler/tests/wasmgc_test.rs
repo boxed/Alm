@@ -1330,6 +1330,62 @@ fn document_title_and_body() {
 }
 
 #[test]
+fn element_time_every() {
+    // Time.every subscription. Advancing the (shared, deterministic) virtual
+    // clock past two intervals must leave both backends showing the last tick's
+    // posix millis, identically.
+    let dir = common::test_dir("alm-wasmgc", "time_every");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Time\n\n\
+         type Msg = Tick Time.Posix\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( 0, Cmd.none )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Tick p) _ = ( Time.posixToMillis p, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Time.every 1000 Tick }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m10.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               r.clock.advance(2500);const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "Time.every render disagrees");
+    assert_eq!(parts[1], "<div>2000</div>", "expected last tick at t=2000");
+}
+
+#[test]
 fn element_http_get() {
     // Browser.element issues an Http.get on click; the host settles it with a
     // 200 body then a 404. Assert both backends render the same Result each time.
