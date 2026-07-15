@@ -3909,8 +3909,16 @@ impl<'a> Codegen<'a> {
     /// random_step(gen, seed) -> (value, seed) : interpret a reified Generator.
     fn emit_random_step(&self) -> Function {
         // params gen(0), seed(1). locals: ta(2),tb(3),tc(4),cur(5):eqref;
-        //   lo(6),hi(7),range(8),x(9),thr(10):i64; tag(11):i32
-        let mut f = Function::new([(4, eqref()), (5, ValType::I64), (1, ValType::I32)]);
+        //   lo(6),hi(7),range(8),x(9),thr(10):i64; tag(11):i32;
+        //   td(12),te(13):eqref; arr(14):ref T_ARR; i(15),n(16):i32 (map4/5, list)
+        let mut f = Function::new([
+            (4, eqref()),
+            (5, ValType::I64),
+            (1, ValType::I32),
+            (2, eqref()),
+            (1, ref_to(T_ARR)),
+            (2, ValType::I32),
+        ]);
         const M32: i64 = 0x1_0000_0000;
         // element i of the tuple/ctor-args held in `local`
         let telem = |f: &mut Function, local: u32, i: i32| {
@@ -3998,6 +4006,91 @@ impl<'a> Codegen<'a> {
         telem(&mut f, 4, 0);
         f.instruction(&Instruction::Call(self.apply1_idx));
         telem(&mut f, 4, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GMap4 (9) / GMap5 (10): thread the seed through 4/5 sub-generators.
+        for (map_tag, arity) in [(9u32, 4u32), (10u32, 5u32)] {
+            let subs = [2u32, 3, 4, 12, 13];
+            f.instruction(&Instruction::LocalGet(11));
+            f.instruction(&Instruction::I32Const(map_tag as i32));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            // t_k = step(gen_k, prevSeed)
+            for k in 0..arity {
+                ctor_argn(&mut f, 0, (k + 1) as i32);
+                if k == 0 {
+                    f.instruction(&Instruction::LocalGet(1)); // seed
+                } else {
+                    telem(&mut f, subs[(k - 1) as usize], 1); // prev.seed
+                }
+                f.instruction(&Instruction::Call(self.random_step_idx));
+                f.instruction(&Instruction::LocalSet(subs[k as usize]));
+            }
+            // (f v0 .. v(arity-1), lastSeed)
+            ctor_argn(&mut f, 0, 0); // f
+            for k in 0..arity {
+                telem(&mut f, subs[k as usize], 0);
+                f.instruction(&Instruction::Call(self.apply1_idx));
+            }
+            telem(&mut f, subs[(arity - 1) as usize], 1);
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::Return);
+            f.instruction(&Instruction::End);
+        }
+
+        // GList (11): [n, gen] → run gen n times, threading the seed.
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(11));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0); // n (boxed)
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(16)); // n
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(14)); // arr
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(5)); // cur = seed
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ta = step(gen, cur)
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        // arr[n-1-i] = ta.value  (elm's Random.list prepends, so the result is
+        // in reverse generation order)
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::I32Sub);
+        telem(&mut f, 2, 0);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // cur = ta.seed
+        telem(&mut f, 2, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 15, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ( list, cur )
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -14647,7 +14740,8 @@ impl<'a> Codegen<'a> {
             // Random: reify each generator as a tagged ctor; random_step runs it.
             ("Random", "int") | ("Random", "float") | ("Random", "constant")
             | ("Random", "map") | ("Random", "map2") | ("Random", "map3")
-            | ("Random", "andThen") | ("Random", "pair") => {
+            | ("Random", "andThen") | ("Random", "pair")
+            | ("Random", "map4") | ("Random", "map5") | ("Random", "list") => {
                 let tag: i32 = match name {
                     "int" => 0,
                     "float" => 1,
@@ -14656,7 +14750,10 @@ impl<'a> Codegen<'a> {
                     "map2" => 4,
                     "map3" => 5,
                     "andThen" => 6,
-                    _ => 7, // pair
+                    "pair" => 7,
+                    "map4" => 9,
+                    "map5" => 10,
+                    _ => 11, // list
                 };
                 f.instruction(&Instruction::I32Const(tag));
                 for a in args {

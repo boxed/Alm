@@ -383,6 +383,27 @@ fn random_generators() {
 }
 
 #[test]
+fn random_list_and_mapn() {
+    assert_str_prog(
+        "random_list_and_mapn",
+        "module Test exposing (main)\n\n\
+         import Random\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       s0 = Random.initialSeed 7\n\
+         \x20       ( xs, s1 ) = Random.step (Random.list 5 (Random.int 0 9)) s0\n\
+         \x20       ( m, _ ) =\n\
+         \x20           Random.step\n\
+         \x20               (Random.map4 (\\a b c d -> a + b + c + d)\n\
+         \x20                   (Random.int 0 5) (Random.int 0 5) (Random.int 0 5) (Random.int 0 5))\n\
+         \x20               s1\n\
+         \x20   in\n\
+         \x20   (List.map String.fromInt xs |> String.join \",\") ++ \"|\" ++ String.fromInt m\n",
+    );
+}
+
+#[test]
 fn list_map4_map5() {
     assert_str_prog(
         "list_map4_map5",
