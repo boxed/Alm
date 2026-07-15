@@ -1303,6 +1303,37 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
 }
 
 #[test]
+fn keyed_reorder() {
+    // Html.Keyed.node with a reordering update: the initial render and the
+    // post-click (rotated) render must match the JS backend. Exercises VKEYED
+    // render + the keyed reconciliation path in patch.
+    assert_sandbox_click(
+        "keyed_reorder",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, li, text)\n\
+         import Html.Keyed\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Rotate\n\n\
+         update : Msg -> List Int -> List Int\n\
+         update _ xs =\n\
+         \x20   case xs of\n\
+         \x20       a :: rest -> rest ++ [ a ]\n\
+         \x20       [] -> xs\n\n\
+         viewItem : Int -> ( String, Html.Html Msg )\n\
+         viewItem k = ( String.fromInt k, li [] [ text (String.fromInt k) ] )\n\n\
+         view : List Int -> Html.Html Msg\n\
+         view xs =\n\
+         \x20   div []\n\
+         \x20       [ button [ onClick Rotate ] [ text \"go\" ]\n\
+         \x20       , Html.Keyed.node \"ul\" [] (List.map viewItem xs)\n\
+         \x20       ]\n\n\
+         main : Program () (List Int) Msg\n\
+         main = Browser.sandbox { init = [ 1, 2, 3, 4 ], update = update, view = view }\n",
+    );
+}
+
+#[test]
 fn sandbox_click_counter() {
     assert_sandbox_click(
         "sandbox_click",

@@ -992,6 +992,7 @@ struct Codegen<'a> {
     index_byte_idx: u32,
     url_from_string_idx: u32,
     strip_keys_idx: u32,
+    keyed_reconcile_idx: u32,
     frame_idx: u32,
     box_int_idx: u32,
     unbox_int_idx: u32,
@@ -1181,6 +1182,7 @@ impl<'a> Codegen<'a> {
             index_byte_idx: 0,
             url_from_string_idx: 0,
             strip_keys_idx: 0,
+            keyed_reconcile_idx: 0,
             frame_idx: 0,
             box_int_idx: 0,
             unbox_int_idx: 0,
@@ -1395,6 +1397,7 @@ impl<'a> Codegen<'a> {
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
         self.strip_keys_idx = next();
+        self.keyed_reconcile_idx = next();
         self.frame_idx = next();
         self.box_int_idx = next();
         self.unbox_int_idx = next();
@@ -1482,7 +1485,8 @@ impl<'a> Codegen<'a> {
         let sb_ret_ty = self.next_type + 29; // (ref T_SB) -> eqref (sb_finish)
         let f64_f64_ty = self.next_type + 30; // (f64) -> f64 (Math unary)
         let f64f64_f64_ty = self.next_type + 31; // (f64,f64) -> f64 (Math atan2/pow)
-        self.next_type += 32;
+        let kr_ty = self.next_type + 32; // (i32,eqref,eqref) -> () (keyed_reconcile)
+        self.next_type += 33;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1643,6 +1647,7 @@ impl<'a> Codegen<'a> {
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
         let strip_keys = self.emit_strip_keys();
+        let keyed_reconcile = self.emit_keyed_reconcile();
         let frame = self.emit_frame();
         let box_int = self.emit_box_int();
         let unbox_int = self.emit_unbox_int();
@@ -1752,6 +1757,7 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ref_to(T_SB)], vec![eqref()]); // sb_ret
         types.ty().function(vec![ValType::F64], vec![ValType::F64]); // f64_f64 (Math unary)
         types.ty().function(vec![ValType::F64, ValType::F64], vec![ValType::F64]); // f64f64_f64
+        types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![]); // keyed_reconcile
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1915,6 +1921,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
         funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
+        funcs.function(kr_ty); // keyed_reconcile (dom, oldKids, newKids)
         funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
         funcs.function(i64_e_ty); // box_int : (i64) -> eqref
         funcs.function(e_i64_ty); // unbox_int : (eqref) -> i64
@@ -2100,6 +2107,7 @@ impl<'a> Codegen<'a> {
         code.function(&index_byte);
         code.function(&url_from_string);
         code.function(&strip_keys);
+        code.function(&keyed_reconcile);
         code.function(&frame);
         code.function(&box_int);
         code.function(&unbox_int);
@@ -10852,7 +10860,20 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(4));
+        // node = (VKEYED) ? kid[1] : kid   (tag is in local 1)
         list_elem(&mut f, 8, 3);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(self.serialize_html_idx));
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(4));
@@ -11049,7 +11070,20 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(3));
+        // node = (VKEYED) ? kid[1] : kid
         list_elem(&mut f, 6, 4);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(self.render_dom_idx));
         f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
         bump(&mut f, 4, 1);
@@ -11103,7 +11137,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // replace = tags differ, or same-VNODE with different tagName
+        // replace = tags differ, or same VNODE/VKEYED with different tagName
         ctor_tag(&mut f, 1);
         ctor_tag(&mut f, 2);
         f.instruction(&Instruction::I32Ne);
@@ -11113,7 +11147,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32GeS); // VNODE (1) or VKEYED (2) carry a tagName
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 1);
         ctor_arg0(&mut f, 2);
@@ -11191,7 +11225,19 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // patch kids by position
+        // VKEYED (tag 2): reconcile children by key, preserving DOM identity.
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0)); // dom
+        ctor_argn(&mut f, 1, 2); // old keyed kids
+        ctor_argn(&mut f, 2, 2); // new keyed kids
+        f.instruction(&Instruction::Call(self.keyed_reconcile_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // patch kids by position (non-keyed VNODE)
         ctor_argn(&mut f, 1, 2);
         f.instruction(&Instruction::LocalSet(10)); // old kids
         ctor_argn(&mut f, 2, 2);
@@ -11561,8 +11607,8 @@ impl<'a> Codegen<'a> {
     /// head-first (T_BACK head=0, elements at data[0..len)).
     fn emit_html_map(&self) -> Function {
         // params f(0), node(1). locals: tag(2),len(3),i(4):i32,
-        //   arr(5):ref T_ARR, elem(6):eqref
-        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        //   arr(5):ref T_ARR, elem(6),kid(7):eqref
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (2, eqref())]);
         ctor_tag(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         // VTEXT (tag 0): unchanged
@@ -11572,8 +11618,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // VNODE: build VNODE[ node.arg0, mappedAttrs, mappedKids ]
-        f.instruction(&Instruction::I32Const(1)); // VNODE tag
+        // VNODE (1) / VKEYED (2): build <tag>[ node.arg0, mappedAttrs, mappedKids ]
+        f.instruction(&Instruction::LocalGet(2)); // preserve VNODE vs VKEYED
         ctor_arg0(&mut f, 1); // tagName
         // --- mapped attrs (node.arg1) ---
         ctor_argn(&mut f, 1, 1);
@@ -11646,9 +11692,29 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         ctor_argn(&mut f, 1, 2);
         f.instruction(&Instruction::LocalSet(6));
+        list_elem(&mut f, 6, 4);
+        f.instruction(&Instruction::LocalSet(7)); // kid (node, or (key,node) pair)
+        // VKEYED: arr[i] = [kid[0], html_map(f, kid[1])] ; else html_map(f, kid)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR)); // key
         f.instruction(&Instruction::LocalGet(0)); // f
-        list_elem(&mut f, 6, 4); // kid
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR)); // node
         f.instruction(&Instruction::Call(self.html_map_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0)); // f
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.html_map_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
@@ -11659,7 +11725,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_BACK));
         f.instruction(&Instruction::StructNew(T_LIST));
-        // VNODE[tagName, attrs, kids]
+        // <tag>[tagName, attrs, kids]
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
@@ -11980,6 +12046,151 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
         f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// keyed_reconcile(dom, oldKids, newKids) : diff two `(key, node)` child
+    /// lists by KEY, preserving DOM node identity across reorders. Matched nodes
+    /// are patched and moved into new order via appendChild (which relocates an
+    /// existing child to the end) — so after appending every target in order the
+    /// unmatched old nodes are left at the front and removed. Not LIS-minimal in
+    /// move count, but identity-preserving and O(n log n) (a key→index treap).
+    fn emit_keyed_reconcile(&self) -> Function {
+        // params dom(0):i32, oldk(1), newk(2):eqref. locals:
+        //   olen(3),nlen(4),j(5),matched(6),unused(7),handle(8),p(9):i32;
+        //   oldHandles(10):ref T_ARR; idxMap(11),pair(12),key(13),found(14):eqref
+        let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (4, eqref())]);
+        let i31 = || HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 };
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        // oldHandles = new T_ARR(olen) ; idxMap = empty treap
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::LocalSet(11));
+        // for i in 0..olen: capture child handle, index key→i
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // oldHandles[i] = i31(dom_child(dom, i))
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // idxMap = treap_insert(oldk[i][0], box(i), idxMap)
+        list_elem(&mut f, 1, 5);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Call(self.treap_insert_idx));
+        f.instruction(&Instruction::LocalSet(11));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // for j in 0..nlen: reuse (patch) or create, then append in order
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6)); // matched
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5)); // j
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 2, 5);
+        f.instruction(&Instruction::LocalSet(12)); // pair
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(13)); // key
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Call(self.treap_get_idx));
+        f.instruction(&Instruction::LocalSet(14)); // found : Maybe Int
+        ctor_tag(&mut f, 14);
+        f.instruction(&Instruction::I32Eqz); // Just?
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        // p = unbox(found.arg0)
+        ctor_arg0(&mut f, 14);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(9));
+        // patch(oldHandles[p], oldk[p][1], pair[1])
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        list_elem(&mut f, 1, 9);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.patch_idx));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Else);
+        // render_dom(pair[1])
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(8)); // handle
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // remove the (olen - matched) unmatched old nodes, now at the front
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        f.instruction(&Instruction::Call(DOM_REMOVE_CHILD));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -15152,23 +15363,22 @@ impl<'a> Codegen<'a> {
                     f.instruction(&Instruction::Call(self.apply1_idx));
                 }
             }
-            // Html.Keyed.node tag attrs keyed → VNODE[tag, attrs, strip_keys keyed].
+            // Html.Keyed.node tag attrs keyed → VKEYED[tag, attrs, keyed] (tag 2).
+            // Keys are preserved (not stripped) so `patch` can reconcile by key.
             ("Html.Keyed", "node") => {
-                f.instruction(&Instruction::I32Const(1)); // VNODE
+                f.instruction(&Instruction::I32Const(2)); // VKEYED
                 self.emit_expr(&args[0], ctx, f)?; // tag
                 self.emit_expr(&args[1], ctx, f)?; // attrs
-                self.emit_expr(&args[2], ctx, f)?; // keyed children
-                f.instruction(&Instruction::Call(self.strip_keys_idx));
+                self.emit_expr(&args[2], ctx, f)?; // keyed children (key, node) pairs
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             ("Html.Keyed", tag) => {
-                // Keyed.ul/ol attrs keyed → VNODE[<tag>, attrs, strip_keys keyed].
-                f.instruction(&Instruction::I32Const(1));
+                // Keyed.ul/ol attrs keyed → VKEYED[<tag>, attrs, keyed].
+                f.instruction(&Instruction::I32Const(2));
                 push_str_const(f, tag);
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.strip_keys_idx));
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
