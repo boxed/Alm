@@ -4861,6 +4861,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6)); // seplen
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2)); // len
+        // empty list → "" (an empty list's backing is null; list_data would trap)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         list_data(&mut f, 1);
         f.instruction(&Instruction::LocalSet(9)); // data
         list_start(&mut f, 1);
@@ -5119,11 +5126,12 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// class_list(pairs) : the `class` string for `Html.Attributes.classList` —
-    /// `String.join " "` of each `(name, True)` pair's name, in original order.
+    /// class_list(pairs) : the `class` Attribute for `Html.Attributes.classList`
+    /// — `AATTR ["class", join " " (true names)]`, or a no-op ANONE (tag 4) when
+    /// no class is on (elm's `className=""` reflects to no attribute).
     fn emit_class_list(&self) -> Function {
-        // param pairs(0). locals: len(1),i(2):i32; acc(3),pair(4):eqref
-        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        // param pairs(0). locals: len(1),i(2):i32; acc(3),pair(4),s(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (3, eqref())]);
         push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(3)); // acc
         list_len(&mut f, 0);
@@ -5157,10 +5165,30 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // String.join " " acc
+        // s = String.join " " acc
         push_str_const(&mut f, " ");
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::Call(self.str_join_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        // empty → ANONE (tag 4, no args); else AATTR ["class", s]
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // ANONE: 2 (null) args so render_dom's up-front arg0/arg1 reads don't
+        // deref a null args array (it skips tag 4 before using them).
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0)); // AATTR
+        push_str_const(&mut f, "class");
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -12023,6 +12051,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(DOM_SET_PROPERTY));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
+        // ANONE (4): a no-op attribute (empty classList) — skip. Otherwise AEVENT.
+        ctor_tag(&mut f, 5);
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
         // AEVENT (2): register [decoder, kind] at a fresh hid, add listener.
         // kind = args[2] if present (advanced on-handlers), else i31(0) plain.
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
@@ -12051,6 +12084,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
+        f.instruction(&Instruction::End); // close `tag != 4` (skip ANONE)
         f.instruction(&Instruction::End); // close ABOOL/AEVENT if-else
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -16713,14 +16747,10 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // classList pairs → AATTR ["class", join " " (true names)].
+            // classList pairs → AATTR ["class", join " " true names] or ANONE.
             ("Html.Attributes", "classList") => {
-                f.instruction(&Instruction::I32Const(0)); // AATTR
-                push_str_const(f, "class");
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.class_list_idx));
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Common string attributes: Html.Attributes.<name> value → AATTR.
             ("Html.Attributes", a) if html_attr_name(a).is_some() => {

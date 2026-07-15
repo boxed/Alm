@@ -1418,13 +1418,11 @@ fn attributes_class_list() {
     );
 }
 
-// KNOWN HOLE (found porting the js-framework-benchmark keyed table to wasm-gc):
-// a keyed child carrying `classList` traps `illegal cast` when the keyed list is
-// patched on update (the row-creating update). Static render is fine and plain
-// (non-keyed) classList updates are fine — it's the keyed diff path. Remove the
-// #[ignore] once the WasmGC backend handles classList inside a keyed patch.
+// Regression: a classList with no true classes builds `String.join " " []`,
+// which used to trap `illegal cast` (empty list has a null backing). Exercised
+// here via a keyed patch that creates rows on update (the js-framework-benchmark
+// shape) — but the bug was in str_join, not the keyed path.
 #[test]
-#[ignore = "wasm-gc: `illegal cast` patching a keyed child with classList on update"]
 fn keyed_classlist_update() {
     assert_sandbox_click(
         "keyed_classlist_update",
