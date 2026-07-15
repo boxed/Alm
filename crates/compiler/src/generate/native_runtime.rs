@@ -10590,8 +10590,56 @@ unsafe fn br_patch_children(
     out
 }
 
-/// Keyed child reconciliation: reuse the DOM node for a matching key, rebuild
-/// the child list in order. Mirrors runtime.js `_VDom_patchKeyed`.
+/// Longest-increasing-subsequence over `source` (each new child's old index,
+/// or -1 for a freshly rendered node). Returns a mask marking the reused
+/// children already in the right relative order, so they can stay put while
+/// everything else is moved. Mirrors `_VDom_keyedStable` in runtime.js.
+#[cfg(target_arch = "wasm32")]
+fn br_keyed_stable(source: &[i32]) -> Vec<bool> {
+    let n = source.len();
+    let mut stay = vec![false; n];
+    let mut parent = vec![usize::MAX; n];
+    let mut tails: Vec<usize> = Vec::new(); // indices into source; source[] increasing
+    for i in 0..n {
+        if source[i] < 0 {
+            continue; // freshly rendered: never "stays"
+        }
+        match tails.last() {
+            None => tails.push(i),
+            Some(&last) if source[last] < source[i] => {
+                parent[i] = last;
+                tails.push(i);
+            }
+            _ => {
+                // first tail whose value is >= source[i]
+                let (mut lo, mut hi) = (0usize, tails.len() - 1);
+                while lo < hi {
+                    let mid = (lo + hi) / 2;
+                    if source[tails[mid]] < source[i] {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if lo > 0 {
+                    parent[i] = tails[lo - 1];
+                }
+                tails[lo] = i;
+            }
+        }
+    }
+    let mut cur = tails.last().copied().unwrap_or(usize::MAX);
+    while cur != usize::MAX {
+        stay[cur] = true;
+        cur = parent[cur];
+    }
+    stay
+}
+
+/// Keyed child reconciliation: reuse the DOM node (and patch its subtree) for a
+/// matching key, and move only the nodes that actually changed position — the
+/// LIS of old indices stays put, everything else is inserted before the next
+/// already-placed sibling. Mirrors runtime.js `_VDom_patchKeyed`.
 #[cfg(target_arch = "wasm32")]
 unsafe fn br_patch_keyed(
     parent: u32,
@@ -10600,12 +10648,8 @@ unsafe fn br_patch_keyed(
     new_list: &[u64],
     tagger: u64,
 ) -> Vec<RNode> {
-    // Every child currently attached to `parent`, so we can clear them before
-    // re-appending in the new order.
-    let old_handles: Vec<u32> = old_kids.iter().map(|k| k.handle).collect();
-
     // Pair each old key with its child html and DOM mirror (old_list and
-    // old_kids are aligned by index).
+    // old_kids are aligned by index, so an entry's position is its old index).
     let mut old_kids = old_kids;
     old_kids.reverse(); // pop() now yields index 0 first
     let mut old_by_key: Vec<(Vec<u8>, u64, Option<RNode>)> = Vec::new();
@@ -10614,32 +10658,54 @@ unsafe fn br_patch_keyed(
         old_by_key.push((key, tuple_second(pair), old_kids.pop()));
     }
 
-    let mut out: Vec<RNode> = Vec::new();
+    // Build the new mirror list, reusing DOM nodes for matching keys.
+    // `source[j]` is the old index of new child j, or -1 if freshly rendered.
+    let mut out: Vec<RNode> = Vec::with_capacity(new_list.len());
+    let mut source: Vec<i32> = Vec::with_capacity(new_list.len());
     for &pair in new_list {
         let key = sbytes(tuple_first(pair)).to_vec();
         let new_child = tuple_second(pair);
-        match old_by_key.iter_mut().find(|(k, _, m)| *k == key && m.is_some()) {
-            Some((_, old_child_html, mirror)) => {
-                let m = mirror.take().unwrap();
-                out.push(br_patch(parent, false, m, *old_child_html, new_child, tagger));
+        let mut matched: Option<usize> = None;
+        for (idx, (k, _, m)) in old_by_key.iter().enumerate() {
+            if *k == key && m.is_some() {
+                matched = Some(idx);
+                break;
             }
-            None => out.push(br_render(new_child, tagger)),
+        }
+        match matched {
+            Some(idx) => {
+                let m = old_by_key[idx].2.take().unwrap();
+                let old_child_html = old_by_key[idx].1;
+                source.push(idx as i32);
+                out.push(br_patch(parent, false, m, old_child_html, new_child, tagger));
+            }
+            None => {
+                source.push(-1);
+                out.push(br_render(new_child, tagger));
+            }
         }
     }
-    // Old children whose key wasn't reused: detach their listeners (their DOM
-    // nodes drop out when we clear and rebuild the order below).
+
+    // Old children whose key disappeared: detach listeners and remove the node.
+    // Reused nodes stay attached and are repositioned below.
     for (_, _, mirror) in &old_by_key {
         if let Some(m) = mirror {
             br_detach_events(m);
+            dom_remove_child(parent, m.handle);
         }
     }
-    // Rebuild the child order: clear all current children, then re-append in
-    // the new order (matching runtime.js, which clears and re-appends).
-    for h in old_handles {
-        dom_remove_child(parent, h);
-    }
-    for m in &out {
-        dom_append_child(parent, m.handle);
+
+    // Insert/move from the end so `reference` is always an already-placed node
+    // (0 == null == append at end). Nodes in the LIS are already in order and
+    // left untouched; only moved or freshly-rendered nodes are inserted.
+    let stay = br_keyed_stable(&source);
+    let handles: Vec<u32> = out.iter().map(|m| m.handle).collect();
+    let mut reference: u32 = 0;
+    for m in (0..out.len()).rev() {
+        if source[m] < 0 || !stay[m] {
+            dom_insert_before(parent, handles[m], reference);
+        }
+        reference = handles[m];
     }
     out
 }

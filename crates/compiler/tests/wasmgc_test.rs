@@ -1946,3 +1946,66 @@ fn sandbox_diff_preserves_identity() {
         "diff/patch should preserve the unchanged button node and update the count"
     );
 }
+
+/// Rough JS-vs-WasmGC compute benchmark across workload classes. Ignored in CI
+/// (perf, not correctness); run with:
+///   cargo test -p alm-compiler --test wasmgc_test bench_wasmgc_vs_js -- --ignored --nocapture
+#[test]
+#[ignore]
+fn bench_wasmgc_vs_js() {
+    use std::time::Instant;
+    // (name, heavy main body, base main body). Each `main : String`; timing the
+    // whole node process and subtracting the base cancels startup/instantiate.
+    let prelude = "module Test exposing (main)\n\n";
+    let workloads: &[(&str, &str, &str)] = &[
+        ("fib(33) calls+int",
+         "fib : Int -> Int\nfib n = if n < 2 then n else fib (n-1) + fib (n-2)\nmain : String\nmain = String.fromInt (fib 33)\n",
+         "main : String\nmain = \"0\"\n"),
+        ("foldl sum 3M int",
+         "main : String\nmain = String.fromInt (List.foldl (+) 0 (List.range 1 3000000))\n",
+         "main : String\nmain = String.fromInt (List.foldl (+) 0 (List.range 1 1))\n"),
+        ("map+length 1M alloc",
+         "main : String\nmain = String.fromInt (List.length (List.map (\\x -> x * 2) (List.range 1 1000000)))\n",
+         "main : String\nmain = String.fromInt (List.length (List.map (\\x -> x * 2) (List.range 1 1)))\n"),
+        ("string join 200k",
+         "main : String\nmain = String.fromInt (String.length (String.join \",\" (List.map String.fromInt (List.range 1 200000))))\n",
+         "main : String\nmain = String.fromInt (String.length (String.join \",\" (List.map String.fromInt (List.range 1 1))))\n"),
+    ];
+    let dir = common::test_dir("alm-wasmgc", "bench");
+    for (name, heavy, base) in workloads {
+        let mut jc = [0f64; 2];
+        let mut wc = [0f64; 2];
+        for (ci, body) in [heavy, base].iter().enumerate() {
+            let entry = dir.join("Test.elm");
+            std::fs::write(&entry, format!("{prelude}{body}")).unwrap();
+            let checked = project::check_project(&entry).unwrap_or_else(|_| panic!("check failed: {name}"));
+            let bundle = dir.join("b.js");
+            std::fs::write(&bundle, generate::generate_project(&checked.modules)).unwrap();
+            let wasm = dir.join("a.wasm");
+            project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|_| panic!("wasm build failed: {name}"));
+            let runner = dir.join("r.cjs");
+            std::fs::write(&runner, STR_RUNNER).unwrap();
+            let best = |mk: &dyn Fn() -> Command| {
+                let mut b = f64::MAX;
+                for _ in 0..5 {
+                    let t = Instant::now();
+                    let _ = run(&mut mk());
+                    b = b.min(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                b
+            };
+            jc[ci] = best(&|| {
+                let mut c = Command::new("node");
+                c.arg("-e").arg(format!("require({:?}).Test.main", bundle.display()));
+                c
+            });
+            wc[ci] = best(&|| {
+                let mut c = Command::new("node");
+                c.arg(&runner).arg(&wasm);
+                c
+            });
+        }
+        let (js, wg) = (jc[0] - jc[1], wc[0] - wc[1]);
+        eprintln!("BENCH {name:24} JS {js:7.1}ms  WasmGC {wg:7.1}ms  ratio {:.2}x", wg / js);
+    }
+}

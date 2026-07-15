@@ -37,6 +37,8 @@ fn make(args: &[String]) -> ExitCode {
         Native(Target),
         /// The typed, monomorphized backend (unboxed native code).
         Typed(Target),
+        /// The from-scratch WebAssembly GC backend (engine-managed GC).
+        WasmGc,
     }
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
@@ -53,10 +55,11 @@ fn make(args: &[String]) -> ExitCode {
                 // fallback (broader coverage, the correctness substrate).
                 "wasm" | "wasm-typed" => backend = Backend::Typed(Target::Wasm),
                 "wasm-uniform" => backend = Backend::Native(Target::Wasm),
+                "wasm-gc" | "wasmgc" => backend = Backend::WasmGc,
                 "native-typed" => backend = Backend::Typed(Target::Native),
                 other => {
                     eprintln!(
-                        "Unknown target `{}`. I know js, native, wasm, wasm-uniform, and native-typed.",
+                        "Unknown target `{}`. I know js, native, wasm, wasm-uniform, wasm-gc, and native-typed.",
                         other
                     );
                     return ExitCode::FAILURE;
@@ -88,6 +91,10 @@ fn make(args: &[String]) -> ExitCode {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
             alm_compiler::project::compile_project_typed(&input, &output, target).map(|()| output)
+        }
+        Backend::WasmGc => {
+            let output = output.unwrap_or_else(|| input.with_extension("wasm"));
+            alm_compiler::project::compile_project_wasmgc(&input, &output).map(|()| output)
         }
         Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));

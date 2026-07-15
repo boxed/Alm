@@ -3181,53 +3181,117 @@ impl<'a> Codegen<'a> {
 
     /// str_join(sep, list) : concatenate strings with `sep` between them.
     fn emit_str_join(&self) -> Function {
-        // params sep(0), list(1). locals: acc(2):eqref, len(3),start(4),i(5):i32,
-        //   data(6):ref T_ARR
-        let mut f = Function::new([(1, eqref()), (3, ValType::I32), (1, ref_to(T_ARR))]);
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayNewDefault(T_STR));
-        f.instruction(&Instruction::LocalSet(2)); // acc = ""
+        // Two-pass O(n) join: sum lengths, allocate once, array.copy each piece.
+        // (A naive acc = acc ++ item loop is O(n²) — it re-copied the whole
+        // accumulator every step, which made String.join catastrophically slow.)
+        // params sep(0), list(1). locals: len(2),total(3),i(4),off(5),seplen(6),
+        //   start(7),itemlen(8):i32; data(9):ref T_ARR; out(10),item(11):ref T_STR
+        let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (2, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(6)); // seplen
         list_len(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalSet(2)); // len
         list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalSet(9)); // data
         list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalSet(7)); // start
+        // item accessor: data[start + i] as T_STR (leaves it on the stack)
+        let item = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(9));
+            f.instruction(&Instruction::LocalGet(7));
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&cast_to(T_STR));
+        };
+        // pass 1: total = Σ len(item) + seplen*(len-1)
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalSet(3)); // total
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // i
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        // if i > 0: acc = acc ++ sep
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::I32GtS);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::End);
-        // acc = acc ++ data[start+i]
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        item(&mut f);
+        f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::Call(self.str_append_idx));
-        f.instruction(&Instruction::LocalSet(2));
-        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
+        // + separators (len > 0 ? seplen*(len-1) : 0)
         f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        // pass 2: allocate and copy
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(10)); // out
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5)); // off
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // if i > 0: copy sep at off, off += seplen
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        // copy item at off, off += itemlen
+        item(&mut f);
+        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(8)); // itemlen
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(10));
         f.instruction(&Instruction::End);
         f
     }
