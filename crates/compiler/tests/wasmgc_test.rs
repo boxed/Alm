@@ -1362,6 +1362,26 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
 }
 
 #[test]
+fn attributes_property() {
+    assert_sandbox_html(
+        "attrs_property",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (input, div)\n\
+         import Html.Attributes as A\n\
+         import Json.Encode as E\n\n\
+         view : Int -> Html.Html Never\n\
+         view _ =\n\
+         \x20   div []\n\
+         \x20       [ input [ A.property \"value\" (E.string \"hi\"), A.property \"checked\" (E.bool True) ] []\n\
+         \x20       , input [ A.property \"disabled\" (E.bool False) ] []\n\
+         \x20       ]\n\n\
+         main : Program () Int Never\n\
+         main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+#[test]
 fn attributes_bool() {
     assert_sandbox_html(
         "attrs_bool",

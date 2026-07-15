@@ -975,6 +975,7 @@ struct Codegen<'a> {
     str_slice_idx: u32,
     str_pad_both_idx: u32,
     class_list_idx: u32,
+    attr_property_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
     list_map4_idx: u32,
@@ -1173,6 +1174,7 @@ impl<'a> Codegen<'a> {
             str_slice_idx: 0,
             str_pad_both_idx: 0,
             class_list_idx: 0,
+            attr_property_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
             list_map4_idx: 0,
@@ -1396,6 +1398,7 @@ impl<'a> Codegen<'a> {
         self.str_slice_idx = next();
         self.str_pad_both_idx = next();
         self.class_list_idx = next();
+        self.attr_property_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
         self.list_map4_idx = next();
@@ -1653,6 +1656,7 @@ impl<'a> Codegen<'a> {
         let str_slice = self.emit_str_slice();
         let str_pad_both = self.emit_str_pad_both();
         let class_list = self.emit_class_list();
+        let attr_property = self.emit_attr_property();
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
         let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
@@ -1936,6 +1940,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // str_slice
         funcs.function(ft3); // str_pad_both
         funcs.function(ft1); // class_list
+        funcs.function(ft2); // attr_property
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
         funcs.function(ft5); // list_map4
@@ -2130,6 +2135,7 @@ impl<'a> Codegen<'a> {
         code.function(&str_slice);
         code.function(&str_pad_both);
         code.function(&class_list);
+        code.function(&attr_property);
         code.function(&list_intersperse);
         code.function(&list_map3);
         code.function(&list_map4);
@@ -5188,6 +5194,45 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// attr_property(name, value) : `Html.Attributes.property` — map the JSON
+    /// value to an attribute. A JSON string → AATTR [name, s] (matches reflected
+    /// string props like `value`); a JSON bool → ABOOL [name, b] (bare when
+    /// true). Other JSON shapes → a no-op ANONE (best effort — property with a
+    /// non-string/bool value, or a non-reflected name, is not fully modeled).
+    fn emit_attr_property(&self) -> Function {
+        // params name(0), value(1). JSON Value tags: 1 bool, 4 string.
+        let mut f = Function::new([]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(4)); // string?
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // AATTR
+        f.instruction(&Instruction::LocalGet(0)); // name
+        ctor_arg0(&mut f, 1); // the string
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(1)); // bool?
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(3)); // ABOOL
+        f.instruction(&Instruction::LocalGet(0)); // name
+        ctor_arg0(&mut f, 1); // the Bool
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        // ANONE (tag 4, 2 null args) — see class_list.
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -16751,6 +16796,12 @@ impl<'a> Codegen<'a> {
             ("Html.Attributes", "classList") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.class_list_idx));
+            }
+            // property name value → attribute from the JSON value (string/bool).
+            ("Html.Attributes", "property") => {
+                self.emit_expr(&args[0], ctx, f)?; // name
+                self.emit_expr(&args[1], ctx, f)?; // Json.Value
+                f.instruction(&Instruction::Call(self.attr_property_idx));
             }
             // Common string attributes: Html.Attributes.<name> value → AATTR.
             ("Html.Attributes", a) if html_attr_name(a).is_some() => {
