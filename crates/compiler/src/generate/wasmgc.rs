@@ -3916,7 +3916,8 @@ impl<'a> Codegen<'a> {
     fn emit_random_step(&self) -> Function {
         // params gen(0), seed(1). locals: ta(2),tb(3),tc(4),cur(5):eqref;
         //   lo(6),hi(7),range(8),x(9),thr(10):i64; tag(11):i32;
-        //   td(12),te(13):eqref; arr(14):ref T_ARR; i(15),n(16):i32 (map4/5, list)
+        //   td(12),te(13):eqref; arr(14):ref T_ARR; i(15),n(16):i32 (map4/5, list);
+        //   total(17),countdown(18),w(19):f64 (uniform/weighted)
         let mut f = Function::new([
             (4, eqref()),
             (5, ValType::I64),
@@ -3924,6 +3925,7 @@ impl<'a> Codegen<'a> {
             (2, eqref()),
             (1, ref_to(T_ARR)),
             (2, ValType::I32),
+            (3, ValType::F64),
         ]);
         const M32: i64 = 0x1_0000_0000;
         // element i of the tuple/ctor-args held in `local`
@@ -4097,6 +4099,206 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_BACK));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // Draw a unit float in [0,1) (elm/random's `float` mantissa) using
+        // peel(seed) and peel(cur=nextSeed(seed)); leaves the f64 on the stack.
+        // Caller must have set cur (local 5) = nextSeed(seed).
+        let draw_unit = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::Call(self.random_peel_idx));
+            f.instruction(&Instruction::I64Const(0x03FF_FFFF));
+            f.instruction(&Instruction::I64And);
+            f.instruction(&Instruction::F64ConvertI64U);
+            f.instruction(&Instruction::F64Const(134217728.0.into()));
+            f.instruction(&Instruction::F64Mul);
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::Call(self.random_peel_idx));
+            f.instruction(&Instruction::I64Const(0x07FF_FFFF));
+            f.instruction(&Instruction::I64And);
+            f.instruction(&Instruction::F64ConvertI64U);
+            f.instruction(&Instruction::F64Add);
+            f.instruction(&Instruction::F64Const(9007199254740992.0.into()));
+            f.instruction(&Instruction::F64Div);
+        };
+        // GWeighted (12): args firstPair[w,v], others (list of [w,v]). Matches
+        // elm's `weighted` = map (getByWeight ...) (float 0 total).
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5)); // cur
+        // total = |firstPair.w| + sum |others[i].w|
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Abs);
+        f.instruction(&Instruction::LocalSet(17));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(12)); // others
+        list_len(&mut f, 12);
+        f.instruction(&Instruction::LocalSet(16));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(17));
+        list_elem(&mut f, 12, 15);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Abs);
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::LocalSet(17));
+        bump(&mut f, 15, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // countdown = draw_unit * total
+        draw_unit(&mut f);
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalSet(18));
+        // getByWeight: sel=firstPair.v, w=|firstPair.w|
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(13)); // sel
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Abs);
+        f.instruction(&Instruction::LocalSet(19)); // w
+        // if countdown > w: countdown -= w; walk others
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::LocalGet(19));
+        f.instruction(&Instruction::F64Gt);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::LocalGet(19));
+        f.instruction(&Instruction::F64Sub);
+        f.instruction(&Instruction::LocalSet(18));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // sel = others[i].v ; w = |others[i].w|
+        list_elem(&mut f, 12, 15);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(13));
+        list_elem(&mut f, 12, 15);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F64Abs);
+        f.instruction(&Instruction::LocalSet(19));
+        // if countdown <= w: done
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::LocalGet(19));
+        f.instruction(&Instruction::F64Le);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::LocalGet(19));
+        f.instruction(&Instruction::F64Sub);
+        f.instruction(&Instruction::LocalSet(18));
+        bump(&mut f, 15, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // GUniform (13): args first (value), rest (list of values); weight 1 each
+        // (elm's `uniform` = weighted (1,first) (map (1,·) rest)).
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(13));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5)); // cur
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(12)); // rest
+        // total = 1 + len(rest)
+        list_len(&mut f, 12);
+        f.instruction(&Instruction::F64ConvertI32S);
+        f.instruction(&Instruction::F64Const(1.0.into()));
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::LocalSet(17));
+        // countdown = draw_unit * total
+        draw_unit(&mut f);
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalSet(18));
+        // sel = first
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(13));
+        // if countdown > 1: countdown -= 1; walk rest
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::F64Const(1.0.into()));
+        f.instruction(&Instruction::F64Gt);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::F64Const(1.0.into()));
+        f.instruction(&Instruction::F64Sub);
+        f.instruction(&Instruction::LocalSet(18));
+        list_len(&mut f, 12);
+        f.instruction(&Instruction::LocalSet(16));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 12, 15);
+        f.instruction(&Instruction::LocalSet(13)); // sel = rest[i]
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::F64Const(1.0.into()));
+        f.instruction(&Instruction::F64Le);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::F64Const(1.0.into()));
+        f.instruction(&Instruction::F64Sub);
+        f.instruction(&Instruction::LocalSet(18));
+        bump(&mut f, 15, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -14808,7 +15010,8 @@ impl<'a> Codegen<'a> {
             ("Random", "int") | ("Random", "float") | ("Random", "constant")
             | ("Random", "map") | ("Random", "map2") | ("Random", "map3")
             | ("Random", "andThen") | ("Random", "pair")
-            | ("Random", "map4") | ("Random", "map5") | ("Random", "list") => {
+            | ("Random", "map4") | ("Random", "map5") | ("Random", "list")
+            | ("Random", "weighted") | ("Random", "uniform") => {
                 let tag: i32 = match name {
                     "int" => 0,
                     "float" => 1,
@@ -14820,7 +15023,9 @@ impl<'a> Codegen<'a> {
                     "pair" => 7,
                     "map4" => 9,
                     "map5" => 10,
-                    _ => 11, // list
+                    "list" => 11,
+                    "weighted" => 12,
+                    _ => 13, // uniform
                 };
                 f.instruction(&Instruction::I32Const(tag));
                 for a in args {

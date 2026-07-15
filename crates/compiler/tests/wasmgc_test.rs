@@ -400,6 +400,24 @@ fn random_generators() {
 }
 
 #[test]
+fn random_uniform_weighted() {
+    assert_str_prog(
+        "random_uniform_weighted",
+        "module Test exposing (main)\n\n\
+         import Random\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       s0 = Random.initialSeed 1\n\
+         \x20       ( a, s1 ) = Random.step (Random.uniform \"x\" [ \"y\", \"z\", \"w\" ]) s0\n\
+         \x20       ( b, s2 ) = Random.step (Random.uniform \"x\" [ \"y\", \"z\", \"w\" ]) s1\n\
+         \x20       ( c, _ ) = Random.step (Random.weighted ( 10.0, \"big\" ) [ ( 1.0, \"small\" ) ]) s2\n\
+         \x20   in\n\
+         \x20   String.join \",\" [ a, b, c ]\n",
+    );
+}
+
+#[test]
 fn random_list_and_mapn() {
     assert_str_prog(
         "random_list_and_mapn",
