@@ -26,8 +26,21 @@ const mem = new Uint8Array(instance.exports.memory.buffer, 0, len);
 process.stdout.write(Buffer.from(mem).toString('utf8'));
 "#;
 
-/// Compile a whole module whose `main : String` and assert both backends agree.
+/// Compile a whole module whose `main : String` and assert all backends agree.
 fn assert_str_prog(test_name: &str, source: &str) {
+    assert_str_prog_impl(test_name, source, true);
+}
+
+/// As `assert_str_prog` but only diffs JS↔WasmGC. Used by the two tests that
+/// exercise String edge cases where the native backend has a KNOWN Elm-parity
+/// bug (astral `String.length` counts code points not UTF-16 units; native
+/// `String.lines` splits only on `\n`, not `\r\n`/`\r`). WasmGC matches JS (the
+/// Elm reference) in both; the native gaps are tracked separately.
+fn assert_str_prog_js_wasm(test_name: &str, source: &str) {
+    assert_str_prog_impl(test_name, source, false);
+}
+
+fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
     let dir = common::test_dir("alm-wasmgc", test_name);
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
@@ -51,6 +64,11 @@ fn assert_str_prog(test_name: &str, source: &str) {
     std::fs::write(&runner, STR_RUNNER).expect("write runner");
     let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
 
+    if check_native {
+        if let Some(nat) = native_out(&entry, &dir) {
+            assert_eq!(js, nat, "JS and native backends disagree");
+        }
+    }
     assert_eq!(js, wasm_out, "JS and WasmGC backends disagree");
 }
 
@@ -63,6 +81,37 @@ fn run(cmd: &mut Command) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+}
+
+/// Build the program with the native (typed, vector-List) backend and run it,
+/// returning its stdout. Returns `None` when the native toolchain isn't
+/// available so the JS/WasmGC diff still runs; a real backend error panics.
+/// The binary is run under `timeout` since native code is uncapped.
+fn native_out(entry: &std::path::Path, dir: &std::path::Path) -> Option<String> {
+    let bin = dir.join("native_app");
+    match project::compile_project_typed(entry, &bin, generate::native::Target::Native) {
+        Ok(()) => {
+            let out = Command::new("timeout")
+                .arg("30")
+                .arg(&bin)
+                .output()
+                .expect("run native binary");
+            assert!(
+                out.status.success(),
+                "native run failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        }
+        Err(e) => {
+            eprintln!(
+                "native backend skipped for this test:\n{}",
+                e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+            );
+            None
+        }
+    }
 }
 
 /// Compile `main = <int expr>` with both backends and assert they agree.
@@ -104,6 +153,9 @@ fn assert_int_prog(test_name: &str, source: &str) {
     std::fs::write(&runner, RUNNER).expect("write runner");
     let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
 
+    if let Some(nat) = native_out(&entry, &dir) {
+        assert_eq!(js, nat, "JS and native backends disagree");
+    }
     assert_eq!(js, wasm_out, "JS and WasmGC backends disagree");
 }
 
@@ -688,7 +740,8 @@ fn kernels_as_values() {
 
 #[test]
 fn string_words_lines() {
-    assert_str_prog(
+    // JS↔WasmGC only: native String.lines splits on "\n" alone (misses \r\n/\r).
+    assert_str_prog_js_wasm(
         "words_lines",
         "module Test exposing (main)\n\n\
          show : List String -> String\n\
@@ -743,7 +796,8 @@ fn basics_clamp() {
 #[test]
 fn string_length_utf16() {
     // Elm String.length counts UTF-16 code units: BMP = 1, astral = 2.
-    assert_str_prog(
+    // JS↔WasmGC only: native counts code points (astral = 1).
+    assert_str_prog_js_wasm(
         "len16",
         "module Test exposing (main)\n\n\
          main : String\n\
