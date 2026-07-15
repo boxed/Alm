@@ -25,11 +25,16 @@ use crate::reporting::annotation::Region;
 const T_INT: u32 = 0; // struct { i64 }
 const T_FLOAT: u32 = 1; // struct { f64 }
 const T_STR: u32 = 2; // array (mut i8)
-const T_ARR: u32 = 3; // array (mut eqref) — records, tuples, ctor args
-const T_CONS: u32 = 4; // struct { eqref head, eqref tail }
-const T_CTOR: u32 = 5; // struct { i32 tag, (ref null T_ARR) args }
-const T_CLOS: u32 = 6; // struct { funcref, i32 arity, i32 applied, (ref null T_ARR) args }
-const N_FIXED: u32 = 7;
+const T_ARR: u32 = 3; // array (mut eqref) — records, tuples, ctor args, list backing
+// A `List a` is a vector, not a cons list (matching alm's native backend):
+// elements live at data[cap-len .. cap) in head-first order (so iteration runs
+// forward through memory), with free space at the FRONT of the backing. `cons`
+// prepends into that slack in amortized O(1); `tail` just shortens the view.
+const T_BACK: u32 = 4; // struct { mut i32 head, (ref T_ARR) data } — head = frontmost used index
+const T_LIST: u32 = 5; // struct { i32 len, (ref null T_BACK) bk }
+const T_CTOR: u32 = 6; // struct { i32 tag, (ref null T_ARR) args }
+const T_CLOS: u32 = 7; // struct { funcref, i32 arity, i32 applied, (ref null T_ARR) args }
+const N_FIXED: u32 = 8;
 /// Highest arity the closure `apply` dispatcher handles.
 const MAX_ARITY: u32 = 6;
 
@@ -327,6 +332,131 @@ fn bump(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalSet(local));
 }
 
+/// A nullable reference to concrete type `idx`.
+fn ref_null_to(idx: u32) -> ValType {
+    ValType::Ref(RefType { nullable: true, heap_type: HeapType::Concrete(idx) })
+}
+
+// ---- List (vector) primitives ----------------------------------------------
+// A list value lives in local `l` (a `T_LIST`). Elements occupy
+// `data[cap-len .. cap)` head-first; these helpers read a list without needing
+// scratch locals (they re-read `l` as required).
+
+/// Push the list's element count (`i32`).
+fn list_len(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LIST));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+}
+
+/// Push the list's backing (`ref null T_BACK`).
+fn list_bk(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LIST));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 1 });
+}
+
+/// Push the backing data array (`ref T_ARR`). Traps on the empty list.
+fn list_data(f: &mut Function, l: u32) {
+    list_bk(f, l);
+    f.instruction(&cast_to(T_BACK));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 1 });
+}
+
+/// Push the head's index into the backing (`start = cap - len`).
+fn list_start(f: &mut Function, l: u32) {
+    list_data(f, l);
+    f.instruction(&Instruction::ArrayLen);
+    list_len(f, l);
+    f.instruction(&Instruction::I32Sub);
+}
+
+/// Push the head element (`data[start]`). Caller must ensure the list is
+/// non-empty.
+fn list_head(f: &mut Function, l: u32) {
+    list_data(f, l);
+    list_start(f, l);
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
+/// Push the tail as a fresh `T_LIST` view sharing the backing (`{len-1, bk}`).
+fn list_tail(f: &mut Function, l: u32) {
+    list_len(f, l);
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Sub);
+    list_bk(f, l);
+    f.instruction(&Instruction::StructNew(T_LIST));
+}
+
+/// Push element at head-offset held in local `iloc` (`data[start+i]`).
+fn list_elem(f: &mut Function, l: u32, iloc: u32) {
+    list_data(f, l);
+    list_start(f, l);
+    f.instruction(&Instruction::LocalGet(iloc));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
+/// Push i32 1 iff the list is empty.
+fn list_is_empty(f: &mut Function, l: u32) {
+    list_len(f, l);
+    f.instruction(&Instruction::I32Eqz);
+}
+
+/// Push the empty list value (`{0, null}`).
+fn push_empty_list(f: &mut Function) {
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_BACK)));
+    f.instruction(&Instruction::StructNew(T_LIST));
+}
+
+/// Copy every element of list `src` into `dst[dstoff..]`, head-first. All of
+/// `i,sd,ss,len` are scratch i32/ref locals the caller reserves. Safe on the
+/// empty list (reads the backing only when non-empty).
+#[allow(clippy::too_many_arguments)]
+fn copy_into(
+    f: &mut Function,
+    src: u32,
+    dst: u32,
+    dstoff: u32,
+    i: u32,
+    sd: u32,
+    ss: u32,
+    len: u32,
+) {
+    list_len(f, src);
+    f.instruction(&Instruction::LocalSet(len));
+    f.instruction(&Instruction::LocalGet(len));
+    f.instruction(&Instruction::If(BlockType::Empty));
+    list_data(f, src);
+    f.instruction(&Instruction::LocalSet(sd));
+    list_start(f, src);
+    f.instruction(&Instruction::LocalSet(ss));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::LocalSet(i));
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::Loop(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(i));
+    f.instruction(&Instruction::LocalGet(len));
+    f.instruction(&Instruction::I32GeS);
+    f.instruction(&Instruction::BrIf(1));
+    f.instruction(&Instruction::LocalGet(dst));
+    f.instruction(&Instruction::LocalGet(dstoff));
+    f.instruction(&Instruction::LocalGet(i));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::LocalGet(sd));
+    f.instruction(&Instruction::LocalGet(ss));
+    f.instruction(&Instruction::LocalGet(i));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+    f.instruction(&Instruction::ArraySet(T_ARR));
+    bump(f, i, 1);
+    f.instruction(&Instruction::Br(0));
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+    f.instruction(&Instruction::End);
+}
+
 pub fn build(mono: &MonoProgram, output: &Path) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     let bytes = cg.build()?;
@@ -348,6 +478,7 @@ struct Codegen<'a> {
     str_append_idx: u32,
     str_from_int_idx: u32,
     apply1_idx: u32,
+    list_cons_idx: u32,
     list_map_idx: u32,
     list_foldl_idx: u32,
     list_length_idx: u32,
@@ -436,6 +567,7 @@ impl<'a> Codegen<'a> {
             str_append_idx: 0,
             str_from_int_idx: 0,
             apply1_idx: 0,
+            list_cons_idx: 0,
             list_map_idx: 0,
             list_foldl_idx: 0,
             list_length_idx: 0,
@@ -548,6 +680,7 @@ impl<'a> Codegen<'a> {
         self.str_append_idx = next();
         self.str_from_int_idx = next();
         self.apply1_idx = next();
+        self.list_cons_idx = next();
         self.list_map_idx = next();
         self.list_foldl_idx = next();
         self.list_length_idx = next();
@@ -656,6 +789,7 @@ impl<'a> Codegen<'a> {
         let str_append = self.emit_str_append();
         let str_from_int = self.emit_str_from_int();
         let apply1 = self.emit_apply1();
+        let list_cons = self.emit_list_cons();
         let list_map = self.emit_list_map();
         let list_foldl = self.emit_list_foldl();
         let list_length = self.emit_list_length();
@@ -737,9 +871,19 @@ impl<'a> Codegen<'a> {
         types.ty().array(&StorageType::I8, true); // T_STR
         types.ty().array(&StorageType::Val(eqref()), true); // T_ARR
         struct_type(&mut types, &[
-            FieldType { element_type: StorageType::Val(eqref()), mutable: true },
-            FieldType { element_type: StorageType::Val(eqref()), mutable: true },
-        ]); // T_CONS
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ref_to(T_ARR)), mutable: false },
+        ]); // T_BACK { mut i32 head, (ref T_ARR) data }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType {
+                element_type: StorageType::Val(ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(T_BACK),
+                })),
+                mutable: false,
+            },
+        ]); // T_LIST { i32 len, (ref null T_BACK) bk }
         struct_type(&mut types, &[
             FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
             FieldType { element_type: StorageType::Val(ref_to(T_ARR)), mutable: false },
@@ -765,6 +909,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // str_append
         funcs.function(ft1); // str_from_int
         funcs.function(ft2); // apply1 : (clos, arg) -> eqref
+        funcs.function(ft2); // list_cons : (x, xs) -> list
         funcs.function(ft2); // list_map
         funcs.function(ft3); // list_foldl
         funcs.function(ft1); // list_length
@@ -847,6 +992,7 @@ impl<'a> Codegen<'a> {
         code.function(&str_append);
         code.function(&str_from_int);
         code.function(&apply1);
+        code.function(&list_cons);
         code.function(&list_map);
         code.function(&list_foldl);
         code.function(&list_length);
@@ -1297,86 +1443,246 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
-    /// list_map(f, xs) : map `f` over a cons list.
-    fn emit_list_map(&self) -> Function {
-        let mut f = Function::new([]);
+    /// list_cons(x, xs) : prepend `x`. Amortized O(1) — writes into the
+    /// backing's front slack when this view owns it, else grows with fresh
+    /// front space (new capacity `2*(len+1)`).
+    fn emit_list_cons(&self) -> Function {
+        // params: x(0), xs(1). locals: len(2), cap(3), start(4), newcap(5),
+        //   nstart(6), k(7):i32, bk(8):ref null T_BACK, ndata(9), odata(10):ref T_ARR
+        let mut f = Function::new([
+            (6, ValType::I32),
+            (1, ref_null_to(T_BACK)),
+            (2, ref_to(T_ARR)),
+        ]);
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_LIST));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(2)); // len
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_LIST));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(8)); // bk
+        // in-place fast path when bk != null
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        // head = apply1(f, xs.head)
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // odata = bk.data
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(10));
+        // cap = odata.len; start = cap - len
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        // if start == bk.head && start > 0
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACK, field_index: 0 });
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // odata[start-1] = x
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        // tail = list_map(f, xs.tail)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_map_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // bk.head = start-1
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACK));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_BACK, field_index: 0 });
+        // return {len+1, bk}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // grow path: newcap = 2*(len+1)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9)); // ndata
+        // nstart = newcap - (len+1)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(6));
+        // ndata[nstart] = x
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // copy old elements when bk != null
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7)); // k
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[nstart+1+k] = odata[start+k]
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // return {len+1, {head:nstart, data:ndata}}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_foldl(f, acc, xs) : left fold, `f element acc`.
-    fn emit_list_foldl(&self) -> Function {
-        let mut f = Function::new([(1, eqref())]); // local 3 = newacc
+    /// list_map(f, xs) : map `f` over the vector, producing a fresh list.
+    fn emit_list_map(&self) -> Function {
+        // params f(0), xs(1). locals: len(2), start(3), i(4):i32,
+        //   xdata(5), ndata(6):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (2, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Else);
-        // newacc = apply1(apply1(f, head), acc)
-        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        list_start(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
-        // list_foldl(f, newacc, xs.tail)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_foldl_idx));
-        f.instruction(&Instruction::End); // if
-        f.instruction(&Instruction::End); // function
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // wrap ndata (start=0, len = ndata.len)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_foldl(f, acc, xs) : left fold `f element acc`, head first.
+    fn emit_list_foldl(&self) -> Function {
+        // params f(0), acc(1), xs(2). locals: len(3), start(4), i(5):i32,
+        //   xdata(6):ref T_ARR, a(7):eqref
+        let mut f =
+            Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(7)); // a = acc
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(6));
+        list_start(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // a = f (xdata[start+i]) a
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
         f
     }
 
     /// list_length(xs) : number of elements, boxed as Int.
     fn emit_list_length(&self) -> Function {
-        let mut f = Function::new([(1, ValType::I32)]); // local 1 = count
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(0));
-        f.instruction(&Instruction::Br(0));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
+        let mut f = Function::new([]);
+        list_len(&mut f, 0);
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::StructNew(T_INT));
-        f.instruction(&Instruction::End); // function
+        f.instruction(&Instruction::End);
         f
     }
 
@@ -1512,120 +1818,194 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
-    /// list_append(xs, ys) : `xs ++ ys` for lists.
+    /// list_append(xs, ys) : `xs ++ ys` — allocate `lenx+leny`, copy both.
     fn emit_list_append(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.list_append_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::End);
+        // params xs(0), ys(1). locals: tot(2),lenx(3),i(4),len(5),ss(6),off(7):i32,
+        //   data(8), sd(9):ref T_ARR
+        let mut f = Function::new([(6, ValType::I32), (2, ref_to(T_ARR))]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3)); // lenx
+        f.instruction(&Instruction::LocalGet(3));
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2)); // tot
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(8)); // data
+        // copy xs at offset 0
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7)); // off
+        copy_into(&mut f, 0, 8, 7, 4, 9, 6, 5);
+        // copy ys at offset lenx
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(7));
+        copy_into(&mut f, 1, 8, 7, 4, 9, 6, 5);
+        // wrap
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_reverse(xs) : reverse a list (iterative, with an accumulator).
+    /// list_reverse(xs) : allocate `len`, copy element k to slot len-1-k.
     fn emit_list_reverse(&self) -> Function {
-        // locals: xs(0); acc(1): eqref
-        let mut f = Function::new([(1, eqref())]);
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        // params xs(0). locals: len(1), start(2), i(3):i32, xdata(4), ndata(5):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (2, ref_to(T_ARR))]);
+        list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        // acc = cons(xs.head, acc)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::LocalSet(1));
-        // xs = xs.tail
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[len-1-i] = xdata[start+i]
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_filter(pred, xs) : keep elements where `pred` returns True.
+    /// list_filter(pred, xs) : keep elements where `pred` holds. Scans from the
+    /// tail so consing yields head-first order.
     fn emit_list_filter(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        // if pred(head) then cons(head, filter(pred, tail)) else filter(pred, tail)
+        // params pred(0), xs(1). locals: len(2), start(3), i(4):i32,
+        //   xdata(5):ref T_ARR, acc(6):eqref, elem(7):eqref
+        let mut f =
+            Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (2, eqref())]);
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(6)); // acc = []
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        // i = len-1 downto 0
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // elem = xdata[start+i]
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        // if pred elem: acc = cons(elem, acc)
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_filter_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_filter_idx));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_foldr(f, acc, xs) : right fold, `f element acc`.
+    /// list_foldr(f, acc, xs) : right fold `f element acc`, tail first.
     fn emit_list_foldr(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // params f(0), acc(1), xs(2). locals: len(3), start(4), i(5):i32,
+        //   xdata(6):ref T_ARR, a(7):eqref
+        let mut f =
+            Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Else);
-        // f head (foldr f acc tail)
+        f.instruction(&Instruction::LocalSet(7));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(6));
+        list_start(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5)); // i = len-1
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // a = f (xdata[start+i]) a
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
-        // second arg = foldr f acc tail
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_foldr_idx));
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::End);
         f
     }
@@ -1669,55 +2049,93 @@ impl<'a> Codegen<'a> {
 
     /// list_range(lo, hi) : `[lo, lo+1, .., hi]`.
     fn emit_list_range(&self) -> Function {
-        // lo(0), hi(1); acc(2):eqref, i(3):i64
-        let mut f = Function::new([(1, eqref()), (1, ValType::I64)]);
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::LocalSet(3)); // i = hi
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
+        // params lo(0), hi(1). locals: loi(2):i64, cnt(3):i64, n(4), i(5):i32,
+        //   data(6):ref T_ARR
+        let mut f = Function::new([(2, ValType::I64), (2, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64LtS);
-        f.instruction(&Instruction::BrIf(1));
-        // acc = cons(box i, acc)
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::LocalSet(2)); // loi
+        // cnt = hi - lo + 1
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I64Const(1));
         f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Add);
         f.instruction(&Instruction::LocalSet(3));
+        // n = cnt < 0 ? 0 : cnt (as i32)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // data[i] = box(loi + i)
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
     /// list_member(x, xs) : whether `x` structurally equals some element.
     fn emit_list_member(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        // params x(0), xs(1). locals: len(2), start(3), i(4):i32, data(5):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::RefI31);
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.val_eq_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
@@ -1726,123 +2144,209 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_take(n, xs) : the first `n` elements.
+    /// list_take(n, xs) : the first `n` elements (copied).
     fn emit_list_take(&self) -> Function {
-        let mut f = Function::new([]);
-        // n <= 0 || xs null → []
+        // params n(0), xs(1). locals: n2(2), len(3), start(4), i(5):i32,
+        //   xdata(6), ndata(7):ref T_ARR
+        let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        // n2 = clamp(unbox n, 0, len)
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64Const(0));
-        f.instruction(&Instruction::I64LeS);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::I32Or);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64Const(1));
-        f.instruction(&Instruction::I64Sub);
-        f.instruction(&Instruction::StructNew(T_INT));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_take_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        // if n2 < 0 { 0 }
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::End);
+        // if n2 > len { len }
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::End);
-        f
-    }
-
-    /// list_drop(n, xs) : all but the first `n` elements.
-    fn emit_list_drop(&self) -> Function {
-        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(6));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64Const(0));
-        f.instruction(&Instruction::I64LeS);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_INT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64Const(1));
-        f.instruction(&Instruction::I64Sub);
-        f.instruction(&Instruction::StructNew(T_INT));
-        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_concat(xss) : concatenate a list of lists.
+    /// list_drop(n, xs) : all but the first `n` — a shared view `{len-n2, bk}`.
+    fn emit_list_drop(&self) -> Function {
+        // params n(0), xs(1). locals: n2(2), len(3):i32
+        let mut f = Function::new([(2, ValType::I32)]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        // {len - n2, xs.bk}
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Sub);
+        list_bk(&mut f, 1);
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// list_concat(xss) : concatenate a list of lists (two passes: sum, copy).
     fn emit_list_concat(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_concat_idx));
-        f.instruction(&Instruction::Call(self.list_append_idx));
+        // params xss(0). locals (index 1 unused): outerlen(2),total(3),oi(4),
+        //   off(5),ci(6),css(7),clen(8):i32, data(9), csd(10):ref T_ARR, inner(11):eqref
+        let mut f =
+            Function::new([(8, ValType::I32), (2, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // pass 1: total
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // inner = xss[oi]
+        list_data(&mut f, 0);
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalGet(3));
+        list_len(&mut f, 11);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
+        // pass 2: copy each inner at running offset
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_data(&mut f, 0);
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(11));
+        copy_into(&mut f, 11, 9, 5, 6, 10, 7, 8);
+        f.instruction(&Instruction::LocalGet(5));
+        list_len(&mut f, 11);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_head/list_tail(xs) : `Nothing` on `[]`, else `Just head`/`Just tail`
-    /// (Maybe: Just=tag 0, Nothing=tag 1). `tail` selects field 1 vs 0.
+    /// list_head/list_tail(xs) : `Nothing` on `[]`, else `Just head`/`Just tail`.
     fn emit_list_head(&self, tail: bool) -> Function {
-        let field = if tail { 1 } else { 0 };
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         // Nothing
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
-        // Just (xs.head or xs.tail)
+        // Just head / Just tail
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: field });
+        if tail {
+            list_tail(&mut f, 0);
+        } else {
+            list_head(&mut f, 0);
+        }
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
@@ -1898,41 +2402,50 @@ impl<'a> Codegen<'a> {
 
     /// str_join(sep, list) : concatenate strings with `sep` between them.
     fn emit_str_join(&self) -> Function {
-        // sep(0), list(1); acc(2):eqref, first(3):i32
-        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
+        // params sep(0), list(1). locals: acc(2):eqref, len(3),start(4),i(5):i32,
+        //   data(6):ref T_ARR
+        let mut f = Function::new([(1, eqref()), (3, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayNewDefault(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(2)); // acc = ""
+        list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(6));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        // if !first: acc = acc ++ sep
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // if i > 0: acc = acc ++ sep
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(3));
-        // acc = acc ++ head
+        // acc = acc ++ data[start+i]
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(2));
@@ -2192,31 +2705,49 @@ impl<'a> Codegen<'a> {
         // lengths
         sign_i(&mut f, 3, 4, false);
         f.instruction(&Instruction::End);
-        // T_CONS: compare heads, then tails
+        // T_LIST: lexicographic over elements, then by length
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_CONS)));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST)));
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3)); // la
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4)); // lb
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 2);
+        list_elem(&mut f, 1, 2);
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(5));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // shorter list sorts first: sign(la - lb)
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // T_ARR (tuples): elementwise
@@ -2271,34 +2802,29 @@ impl<'a> Codegen<'a> {
     /// list_insert(x, sorted) : insert `x` into an ascending-sorted list.
     fn emit_list_insert(&self) -> Function {
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 1);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // [x]
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
+        // compare(x, head) <= 0 ? cons(x, sorted) : cons(head, insert(x, tail))
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32LeS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
         f.instruction(&Instruction::Call(self.list_insert_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -2308,17 +2834,13 @@ impl<'a> Codegen<'a> {
     /// list_sort(xs) : insertion sort using val_compare.
     fn emit_list_sort(&self) -> Function {
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        // insert(head, sort(tail))
+        list_head(&mut f, 0);
+        list_tail(&mut f, 0);
         f.instruction(&Instruction::Call(self.list_sort_idx));
         f.instruction(&Instruction::Call(self.list_insert_idx));
         f.instruction(&Instruction::End);
@@ -2328,210 +2850,260 @@ impl<'a> Codegen<'a> {
 
     /// list_all/any(pred, xs) : whether `pred` holds for all / any elements.
     fn emit_list_all_any(&self, all: bool) -> Function {
-        // early-exit value: all -> return false on first !pred; any -> true on first pred
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        // params pred(0), xs(1). locals: len(2), start(3), i(4):i32, data(5):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(if all { 1 } else { 0 }));
-        f.instruction(&Instruction::RefI31);
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
-        // p = pred(head)
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(5));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         if all {
-            f.instruction(&Instruction::I32Eqz); // !p → return false
+            f.instruction(&Instruction::I32Eqz);
         }
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(if all { 0 } else { 1 }));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(1));
+        bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Unreachable);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(if all { 1 } else { 0 }));
+        f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::End);
         f
     }
 
     /// list_min/max(xs) : Maybe (least / greatest element) by val_compare.
     fn emit_list_min_max(&self, max: bool) -> Function {
-        // xs(0); best(1): eqref
-        let mut f = Function::new([(1, eqref())]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
+        // params xs(0). locals: len(1), start(2), i(3):i32, data(4):ref T_ARR,
+        //   best(5):eqref
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
-        // Nothing
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // best = head; xs = tail
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(0));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // best = data[start]
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        // if compare(head, best) (max: >0)(min: <0) → best = head
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // e = data[start+i]; if compare(e, best) (max:>0/min:<0) best = e
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(if max { &Instruction::I32GtS } else { &Instruction::I32LtS });
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(0));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // Just best
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_indexed_map(f, i, xs) : map with the element index (starts at the
-    /// passed `i`, boxed as Int).
+    /// list_indexedMap(f, base, xs) : map with element index (from `base`).
     fn emit_list_indexed_map(&self) -> Function {
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        // head' = apply1(apply1(f, i), xs.head)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        // tail' = indexed(f, i+1, xs.tail)
-        f.instruction(&Instruction::LocalGet(0));
+        // params f(0), base(1), xs(2). locals: len(3), start(4), i(5), base_i(6):i32,
+        //   xdata(7), ndata(8):ref T_ARR
+        let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
-        f.instruction(&Instruction::I64Const(1));
-        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(6));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(7));
+        list_start(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[i] = f (box(base+i)) (xdata[start+i])
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::StructNew(T_INT));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_indexed_map_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_sum/product(xs) : numeric fold. Works for both `List Int` and
-    /// `List Float` by dispatching on the runtime type of the first element;
-    /// the empty list yields the Int identity (0 / 1), matching Elm.
+    /// list_sum/product(xs) : numeric fold over Int or Float (dispatch on the
+    /// first element); empty yields the Int identity (0 / 1), matching Elm.
     fn emit_list_sum_prod(&self, product: bool) -> Function {
         let ident = if product { 1 } else { 0 };
-        // locals: iacc i64 (1), facc f64 (2), cur eqref (3)
-        let mut f = Function::new([(1, ValType::I64), (1, ValType::F64), (1, eqref())]);
+        // params xs(0). locals: len(1),start(2),i(3):i32, data(4):ref T_ARR,
+        //   iacc(5):i64, facc(6):f64
+        let mut f = Function::new([
+            (3, ValType::I32),
+            (1, ref_to(T_ARR)),
+            (1, ValType::I64),
+            (1, ValType::F64),
+        ]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
         // empty -> box Int identity
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I64Const(ident));
         f.instruction(&Instruction::StructNew(T_INT));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // float path if head is a Float box
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // float path if data[start] is a Float
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::F64Const((ident as f64).into()));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&cast_to(T_FLOAT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
         f.instruction(if product { &Instruction::F64Mul } else { &Instruction::F64Add });
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalSet(6));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::StructNew(T_FLOAT));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // int path
         f.instruction(&Instruction::I64Const(ident));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
         f.instruction(if product { &Instruction::I64Mul } else { &Instruction::I64Add });
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_INT));
         f.instruction(&Instruction::End);
         f
@@ -2539,37 +3111,66 @@ impl<'a> Codegen<'a> {
 
     /// list_map2(f, xs, ys) : zip-map, stopping at the shorter list.
     fn emit_list_map2(&self) -> Function {
-        let mut f = Function::new([]);
-        // if either null -> Nil
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::I32Or);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::Else);
-        // head' = apply1(apply1(f, xs.head), ys.head)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        // tail' = map2(f, xs.tail, ys.tail)
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::Call(self.list_map2_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        // params f(0), xs(1), ys(2). locals: n(3),xs0(4),ys0(5),i(6):i32,
+        //   xd(7),yd(8),nd(9):ref T_ARR
+        let mut f = Function::new([(4, ValType::I32), (3, ref_to(T_ARR))]);
+        // n = min(len xs, len ys)
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(7));
+        list_data(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(8));
+        list_start(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4));
+        list_start(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
@@ -3058,23 +3659,22 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// str_to_list(s) : String -> List Char, decoding UTF-8 code points.
+    /// str_to_list(s) : String -> List Char. Two passes: count code points,
+    /// allocate, then fill head-first.
     fn emit_str_to_list(&self) -> Function {
-        // locals: sstr(1):str, len(2), i(3), cp(4), adv(5):i32, acc(6):eqref
-        let mut f = Function::new([
-            (1, ref_to(T_STR)),
-            (4, ValType::I32),
-            (1, eqref()),
-        ]);
+        // params s(0). locals: sstr(1):str, blen(2),i(3),cp(4),adv(5),count(6),
+        //   k(7):i32, data(8):ref T_ARR
+        let mut f = Function::new([(1, ref_to(T_STR)), (6, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_STR));
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(2));
+        // pass 1: count
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
@@ -3083,12 +3683,35 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
         utf8_decode(&mut f, 1, 3, 4, 5);
-        // acc = cons(Char cp, acc)
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // pass 2: fill
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        utf8_decode(&mut f, 1, 3, 4, 5);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::RefI31);
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 7, 1);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Add);
@@ -3097,76 +3720,89 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
-    /// str_from_list(chars) : List Char -> String, encoding UTF-8. Two passes:
-    /// sum the byte widths, allocate, then fill.
+    /// str_from_list(chars) : List Char -> String. Two passes: sum byte widths,
+    /// then encode.
     fn emit_str_from_list(&self) -> Function {
-        // locals: total(1), off(2), cp(3), bl(4):i32, cur(5):eqref, out(6):str
-        let mut f = Function::new([
-            (4, ValType::I32),
-            (1, eqref()),
-            (1, ref_to(T_STR)),
-        ]);
-        // pass 1: total byte length
-        f.instruction(&Instruction::I32Const(0));
+        // params chars(0). locals: len(1),total(2),off(3),cp(4),bl(5),i(6),
+        //   start(7):i32, xdata(8):ref T_ARR, out(9):str
+        let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (1, ref_to(T_STR))]);
+        list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::LocalSet(3));
-        utf8_byte_len(&mut f, 3, 4);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Br(0));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayNewDefault(T_STR));
-        f.instruction(&Instruction::LocalSet(6));
-        // pass 2: encode
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(8));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7));
+        // pass 1: total bytes
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
-        f.instruction(&Instruction::LocalSet(3));
-        utf8_encode(&mut f, 6, 2, 3);
+        f.instruction(&Instruction::LocalSet(4));
+        utf8_byte_len(&mut f, 4, 5);
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        bump(&mut f, 6, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // allocate output
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(9));
+        // pass 2: encode
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(4));
+        utf8_encode(&mut f, 9, 3, 4);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::End);
         f
     }
@@ -3455,7 +4091,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(13));
         // empty separator → one piece per code point
         f.instruction(&Instruction::LocalGet(4));
@@ -3479,7 +4115,7 @@ impl<'a> Codegen<'a> {
         slice_into(&mut f, 3, 8, 9, 14, 15);
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(13));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(11));
@@ -3520,7 +4156,7 @@ impl<'a> Codegen<'a> {
         slice_into(&mut f, 3, 8, 9, 14, 15);
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(13));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(4));
@@ -3564,7 +4200,7 @@ impl<'a> Codegen<'a> {
         slice_into(&mut f, 3, 8, 9, 14, 15);
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(13));
         f.instruction(&Instruction::LocalGet(13));
         f.instruction(&Instruction::Call(self.list_reverse_idx));
@@ -3601,7 +4237,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
@@ -3657,7 +4293,7 @@ impl<'a> Codegen<'a> {
         slice_into(&mut f, 1, 5, 6, 9, 10);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::Br(0)); // outer_loop
         f.instruction(&Instruction::End); // outer_loop
@@ -3688,7 +4324,7 @@ impl<'a> Codegen<'a> {
             slice_into(f, 1, 5, 6, 9, 10);
             f.instruction(&Instruction::LocalGet(9));
             f.instruction(&Instruction::LocalGet(8));
-            f.instruction(&Instruction::StructNew(T_CONS));
+            f.instruction(&Instruction::Call(self.list_cons_idx));
             f.instruction(&Instruction::LocalSet(8));
         };
         f.instruction(&Instruction::LocalGet(0));
@@ -3697,7 +4333,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
@@ -3760,7 +4396,7 @@ impl<'a> Codegen<'a> {
         slice_into(&mut f, 1, 5, 6, 9, 10);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::Call(self.list_reverse_idx));
@@ -3770,48 +4406,59 @@ impl<'a> Codegen<'a> {
 
     /// list_repeat(n, x) : a list of `n` copies of `x` (empty if n <= 0).
     fn emit_list_repeat(&self) -> Function {
-        // params: n(0), x(1). locals: k(2):i32, acc(3):eqref
-        let mut f = Function::new([(1, ValType::I32), (1, eqref())]);
+        // params n(0), x(1). locals: n2(2), i(3):i32, data(4):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_INT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::I32LeS);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_CONS));
-        f.instruction(&Instruction::LocalSet(3));
-        dec(&mut f, 2);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
 
     /// list_filterMap(f, xs) : map with `f : a -> Maybe b`, keeping Justs.
     fn emit_list_filter_map(&self) -> Function {
-        // params: f(0), xs(1). local: r(2):eqref
+        // params f(0), xs(1). local r(2):eqref
         let mut f = Function::new([(1, eqref())]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 1);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::Else);
-        // r = apply1(f, head)
+        // r = f head
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalSet(2));
         ctor_tag(&mut f, 2);
@@ -3819,16 +4466,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         ctor_arg0(&mut f, 2);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
         f.instruction(&Instruction::Call(self.list_filter_map_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
         f.instruction(&Instruction::Call(self.list_filter_map_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -3838,22 +4481,16 @@ impl<'a> Codegen<'a> {
 
     /// list_sortBy(f, xs) : insertion sort keyed by `f`, stable, ascending.
     fn emit_list_sortby(&self) -> Function {
-        // params: f(0), xs(1)
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 1);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::Else);
         // insert(f, head, sortBy(f, tail))
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
         f.instruction(&Instruction::Call(self.list_sortby_idx));
         f.instruction(&Instruction::Call(self.list_sortby_insert_idx));
         f.instruction(&Instruction::End);
@@ -3863,24 +4500,20 @@ impl<'a> Codegen<'a> {
 
     /// list_sortByInsert(f, x, ys) : insert `x` into key-sorted `ys`.
     fn emit_list_sortby_insert(&self) -> Function {
-        // params: f(0), x(1), ys(2)
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 2);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         // [x]
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
         // compare(f x, f head) <= 0 → cons(x, ys)
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 2);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::I32Const(0));
@@ -3888,19 +4521,15 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
         // cons(head, insert(f, x, tail))
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 2);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 2);
         f.instruction(&Instruction::Call(self.list_sortby_insert_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -3957,84 +4586,62 @@ impl<'a> Codegen<'a> {
 
     /// list_intersperse(sep, xs) : `sep` between consecutive elements.
     fn emit_list_intersperse(&self) -> Function {
-        // params: sep(0), xs(1)
-        let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        // params sep(0), xs(1). locals head(2), tail(3):eqref
+        let mut f = Function::new([(2, eqref())]);
+        list_is_empty(&mut f, 1);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::Else);
-        // head
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
-        // tail
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalTee(1));
-        f.instruction(&Instruction::RefIsNull);
+        list_head(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        list_is_empty(&mut f, 3);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         // [head]
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalGet(2));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::Else);
-        // cons(sep, intersperse(sep, tail))
+        // cons(head, cons(sep, intersperse(sep, tail)))
+        f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::Call(self.list_intersperse_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::End);
-        // cons(head, <the above tail>)
-        f.instruction(&Instruction::StructNew(T_CONS));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
 
-    /// list_map3(f, xs, ys, zs) : zip-map of three lists, stopping at the
-    /// shortest.
+    /// list_map3(f, xs, ys, zs) : zip-map of three lists, stopping at shortest.
     fn emit_list_map3(&self) -> Function {
-        // params: f(0), xs(1), ys(2), zs(3)
         let mut f = Function::new([]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 1);
+        list_is_empty(&mut f, 2);
         f.instruction(&Instruction::I32Or);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 3);
         f.instruction(&Instruction::I32Or);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
         f.instruction(&Instruction::Else);
-        // head' = apply1(apply1(apply1(f, xs.head), ys.head), zs.head)
+        // cons(f h1 h2 h3, map3(f, t1, t2, t3))
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 2);
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 3);
         f.instruction(&Instruction::Call(self.apply1_idx));
-        // tail' = map3(f, xs.tail, ys.tail, zs.tail)
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
+        list_tail(&mut f, 2);
+        list_tail(&mut f, 3);
         f.instruction(&Instruction::Call(self.list_map3_idx));
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -4042,27 +4649,21 @@ impl<'a> Codegen<'a> {
 
     /// list_partition(pred, xs) : `(matching, non-matching)` preserving order.
     fn emit_list_partition(&self) -> Function {
-        // params: pred(0), xs(1). locals: rest(2), head(3):eqref
+        // params pred(0), xs(1). locals rest(2), head(3):eqref
         let mut f = Function::new([(2, eqref())]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 1);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
+        push_empty_list(&mut f);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Else);
         // rest = partition(pred, tail); head = xs.head
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 1);
         f.instruction(&Instruction::Call(self.list_partition_idx));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
-        // pred head ?
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -4072,7 +4673,7 @@ impl<'a> Codegen<'a> {
         // [cons(head, rest[0]), rest[1]]
         f.instruction(&Instruction::LocalGet(3));
         self.load_arr(2, 0, &mut f);
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         self.load_arr(2, 1, &mut f);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Else);
@@ -4080,44 +4681,39 @@ impl<'a> Codegen<'a> {
         self.load_arr(2, 0, &mut f);
         f.instruction(&Instruction::LocalGet(3));
         self.load_arr(2, 1, &mut f);
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::End); // inner if
-        f.instruction(&Instruction::End); // outer if
-        f.instruction(&Instruction::End); // function
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f
     }
 
     /// list_unzip(xs) : `(firsts, seconds)` from a list of pairs.
     fn emit_list_unzip(&self) -> Function {
-        // param: xs(0). locals: rest(1), pair(2):eqref
+        // param xs(0). locals rest(1), pair(2):eqref
         let mut f = Function::new([(2, eqref())]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefIsNull);
+        list_is_empty(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::RefNull(eq_heap()));
-        f.instruction(&Instruction::RefNull(eq_heap()));
+        push_empty_list(&mut f);
+        push_empty_list(&mut f);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 1 });
+        list_tail(&mut f, 0);
         f.instruction(&Instruction::Call(self.list_unzip_idx));
         f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: 0 });
+        list_head(&mut f, 0);
         f.instruction(&Instruction::LocalSet(2));
         // [cons(pair[0], rest[0]), cons(pair[1], rest[1])]
         self.load_arr(2, 0, &mut f);
         self.load_arr(1, 0, &mut f);
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         self.load_arr(2, 1, &mut f);
         self.load_arr(1, 1, &mut f);
-        f.instruction(&Instruction::StructNew(T_CONS));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::End); // if
-        f.instruction(&Instruction::End); // function
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f
     }
 
@@ -4239,12 +4835,41 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // T_CONS: head eq && tail eq (recursive)
-        test(&mut f, 0, T_CONS);
+        // T_LIST: equal length, then elementwise
+        test(&mut f, 0, T_LIST);
         f.instruction(&Instruction::If(BlockType::Empty));
-        self.val_eq_field(&mut f, T_CONS, 0);
-        self.val_eq_field(&mut f, T_CONS, 1);
-        f.instruction(&Instruction::I32And);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3));
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 2);
+        list_elem(&mut f, 1, 2);
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -4296,20 +4921,6 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::End);
         f
-    }
-
-    /// In `val_eq`: push i32 = (val_eq(a.field, b.field) as i32), for a struct
-    /// field of `a`(local 0) and `b`(local 1).
-    fn val_eq_field(&self, f: &mut Function, ty: u32, field: u32) {
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(ty));
-        f.instruction(&Instruction::StructGet { struct_type_index: ty, field_index: field });
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(ty));
-        f.instruction(&Instruction::StructGet { struct_type_index: ty, field_index: field });
-        f.instruction(&Instruction::Call(self.val_eq_idx));
-        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
-        f.instruction(&Instruction::I31GetS);
     }
 
     /// In `val_eq`: compare the two `T_ARR`s in locals 0/1 elementwise, ending
@@ -4439,17 +5050,21 @@ impl<'a> Codegen<'a> {
             // A nullary constructor value (e.g. `Nothing`, `Red`).
             TypedKind::Ctor(_, _, ctor) => self.emit_ctor(ctor.index, &[], ctx, f)?,
             TypedKind::List(items) => {
-                // Build the cons chain right-to-left onto Nil (null) via a temp.
-                let acc = ctx.bind("$list");
-                f.instruction(&Instruction::RefNull(eq_heap()));
-                f.instruction(&Instruction::LocalSet(acc));
-                for item in items.iter().rev() {
-                    self.emit_expr(item, ctx, f)?; // head
-                    f.instruction(&Instruction::LocalGet(acc)); // tail
-                    f.instruction(&Instruction::StructNew(T_CONS));
-                    f.instruction(&Instruction::LocalSet(acc));
+                // Build a tight vector: push len and head-index (constants),
+                // then the elements head-first, then fold into T_ARR/T_BACK/T_LIST.
+                if items.is_empty() {
+                    push_empty_list(f);
+                } else {
+                    let n = items.len() as u32;
+                    f.instruction(&Instruction::I32Const(n as i32)); // len
+                    f.instruction(&Instruction::I32Const(0)); // head index
+                    for item in items {
+                        self.emit_expr(item, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: n });
+                    f.instruction(&Instruction::StructNew(T_BACK));
+                    f.instruction(&Instruction::StructNew(T_LIST));
                 }
-                f.instruction(&Instruction::LocalGet(acc));
             }
             TypedKind::Tuple(a, b, c) => {
                 self.emit_expr(a, ctx, f)?;
@@ -4668,10 +5283,9 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.list_append_idx));
             }
             "::" => {
-                // cons: struct { head = l, tail = r }
                 self.emit_expr(l, ctx, f)?;
                 self.emit_expr(r, ctx, f)?;
-                f.instruction(&Instruction::StructNew(T_CONS));
+                f.instruction(&Instruction::Call(self.list_cons_idx));
             }
             "|>" => {
                 // x |> f  ==  f x
@@ -4910,8 +5524,8 @@ impl<'a> Codegen<'a> {
             }
             ("List", "singleton") => {
                 self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::RefNull(eq_heap()));
-                f.instruction(&Instruction::StructNew(T_CONS));
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.list_cons_idx));
             }
             ("Maybe", "withDefault") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -5658,11 +6272,10 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::End);
             }
             List(items) if items.is_empty() => {
-                f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::RefIsNull);
+                list_is_empty(f, s);
             }
             List(items) => {
-                // non-null AND head matches items[0] AND tail matches List(rest)
+                // non-empty AND head matches items[0] AND tail matches List(rest)
                 self.emit_cons_test(&items[0], &make_list_tail(pat, items), s, ctx, f)?;
             }
             Cons(h, t) => self.emit_cons_test(h, t, s, ctx, f)?,
@@ -5694,11 +6307,10 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
-        // Guard on non-null, THEN test head/tail (casts to T_CONS are only
-        // safe on a real cons cell).
-        f.instruction(&Instruction::LocalGet(s));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::I32Eqz); // non-null
+        // Guard on non-empty, THEN test head/tail (head/tail are only valid on
+        // a non-empty vector).
+        list_is_empty(f, s);
+        f.instruction(&Instruction::I32Eqz); // non-empty
         f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
         f.instruction(&Instruction::I32Const(1));
         if non_trivial(h) {
@@ -5799,10 +6411,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(i as i32));
         f.instruction(&Instruction::ArrayGet(T_ARR));
     }
+    /// Load a list's head (field 0) or tail (field 1) for pattern matching.
     fn load_cons(&self, s: u32, field: u32, f: &mut Function) {
-        f.instruction(&Instruction::LocalGet(s));
-        f.instruction(&cast_to(T_CONS));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_CONS, field_index: field });
+        if field == 0 {
+            list_head(f, s);
+        } else {
+            list_tail(f, s);
+        }
     }
     fn load_arr(&self, s: u32, i: u32, f: &mut Function) {
         f.instruction(&Instruction::LocalGet(s));
@@ -6054,23 +6669,6 @@ fn pat_size(p: &can::Pattern) -> u32 {
         Ctor(_, _, _, args) => args.iter().map(pat_size).sum(),
         List(items) => items.iter().map(pat_size).sum(),
         Cons(h, t) => pat_size(h) + pat_size(t),
-        Record(fields) => fields.len() as u32,
-        _ => 0,
-    }
-}
-
-/// Number of variable bindings a pattern introduces.
-fn pat_var_count(p: &can::Pattern) -> u32 {
-    use can::Pattern_::*;
-    match &p.value {
-        Var(_) => 1,
-        Alias(inner, _) => 1 + pat_var_count(inner),
-        Tuple(a, b, rest) => {
-            pat_var_count(a) + pat_var_count(b) + rest.iter().map(pat_var_count).sum::<u32>()
-        }
-        Ctor(_, _, _, args) => args.iter().map(pat_var_count).sum(),
-        List(items) => items.iter().map(pat_var_count).sum(),
-        Cons(h, t) => pat_var_count(h) + pat_var_count(t),
         Record(fields) => fields.len() as u32,
         _ => 0,
     }
