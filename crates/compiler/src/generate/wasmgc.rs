@@ -546,6 +546,19 @@ struct Codegen<'a> {
     list_map3_idx: u32,
     list_partition_idx: u32,
     list_unzip_idx: u32,
+    dict_get_idx: u32,
+    dict_insert_idx: u32,
+    dict_remove_idx: u32,
+    dict_from_list_idx: u32,
+    dict_foldl_idx: u32,
+    dict_foldr_idx: u32,
+    dict_map_idx: u32,
+    dict_filter_idx: u32,
+    dict_keys_idx: u32,
+    dict_values_idx: u32,
+    dict_intersect_idx: u32,
+    dict_diff_idx: u32,
+    dict_update_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -635,6 +648,19 @@ impl<'a> Codegen<'a> {
             list_map3_idx: 0,
             list_partition_idx: 0,
             list_unzip_idx: 0,
+            dict_get_idx: 0,
+            dict_insert_idx: 0,
+            dict_remove_idx: 0,
+            dict_from_list_idx: 0,
+            dict_foldl_idx: 0,
+            dict_foldr_idx: 0,
+            dict_map_idx: 0,
+            dict_filter_idx: 0,
+            dict_keys_idx: 0,
+            dict_values_idx: 0,
+            dict_intersect_idx: 0,
+            dict_diff_idx: 0,
+            dict_update_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -748,6 +774,19 @@ impl<'a> Codegen<'a> {
         self.list_map3_idx = next();
         self.list_partition_idx = next();
         self.list_unzip_idx = next();
+        self.dict_get_idx = next();
+        self.dict_insert_idx = next();
+        self.dict_remove_idx = next();
+        self.dict_from_list_idx = next();
+        self.dict_foldl_idx = next();
+        self.dict_foldr_idx = next();
+        self.dict_map_idx = next();
+        self.dict_filter_idx = next();
+        self.dict_keys_idx = next();
+        self.dict_values_idx = next();
+        self.dict_intersect_idx = next();
+        self.dict_diff_idx = next();
+        self.dict_update_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -857,6 +896,19 @@ impl<'a> Codegen<'a> {
         let list_map3 = self.emit_list_map3();
         let list_partition = self.emit_list_partition();
         let list_unzip = self.emit_list_unzip();
+        let dict_get = self.emit_dict_get();
+        let dict_insert = self.emit_dict_insert();
+        let dict_remove = self.emit_dict_remove();
+        let dict_from_list = self.emit_dict_from_list();
+        let dict_foldl = self.emit_dict_fold(false);
+        let dict_foldr = self.emit_dict_fold(true);
+        let dict_map = self.emit_dict_map();
+        let dict_filter = self.emit_dict_filter();
+        let dict_keys = self.emit_dict_project(0);
+        let dict_values = self.emit_dict_project(1);
+        let dict_intersect = self.emit_dict_intersect();
+        let dict_diff = self.emit_dict_diff();
+        let dict_update = self.emit_dict_update();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -977,6 +1029,19 @@ impl<'a> Codegen<'a> {
         funcs.function(ft4); // list_map3
         funcs.function(ft2); // list_partition
         funcs.function(ft1); // list_unzip
+        funcs.function(ft2); // dict_get
+        funcs.function(ft3); // dict_insert
+        funcs.function(ft2); // dict_remove
+        funcs.function(ft2); // dict_from_list (pairs, acc)
+        funcs.function(ft3); // dict_foldl
+        funcs.function(ft3); // dict_foldr
+        funcs.function(ft2); // dict_map
+        funcs.function(ft2); // dict_filter
+        funcs.function(ft1); // dict_keys
+        funcs.function(ft1); // dict_values
+        funcs.function(ft2); // dict_intersect
+        funcs.function(ft2); // dict_diff (toRemove, acc)
+        funcs.function(ft3); // dict_update
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -1060,6 +1125,19 @@ impl<'a> Codegen<'a> {
         code.function(&list_map3);
         code.function(&list_partition);
         code.function(&list_unzip);
+        code.function(&dict_get);
+        code.function(&dict_insert);
+        code.function(&dict_remove);
+        code.function(&dict_from_list);
+        code.function(&dict_foldl);
+        code.function(&dict_foldr);
+        code.function(&dict_map);
+        code.function(&dict_filter);
+        code.function(&dict_keys);
+        code.function(&dict_values);
+        code.function(&dict_intersect);
+        code.function(&dict_diff);
+        code.function(&dict_update);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1701,6 +1779,11 @@ impl<'a> Codegen<'a> {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
             f.instruction(&Instruction::F64Const(v.into()));
             f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
+        }
+        // Nullary empty collections.
+        if (module == "Dict" || module == "Set") && name == "empty" {
+            push_empty_list(f);
             return Ok(());
         }
         let arity: u32 = match (module, name) {
@@ -4717,6 +4800,559 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Dict: a key-sorted vector of [k,v] pairs (pairs are T_ARR tuples) ----
+
+    /// dict_get(k, d) : Maybe v — linear scan, early-exits once keys pass `k`.
+    fn emit_dict_get(&self) -> Function {
+        // params k(0), d(1). locals: len(2),i(3),c(4):i32, pair(5):eqref
+        let mut f = Function::new([(3, ValType::I32), (1, eqref())]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(5, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        // c == 0 → Just pair[1]
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        self.load_arr(5, 1, &mut f);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // c < 0 → passed it, Nothing
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_insert(k, v, d) : splice `[k,v]` into the sorted vector, replacing
+    /// an existing key.
+    fn emit_dict_insert(&self) -> Function {
+        // params k(0),v(1),d(2). locals: len(3),pos(4),skip(5),i(6),di(7),rlen(8):i32,
+        //   ndata(9):ref T_ARR, pair(10):eqref
+        let mut f = Function::new([(6, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        // pos = first index where key >= k
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 2, 4);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(10, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // skip = (pos < len && d[pos].key == k) ? 1 : 0
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_elem(&mut f, 2, 4);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(10, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // rlen = len + 1 - skip
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
+        // copy prefix [0, pos)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        list_elem(&mut f, 2, 6);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ndata[pos] = [k, v]
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // copy suffix: src i = pos+skip, dst di = pos+1
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(7));
+        list_elem(&mut f, 2, 6);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        bump(&mut f, 7, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // wrap
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_remove(k, d) : the sorted vector without key `k`.
+    fn emit_dict_remove(&self) -> Function {
+        // params k(0),d(1). locals: len(2),found(3),rlen(4),i(5),di(6):i32,
+        //   ndata(7):ref T_ARR, pair(8):eqref
+        let mut f = Function::new([(5, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        // found?
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(8, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        // di=0; copy pairs whose key != k
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(8, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_from_list(pairs, acc) : insert each `[k,v]` of `pairs` into `acc`
+    /// (later duplicates win, matching Elm's foldl-insert).
+    fn emit_dict_from_list(&self) -> Function {
+        // params pairs(0), acc(1). locals: a(2),cur(3),pair(4):eqref
+        let mut f = Function::new([(3, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1));
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(4));
+        self.load_arr(4, 0, &mut f);
+        self.load_arr(4, 1, &mut f);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.dict_insert_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_foldl/foldr(f, acc, d) : fold `f key value acc` in key order.
+    fn emit_dict_fold(&self, rev: bool) -> Function {
+        // params f(0),acc(1),d(2). locals: len(3),i(4):i32, a(5),pair(6):eqref
+        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(5));
+        if rev {
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::LocalSet(4));
+        } else {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::LocalSet(4));
+        }
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        if rev {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I32LtS);
+        } else {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32GeS);
+        }
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 2, 4);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(6, 0, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        self.load_arr(6, 1, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        if rev {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::LocalSet(4));
+        } else {
+            bump(&mut f, 4, 1);
+        }
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_map(f, d) : rebuild with `[k, f k v]` (keys/order unchanged).
+    fn emit_dict_map(&self) -> Function {
+        // params f(0),d(1). locals: len(2),i(3):i32, ndata(4):ref T_ARR, pair(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        self.load_arr(5, 0, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(5, 0, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        self.load_arr(5, 1, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_filter(pred, d) : keep pairs where `pred k v` (scans from the tail
+    /// so consing preserves ascending order).
+    fn emit_dict_filter(&self) -> Function {
+        // params pred(0),d(1). locals: len(2),i(3):i32, acc(4),pair(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        self.load_arr(5, 0, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        self.load_arr(5, 1, &mut f);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_keys / dict_values(d) : project field 0 / 1 of each pair.
+    fn emit_dict_project(&self, field: u32) -> Function {
+        // params d(0). locals: len(1),i(2):i32, ndata(3):ref T_ARR, pair(4):eqref
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        self.load_arr(4, field, &mut f);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_intersect(t1, t2) : pairs of `t1` whose key is in `t2` (t1's values).
+    fn emit_dict_intersect(&self) -> Function {
+        // params t1(0),t2(1). locals: len(2),i(3):i32, acc(4),pair(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 3);
+        f.instruction(&Instruction::LocalSet(5));
+        // if member(pair.key, t2): keep
+        self.load_arr(5, 0, &mut f);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.dict_get_idx));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz); // Just
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_diff(toRemove, base) : `base` without any key present in `toRemove`.
+    fn emit_dict_diff(&self) -> Function {
+        // params toRemove(0), base(1). locals: a(2),cur(3),pair(4):eqref
+        let mut f = Function::new([(3, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1));
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(4));
+        self.load_arr(4, 0, &mut f);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.dict_remove_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_update(k, alter, d) : `alter (get k d)` then insert/remove.
+    fn emit_dict_update(&self) -> Function {
+        // params k(0), alter(1), d(2). local r(3):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.dict_get_idx));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_tag(&mut f, 3);
+        f.instruction(&Instruction::I32Eqz); // Just
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 3);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.dict_insert_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.dict_remove_idx));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -5571,6 +6207,112 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
                 f.instruction(&Instruction::Call(self.clamp_idx));
+            }
+            // Dict: a key-sorted vector of [k,v] pairs.
+            ("Dict", "empty") => push_empty_list(f),
+            ("Dict", "singleton") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.dict_insert_idx));
+            }
+            ("Dict", "insert") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_insert_idx));
+            }
+            ("Dict", "get") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_get_idx));
+            }
+            ("Dict", "member") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_get_idx));
+                f.instruction(&cast_to(T_CTOR));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+                f.instruction(&Instruction::I32Eqz); // Just → True
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Dict", "remove") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_remove_idx));
+            }
+            ("Dict", "update") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_update_idx));
+            }
+            ("Dict", "size") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Dict", "isEmpty") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Dict", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Dict", "keys") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_keys_idx));
+            }
+            ("Dict", "values") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_values_idx));
+            }
+            ("Dict", "fromList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.dict_from_list_idx));
+            }
+            ("Dict", "foldl") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_foldl_idx));
+            }
+            ("Dict", "foldr") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_foldr_idx));
+            }
+            ("Dict", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_map_idx));
+            }
+            ("Dict", "filter") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_filter_idx));
+            }
+            ("Dict", "union") => {
+                // union t1 t2 = insert all of t1 into t2 (t1 wins).
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_from_list_idx));
+            }
+            ("Dict", "intersect") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.dict_intersect_idx));
+            }
+            ("Dict", "diff") => {
+                // diff t1 t2 = remove t2's keys from t1.
+                self.emit_expr(&args[1], ctx, f)?; // toRemove = t2
+                self.emit_expr(&args[0], ctx, f)?; // base = t1
+                f.instruction(&Instruction::Call(self.dict_diff_idx));
             }
             ("Tuple", "first") => {
                 self.emit_expr(&args[0], ctx, f)?;

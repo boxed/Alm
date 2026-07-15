@@ -914,3 +914,54 @@ fn list_map2() {
             List.map2 (\\a b -> a + b) [ 1, 2, 3 ] [ 10, 20, 30, 40 ]\n        |> List.map String.fromInt\n        |> String.join \",\"\n",
     );
 }
+
+#[test]
+fn dict_basics() {
+    assert_str_prog(
+        "dict_basics",
+        "module Test exposing (main)\n\n\
+         show : Maybe Int -> String\n\
+         show m =\n    case m of\n        Just n ->\n            String.fromInt n\n\n        Nothing ->\n            \"-\"\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         d : Dict.Dict String Int\n\
+         d =\n    Dict.fromList [ ( \"b\", 2 ), ( \"a\", 1 ), ( \"c\", 3 ), ( \"a\", 9 ) ]\n\n\
+         main : String\n\
+         main =\n    \
+            show (Dict.get \"a\" d)\n        ++ \",\" ++ show (Dict.get \"c\" d)\n        ++ \",\" ++ show (Dict.get \"z\" d)\n        ++ \"|\" ++ String.fromInt (Dict.size d)\n        ++ \"|\" ++ yn (Dict.member \"b\" d)\n        ++ yn (Dict.member \"z\" d)\n        ++ \"|\" ++ String.join \",\" (Dict.keys d)\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (Dict.values d))\n",
+    );
+}
+
+#[test]
+fn dict_insert_remove_update() {
+    assert_str_prog(
+        "dict_ins_rem",
+        "module Test exposing (main)\n\n\
+         showEntry : ( String, Int ) -> String\n\
+         showEntry pair = Tuple.first pair ++ String.fromInt (Tuple.second pair)\n\n\
+         dump : Dict.Dict String Int -> String\n\
+         dump dd = String.join \",\" (List.map showEntry (Dict.toList dd))\n\n\
+         main : String\n\
+         main =\n    \
+            let\n        d0 = Dict.empty\n        d1 = Dict.insert \"m\" 5 (Dict.insert \"a\" 1 (Dict.insert \"z\" 9 d0))\n        d2 = Dict.insert \"a\" 100 d1\n        d3 = Dict.remove \"z\" d2\n        d4 = Dict.update \"m\" (\\mv -> Maybe.map (\\v -> v + 1) mv) d3\n        d5 = Dict.update \"x\" (\\_ -> Just 7) d4\n    in\n    dump d1 ++ \"|\" ++ dump d2 ++ \"|\" ++ dump d3 ++ \"|\" ++ dump d4 ++ \"|\" ++ dump d5\n",
+    );
+}
+
+#[test]
+fn dict_fold_map_filter_combine() {
+    assert_str_prog(
+        "dict_combine",
+        "module Test exposing (main)\n\n\
+         showEntry : ( String, Int ) -> String\n\
+         showEntry pair = Tuple.first pair ++ String.fromInt (Tuple.second pair)\n\n\
+         dump : Dict.Dict String Int -> String\n\
+         dump dd = String.join \",\" (List.map showEntry (Dict.toList dd))\n\n\
+         a : Dict.Dict String Int\n\
+         a = Dict.fromList [ ( \"a\", 1 ), ( \"b\", 2 ), ( \"c\", 3 ) ]\n\n\
+         b : Dict.Dict String Int\n\
+         b = Dict.fromList [ ( \"b\", 20 ), ( \"d\", 40 ) ]\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (Dict.foldl (\\_ v acc -> v + acc) 0 a)\n        ++ \"|\" ++ dump (Dict.map (\\_ v -> v * 10) a)\n        ++ \"|\" ++ dump (Dict.filter (\\_ v -> v > 1) a)\n        ++ \"|\" ++ dump (Dict.union a b)\n        ++ \"|\" ++ dump (Dict.intersect a b)\n        ++ \"|\" ++ dump (Dict.diff a b)\n",
+    );
+}
