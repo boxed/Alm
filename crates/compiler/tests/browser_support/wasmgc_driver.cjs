@@ -54,6 +54,7 @@ function start(wasmPath, doc) {
       const name = str(np, nl);
       (outgoing[name] = outgoing[name] || []).push(str(jp, jl));
     },
+    host_set_title: (p, l) => { doc.title = str(p, l); },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });

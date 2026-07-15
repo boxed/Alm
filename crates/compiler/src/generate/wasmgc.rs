@@ -53,7 +53,8 @@ const DOM_REMOVE_CHILD: u32 = 11; // (parent,child)
 const DOM_REPLACE: u32 = 12; // (old,new) — replace old with new in its parent
 const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len,hid)
 const HOST_PORT_OUT: u32 = 14; // (nameptr,namelen,jsonptr,jsonlen) — outgoing port
-const N_IMPORTS: u32 = 15;
+const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
+const N_IMPORTS: u32 = 16;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -707,6 +708,7 @@ struct Codegen<'a> {
     patch_idx: u32,
     run_cmd_idx: u32,
     str_from_mem_idx: u32,
+    render_document_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -844,6 +846,7 @@ impl<'a> Codegen<'a> {
             patch_idx: 0,
             run_cmd_idx: 0,
             str_from_mem_idx: 0,
+            render_document_idx: 0,
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
@@ -1006,6 +1009,7 @@ impl<'a> Codegen<'a> {
         self.patch_idx = next();
         self.run_cmd_idx = next();
         self.str_from_mem_idx = next();
+        self.render_document_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1180,6 +1184,7 @@ impl<'a> Codegen<'a> {
         let patch = self.emit_patch();
         let run_cmd = self.emit_run_cmd();
         let str_from_mem = self.emit_str_from_mem();
+        let render_document = self.emit_render_document();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1371,6 +1376,7 @@ impl<'a> Codegen<'a> {
         funcs.function(patch_ty); // patch
         funcs.function(eqref_to_void_ty); // run_cmd
         funcs.function(ii_eqref_ty); // str_from_mem
+        funcs.function(json_ret_ty); // doc_vnode : () -> eqref
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1504,6 +1510,7 @@ impl<'a> Codegen<'a> {
         code.function(&patch);
         code.function(&run_cmd);
         code.function(&str_from_mem);
+        code.function(&render_document);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1600,6 +1607,7 @@ impl<'a> Codegen<'a> {
             ("dom_replace", imp_ii_v),
             ("dom_remove_event_listener", imp_i4_v),
             ("host_port_out", imp_i4_v),
+            ("host_set_title", imp_ii_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -8751,6 +8759,42 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// doc_vnode() : evaluate a `Browser.document` view into a vdom node. The
+    /// view yields `{ body : List (Html msg), title : String }` (fields sorted:
+    /// body=0, title=1). We set the page title via the host and wrap the body
+    /// list in a `<div>` VNODE — matching the JS runtime — so the ordinary
+    /// single-root render/diff path handles it unchanged.
+    fn emit_render_document(&self) -> Function {
+        // locals: doc(0), title(1):eqref
+        let mut f = Function::new([(2, eqref())]);
+        // doc = view model
+        f.instruction(&Instruction::GlobalGet(G_VIEW));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(0));
+        // host_set_title(marshal(doc.title), len)  (title = doc[1])
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(1));
+        self.dom_str(&mut f, 1); // marshals the title string
+        f.instruction(&Instruction::Call(HOST_SET_TITLE));
+        // VNODE("div", [], doc.body)  (body = doc[0])
+        f.instruction(&Instruction::I32Const(1)); // VNODE
+        push_str_const(&mut f, "div");
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// alm_event(hid, ptr, len) : run the handler decoder against the event
     /// payload (JSON text at [ptr, len) in linear memory, or `null` when
     /// len==0), update the model, and diff/patch the DOM.
@@ -8791,10 +8835,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalSet(6));
-        // element: upd is a (model, cmd) tuple; sandbox: upd is the model
+        // element/document (G_KIND != 0): upd is a (model, cmd) tuple; sandbox: upd is the model
         f.instruction(&Instruction::GlobalGet(G_KIND));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&cast_to(T_ARR));
@@ -8810,12 +8852,19 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
         f.instruction(&Instruction::End);
-        // new = view model ; patch against prev
+        // new = (document ? doc_vnode() : view model) ; patch against prev
         f.instruction(&Instruction::I32Const(BUMP_BASE));
         f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Call(self.render_document_idx));
+        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::GlobalGet(G_VIEW));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::GlobalGet(G_ROOT));
         f.instruction(&Instruction::GlobalGet(G_PREV));
@@ -8830,7 +8879,7 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// alm_browser_start() : unpack the program (sandbox tag0 or element tag1),
+    /// alm_browser_start() : unpack the program (sandbox / element / document),
     /// wire model/update/view (+ initial cmd for element), render and mount.
     fn emit_alm_browser_start(&self, main_idx: u32) -> Function {
         // locals: rec(0), prog(1), initcmd(2):eqref
@@ -8851,16 +8900,16 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::I32Const(i));
             f.instruction(&Instruction::ArrayGet(T_ARR));
         };
-        // dispatch on program tag
+        // G_KIND = program tag (0 sandbox, 1 element, 2 document)
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        // element: record = {init:0, subscriptions:1, update:2, view:3}
-        f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::GlobalSet(G_KIND));
+        // element/document (tag != 0) share init and the {init,subscriptions,
+        // update,view} record; sandbox (tag 0) takes the else branch.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // record = {init:0, subscriptions:1, update:2, view:3}
         // tuple = init(()) ; model = tuple[0] ; initcmd = tuple[1]
         field(&mut f, 0);
         f.instruction(&Instruction::I32Const(0));
@@ -8891,8 +8940,6 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_VIEW));
         f.instruction(&Instruction::Else);
         // sandbox: record = {init:0, update:1, view:2}
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::GlobalSet(G_KIND));
         field(&mut f, 0);
         f.instruction(&Instruction::GlobalSet(G_MODEL));
         field(&mut f, 1);
@@ -8905,20 +8952,26 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_HANDLERS));
         Self::emit_reset_render(&mut f);
-        // run initial cmd (element only)
+        // run initial cmd (element / document, i.e. G_KIND != 0)
         f.instruction(&Instruction::GlobalGet(G_KIND));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(self.run_cmd_idx));
         f.instruction(&Instruction::End);
         Self::emit_reset_render(&mut f);
-        // prev = view model ; root = render_dom(prev) ; mount ; record both
+        // prev = document ? doc_vnode() : view model
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Call(self.render_document_idx));
+        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::GlobalGet(G_VIEW));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::GlobalSet(G_PREV));
+        // root = render_dom(prev) ; mount ; record both
         f.instruction(&Instruction::GlobalGet(G_PREV));
         f.instruction(&Instruction::Call(self.render_dom_idx));
         f.instruction(&Instruction::GlobalSet(G_ROOT));
@@ -10840,6 +10893,13 @@ impl<'a> Codegen<'a> {
             ("Browser", "element") => {
                 // Program = T_CTOR tag1 [record].
                 f.instruction(&Instruction::I32Const(1));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Browser", "document") => {
+                // Program = T_CTOR tag2 [record].
+                f.instruction(&Instruction::I32Const(2));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));

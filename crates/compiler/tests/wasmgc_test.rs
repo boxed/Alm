@@ -1212,6 +1212,68 @@ fn sandbox_click_counter() {
 }
 
 #[test]
+fn document_title_and_body() {
+    // Browser.document: view returns { title, body }. Assert both backends set
+    // the same title and render the same body, at init and after a click.
+    let dir = common::test_dir("alm-wasmgc", "document");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Inc\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( 0, Cmd.none )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update _ n = ( n + 1, Cmd.none )\n\n\
+         view : Int -> Browser.Document Msg\n\
+         view n =\n    { title = \"Count \" ++ String.fromInt n\n    , body = [ button [ onClick Inc ] [ text \"+\" ], div [] [ text (String.fromInt n) ] ]\n    }\n\n\
+         main : Program () Int Msg\n\
+         main =\n    Browser.document { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m6.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);\
+               const a=doc.title+'|'+serializeBody(doc);\
+               const b=findBtn(doc.body);if(b)dispatchEvent(b,'click',{{}});\
+               const c=doc.title+'|'+serializeBody(doc);return [a,c];}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write([j[0],w[0],j[1],w[1]].join('\\u001e'));",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 4, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "initial title/body disagree");
+    assert_eq!(parts[2], parts[3], "post-click title/body disagree");
+    assert_eq!(
+        parts[2], "Count 1|<div><button>+</button><div>1</div></div>",
+        "unexpected document render"
+    );
+}
+
+#[test]
 fn sandbox_on_input() {
     // onInput carries the event payload (target.value). Type into the field and
     // assert both backends render the echoed text identically.
