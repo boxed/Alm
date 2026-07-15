@@ -287,6 +287,19 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn string_replace() {
+    assert_str_prog(
+        "string_replace",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.replace \"o\" \"0\" \"foo boo\"\n\
+         \x20       ++ \"|\"\n\
+         \x20       ++ String.replace \", \" \";\" \"a, b, c\"\n",
+    );
+}
+
+#[test]
 fn numeric_transcendentals() {
     // wasm-gc calls node's Math.* (same libm as the JS runner), so js==wasm is
     // exact; native uses system libm and can differ by an ulp on trig, so this

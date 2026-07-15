@@ -15239,6 +15239,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_split_idx));
             }
+            // replace before after s = join after (split before s)
+            ("String", "replace") => {
+                self.emit_expr(&args[1], ctx, f)?; // after (join sep)
+                self.emit_expr(&args[0], ctx, f)?; // before (split sep)
+                self.emit_expr(&args[2], ctx, f)?; // s
+                f.instruction(&Instruction::Call(self.str_split_idx));
+                f.instruction(&Instruction::Call(self.str_join_idx));
+            }
             ("String", "padLeft") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
