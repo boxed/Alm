@@ -221,7 +221,18 @@ const HOST_GET_URL: u32 = 22; // (outptr) -> len — write current href to memor
 const HOST_LOAD: u32 = 23; // (ptr,len) — full page navigation
 const HOST_CLEAR_FRAMES: u32 = 24; // () — cancel the animation-frame loop
 const HOST_REQUEST_FRAME: u32 = 25; // (slot) — start an animation-frame loop
-const N_IMPORTS: u32 = 26;
+// Host Math.* for the transcendentals (no wasm intrinsics; matches the JS
+// backend's libm bit-for-bit). Unary (f64)->f64 except atan2/pow ((f64,f64)->f64).
+const MATH_SIN: u32 = 26;
+const MATH_COS: u32 = 27;
+const MATH_TAN: u32 = 28;
+const MATH_ASIN: u32 = 29;
+const MATH_ACOS: u32 = 30;
+const MATH_ATAN: u32 = 31;
+const MATH_LOG: u32 = 32;
+const MATH_ATAN2: u32 = 33;
+const MATH_POW: u32 = 34;
+const N_IMPORTS: u32 = 35;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -1469,7 +1480,9 @@ impl<'a> Codegen<'a> {
         let sb_i_v_ty = self.next_type + 27; // (ref T_SB, i32) -> () (sb_ensure, sb_push_byte)
         let sb_e_v_ty = self.next_type + 28; // (ref T_SB, eqref) -> () (sb_push_str, sb_escape)
         let sb_ret_ty = self.next_type + 29; // (ref T_SB) -> eqref (sb_finish)
-        self.next_type += 30;
+        let f64_f64_ty = self.next_type + 30; // (f64) -> f64 (Math unary)
+        let f64f64_f64_ty = self.next_type + 31; // (f64,f64) -> f64 (Math atan2/pow)
+        self.next_type += 32;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1737,6 +1750,8 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ref_to(T_SB), ValType::I32], vec![]); // sb_i_v
         types.ty().function(vec![ref_to(T_SB), eqref()], vec![]); // sb_e_v
         types.ty().function(vec![ref_to(T_SB)], vec![eqref()]); // sb_ret
+        types.ty().function(vec![ValType::F64], vec![ValType::F64]); // f64_f64 (Math unary)
+        types.ty().function(vec![ValType::F64, ValType::F64], vec![ValType::F64]); // f64f64_f64
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -2256,6 +2271,16 @@ impl<'a> Codegen<'a> {
             ("host_load", imp_ii_v),
             ("host_clear_frames", json_void_ty),
             ("host_request_frame", imp_i_v),
+            // Math.* (indices MATH_SIN..MATH_POW) — the transcendentals.
+            ("math_sin", f64_f64_ty),
+            ("math_cos", f64_f64_ty),
+            ("math_tan", f64_f64_ty),
+            ("math_asin", f64_f64_ty),
+            ("math_acos", f64_f64_ty),
+            ("math_atan", f64_f64_ty),
+            ("math_log", f64_f64_ty),
+            ("math_atan2", f64f64_f64_ty),
+            ("math_pow", f64f64_f64_ty),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -2945,6 +2970,13 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_CTOR));
                 return Ok(());
             }
+        }
+        // Basics.pi / e : Float constants.
+        if module == "Basics" && (name == "pi" || name == "e") {
+            let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
+            f.instruction(&Instruction::F64Const(v.into()));
+            f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
         }
         // Random.minInt / maxInt : the 32-bit signed bounds, as boxed Ints.
         if module == "Random" && (name == "minInt" || name == "maxInt") {
@@ -13516,6 +13548,23 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::F64Div);
                 f.instruction(&Instruction::StructNew(T_FLOAT));
             }
+            // `^` is Math.pow for both Int and Float (as in JS); the Int result
+            // is the truncated power.
+            "^" if is_float(&l.tipe) => {
+                self.emit_f64(l, ctx, f)?;
+                self.emit_f64(r, ctx, f)?;
+                f.instruction(&Instruction::Call(MATH_POW));
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            "^" => {
+                self.emit_i64(l, ctx, f)?;
+                f.instruction(&Instruction::F64ConvertI64S);
+                self.emit_i64(r, ctx, f)?;
+                f.instruction(&Instruction::F64ConvertI64S);
+                f.instruction(&Instruction::Call(MATH_POW));
+                f.instruction(&Instruction::I64TruncF64S);
+                self.emit_box_int_inline(ctx, f);
+            }
             "<" | ">" | "<=" | ">=" => {
                 if is_float(&l.tipe) {
                     self.emit_f64(l, ctx, f)?;
@@ -14774,6 +14823,52 @@ impl<'a> Codegen<'a> {
                 self.emit_f64(&args[0], ctx, f)?;
                 f.instruction(&Instruction::F64Sqrt);
                 f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            // Transcendentals: delegate to the host Math.* (libm), matching JS.
+            ("Basics", "sin") | ("Basics", "cos") | ("Basics", "tan")
+            | ("Basics", "asin") | ("Basics", "acos") | ("Basics", "atan") => {
+                let idx = match name {
+                    "sin" => MATH_SIN,
+                    "cos" => MATH_COS,
+                    "tan" => MATH_TAN,
+                    "asin" => MATH_ASIN,
+                    "acos" => MATH_ACOS,
+                    _ => MATH_ATAN,
+                };
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(idx));
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "atan2") => {
+                self.emit_f64(&args[0], ctx, f)?; // y
+                self.emit_f64(&args[1], ctx, f)?; // x
+                f.instruction(&Instruction::Call(MATH_ATAN2));
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            // logBase b x = log x / log b
+            ("Basics", "logBase") => {
+                self.emit_f64(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(MATH_LOG));
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(MATH_LOG));
+                f.instruction(&Instruction::F64Div);
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            // degrees d = d * pi/180 ; turns t = 2*pi*t ; radians r = r
+            ("Basics", "degrees") => {
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Const((std::f64::consts::PI / 180.0).into()));
+                f.instruction(&Instruction::F64Mul);
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "turns") => {
+                self.emit_f64(&args[0], ctx, f)?;
+                f.instruction(&Instruction::F64Const((2.0 * std::f64::consts::PI).into()));
+                f.instruction(&Instruction::F64Mul);
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            ("Basics", "radians") => {
+                self.emit_expr(&args[0], ctx, f)?; // identity (already a Float)
             }
             ("Basics", "isNaN") => {
                 // NaN is the only value not equal to itself.

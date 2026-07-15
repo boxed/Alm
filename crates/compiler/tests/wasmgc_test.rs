@@ -11,7 +11,7 @@ use alm_compiler::{generate, project};
 const RUNNER: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({},{get:()=>()=>0})});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({M:{math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow}},{get:(t,k)=>t.M[k]||(()=>0)})});
 console.log(instance.exports.main_int().toString());
 "#;
 
@@ -20,7 +20,7 @@ console.log(instance.exports.main_int().toString());
 const STR_RUNNER: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({},{get:()=>()=>0})});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({M:{math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow}},{get:(t,k)=>t.M[k]||(()=>0)})});
 const len = instance.exports.render();
 const mem = new Uint8Array(instance.exports.memory.buffer, 0, len);
 process.stdout.write(Buffer.from(mem).toString('utf8'));
@@ -283,6 +283,31 @@ fn maybe_result_combinators() {
          \x20       , \",\"\n\
          \x20       , String.fromInt (List.length (2 :: [ 3, 4 ]))\n\
          \x20       ]\n",
+    );
+}
+
+#[test]
+fn numeric_transcendentals() {
+    // wasm-gc calls node's Math.* (same libm as the JS runner), so js==wasm is
+    // exact; native uses system libm and can differ by an ulp on trig, so this
+    // is a js<->wasm check. Integer/rational parts (^, logBase 2 8) are exact.
+    assert_str_prog_js_wasm(
+        "numeric_transcendentals",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   [ round (1000000.0 * sin 1.0)\n\
+         \x20   , round (1000000.0 * cos 0.5)\n\
+         \x20   , round (1000000.0 * tan 0.3)\n\
+         \x20   , round (1000000.0 * atan2 1.0 2.0)\n\
+         \x20   , round (1000000.0 * logBase 2.0 8.0)\n\
+         \x20   , round (1000000.0 * pi)\n\
+         \x20   , round (1000000.0 * degrees 180.0)\n\
+         \x20   , 2 ^ 10\n\
+         \x20   , round (1000000.0 * (2.0 ^ 0.5))\n\
+         \x20   ]\n\
+         \x20       |> List.map String.fromInt\n\
+         \x20       |> String.join \",\"\n",
     );
 }
 
@@ -1206,7 +1231,7 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
     std::fs::write(
         &runner,
         "const fs=require('fs');const b=fs.readFileSync(process.argv[2]);\
-         const i=new WebAssembly.Instance(new WebAssembly.Module(b),{env:new Proxy({},{get:()=>()=>0})});\
+         const i=new WebAssembly.Instance(new WebAssembly.Module(b),{env:new Proxy({M:{math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow}},{get:(t,k)=>t.M[k]||(()=>0)})});\
          const n=i.exports.render_html();\
          process.stdout.write(Buffer.from(new Uint8Array(i.exports.memory.buffer,0,n)).toString('utf8'));",
     )

@@ -103,6 +103,10 @@ function start(wasmPath, doc, clock) {
       return bytes.length;
     },
     host_load: (p, l) => { currentUrl = new URL(str(p, l), currentUrl).href; },
+    // Host Math.* (Basics transcendentals).
+    math_sin: Math.sin, math_cos: Math.cos, math_tan: Math.tan,
+    math_asin: Math.asin, math_acos: Math.acos, math_atan: Math.atan,
+    math_log: Math.log, math_atan2: Math.atan2, math_pow: Math.pow,
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
