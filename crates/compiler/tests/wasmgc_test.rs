@@ -999,3 +999,35 @@ fn set_combine() {
             dump (Set.union a b)\n        ++ \"|\" ++ dump (Set.intersect a b)\n        ++ \"|\" ++ dump (Set.diff a b)\n        ++ \"|\" ++ dump (Set.filter (\\x -> modBy 2 x == 0) a)\n        ++ \"|\" ++ dump (Set.map (\\x -> x * x) a)\n",
     );
 }
+
+#[test]
+fn array_basics() {
+    assert_str_prog(
+        "array_basics",
+        "module Test exposing (main)\n\n\
+         show : Maybe Int -> String\n\
+         show m =\n    case m of\n        Just n ->\n            String.fromInt n\n\n        Nothing ->\n            \"-\"\n\n\
+         dump : Array.Array Int -> String\n\
+         dump a = String.join \",\" (List.map String.fromInt (Array.toList a))\n\n\
+         arr : Array.Array Int\n\
+         arr = Array.fromList [ 10, 20, 30, 40 ]\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (Array.length arr)\n        ++ \"|\" ++ show (Array.get 2 arr)\n        ++ \",\" ++ show (Array.get 9 arr)\n        ++ \"|\" ++ dump (Array.set 1 99 arr)\n        ++ \"|\" ++ dump (Array.push 50 arr)\n        ++ \"|\" ++ dump (Array.initialize 4 (\\i -> i * i))\n        ++ \"|\" ++ dump (Array.slice 1 3 arr)\n        ++ \"|\" ++ dump (Array.slice 1 -1 arr)\n        ++ \"|\" ++ String.fromInt (Array.foldl (+) 0 arr)\n        ++ \"|\" ++ dump (Array.map (\\x -> x + 1) arr)\n        ++ \"|\" ++ dump (Array.filter (\\x -> x > 15) arr)\n",
+    );
+}
+
+#[test]
+fn array_indexed() {
+    assert_str_prog(
+        "array_indexed",
+        "module Test exposing (main)\n\n\
+         showPair : ( Int, Int ) -> String\n\
+         showPair p = String.fromInt (Tuple.first p) ++ \":\" ++ String.fromInt (Tuple.second p)\n\n\
+         arr : Array.Array Int\n\
+         arr = Array.fromList [ 7, 8, 9 ]\n\n\
+         main : String\n\
+         main =\n    \
+            String.join \",\" (List.map showPair (Array.toIndexedList arr))\n        ++ \"|\" ++ String.join \",\" (List.map String.fromInt (Array.toList (Array.indexedMap (\\i x -> i + x) arr)))\n",
+    );
+}

@@ -565,6 +565,12 @@ struct Codegen<'a> {
     set_from_list_idx: u32,
     set_intersect_idx: u32,
     set_diff_idx: u32,
+    array_get_idx: u32,
+    array_set_idx: u32,
+    array_push_idx: u32,
+    array_slice_idx: u32,
+    array_initialize_idx: u32,
+    array_to_indexed_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -673,6 +679,12 @@ impl<'a> Codegen<'a> {
             set_from_list_idx: 0,
             set_intersect_idx: 0,
             set_diff_idx: 0,
+            array_get_idx: 0,
+            array_set_idx: 0,
+            array_push_idx: 0,
+            array_slice_idx: 0,
+            array_initialize_idx: 0,
+            array_to_indexed_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -805,6 +817,12 @@ impl<'a> Codegen<'a> {
         self.set_from_list_idx = next();
         self.set_intersect_idx = next();
         self.set_diff_idx = next();
+        self.array_get_idx = next();
+        self.array_set_idx = next();
+        self.array_push_idx = next();
+        self.array_slice_idx = next();
+        self.array_initialize_idx = next();
+        self.array_to_indexed_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -933,6 +951,12 @@ impl<'a> Codegen<'a> {
         let set_from_list = self.emit_set_from_list();
         let set_intersect = self.emit_set_intersect();
         let set_diff = self.emit_set_diff();
+        let array_get = self.emit_array_get();
+        let array_set = self.emit_array_set();
+        let array_push = self.emit_array_push();
+        let array_slice = self.emit_array_slice();
+        let array_initialize = self.emit_array_initialize();
+        let array_to_indexed = self.emit_array_to_indexed();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -1072,6 +1096,12 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // set_from_list (xs, acc)
         funcs.function(ft2); // set_intersect
         funcs.function(ft2); // set_diff (toRemove, base)
+        funcs.function(ft2); // array_get
+        funcs.function(ft3); // array_set
+        funcs.function(ft2); // array_push
+        funcs.function(ft3); // array_slice
+        funcs.function(ft2); // array_initialize
+        funcs.function(ft1); // array_to_indexed
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -1174,6 +1204,12 @@ impl<'a> Codegen<'a> {
         code.function(&set_from_list);
         code.function(&set_intersect);
         code.function(&set_diff);
+        code.function(&array_get);
+        code.function(&array_set);
+        code.function(&array_push);
+        code.function(&array_slice);
+        code.function(&array_initialize);
+        code.function(&array_to_indexed);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -5389,6 +5425,330 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Array: the same T_LIST vector; most ops are the List kernels ----
+
+    /// array_get(i, a) : `Just a[i]` in bounds, else `Nothing`.
+    fn emit_array_get(&self) -> Function {
+        // params i(0), a(1). locals: ii(2), len(3):i32
+        let mut f = Function::new([(2, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        // 0 <= ii < len ?
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Just
+        list_elem(&mut f, 1, 2);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// array_set(i, x, a) : copy with index `i` replaced (unchanged if out of
+    /// bounds).
+    fn emit_array_set(&self) -> Function {
+        // params i(0), x(1), a(2). locals: ii(3),len(4),j(5):i32, ndata(6):ref T_ARR
+        let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(4));
+        // out of bounds → return a unchanged
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[j] = (j == ii) ? x : a[j]
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Else);
+        list_elem(&mut f, 2, 5);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// array_push(x, a) : append `x` at the end.
+    fn emit_array_push(&self) -> Function {
+        // params x(0), a(1). locals: len(2),j(3):i32, ndata(4):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ndata[len] = x
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// array_slice(from, to, a) : JS/Elm `slice` — negative indices count from
+    /// the end; clamps to bounds.
+    fn emit_array_slice(&self) -> Function {
+        // params from(0), to(1), a(2). locals: len(3),s(4),e(5),j(6):i32,
+        //   ndata(7):ref T_ARR
+        let mut f = Function::new([(4, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(3));
+        // s = normalize(from)
+        self.emit_slice_index(&mut f, 0, 3, 4);
+        // e = normalize(to)
+        self.emit_slice_index(&mut f, 1, 3, 5);
+        // if e < s { e = s }
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        // ndata = new(e - s); copy a[s + j]
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        // a[s + j] : reuse list_elem with a temp index in local 6? need s+j.
+        // compute index into a fresh push: use local pattern via list_data/start
+        list_data(&mut f, 2);
+        list_start(&mut f, 2);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// In array_slice: read boxed Int arg `arg`, normalize it against `len`
+    /// (negative = from end, clamp to [0,len]), store into local `out`.
+    fn emit_slice_index(&self, f: &mut Function, arg: u32, len: u32, out: u32) {
+        f.instruction(&Instruction::LocalGet(arg));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(out));
+        // if out < 0 { out += len }
+        f.instruction(&Instruction::LocalGet(out));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(out));
+        f.instruction(&Instruction::LocalGet(len));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(out));
+        f.instruction(&Instruction::End);
+        // clamp to [0, len]
+        f.instruction(&Instruction::LocalGet(out));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(out));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(out));
+        f.instruction(&Instruction::LocalGet(len));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(len));
+        f.instruction(&Instruction::LocalSet(out));
+        f.instruction(&Instruction::End);
+    }
+
+    /// array_initialize(n, gen) : `[gen 0, gen 1, .., gen (n-1)]`.
+    fn emit_array_initialize(&self) -> Function {
+        // params n(0), gen(1). locals: n2(2),i(3):i32, ndata(4):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        // gen(box i)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// array_toIndexedList(a) : `[(0,a0),(1,a1),..]`.
+    fn emit_array_to_indexed(&self) -> Function {
+        // params a(0). locals: len(1),i(2):i32, ndata(3):ref T_ARR
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[i] = (box i, a[i])
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        list_elem(&mut f, 0, 2);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     // ---- Set: a sorted vector of unique elements ----
 
     /// set_insert(x, s) : splice `x` into the sorted vector (dedup).
@@ -6755,6 +7115,94 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?; // toRemove = s2
                 self.emit_expr(&args[0], ctx, f)?; // base = s1
                 f.instruction(&Instruction::Call(self.set_diff_idx));
+            }
+            // Array: the same T_LIST vector — toList/fromList are identity and
+            // most ops reuse the List kernels.
+            ("Array", "empty") => push_empty_list(f),
+            ("Array", "fromList") | ("Array", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Array", "length") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Array", "isEmpty") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Array", "repeat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_repeat_idx));
+            }
+            ("Array", "get") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_get_idx));
+            }
+            ("Array", "set") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_set_idx));
+            }
+            ("Array", "push") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_push_idx));
+            }
+            ("Array", "append") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_append_idx));
+            }
+            ("Array", "slice") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_slice_idx));
+            }
+            ("Array", "initialize") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_initialize_idx));
+            }
+            ("Array", "toIndexedList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.array_to_indexed_idx));
+            }
+            ("Array", "foldl") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_foldl_idx));
+            }
+            ("Array", "foldr") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_foldr_idx));
+            }
+            ("Array", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_map_idx));
+            }
+            ("Array", "indexedMap") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::I64Const(0));
+                f.instruction(&Instruction::StructNew(T_INT));
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_indexed_map_idx));
+            }
+            ("Array", "filter") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_filter_idx));
             }
             ("Tuple", "first") => {
                 self.emit_expr(&args[0], ctx, f)?;
