@@ -39,7 +39,9 @@ function start(wasmPath, doc, clock) {
         const payload = { target: { value: t.value || '', checked: !!t.checked } };
         const bytes = new TextEncoder().encode(JSON.stringify(payload));
         new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
-        instance.exports.alm_event(hid, 0, bytes.length);
+        const flags = instance.exports.alm_event(hid, 0, bytes.length) | 0;
+        if ((flags & 1) && ev.preventDefault) ev.preventDefault();
+        if ((flags & 2) && ev.stopPropagation) ev.stopPropagation();
       });
     },
     dom_mount: (r) => { mountedRoot = nodes[r]; doc.body.appendChild(mountedRoot); },

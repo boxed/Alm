@@ -1506,6 +1506,125 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
 }
 
 #[test]
+fn events_custom() {
+    // Html.Events.custom returns { message, stopPropagation, preventDefault };
+    // verify the message dispatches and preventDefault is honored.
+    let dir = common::test_dir("alm-wasmgc", "custom_event");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, text)\n\
+         import Html.Events as E\n\
+         import Json.Decode as D\n\n\
+         type Msg = Clicked\n\n\
+         update : Msg -> Int -> Int\n\
+         update Clicked _ = 7\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n\
+         \x20   button\n\
+         \x20       [ E.custom \"click\"\n\
+         \x20           (D.succeed { message = Clicked, stopPropagation = False, preventDefault = True })\n\
+         \x20       ]\n\
+         \x20       [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m_cu.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               const ev={{}};dispatchEvent(findBtn(doc.body),'click',ev);\
+               const out=serializeBody(doc)+'|pd='+(!!ev.defaultPrevented);if(r&&r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected: {out}");
+    assert_eq!(parts[0], parts[1], "custom event disagrees");
+    assert_eq!(parts[1], "<button>7</button>|pd=true", "custom msg + preventDefault: {}", parts[1]);
+}
+
+#[test]
+fn events_prevent_default() {
+    // preventDefaultOn "click" (succeed (Clicked, True)): the msg dispatches AND
+    // the event is preventDefaulted. Both backends must agree on the render and
+    // on defaultPrevented.
+    let dir = common::test_dir("alm-wasmgc", "prevent_default");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, text)\n\
+         import Html.Events as E\n\
+         import Json.Decode as D\n\n\
+         type Msg = Clicked\n\n\
+         update : Msg -> Int -> Int\n\
+         update Clicked _ = 1\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n\
+         \x20   button [ E.preventDefaultOn \"click\" (D.succeed ( Clicked, True )) ] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m_pd.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               const ev={{}};dispatchEvent(findBtn(doc.body),'click',ev);\
+               const out=serializeBody(doc)+'|pd='+(!!ev.defaultPrevented);if(r&&r.restore)r.restore();return out;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j+'\\u001e'+w);",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected: {out}");
+    assert_eq!(parts[0], parts[1], "preventDefaultOn disagrees");
+    assert_eq!(parts[1], "<button>1</button>|pd=true", "msg + preventDefault: {}", parts[1]);
+}
+
+#[test]
 fn events_on_check() {
     // onCheck fires on "change" reading target.checked; dispatch a change with
     // checked=true and assert both backends update identically.

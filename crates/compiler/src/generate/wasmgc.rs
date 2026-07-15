@@ -12023,11 +12023,25 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(DOM_SET_PROPERTY));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
-        // AEVENT (2): register decoder at a fresh hid, add listener
+        // AEVENT (2): register [decoder, kind] at a fresh hid, add listener.
+        // kind = args[2] if present (advanced on-handlers), else i31(0) plain.
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
         f.instruction(&Instruction::LocalGet(8)); // decoder
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_argn(&mut f, 5, 2); // kind i31
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
         f.instruction(&Instruction::LocalGet(3)); // node
         self.dom_str(&mut f, 7); // event name
@@ -12537,13 +12551,29 @@ impl<'a> Codegen<'a> {
     /// payload (JSON text at [ptr, len) in linear memory, or `null` when
     /// len==0), update the model, and diff/patch the DOM.
     fn emit_alm_event(&self) -> Function {
-        // params hid(0),ptr(1),len(2). locals: dec(3),r(4),new(5),upd(6),val(7):eqref
-        let mut f = Function::new([(5, eqref())]);
+        // params hid(0),ptr(1),len(2). locals: dec(3),r(4),okval(5),msg(6),
+        //   val(7):eqref; kind(8),flags(9):i32. Returns preventDefault/stop flags
+        //   (bit0=preventDefault, bit1=stopPropagation) for the host to honor.
+        let mut f = Function::new([(5, eqref()), (2, ValType::I32)]);
+        let i31 = HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 };
+        // entry = G_HANDLERS[hid] = [decoder, kind]; dec = entry[0], kind = entry[1]
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalSet(4)); // entry (reuse r slot)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3)); // dec
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(i31));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(8)); // kind
         // val = len>0 ? Ok-value(json_parse(str_from_mem(ptr,len))) : JSON null
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
@@ -12552,25 +12582,93 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.str_from_mem_idx));
         f.instruction(&Instruction::Call(self.json_parse_idx));
         f.instruction(&Instruction::LocalSet(7));
-        ctor_arg0(&mut f, 7); // Result Ok [value] → value
+        ctor_arg0(&mut f, 7);
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::LocalGet(3)); // dec
-        f.instruction(&Instruction::LocalGet(7)); // val
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.json_run_idx));
         f.instruction(&Instruction::LocalSet(4));
         ctor_tag(&mut f, 4);
-        f.instruction(&Instruction::I32Eqz); // Ok
-        f.instruction(&Instruction::If(BlockType::Empty));
-        // dispatch the decoded msg (Result Ok [msg] → msg)
+        f.instruction(&Instruction::I32Eqz); // Ok?
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
         ctor_arg0(&mut f, 4);
-        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
-        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(5)); // okval
         f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(9)); // flags
+        // element i of okval, as an i32 bool
+        let obool = |f: &mut Function, i: i32| {
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::RefCastNonNull(i31));
+            f.instruction(&Instruction::I31GetS);
+        };
+        // msg = plain ? okval : okval[0]
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(6)); // msg
+        // stopPropagationOn (1): flags |= okval[1] ? 2 : 0
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        obool(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // preventDefaultOn (2): flags |= okval[1] ? 1 : 0
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        obool(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // custom (3): record {message(0), preventDefault(1), stopPropagation(2)}
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        obool(&mut f, 1); // preventDefault
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        obool(&mut f, 2); // stopPropagation
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::LocalGet(9)); // return flags
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0)); // decode failed → no flags
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -16846,6 +16944,26 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Advanced handlers carry a 3rd `kind` marker (i31) so alm_event can
+            // read the decoder's (msg, flag) pair / {message, ...} record and
+            // return preventDefault/stopPropagation to the host. 1=stopProp,
+            // 2=preventDefault, 3=custom.
+            ("Html.Events", "stopPropagationOn")
+            | ("Html.Events", "preventDefaultOn")
+            | ("Html.Events", "custom") => {
+                let kind: i32 = match name {
+                    "stopPropagationOn" => 1,
+                    "preventDefaultOn" => 2,
+                    _ => 3, // custom
+                };
+                f.instruction(&Instruction::I32Const(2)); // AEVENT
+                self.emit_expr(&args[0], ctx, f)?; // name
+                self.emit_expr(&args[1], ctx, f)?; // decoder
+                f.instruction(&Instruction::I32Const(kind));
+                f.instruction(&Instruction::RefI31);
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
