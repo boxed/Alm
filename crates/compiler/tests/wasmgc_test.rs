@@ -1055,3 +1055,31 @@ fn json_encode_pretty() {
             E.encode 2\n        (E.object\n            [ ( \"a\", E.int 1 )\n            , ( \"nested\", E.list E.int [ 1, 2, 3 ] )\n            ]\n        )\n",
     );
 }
+
+#[test]
+fn json_decode_basics() {
+    assert_str_prog(
+        "json_dec",
+        "module Test exposing (main)\n\n\
+         import Json.Decode as D\n\n\
+         person : D.Decoder String\n\
+         person =\n    D.map2 (\\n a -> n ++ \"/\" ++ String.fromInt a)\n        (D.field \"name\" D.string)\n        (D.field \"age\" D.int)\n\n\
+         main : String\n\
+         main =\n    \
+            (case D.decodeString person \"{ \\\"name\\\": \\\"Bob\\\", \\\"age\\\": 42 }\" of\n        Ok s -> s\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.list D.int) \"[1, 2, 3]\" of\n        Ok xs -> String.join \",\" (List.map String.fromInt xs)\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.field \"a\" (D.field \"b\" D.bool)) \"{\\\"a\\\":{\\\"b\\\":true}}\" of\n        Ok b -> if b then \"y\" else \"n\"\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString D.int \"not json\" of\n        Ok _ -> \"ok\"\n\n        Err _ -> \"ERR\"\n    )\n",
+    );
+}
+
+#[test]
+fn json_decode_combinators() {
+    assert_str_prog(
+        "json_dec2",
+        "module Test exposing (main)\n\n\
+         import Json.Decode as D\n\n\
+         showMaybe : Maybe Int -> String\n\
+         showMaybe m =\n    case m of\n        Just n -> String.fromInt n\n\n        Nothing -> \"-\"\n\n\
+         main : String\n\
+         main =\n    \
+            (case D.decodeString (D.maybe (D.field \"x\" D.int)) \"{\\\"y\\\":1}\" of\n        Ok m -> showMaybe m\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.oneOf [ D.int, D.succeed 0 ]) \"\\\"hi\\\"\" of\n        Ok n -> String.fromInt n\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.index 1 D.string) \"[\\\"a\\\",\\\"b\\\"]\" of\n        Ok s -> s\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.at [ \"a\", \"b\" ] D.int) \"{\\\"a\\\":{\\\"b\\\":7}}\" of\n        Ok n -> String.fromInt n\n\n        Err _ -> \"ERR\"\n    )\n        ++ \"|\" ++ (case D.decodeString (D.nullable D.int) \"null\" of\n        Ok m -> showMaybe m\n\n        Err _ -> \"ERR\"\n    )\n",
+    );
+}

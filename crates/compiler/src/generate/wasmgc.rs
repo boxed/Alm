@@ -14,8 +14,8 @@ use std::path::Path;
 use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
     ElementSection, Elements, ExportKind, ExportSection, FieldType, Function, FunctionSection,
-    HeapType, Instruction, MemArg, MemorySection, MemoryType, Module, RefType, StorageType,
-    TypeSection, ValType,
+    GlobalSection, GlobalType, HeapType, Instruction, MemArg, MemorySection, MemoryType, Module,
+    RefType, StorageType, TypeSection, ValType,
 };
 
 use crate::ast::canonical as can;
@@ -317,11 +317,57 @@ fn ctor_tag(f: &mut Function, local: u32) {
 
 /// Push argument 0 of the custom-type value in `local`.
 fn ctor_arg0(f: &mut Function, local: u32) {
+    ctor_argn(f, local, 0);
+}
+
+/// Push argument `n` of the custom-type value in `local`.
+fn ctor_argn(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalGet(local));
     f.instruction(&cast_to(T_CTOR));
     f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
-    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32Const(n));
     f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
+/// Push a JSON `Value` = `T_CTOR { tag, [arg-on-stack] }` — arg must already be
+/// on the stack; emits `[tag] arg -> ...` is impossible, so callers push tag
+/// then the arg then call this to wrap. Here `tag` is pushed, so use as:
+/// `push tag; <compute arg>; wrap1()`.
+fn wrap1(f: &mut Function) {
+    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+    f.instruction(&Instruction::StructNew(T_CTOR));
+}
+
+/// Push a decode failure: `Err (Failure "" null)` (Result tag 1 → Error tag 3).
+fn push_decode_err(f: &mut Function) {
+    f.instruction(&Instruction::I32Const(1)); // Err
+    f.instruction(&Instruction::I32Const(3)); // Failure
+    push_str_const(f, "");
+    f.instruction(&Instruction::I32Const(0)); // a JNULL Value
+    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+    f.instruction(&Instruction::StructNew(T_CTOR));
+    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+    f.instruction(&Instruction::StructNew(T_CTOR)); // Failure
+    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+    f.instruction(&Instruction::StructNew(T_CTOR)); // Err
+}
+
+/// Push the current parse byte `jstr[jpos]`, or -1 at end of input.
+/// (globals: 0=jstr, 1=jpos.)
+fn json_cur(f: &mut Function) {
+    f.instruction(&Instruction::GlobalGet(1));
+    f.instruction(&Instruction::GlobalGet(0));
+    f.instruction(&cast_to(T_STR));
+    f.instruction(&Instruction::ArrayLen);
+    f.instruction(&Instruction::I32GeS);
+    f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    f.instruction(&Instruction::I32Const(-1));
+    f.instruction(&Instruction::Else);
+    f.instruction(&Instruction::GlobalGet(0));
+    f.instruction(&cast_to(T_STR));
+    f.instruction(&Instruction::GlobalGet(1));
+    f.instruction(&Instruction::ArrayGetU(T_STR));
+    f.instruction(&Instruction::End);
 }
 
 /// Emit `local += n` for an i32 local.
@@ -583,6 +629,15 @@ struct Codegen<'a> {
     json_enc_idx: u32,
     json_escape_idx: u32,
     json_dict_pairs_idx: u32,
+    json_skipws_idx: u32,
+    json_pstr_idx: u32,
+    json_pnum_idx: u32,
+    json_pval_idx: u32,
+    json_parr_idx: u32,
+    json_pobj_idx: u32,
+    json_parse_idx: u32,
+    json_run_idx: u32,
+    json_decstr_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -700,6 +755,15 @@ impl<'a> Codegen<'a> {
             json_enc_idx: 0,
             json_escape_idx: 0,
             json_dict_pairs_idx: 0,
+            json_skipws_idx: 0,
+            json_pstr_idx: 0,
+            json_pnum_idx: 0,
+            json_pval_idx: 0,
+            json_parr_idx: 0,
+            json_pobj_idx: 0,
+            json_parse_idx: 0,
+            json_run_idx: 0,
+            json_decstr_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -841,6 +905,15 @@ impl<'a> Codegen<'a> {
         self.json_enc_idx = next();
         self.json_escape_idx = next();
         self.json_dict_pairs_idx = next();
+        self.json_skipws_idx = next();
+        self.json_pstr_idx = next();
+        self.json_pnum_idx = next();
+        self.json_pval_idx = next();
+        self.json_parr_idx = next();
+        self.json_pobj_idx = next();
+        self.json_parse_idx = next();
+        self.json_run_idx = next();
+        self.json_decstr_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -876,7 +949,9 @@ impl<'a> Codegen<'a> {
         let main_int_ty = self.next_type;
         let render_ty = self.next_type + 1;
         let val_compare_ty = self.next_type + 2; // (eqref, eqref) -> i32
-        self.next_type += 3;
+        let json_void_ty = self.next_type + 3; // () -> ()
+        let json_ret_ty = self.next_type + 4; // () -> eqref
+        self.next_type += 5;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -978,6 +1053,15 @@ impl<'a> Codegen<'a> {
         let json_enc = self.emit_json_enc();
         let json_escape = self.emit_json_escape();
         let json_dict_pairs = self.emit_json_dict_pairs();
+        let json_skipws = self.emit_json_skipws();
+        let json_pstr = self.emit_json_pstr();
+        let json_pnum = self.emit_json_pnum();
+        let json_pval = self.emit_json_pval();
+        let json_parr = self.emit_json_parr();
+        let json_pobj = self.emit_json_pobj();
+        let json_parse = self.emit_json_parse();
+        let json_run = self.emit_json_run();
+        let json_decstr = self.emit_json_decstr();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -1021,6 +1105,8 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![], vec![ValType::I64]); // main_int
         types.ty().function(vec![], vec![ValType::I32]); // render
         types.ty().function(vec![eqref(), eqref()], vec![ValType::I32]); // val_compare
+        types.ty().function(vec![], vec![]); // json_void: () -> ()
+        types.ty().function(vec![], vec![eqref()]); // json_ret: () -> eqref
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1126,6 +1212,15 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // json_enc (value, gap, prefix)
         funcs.function(ft1); // json_escape
         funcs.function(ft3); // json_dict_pairs
+        funcs.function(json_void_ty); // json_skipws : () -> ()
+        funcs.function(json_ret_ty); // json_pstr : () -> eqref
+        funcs.function(json_ret_ty); // json_pnum : () -> eqref
+        funcs.function(json_ret_ty); // json_pval : () -> eqref
+        funcs.function(json_ret_ty); // json_parr : () -> eqref
+        funcs.function(json_ret_ty); // json_pobj : () -> eqref
+        funcs.function(ft1); // json_parse : String -> Result
+        funcs.function(ft2); // json_run : (decoder, value) -> Result
+        funcs.function(ft2); // json_decstr : (decoder, string) -> Result
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -1237,6 +1332,15 @@ impl<'a> Codegen<'a> {
         code.function(&json_enc);
         code.function(&json_escape);
         code.function(&json_dict_pairs);
+        code.function(&json_skipws);
+        code.function(&json_pstr);
+        code.function(&json_pnum);
+        code.function(&json_pval);
+        code.function(&json_parr);
+        code.function(&json_pobj);
+        code.function(&json_parse);
+        code.function(&json_run);
+        code.function(&json_decstr);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -1262,6 +1366,22 @@ impl<'a> Codegen<'a> {
         let mut data = DataSection::new();
         data.passive(self.string_data.iter().copied());
 
+        // Globals for the JSON parser cursor (see emit_json_parse): the input
+        // string, the byte position, and an error flag.
+        let mut globals = GlobalSection::new();
+        globals.global(
+            GlobalType { val_type: ref_null_to(T_STR), mutable: true, shared: false },
+            &ConstExpr::ref_null(HeapType::Concrete(T_STR)),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
+
         let mut exports = ExportSection::new();
         exports.export("main_int", ExportKind::Func, main_int_idx);
         exports.export("render", ExportKind::Func, render_idx);
@@ -1271,6 +1391,7 @@ impl<'a> Codegen<'a> {
         module.section(&types);
         module.section(&funcs);
         module.section(&mems);
+        module.section(&globals);
         module.section(&exports);
         module.section(&elems);
         // DataCount must precede Code when code uses `array.new_data`.
@@ -1891,6 +2012,24 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
+        }
+        // Leaf Json.Decode decoders (used as first-class values): a decoder AST
+        // node with no args. string=0 int=1 float=2 bool=3 value=4.
+        if module == "Json.Decode" {
+            let leaf = match name {
+                "string" => Some(0),
+                "int" => Some(1),
+                "float" => Some(2),
+                "bool" => Some(3),
+                "value" => Some(4),
+                _ => None,
+            };
+            if let Some(tag) = leaf {
+                f.instruction(&Instruction::I32Const(tag));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+                return Ok(());
+            }
         }
         let arity: u32 = match (module, name) {
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
@@ -6447,6 +6586,1267 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Json.Decode: a recursive-descent parser (globals 0=jstr,1=jpos,
+    //      2=jerr) producing the tagged Value, and a tagged-decoder interpreter.
+
+    /// json_skipws() : advance jpos past JSON whitespace.
+    fn emit_json_skipws(&self) -> Function {
+        let mut f = Function::new([(1, ValType::I32)]); // c
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        // stop at end (-1)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // is ws? 32/9/10/13
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(32));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(9));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(13));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1)); // not ws → stop
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_pstr() : parse a `"…"` string at jpos, returning its content String.
+    fn emit_json_pstr(&self) -> Function {
+        // locals: c(0),e(1),cp(2),b(3),k(4):i32, out(5):eqref
+        let mut f = Function::new([(5, ValType::I32), (1, eqref())]);
+        // skip opening quote
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        // end of input → error
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::GlobalSet(2));
+        f.instruction(&Instruction::Br(2));
+        f.instruction(&Instruction::End);
+        // consume c
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        // closing quote?
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(34));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::BrIf(1));
+        // escape?
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(92));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // e = next byte
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        // out ++= piece
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(117)); // 'u'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // \uXXXX → codepoint → str_from_char
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2)); // cp
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // k
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // hd = hexval(cur); jpos++
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(3));
+        self.json_hexval(&mut f, 3);
+        // cp = cp*16 + hd
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Call(self.str_from_char_idx));
+        f.instruction(&Instruction::Else);
+        // simple escape → one byte
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(3)); // b = e (", \, / map to self)
+        for (esc, byte) in [(110, 10), (116, 9), (114, 13), (98, 8), (102, 12)] {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32Const(esc));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(byte));
+            f.instruction(&Instruction::LocalSet(3));
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_STR, array_size: 1 });
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Else);
+        // ordinary byte
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_STR, array_size: 1 });
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Convert the hex-digit byte in local `d` to its value (in place).
+    fn json_hexval(&self, f: &mut Function, d: u32) {
+        // d = (d>=97 ? d-87 : (d>=65 ? d-55 : d-48))
+        f.instruction(&Instruction::LocalGet(d));
+        f.instruction(&Instruction::I32Const(97));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(d));
+        f.instruction(&Instruction::I32Const(87));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(d));
+        f.instruction(&Instruction::I32Const(65));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(d));
+        f.instruction(&Instruction::I32Const(55));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(d));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+    }
+
+    /// json_pnum() : parse a number → JINT (tag 2) if it has no '.'/'e', else
+    /// JFLOAT (tag 3). (Hand-rolled decimal→f64: exact for short inputs.)
+    fn emit_json_pnum(&self) -> Function {
+        // locals: c(0),sign(1),isf(2),exp(3),esign(4):i32, ival(5):i64,
+        //   fval(6),scale(7):f64
+        let mut f = Function::new([(5, ValType::I32), (1, ValType::I64), (2, ValType::F64)]);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(1)); // sign
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2)); // isf
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalSet(5)); // ival
+        f.instruction(&Instruction::F64Const(0.0.into()));
+        f.instruction(&Instruction::LocalSet(6)); // fval
+        // sign
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(45));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::End);
+        // integer digits
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(57));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        // ival = ival*10 + (c-48); fval = fval*10 + (c-48)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::F64Const(10.0.into()));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::F64ConvertI32S);
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // fraction
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(46)); // '.'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(2)); // isf
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::F64Const(0.1.into()));
+        f.instruction(&Instruction::LocalSet(7)); // scale
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(57));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        // fval += (c-48)*scale ; scale *= 0.1
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::F64ConvertI32S);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::F64Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::F64Const(0.1.into()));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // exponent
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(32));
+        f.instruction(&Instruction::I32Or); // lower-case: 'E'|32 == 'e'
+        f.instruction(&Instruction::I32Const(101)); // 'e'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(4)); // esign
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3)); // exp
+        // optional sign
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(45));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::Else);
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(43));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(57));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // fval *= 10^(esign*exp) via repeated mul/div
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::F64Const(10.0.into()));
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::F64Const(10.0.into()));
+        f.instruction(&Instruction::F64Div);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        dec(&mut f, 3);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // exponent if
+        // build result
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // JFLOAT: tag 3 [ sign * fval ]
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::F64ConvertI32S);
+        f.instruction(&Instruction::F64Mul);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        // JINT: tag 2 [ sign * ival ]
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::StructNew(T_INT));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_pval() : parse any JSON value at jpos (skips leading ws).
+    fn emit_json_pval(&self) -> Function {
+        let mut f = Function::new([(1, ValType::I32)]); // c
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        // '{'
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(123));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Call(self.json_pobj_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(91)); // '['
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Call(self.json_parr_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(34)); // '"'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(4)); // JSTRING
+        f.instruction(&Instruction::Call(self.json_pstr_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(116)); // 't'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        self.json_advance(&mut f, 4);
+        f.instruction(&Instruction::I32Const(1)); // JBOOL
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(102)); // 'f'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        self.json_advance(&mut f, 5);
+        f.instruction(&Instruction::I32Const(1)); // JBOOL
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(110)); // 'n'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        self.json_advance(&mut f, 4);
+        f.instruction(&Instruction::I32Const(0)); // JNULL
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        // number if '-' or digit, else error
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(45));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(48));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Const(57));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Call(self.json_pnum_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::GlobalSet(2)); // jerr
+        f.instruction(&Instruction::I32Const(0)); // JNULL placeholder
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Advance jpos by `n` (consume a literal like true/false/null).
+    fn json_advance(&self, f: &mut Function, n: i32) {
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::I32Const(n));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(1));
+    }
+
+    /// json_parr() : parse a `[…]` array at jpos → JARRAY.
+    fn emit_json_parr(&self) -> Function {
+        // locals: acc(0):eqref, c(1):i32
+        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
+        self.json_advance(&mut f, 1); // '['
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(93)); // ']'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.json_advance(&mut f, 1);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // acc = cons(pval(), acc)
+        f.instruction(&Instruction::Call(self.json_pval_idx));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(1));
+        self.json_advance(&mut f, 1); // consume separator/close
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(44)); // ','
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::BrIf(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(93)); // ']'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::GlobalSet(2)); // jerr
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // JARRAY tag 5 [ reverse acc ]
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_pobj() : parse a `{…}` object at jpos → JOBJECT.
+    fn emit_json_pobj(&self) -> Function {
+        // locals: acc(0),key(1),v(2):eqref, c(3):i32
+        let mut f = Function::new([(3, eqref()), (1, ValType::I32)]);
+        self.json_advance(&mut f, 1); // '{'
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(125)); // '}'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.json_advance(&mut f, 1);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        // key
+        f.instruction(&Instruction::Call(self.json_pstr_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        // expect ':'
+        json_cur(&mut f);
+        f.instruction(&Instruction::I32Const(58));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::GlobalSet(2));
+        f.instruction(&Instruction::Br(2));
+        f.instruction(&Instruction::End);
+        self.json_advance(&mut f, 1); // ':'
+        f.instruction(&Instruction::Call(self.json_pval_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        // acc = cons([key, v], acc)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        json_cur(&mut f);
+        f.instruction(&Instruction::LocalSet(3));
+        self.json_advance(&mut f, 1);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(44)); // ','
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::BrIf(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(125)); // '}'
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::GlobalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_parse(s) : String -> Result Error Value.
+    fn emit_json_parse(&self) -> Function {
+        // param s(0). local v(1):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::GlobalSet(0)); // jstr
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(1)); // jpos
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalSet(2)); // jerr
+        f.instruction(&Instruction::Call(self.json_pval_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Call(self.json_skipws_idx));
+        // ok if jerr==0 && jpos>=len
+        f.instruction(&Instruction::GlobalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::GlobalGet(1));
+        f.instruction(&Instruction::GlobalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::LocalGet(1));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_run(dec, val) : interpret a tagged decoder against a JSON Value,
+    /// returning `Result Error a`. Decoder tags: 0 string,1 int,2 float,3 bool,
+    /// 4 value,5 null,6 list,7 array,8 field,9 index,10 at,11 keyValuePairs,
+    /// 12 dict,13 maybe,14 nullable,15 map,16 map2,17 map3,18 andThen,19 oneOf,
+    /// 20 succeed,21 fail,22 lazy. Value tags: 0 null,1 bool,2 int,3 float,
+    /// 4 string,5 array,6 object.
+    fn emit_json_run(&self) -> Function {
+        // params dec(0), val(1). locals: t(2),len(4),i(5),ii(6):i32,
+        //   acc(7),r(8),items(9),d(10),pair(11),sub(12):eqref, fv(13):f64
+        let mut f = Function::new([(5, ValType::I32), (6, eqref()), (1, ValType::F64)]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // helper closures capturing nothing — emit inline via small fns:
+        let arm = |f: &mut Function, tag: i32| {
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Const(tag));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+        };
+        let vtag_is = |f: &mut Function, tag: i32| {
+            ctor_tag(f, 1);
+            f.instruction(&Instruction::I32Const(tag));
+            f.instruction(&Instruction::I32Eq);
+        };
+        // 0 string
+        arm(&mut f, 0);
+        vtag_is(&mut f, 4);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 1);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 1 int
+        arm(&mut f, 1);
+        vtag_is(&mut f, 2);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 1);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        vtag_is(&mut f, 3);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(13));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::F64ConvertI64S);
+        f.instruction(&Instruction::F64Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::StructNew(T_INT));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 2 float
+        arm(&mut f, 2);
+        vtag_is(&mut f, 3);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 1);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        vtag_is(&mut f, 2);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::F64ConvertI64S);
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 3 bool
+        arm(&mut f, 3);
+        vtag_is(&mut f, 1);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 1);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 4 value
+        arm(&mut f, 4);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 5 null
+        arm(&mut f, 5);
+        vtag_is(&mut f, 0);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 6 list / 7 array
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        vtag_is(&mut f, 5);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(9)); // items
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(12)); // sub
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(7)); // acc
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(12));
+        list_elem(&mut f, 9, 5);
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 8 field
+        arm(&mut f, 8);
+        vtag_is(&mut f, 6);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(9)); // pairs
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 9, 5);
+        f.instruction(&Instruction::LocalSet(11)); // pair
+        ctor_arg0(&mut f, 0); // name
+        self.load_arr(11, 0, &mut f);
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1); // sub
+        self.load_arr(11, 1, &mut f);
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 9 index
+        arm(&mut f, 9);
+        vtag_is(&mut f, 5);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(9));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&cast_to(T_INT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_INT, field_index: 0 });
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(6));
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 1);
+        list_elem(&mut f, 9, 6);
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 10 at: build nested DField(name, ...) then run
+        arm(&mut f, 10);
+        ctor_arg0(&mut f, 0); // names
+        f.instruction(&Instruction::LocalSet(9));
+        ctor_argn(&mut f, 0, 1); // sub
+        f.instruction(&Instruction::LocalSet(10)); // d
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        // d = DField(names[i], d)  (tag 8)
+        f.instruction(&Instruction::I32Const(8));
+        list_elem(&mut f, 9, 5);
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 11 keyValuePairs / 12 dict
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(11));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        vtag_is(&mut f, 6);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(9)); // pairs
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(12)); // sub
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(7));
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 9, 5);
+        f.instruction(&Instruction::LocalSet(11)); // pair
+        f.instruction(&Instruction::LocalGet(12));
+        self.load_arr(11, 1, &mut f);
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8)); // r
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // acc = cons([key, r.arg0], acc)
+        self.load_arr(11, 0, &mut f);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // reversed kv list
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        // Ok (Dict.fromList kv)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(self.dict_from_list_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 13 maybe
+        arm(&mut f, 13);
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(0)); // Just
+        ctor_arg0(&mut f, 8);
+        wrap1(&mut f);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 14 nullable
+        arm(&mut f, 14);
+        vtag_is(&mut f, 0);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(0)); // Just
+        ctor_arg0(&mut f, 8);
+        wrap1(&mut f);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 15 map
+        arm(&mut f, 15);
+        ctor_argn(&mut f, 0, 1); // sub
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0); // f
+        ctor_arg0(&mut f, 8); // x
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 16 map2
+        arm(&mut f, 16);
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(7)); // x1
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0); // f
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 17 map3
+        arm(&mut f, 17);
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(7)); // x1
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(9)); // x2
+        ctor_argn(&mut f, 0, 3);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 18 andThen
+        arm(&mut f, 18);
+        ctor_argn(&mut f, 0, 1); // sub
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 0); // f
+        ctor_arg0(&mut f, 8); // x
+        f.instruction(&Instruction::Call(self.apply1_idx)); // f x = Decoder
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 19 oneOf
+        arm(&mut f, 19);
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(9)); // decoders
+        list_len(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 9, 5);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 20 succeed
+        arm(&mut f, 20);
+        f.instruction(&Instruction::I32Const(0));
+        ctor_arg0(&mut f, 0);
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 21 fail
+        arm(&mut f, 21);
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // 22 lazy
+        arm(&mut f, 22);
+        ctor_arg0(&mut f, 0); // thunk
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // Unit
+        f.instruction(&Instruction::Call(self.apply1_idx)); // thunk () = Decoder
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // fallback
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_decstr(dec, s) : decodeString — parse then run.
+    fn emit_json_decstr(&self) -> Function {
+        // params dec(0), s(1). local p(2):eqref
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_parse_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Eqz); // Ok
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(0));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(2)); // propagate Err
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -7177,6 +8577,30 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
+    /// Build a decoder AST node: `T_CTOR { tag, [args…] }` (null args if none).
+    fn emit_dnode(
+        &mut self,
+        tag: i32,
+        args: &[&TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        f.instruction(&Instruction::I32Const(tag));
+        if args.is_empty() {
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        } else {
+            for a in args {
+                self.emit_expr(a, ctx, f)?;
+            }
+            f.instruction(&Instruction::ArrayNewFixed {
+                array_type_index: T_ARR,
+                array_size: args.len() as u32,
+            });
+        }
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        Ok(())
+    }
+
     /// A saturated call to a known kernel (`Foreign`).
     fn emit_kernel(
         &mut self,
@@ -7634,6 +9058,40 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.str_repeat_idx));
                 push_str_const(f, "");
                 f.instruction(&Instruction::Call(self.json_enc_idx));
+            }
+            // Json.Decode: build a decoder AST node (leaf decoders are nullary
+            // values handled in emit_foreign_value).
+            ("Json.Decode", "null") => self.emit_dnode(5, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "list") => self.emit_dnode(6, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "array") => self.emit_dnode(7, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "field") => self.emit_dnode(8, &[&args[0], &args[1]], ctx, f)?,
+            ("Json.Decode", "index") => self.emit_dnode(9, &[&args[0], &args[1]], ctx, f)?,
+            ("Json.Decode", "at") => self.emit_dnode(10, &[&args[0], &args[1]], ctx, f)?,
+            ("Json.Decode", "keyValuePairs") => self.emit_dnode(11, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "dict") => self.emit_dnode(12, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "maybe") => self.emit_dnode(13, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "nullable") => self.emit_dnode(14, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "map") => self.emit_dnode(15, &[&args[0], &args[1]], ctx, f)?,
+            ("Json.Decode", "map2") => {
+                self.emit_dnode(16, &[&args[0], &args[1], &args[2]], ctx, f)?
+            }
+            ("Json.Decode", "map3") => {
+                self.emit_dnode(17, &[&args[0], &args[1], &args[2], &args[3]], ctx, f)?
+            }
+            ("Json.Decode", "andThen") => self.emit_dnode(18, &[&args[0], &args[1]], ctx, f)?,
+            ("Json.Decode", "oneOf") => self.emit_dnode(19, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "succeed") => self.emit_dnode(20, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "fail") => self.emit_dnode(21, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "lazy") => self.emit_dnode(22, &[&args[0]], ctx, f)?,
+            ("Json.Decode", "decodeString") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.json_decstr_idx));
+            }
+            ("Json.Decode", "decodeValue") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.json_run_idx));
             }
             ("Tuple", "first") => {
                 self.emit_expr(&args[0], ctx, f)?;
