@@ -901,6 +901,22 @@ fn tuple_param_patterns() {
 }
 
 #[test]
+fn record_param_patterns() {
+    // Record destructuring in a function param, a lambda param, and a let
+    // binding (`{ a, b }`). Each named field loads from its sorted T_ARR slot.
+    assert_str_prog(
+        "record_params",
+        "module Test exposing (main)\n\n\
+         type alias P = { a : Int, b : Int }\n\n\
+         sum : P -> Int\n\
+         sum { a, b } = a + b\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (sum { a = 40, b = 2 })\n        ++ \"|\" ++ String.fromInt ((\\{ a } -> a) { a = 100, b = 7 })\n        ++ \"|\" ++ (let { b } = { a = 1, b = 9 } in String.fromInt b)\n",
+    );
+}
+
+#[test]
 fn tuple_map_xor_map3() {
     assert_str_prog(
         "tuple_xor_map3",
@@ -1399,6 +1415,32 @@ fn attributes_class_list() {
          \x20       [ text \"hi\" ]\n\n\
          main : Program () Int Msg\n\
          main = Browser.sandbox { init = 0, update = \\_ m -> m, view = view }\n",
+    );
+}
+
+// KNOWN HOLE (found porting the js-framework-benchmark keyed table to wasm-gc):
+// a keyed child carrying `classList` traps `illegal cast` when the keyed list is
+// patched on update (the row-creating update). Static render is fine and plain
+// (non-keyed) classList updates are fine — it's the keyed diff path. Remove the
+// #[ignore] once the WasmGC backend handles classList inside a keyed patch.
+#[test]
+#[ignore = "wasm-gc: `illegal cast` patching a keyed child with classList on update"]
+fn keyed_classlist_update() {
+    assert_sandbox_click(
+        "keyed_classlist_update",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, text)\n\
+         import Html.Attributes exposing (classList)\n\
+         import Html.Events exposing (onClick)\n\
+         import Html.Keyed as Keyed\n\n\
+         type Msg = Run\n\n\
+         row2 : Int -> ( String, Html Msg )\n\
+         row2 i =\n    ( String.fromInt i, div [ classList [ ( \"danger\", False ) ] ] [ text (String.fromInt i) ] )\n\n\
+         view : Int -> Html Msg\n\
+         view n =\n    div [] [ button [ onClick Run ] [ text \"run\" ], Keyed.node \"div\" [] (List.map row2 (List.range 1 n)) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = \\_ _ -> 3, view = view }\n",
     );
 }
 
