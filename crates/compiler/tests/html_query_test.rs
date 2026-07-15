@@ -15,7 +15,7 @@ mod common;
 /// `Elm` object just before it is exported.
 fn to_json(body: &str) -> String {
     let source = format!("module Test exposing (..)\n\nimport Html\nimport Html.Attributes\nimport Html.Events\nimport Html.Keyed\n\n{}", body);
-    let javascript = common::compile_single("Test.elm", &source);
+    let javascript = common::compile_single_no_dce("Test.elm", &source);
     let javascript = javascript.replace(
         "if (typeof module !== 'undefined') { module.exports = Elm; }",
         "Elm._toJson = $Elm$Kernel$HtmlAsJson$toJson; Elm._html = $Test$main;\nif (typeof module !== 'undefined') { module.exports = Elm; }",

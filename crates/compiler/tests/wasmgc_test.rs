@@ -1210,3 +1210,54 @@ fn sandbox_click_counter() {
          main = Browser.sandbox { init = 0, update = update, view = view }\n",
     );
 }
+
+#[test]
+fn sandbox_diff_preserves_identity() {
+    // After a click that only changes a text node, the diff/patch must keep the
+    // unchanged <button> DOM node (a full rebuild would replace it).
+    let dir = common::test_dir("alm-wasmgc", "sandbox_diff");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, text)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Inc\n\n\
+         update : Msg -> Int -> Int\n\
+         update _ n = n + 1\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ button [ onClick Inc ] [ text \"+\" ], div [] [ text (String.fromInt n) ] ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m3.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             const doc=new Document();wg.start({w:?},doc);\
+             const b0=findBtn(doc.body);dispatchEvent(b0,'click',{{}});const b1=findBtn(doc.body);\
+             process.stdout.write((b0===b1?'SAME':'NEW')+'|'+serializeBody(doc));",
+            sup = support, w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    assert_eq!(
+        out, "SAME|<div><button>+</button><div>1</div></div>",
+        "diff/patch should preserve the unchanged button node and update the count"
+    );
+}

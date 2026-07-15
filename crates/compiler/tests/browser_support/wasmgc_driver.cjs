@@ -32,6 +32,16 @@ function start(wasmPath, doc) {
       else doc.body.appendChild(nodes[r]);
       mountedRoot = nodes[r];
     },
+    dom_child: (p, i) => reg(nodes[p].childNodes[i]),
+    dom_set_text: (n, s, sl) => { nodes[n].textContent = str(s, sl); },
+    dom_remove_attribute: (n, k, kl) => { nodes[n].removeAttribute(str(k, kl)); },
+    dom_remove_child: (p, c) => { nodes[p].removeChild(nodes[c]); },
+    dom_replace: (o, nw) => {
+      const old = nodes[o];
+      if (old.parentNode) old.parentNode.replaceChild(nodes[nw], old);
+      if (old === mountedRoot) mountedRoot = nodes[nw];
+    },
+    dom_remove_event_listener: () => {},
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });

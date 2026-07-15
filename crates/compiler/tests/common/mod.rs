@@ -61,7 +61,21 @@ impl Drop for TestDir {
 
 /// Compile a single Elm module, panicking with rendered reports on failure.
 pub fn compile_single(file_name: &str, source: &str) -> String {
-    match alm_compiler::compile(source) {
+    unwrap_compiled(file_name, source, alm_compiler::compile(source))
+}
+
+/// Compile with dead-code elimination disabled — for tests that splice in
+/// references to kernel internals the app itself never uses.
+pub fn compile_single_no_dce(file_name: &str, source: &str) -> String {
+    unwrap_compiled(file_name, source, alm_compiler::compile_no_dce(source))
+}
+
+fn unwrap_compiled(
+    file_name: &str,
+    source: &str,
+    result: Result<String, Vec<alm_compiler::reporting::Report>>,
+) -> String {
+    match result {
         Ok(js) => js,
         Err(reports) => panic!(
             "compilation failed:\n{}",

@@ -46,7 +46,13 @@ const DOM_APPEND_CHILD: u32 = 4; // (parent,child)
 const DOM_ADD_EVENT_LISTENER: u32 = 5; // (node,np,nl,hid)
 const DOM_MOUNT: u32 = 6; // (root)
 const DOM_REPLACE_ROOT: u32 = 7; // (root)
-const N_IMPORTS: u32 = 8;
+const DOM_CHILD: u32 = 8; // (parent,i) -> handle
+const DOM_SET_TEXT: u32 = 9; // (node,ptr,len)
+const DOM_REMOVE_ATTRIBUTE: u32 = 10; // (node,ptr,len)
+const DOM_REMOVE_CHILD: u32 = 11; // (parent,child)
+const DOM_REPLACE: u32 = 12; // (old,new) — replace old with new in its parent
+const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len,hid)
+const N_IMPORTS: u32 = 14;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -56,6 +62,8 @@ const G_VIEW: u32 = 5;
 const G_HANDLERS: u32 = 6;
 const G_NEXT_HID: u32 = 7;
 const G_BUMP: u32 = 8;
+const G_PREV: u32 = 9; // previously-rendered vdom (for diff/patch)
+const G_ROOT: u32 = 10; // mounted root DOM handle
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
 /// Highest arity the closure `apply` dispatcher handles.
@@ -687,6 +695,7 @@ struct Codegen<'a> {
     marshal_idx: u32,
     render_dom_idx: u32,
     rerender_idx: u32,
+    patch_idx: u32,
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
@@ -821,6 +830,7 @@ impl<'a> Codegen<'a> {
             marshal_idx: 0,
             render_dom_idx: 0,
             rerender_idx: 0,
+            patch_idx: 0,
             alm_event_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
@@ -979,6 +989,7 @@ impl<'a> Codegen<'a> {
         self.marshal_idx = next();
         self.render_dom_idx = next();
         self.rerender_idx = next();
+        self.patch_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1027,7 +1038,9 @@ impl<'a> Codegen<'a> {
         let imp_i_v = self.next_type + 9; // (i32) -> ()
         let eqref_to_i32_ty = self.next_type + 10; // eqref -> i32 (marshal, render_dom)
         let alm_event_ty = self.next_type + 11; // (i32,i32,i32) -> i32
-        self.next_type += 12;
+        let imp_i3_v = self.next_type + 12; // (i32,i32,i32) -> ()
+        let patch_ty = self.next_type + 13; // (i32,eqref,eqref) -> i32
+        self.next_type += 14;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1146,6 +1159,7 @@ impl<'a> Codegen<'a> {
         let marshal = self.emit_marshal();
         let render_dom = self.emit_render_dom();
         let rerender = self.emit_rerender();
+        let patch = self.emit_patch();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -1209,6 +1223,8 @@ impl<'a> Codegen<'a> {
             vec![ValType::I32, ValType::I32, ValType::I32],
             vec![ValType::I32],
         ); // alm_event
+        types.ty().function(vec![ValType::I32, ValType::I32, ValType::I32], vec![]); // imp_i3_v
+        types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![ValType::I32]); // patch
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1330,6 +1346,7 @@ impl<'a> Codegen<'a> {
         funcs.function(eqref_to_i32_ty); // marshal
         funcs.function(eqref_to_i32_ty); // render_dom
         funcs.function(json_void_ty); // rerender
+        funcs.function(patch_ty); // patch
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -1460,6 +1477,7 @@ impl<'a> Codegen<'a> {
         code.function(&marshal);
         code.function(&render_dom);
         code.function(&rerender);
+        code.function(&patch);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -1524,6 +1542,15 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(BUMP_BASE),
         );
+        // 9=prev vdom (eqref), 10=root handle (i32).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
+        );
+        globals.global(
+            GlobalType { val_type: ValType::I32, mutable: true, shared: false },
+            &ConstExpr::i32_const(0),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -1536,6 +1563,12 @@ impl<'a> Codegen<'a> {
             ("dom_add_event_listener", imp_i4_v),
             ("dom_mount", imp_i_v),
             ("dom_replace_root", imp_i_v),
+            ("dom_child", imp_ii_i),
+            ("dom_set_text", imp_i3_v),
+            ("dom_remove_attribute", imp_i3_v),
+            ("dom_remove_child", imp_ii_v),
+            ("dom_replace", imp_ii_v),
+            ("dom_remove_event_listener", imp_i4_v),
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -8413,18 +8446,199 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// patch(dom, old, new) : diff `old`→`new` and mutate the DOM in place,
+    /// returning the (possibly replaced) handle. `val_eq`-equal subtrees are
+    /// skipped, preserving DOM node identity. (First draft: attrs are re-applied
+    /// rather than diffed, and event listeners persist across a patch — fine for
+    /// nullary-message handlers.)
+    fn emit_patch(&self) -> Function {
+        // params dom(0):i32, old(1),new(2):eqref. locals: t(3),olen(4),nlen(5),
+        //   i(6),common(7),cdom(8):i32, attr(9),osub(10),nsub(11),key(12),val(13):eqref
+        let mut f = Function::new([(6, ValType::I32), (5, eqref())]);
+        // identical subtree → nothing to do
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // replace = tags differ, or same-VNODE with different tagName
+        ctor_tag(&mut f, 1);
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 1);
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(DOM_REPLACE));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VTEXT (both, text changed): set text
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 12);
+        f.instruction(&Instruction::Call(DOM_SET_TEXT));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VNODE same tag: reapply new attrs (AATTR/ASTYLE; events persist)
+        ctor_argn(&mut f, 2, 1);
+        f.instruction(&Instruction::LocalSet(11));
+        list_len(&mut f, 11);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 11, 6);
+        f.instruction(&Instruction::LocalSet(9));
+        ctor_arg0(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(12));
+        ctor_argn(&mut f, 9, 1);
+        f.instruction(&Instruction::LocalSet(13));
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 12);
+        self.dom_str(&mut f, 13);
+        f.instruction(&Instruction::Call(DOM_SET_ATTRIBUTE));
+        f.instruction(&Instruction::Else);
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 12);
+        self.dom_str(&mut f, 13);
+        f.instruction(&Instruction::Call(DOM_SET_STYLE));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // patch kids by position
+        ctor_argn(&mut f, 1, 2);
+        f.instruction(&Instruction::LocalSet(10)); // old kids
+        ctor_argn(&mut f, 2, 2);
+        f.instruction(&Instruction::LocalSet(11)); // new kids
+        list_len(&mut f, 10);
+        f.instruction(&Instruction::LocalSet(4)); // olen
+        list_len(&mut f, 11);
+        f.instruction(&Instruction::LocalSet(5)); // nlen
+        // common = min(olen, nlen)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::End);
+        // patch [0, common)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        list_elem(&mut f, 10, 6);
+        list_elem(&mut f, 11, 6);
+        f.instruction(&Instruction::Call(self.patch_idx));
+        f.instruction(&Instruction::Drop);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // append extra new kids [common, nlen)
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 11, 6);
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // remove extra old kids: (olen-nlen) removals at index nlen
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        f.instruction(&Instruction::Call(DOM_REMOVE_CHILD));
+        dec(&mut f, 4);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// alm_event(hid, ptr, len) : run the handler decoder, update the model,
-    /// re-render. (Payload parsing is a later milestone; onClick-style handlers
-    /// use `Decode.succeed` and ignore it.)
+    /// and diff/patch the DOM. (Payload parsing is a later milestone; onClick
+    /// handlers use `Decode.succeed` and ignore it.)
     fn emit_alm_event(&self) -> Function {
-        // params hid(0),ptr(1),len(2). locals: dec(3),r(4):eqref
-        let mut f = Function::new([(2, eqref())]);
+        // params hid(0),ptr(1),len(2). locals: dec(3),r(4),new(5):eqref
+        let mut f = Function::new([(3, eqref())]);
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(3)); // decoder
-        // r = json_run(decoder, JNULL)
+        f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
@@ -8436,12 +8650,25 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         // model = update msg model
         f.instruction(&Instruction::GlobalGet(G_UPDATE));
-        ctor_arg0(&mut f, 4); // msg
+        ctor_arg0(&mut f, 4);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
-        f.instruction(&Instruction::Call(self.rerender_idx));
+        // new = view model ; patch against prev
+        f.instruction(&Instruction::I32Const(BUMP_BASE));
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::GlobalGet(G_VIEW));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::GlobalGet(G_ROOT));
+        f.instruction(&Instruction::GlobalGet(G_PREV));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.patch_idx));
+        f.instruction(&Instruction::GlobalSet(G_ROOT));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::GlobalSet(G_PREV));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::End);
@@ -8480,11 +8707,15 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_HANDLERS));
         Self::emit_reset_render(&mut f);
-        // root = render_dom(view model); mount
+        // prev = view model ; root = render_dom(prev) ; mount ; record both
         f.instruction(&Instruction::GlobalGet(G_VIEW));
         f.instruction(&Instruction::GlobalGet(G_MODEL));
         f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::GlobalSet(G_PREV));
+        f.instruction(&Instruction::GlobalGet(G_PREV));
         f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::GlobalSet(G_ROOT));
+        f.instruction(&Instruction::GlobalGet(G_ROOT));
         f.instruction(&Instruction::Call(DOM_MOUNT));
         f.instruction(&Instruction::End);
         f
