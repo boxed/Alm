@@ -559,6 +559,12 @@ struct Codegen<'a> {
     dict_intersect_idx: u32,
     dict_diff_idx: u32,
     dict_update_idx: u32,
+    set_insert_idx: u32,
+    set_member_idx: u32,
+    set_remove_idx: u32,
+    set_from_list_idx: u32,
+    set_intersect_idx: u32,
+    set_diff_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
@@ -661,6 +667,12 @@ impl<'a> Codegen<'a> {
             dict_intersect_idx: 0,
             dict_diff_idx: 0,
             dict_update_idx: 0,
+            set_insert_idx: 0,
+            set_member_idx: 0,
+            set_remove_idx: 0,
+            set_from_list_idx: 0,
+            set_intersect_idx: 0,
+            set_diff_idx: 0,
             func_arity: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
@@ -787,6 +799,12 @@ impl<'a> Codegen<'a> {
         self.dict_intersect_idx = next();
         self.dict_diff_idx = next();
         self.dict_update_idx = next();
+        self.set_insert_idx = next();
+        self.set_member_idx = next();
+        self.set_remove_idx = next();
+        self.set_from_list_idx = next();
+        self.set_intersect_idx = next();
+        self.set_diff_idx = next();
         let main_int_idx = next();
         let render_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
@@ -909,6 +927,12 @@ impl<'a> Codegen<'a> {
         let dict_intersect = self.emit_dict_intersect();
         let dict_diff = self.emit_dict_diff();
         let dict_update = self.emit_dict_update();
+        let set_insert = self.emit_set_insert();
+        let set_member = self.emit_set_member();
+        let set_remove = self.emit_set_remove();
+        let set_from_list = self.emit_set_from_list();
+        let set_intersect = self.emit_set_intersect();
+        let set_diff = self.emit_set_diff();
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
         mi.instruction(&cast_to(T_INT));
@@ -1042,6 +1066,12 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // dict_intersect
         funcs.function(ft2); // dict_diff (toRemove, acc)
         funcs.function(ft3); // dict_update
+        funcs.function(ft2); // set_insert
+        funcs.function(ft2); // set_member
+        funcs.function(ft2); // set_remove
+        funcs.function(ft2); // set_from_list (xs, acc)
+        funcs.function(ft2); // set_intersect
+        funcs.function(ft2); // set_diff (toRemove, base)
         funcs.function(main_int_ty);
         funcs.function(render_ty);
         let lifted_types: Vec<u32> =
@@ -1138,6 +1168,12 @@ impl<'a> Codegen<'a> {
         code.function(&dict_intersect);
         code.function(&dict_diff);
         code.function(&dict_update);
+        code.function(&set_insert);
+        code.function(&set_member);
+        code.function(&set_remove);
+        code.function(&set_from_list);
+        code.function(&set_intersect);
+        code.function(&set_diff);
         code.function(&mi);
         code.function(&render);
         for (_, body) in &self.lifted {
@@ -5353,6 +5389,323 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- Set: a sorted vector of unique elements ----
+
+    /// set_insert(x, s) : splice `x` into the sorted vector (dedup).
+    fn emit_set_insert(&self) -> Function {
+        // params x(0), s(1). locals: len(2),pos(3),skip(4),i(5),di(6),rlen(7):i32,
+        //   ndata(8):ref T_ARR
+        let mut f = Function::new([(6, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        // pos = first index where s[i] >= x
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::BrIf(1));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // skip = (pos < len && s[pos] == x) ? 1 : 0
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(8));
+        // prefix
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(5));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ndata[pos] = x
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // suffix
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(6));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 5, 1);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// set_member(x, s) : Bool.
+    fn emit_set_member(&self) -> Function {
+        // params x(0), s(1). locals: len(2),i(3),c(4):i32
+        let mut f = Function::new([(3, ValType::I32)]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 1, 3);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// set_remove(x, s) : the sorted vector without `x`.
+    fn emit_set_remove(&self) -> Function {
+        // params x(0), s(1). locals: len(2),found(3),rlen(4),i(5),di(6):i32,
+        //   ndata(7):ref T_ARR
+        let mut f = Function::new([(5, ValType::I32), (1, ref_to(T_ARR))]);
+        list_len(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        list_elem(&mut f, 1, 5);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// set_from_list(xs, acc) : insert each element of `xs` into `acc`.
+    fn emit_set_from_list(&self) -> Function {
+        // params xs(0), acc(1). locals: a(2),cur(3):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1));
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.set_insert_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// set_intersect(s1, s2) : elements of `s1` also in `s2`.
+    fn emit_set_intersect(&self) -> Function {
+        // params s1(0), s2(1). locals: len(2),i(3):i32, acc(4),elem(5):eqref
+        let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 0, 3);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.set_member_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// set_diff(toRemove, base) : `base` without any element of `toRemove`.
+    fn emit_set_diff(&self) -> Function {
+        // params toRemove(0), base(1). locals: a(2),cur(3):eqref
+        let mut f = Function::new([(2, eqref())]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1));
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.set_remove_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -6313,6 +6666,95 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?; // toRemove = t2
                 self.emit_expr(&args[0], ctx, f)?; // base = t1
                 f.instruction(&Instruction::Call(self.dict_diff_idx));
+            }
+            // Set: a sorted vector of unique elements (a Set IS its own toList,
+            // so foldl/foldr/filter/partition are the ordinary List kernels).
+            ("Set", "empty") => push_empty_list(f),
+            ("Set", "singleton") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.set_insert_idx));
+            }
+            ("Set", "insert") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.set_insert_idx));
+            }
+            ("Set", "remove") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.set_remove_idx));
+            }
+            ("Set", "member") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.set_member_idx));
+            }
+            ("Set", "size") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::StructNew(T_INT));
+            }
+            ("Set", "isEmpty") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_LIST));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_LIST, field_index: 0 });
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::RefI31);
+            }
+            ("Set", "toList") => self.emit_expr(&args[0], ctx, f)?,
+            ("Set", "fromList") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.set_from_list_idx));
+            }
+            ("Set", "foldl") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_foldl_idx));
+            }
+            ("Set", "foldr") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                self.emit_expr(&args[2], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_foldr_idx));
+            }
+            ("Set", "filter") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_filter_idx));
+            }
+            ("Set", "partition") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_partition_idx));
+            }
+            ("Set", "map") => {
+                // fromList (List.map f (toList s))
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.list_map_idx));
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.set_from_list_idx));
+            }
+            ("Set", "union") => {
+                // insert all of s1 into s2
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.set_from_list_idx));
+            }
+            ("Set", "intersect") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.set_intersect_idx));
+            }
+            ("Set", "diff") => {
+                self.emit_expr(&args[1], ctx, f)?; // toRemove = s2
+                self.emit_expr(&args[0], ctx, f)?; // base = s1
+                f.instruction(&Instruction::Call(self.set_diff_idx));
             }
             ("Tuple", "first") => {
                 self.emit_expr(&args[0], ctx, f)?;

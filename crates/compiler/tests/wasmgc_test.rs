@@ -965,3 +965,37 @@ fn dict_fold_map_filter_combine() {
             String.fromInt (Dict.foldl (\\_ v acc -> v + acc) 0 a)\n        ++ \"|\" ++ dump (Dict.map (\\_ v -> v * 10) a)\n        ++ \"|\" ++ dump (Dict.filter (\\_ v -> v > 1) a)\n        ++ \"|\" ++ dump (Dict.union a b)\n        ++ \"|\" ++ dump (Dict.intersect a b)\n        ++ \"|\" ++ dump (Dict.diff a b)\n",
     );
 }
+
+#[test]
+fn set_basics() {
+    assert_str_prog(
+        "set_basics",
+        "module Test exposing (main)\n\n\
+         yn : Bool -> String\n\
+         yn b = if b then \"y\" else \"n\"\n\n\
+         dump : Set.Set Int -> String\n\
+         dump s = String.join \",\" (List.map String.fromInt (Set.toList s))\n\n\
+         s : Set.Set Int\n\
+         s = Set.fromList [ 3, 1, 2, 3, 1 ]\n\n\
+         main : String\n\
+         main =\n    \
+            dump s\n        ++ \"|\" ++ String.fromInt (Set.size s)\n        ++ \"|\" ++ yn (Set.member 2 s)\n        ++ yn (Set.member 9 s)\n        ++ \"|\" ++ dump (Set.insert 5 (Set.remove 1 s))\n        ++ \"|\" ++ String.fromInt (Set.foldl (+) 0 s)\n",
+    );
+}
+
+#[test]
+fn set_combine() {
+    assert_str_prog(
+        "set_combine",
+        "module Test exposing (main)\n\n\
+         dump : Set.Set Int -> String\n\
+         dump s = String.join \",\" (List.map String.fromInt (Set.toList s))\n\n\
+         a : Set.Set Int\n\
+         a = Set.fromList [ 1, 2, 3, 4 ]\n\n\
+         b : Set.Set Int\n\
+         b = Set.fromList [ 3, 4, 5, 6 ]\n\n\
+         main : String\n\
+         main =\n    \
+            dump (Set.union a b)\n        ++ \"|\" ++ dump (Set.intersect a b)\n        ++ \"|\" ++ dump (Set.diff a b)\n        ++ \"|\" ++ dump (Set.filter (\\x -> modBy 2 x == 0) a)\n        ++ \"|\" ++ dump (Set.map (\\x -> x * x) a)\n",
+    );
+}
