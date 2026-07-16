@@ -238,7 +238,10 @@ const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before r
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
-const N_IMPORTS: u32 = 41;
+const HOST_REGEX_COMPILE: u32 = 41; // (patPtr,patLen,flags) -> id (elm/regex)
+const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
+const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
+const N_IMPORTS: u32 = 44;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -1226,6 +1229,12 @@ struct Codegen<'a> {
     attr_map_idx: u32,
     time_adj_minutes_idx: u32,
     time_civil_idx: u32,
+    regex_read_strings_idx: u32,
+    regex_read_matches_idx: u32,
+    regex_compile_idx: u32,
+    regex_find_idx: u32,
+    regex_split_idx: u32,
+    regex_replace_idx: u32,
     parser_is_sub_char_idx: u32,
     parser_is_ascii_code_idx: u32,
     parser_chomp_base10_idx: u32,
@@ -1447,6 +1456,12 @@ impl<'a> Codegen<'a> {
             attr_map_idx: 0,
             time_adj_minutes_idx: 0,
             time_civil_idx: 0,
+            regex_read_strings_idx: 0,
+            regex_read_matches_idx: 0,
+            regex_compile_idx: 0,
+            regex_find_idx: 0,
+            regex_split_idx: 0,
+            regex_replace_idx: 0,
             parser_is_sub_char_idx: 0,
             parser_is_ascii_code_idx: 0,
             parser_chomp_base10_idx: 0,
@@ -1716,6 +1731,12 @@ impl<'a> Codegen<'a> {
         self.attr_map_idx = next();
         self.time_adj_minutes_idx = next();
         self.time_civil_idx = next();
+        self.regex_read_strings_idx = next();
+        self.regex_read_matches_idx = next();
+        self.regex_compile_idx = next();
+        self.regex_find_idx = next();
+        self.regex_split_idx = next();
+        self.regex_replace_idx = next();
         self.parser_is_sub_char_idx = next();
         self.parser_is_ascii_code_idx = next();
         self.parser_chomp_base10_idx = next();
@@ -1800,6 +1821,7 @@ impl<'a> Codegen<'a> {
         let kr_ty = self.next_type + 32; // (i32,eqref,eqref) -> () (keyed_reconcile)
         let f64_ret_ty = self.next_type + 33; // () -> f64 (host_now)
         let fi_i_ty = self.next_type + 34; // (f64,i32) -> i32 (host_ftoa)
+        let regex5_ty = self.next_type + 35; // (id,sp,sl,n,out) -> count
         self.next_type += 35;
 
         // Synthesized helper bodies.
@@ -1998,6 +2020,12 @@ impl<'a> Codegen<'a> {
         let attr_map = self.emit_attr_map();
         let time_adj_minutes = self.emit_time_adj_minutes();
         let time_civil = self.emit_time_civil();
+        let regex_read_strings = self.emit_regex_read_strings();
+        let regex_read_matches = self.emit_regex_read_matches();
+        let regex_compile = self.emit_regex_compile();
+        let regex_find = self.emit_regex_find();
+        let regex_split = self.emit_regex_split();
+        let regex_replace = self.emit_regex_replace();
         let parser_is_sub_char = self.emit_parser_is_sub_char();
         let parser_is_ascii_code = self.emit_parser_is_ascii_code();
         let parser_chomp_base10 = self.emit_parser_chomp_base10();
@@ -2104,6 +2132,10 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![]); // keyed_reconcile
         types.ty().function(vec![], vec![ValType::F64]); // f64_ret (host_now)
         types.ty().function(vec![ValType::F64, ValType::I32], vec![ValType::I32]); // fi_i (host_ftoa)
+        types.ty().function(
+            vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            vec![ValType::I32],
+        ); // regex5 (host_regex_find/split): (id,sp,sl,n,out) -> count
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -2304,6 +2336,12 @@ impl<'a> Codegen<'a> {
         funcs.function(ee_eqref_ty); // attr_map : (f, attr) -> attr
         funcs.function(ee_eqref_ty); // time_adj_minutes : (zone, posix) -> Int
         funcs.function(e_e_ty); // time_civil : minutes -> [y, m, d]
+        funcs.function(ii_eqref_ty); // regex_read_strings : (out, count) -> List String
+        funcs.function(ii_eqref_ty); // regex_read_matches : (out, count) -> List Match
+        funcs.function(ee_eqref_ty); // regex_compile : (options, string) -> Maybe Regex
+        funcs.function(ft3); // regex_find : (regex, n, subject) -> List Match
+        funcs.function(ft3); // regex_split : (regex, n, subject) -> List String
+        funcs.function(ft4); // regex_replace : (regex, n, replacer, subject) -> String
         funcs.function(ft3); // parser_is_sub_char : (pred, offset, string) -> Int
         funcs.function(ft3); // parser_is_ascii_code : (code, offset, string) -> Bool
         funcs.function(ft2); // parser_chomp_base10 : (offset, string) -> Int
@@ -2520,6 +2558,12 @@ impl<'a> Codegen<'a> {
         code.function(&attr_map);
         code.function(&time_adj_minutes);
         code.function(&time_civil);
+        code.function(&regex_read_strings);
+        code.function(&regex_read_matches);
+        code.function(&regex_compile);
+        code.function(&regex_find);
+        code.function(&regex_split);
+        code.function(&regex_replace);
         code.function(&parser_is_sub_char);
         code.function(&parser_is_ascii_code);
         code.function(&parser_chomp_base10);
@@ -2715,6 +2759,10 @@ impl<'a> Codegen<'a> {
             ("host_ftoa", fi_i_ty),
             ("host_atof", alm_event_ty), // (ptr,len,outptr) -> ok
             ("dom_insert_before", imp_i3_v), // (parent,node,ref) — index 40
+            // elm/regex — delegate to the host's RegExp (like Math.* for trig).
+            ("host_regex_compile", alm_event_ty), // (patPtr,patLen,flags) -> id (41)
+            ("host_regex_find", regex5_ty), // (id,sp,sl,n,out) -> match count (42)
+            ("host_regex_split", regex5_ty), // (id,sp,sl,n,out) -> piece count (43)
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -3470,6 +3518,19 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
             f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
+        // elm/regex: `Regex.never` is a never-matching regex (id -2, which the
+        // host treats as never-matching); `infinity` is the unbounded match
+        // limit (2^31-1 — effectively unlimited for findAtMost/split/replace).
+        if module == "Elm.Kernel.Regex" && name == "never" {
+            f.instruction(&Instruction::I64Const(-2));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            return Ok(());
+        }
+        if module == "Elm.Kernel.Regex" && name == "infinity" {
+            f.instruction(&Instruction::I64Const(2147483647));
+            f.instruction(&Instruction::Call(self.box_int_idx));
             return Ok(());
         }
         // Time.utc : the UTC zone, elm's `Zone 0 []` (single ctor, tag 0):
@@ -14717,6 +14778,446 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// regex_read_strings(out, count) -> List String. Reads the split blob the
+    /// host wrote at `out`: `count` length-prefixed UTF-8 strings ([i32 len,
+    /// bytes]…). Builds a head-first vector List.
+    fn emit_regex_read_strings(&self) -> Function {
+        // params out(0), count(1). locals cur(2),i(3):i32, arr(4):ref T_ARR, len(5):i32
+        let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(2)); // cur = out
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // len = mem[cur]; cur += 4
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Load(mem0()));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        // arr[i] = str_from_mem(cur, len)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // cur += len
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // List{count, T_BACK{0, arr}}
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// regex_read_matches(out, count) -> List Match. Reads the find blob: per
+    /// match `[i32 byteStart, i32 matchLen, matchBytes, i32 nsubs, (i32 present,
+    /// [i32 subLen, subBytes])…]`. Match record fields sort to index(0)/match(1)/
+    /// number(2)/submatches(3); number is the 1-based match ordinal.
+    fn emit_regex_read_matches(&self) -> Function {
+        // params out(0), count(1). locals cur(2),i(3):i32, arr(4):ref T_ARR,
+        //   byteStart(5),matchLen(6),nsubs(7),j(8):i32, subArr(9):ref T_ARR,
+        //   present(10),subLen(11):i32, matchStr(12):eqref
+        let mut f = Function::new([
+            (2, ValType::I32),
+            (1, ref_to(T_ARR)),
+            (4, ValType::I32),
+            (1, ref_to(T_ARR)),
+            (2, ValType::I32),
+            (1, eqref()),
+        ]);
+        let load_advance = |f: &mut Function, dst: u32| {
+            // dst = mem[cur]; cur += 4
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Load(mem0()));
+            f.instruction(&Instruction::LocalSet(dst));
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32Const(4));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalSet(2));
+        };
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        load_advance(&mut f, 5); // byteStart
+        load_advance(&mut f, 6); // matchLen
+        // matchStr = str_from_mem(cur, matchLen); cur += matchLen
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        load_advance(&mut f, 7); // nsubs
+        // subArr = new T_ARR(nsubs)
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        load_advance(&mut f, 10); // present
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        // present ? Just(str) : Nothing
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        load_advance(&mut f, 11); // subLen
+        f.instruction(&Instruction::I32Const(0)); // Just tag
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2)); // cur += subLen
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Nothing tag
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 8, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // arr[i] = Match [box byteStart, matchStr, box (i+1), submatchesList]
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        // submatchesList = List{nsubs, T_BACK{0, subArr}}
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// regex_compile(options, string) -> Maybe Regex. options is the record
+    /// {caseInsensitive(0), multiline(1)}; flags = ci | (ml<<1). Returns
+    /// `Just (box id)` (id ≥ 0) or `Nothing` (invalid pattern). Regex is the
+    /// boxed compiled-handle id.
+    fn emit_regex_compile(&self) -> Function {
+        // params options(0), string(1). locals sp(2),flags(3),id(4):i32
+        let mut f = Function::new([(3, ValType::I32)]);
+        // flags = caseInsensitive | (multiline << 1)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Shl);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalSet(3));
+        // sp = marshal(string); id = host_regex_compile(sp, string.len, flags)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.marshal_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(HOST_REGEX_COMPILE));
+        f.instruction(&Instruction::LocalSet(4));
+        // id < 0 ? Nothing : Just (box id)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0)); // Just
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// regex_find(regex, n, subject) -> List Match. Marshals the subject to
+    /// linear memory, asks the host for up to `n` matches (blob at G_BUMP), and
+    /// reads it. `regex` is a boxed Int id (< 0 = never → empty).
+    fn emit_regex_find(&self) -> Function {
+        // params regex(0), n(1), subject(2). locals id,sp,sl,out,cnt,nlim(3..8):i32
+        let mut f = Function::new([(6, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.marshal_idx));
+        f.instruction(&Instruction::LocalSet(4)); // sp
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5)); // sl
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalSet(6)); // out
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(8)); // nlim
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(HOST_REGEX_FIND));
+        f.instruction(&Instruction::LocalSet(7)); // cnt
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.regex_read_matches_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// regex_split(regex, n, subject) -> List String. As regex_find but the host
+    /// splits; never (id < 0) yields the singleton `[subject]` (elm's behaviour).
+    fn emit_regex_split(&self) -> Function {
+        let mut f = Function::new([(6, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // [subject]
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.marshal_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(HOST_REGEX_SPLIT));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.regex_read_strings_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// regex_replace(regex, n, replacer, subject) -> String. Finds matches, then
+    /// splices in wasm: between matches keep the subject slice; for each match
+    /// substitute `replacer match` (applied here, so no host callback). Byte
+    /// offsets from the find blob index the marshaled subject at `sp`.
+    fn emit_regex_replace(&self) -> Function {
+        // params regex(0),n(1),replacer(2),subject(3). locals id,sp,sl,out,cnt,
+        //   nlim,lastEnd,i,len,idx,mlen(4..14):i32, matches,result,m,mstr(15..18):eqref
+        let mut f = Function::new([(11, ValType::I32), (4, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.marshal_idx));
+        f.instruction(&Instruction::LocalSet(5)); // sp
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(6)); // sl
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalSet(7)); // out
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(9)); // nlim
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(HOST_REGEX_FIND));
+        f.instruction(&Instruction::LocalSet(8)); // cnt
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(self.regex_read_matches_idx));
+        f.instruction(&Instruction::LocalSet(15)); // matches
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::LocalSet(16)); // result = ""
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(10)); // lastEnd
+        list_len(&mut f, 15);
+        f.instruction(&Instruction::LocalSet(12)); // len
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(11)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 15, 11);
+        f.instruction(&Instruction::LocalSet(17)); // m
+        // idx = unbox(m[0]); mstr = m[1]; mlen = mstr.len
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(13)); // idx
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(18)); // mstr
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(14)); // mlen
+        // result = result ++ subj[lastEnd..idx]
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Add); // sp + lastEnd
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Sub); // idx - lastEnd
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(16));
+        // result = result ++ replacer(m)
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(16));
+        // lastEnd = idx + mlen
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(10));
+        bump(&mut f, 11, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // result ++ subj[lastEnd..sl]
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// index_byte(str, ch) : first index of byte `ch` in the T_STR, or -1.
     /// (Byte-indexed — matches the backend's byte-based String slicing, which is
     /// exact for the ASCII delimiters URLs are split on.)
@@ -19783,7 +20284,46 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::ArrayGet(T_ARR));
             }
-            // elm/parser low-level kernels (byte-offset ports; see the emit_*).
+            // elm/regex — delegate to the host RegExp (see emit_regex_*).
+            ("Elm.Kernel.Regex", "fromStringWith") => {
+                self.emit_expr(&args[0], ctx, f)?; // options
+                self.emit_expr(&args[1], ctx, f)?; // pattern string
+                f.instruction(&Instruction::Call(self.regex_compile_idx));
+            }
+            ("Elm.Kernel.Regex", "contains") => {
+                // find(re, 1, string) non-empty.
+                self.emit_expr(&args[0], ctx, f)?; // re
+                f.instruction(&Instruction::I64Const(1));
+                f.instruction(&Instruction::Call(self.box_int_idx));
+                self.emit_expr(&args[1], ctx, f)?; // string
+                f.instruction(&Instruction::Call(self.regex_find_idx));
+                let s = ctx.scratch_eqref;
+                f.instruction(&Instruction::LocalSet(s));
+                list_is_empty(f, s);
+                f.instruction(&Instruction::I32Eqz); // non-empty → True
+                f.instruction(&Instruction::RefI31);
+            }
+            // Kernel arg order is `n re [replacer] string`; the helpers want
+            // `re n [replacer] subject`, so re-emit re before n.
+            ("Elm.Kernel.Regex", "findAtMost") => {
+                self.emit_expr(&args[1], ctx, f)?; // re
+                self.emit_expr(&args[0], ctx, f)?; // n
+                self.emit_expr(&args[2], ctx, f)?; // string
+                f.instruction(&Instruction::Call(self.regex_find_idx));
+            }
+            ("Elm.Kernel.Regex", "splitAtMost") => {
+                self.emit_expr(&args[1], ctx, f)?; // re
+                self.emit_expr(&args[0], ctx, f)?; // n
+                self.emit_expr(&args[2], ctx, f)?; // string
+                f.instruction(&Instruction::Call(self.regex_split_idx));
+            }
+            ("Elm.Kernel.Regex", "replaceAtMost") => {
+                self.emit_expr(&args[1], ctx, f)?; // re
+                self.emit_expr(&args[0], ctx, f)?; // n
+                self.emit_expr(&args[2], ctx, f)?; // replacer
+                self.emit_expr(&args[3], ctx, f)?; // string
+                f.instruction(&Instruction::Call(self.regex_replace_idx));
+            }
             ("Elm.Kernel.Parser", "isSubChar") => {
                 for a in args {
                     self.emit_expr(a, ctx, f)?;

@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const { makeClock } = require('./clock.cjs');
+const { regexHost } = require('./regex_host.cjs');
 
 function start(wasmPath, doc, clock) {
   clock = clock || makeClock();
@@ -124,6 +125,8 @@ function start(wasmPath, doc, clock) {
       const n = +s; if (n !== n) return 0;
       new DataView(memory.buffer).setFloat64(o, n, true); return 1;
     },
+    // elm/regex host — delegate to JS RegExp (see REGEX_HOST below).
+    ...regexHost(() => memory),
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });
