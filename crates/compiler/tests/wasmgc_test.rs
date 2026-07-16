@@ -1600,6 +1600,25 @@ fn keyed_handler_table_grows() {
     );
 }
 
+// KNOWN HOLE (blocks js-framework-benchmark create-10k): self-tail-recursive
+// functions are emitted as ordinary `call`s, so deep recursion (here 200000,
+// and the benchmark's 10000-row builder) overflows the wasm stack with
+// `Maximum call stack size exceeded`. The JS/native backends turn self
+// tail-calls into loops. Remove the #[ignore] once the WasmGC backend emits
+// `return_call` (or a loop) for self-tail-calls. Compared JS↔WasmGC only.
+#[test]
+#[ignore = "wasm-gc: no tail-call optimization — deep self-recursion overflows the stack"]
+fn deep_tail_recursion() {
+    assert_str_prog_js_wasm(
+        "deep_tail_recursion",
+        "module Test exposing (main)\n\n\
+         count : Int -> Int -> Int\n\
+         count n acc =\n    if n <= 0 then acc else count (n - 1) (acc + 1)\n\n\
+         main : String\n\
+         main = String.fromInt (count 200000 0)\n",
+    );
+}
+
 #[test]
 fn sandbox_static_render() {
     assert_sandbox_html(
