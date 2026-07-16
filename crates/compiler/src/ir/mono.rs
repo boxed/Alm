@@ -250,13 +250,21 @@ fn default_numbers(tipe: &can::Type) -> can::Type {
     }
 }
 
-/// Type-nesting depth beyond which the monomorphizer gives up. Polymorphic
-/// recursion — a recursive call at a strictly deeper type, legal in Elm via an
-/// annotation — instantiates unboundedly many types and fundamentally cannot be
-/// monomorphized. Past this depth we report a clean error instead of hanging.
+/// Type-nesting depth beyond which the monomorphizer gives up — a runaway
+/// heuristic, NOT a hard "can't compile deep types" wall. Genuine polymorphic
+/// recursion (a recursive call at a strictly deeper type, legal in Elm via an
+/// annotation) instantiates unboundedly many types and truly cannot be
+/// monomorphized; past this depth we report a clean error instead of hanging.
+/// But merely DEEP-yet-FINITE types are fine and must compile: a big record
+/// decoded with a `succeed Ctor |> required f1 |> … |> required fN` pipeline
+/// builds a `Decoder (a1 -> … -> aN -> Record)` whose nesting depth ≈ N, so the
+/// old limit of 20 spuriously rejected records with ~20+ fields (e.g. json-schema
+/// via Json.Decode.Pipeline). This bound is generous enough for realistic finite
+/// types while still catching true runaway (which generates one instance per
+/// depth level, so it errors after ~LIMIT instances — bounded, no hang).
 /// (Layout-stationary cases like robinheghan/elm-deque never reach here: they
 /// are implemented natively — see `is_native_shunted_module` in `project.rs`.)
-const POLY_REC_DEPTH_LIMIT: usize = 20;
+const POLY_REC_DEPTH_LIMIT: usize = 200;
 
 fn poly_rec_error(module: &Name, name: &Name) -> String {
     format!(
