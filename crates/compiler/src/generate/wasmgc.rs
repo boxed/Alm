@@ -237,13 +237,14 @@ const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_t
 const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM property true
 const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before ref (ref=0 → append)
 const DOM_BUILD: u32 = 44; // (streamPtr) -> rootHandle — build a whole subtree from a bytecode stream
+const DOM_CLEAR: u32 = 45; // (parent) — remove & reclaim all children in one host call
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
 const HOST_REGEX_COMPILE: u32 = 41; // (patPtr,patLen,flags) -> id (elm/regex)
 const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
 const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
-const N_IMPORTS: u32 = 45;
+const N_IMPORTS: u32 = 46;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -3076,6 +3077,7 @@ impl<'a> Codegen<'a> {
             ("host_regex_find", regex5_ty), // (id,sp,sl,n,out) -> match count (42)
             ("host_regex_split", regex5_ty), // (id,sp,sl,n,out) -> piece count (43)
             ("dom_build", i_i_ty), // (streamPtr) -> rootHandle — batched subtree build (44)
+            ("dom_clear", imp_i_v), // (parent) — remove+reclaim all children (45)
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -17868,6 +17870,17 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 2);
         f.instruction(&Instruction::LocalSet(4));
+
+        // CLEAR fast path — the new keyed list is empty: remove and reclaim every
+        // child in a single host call, skipping the per-child handle capture,
+        // treap build, and LIS the general path would otherwise do.
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(DOM_CLEAR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
 
         // FAST PATH — the key list is unchanged (same length, same keys in the
         // same order): no node moved, was added, or was removed, so just patch

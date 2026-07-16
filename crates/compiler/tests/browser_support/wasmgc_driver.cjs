@@ -26,13 +26,32 @@ function start(wasmPath, doc, clock) {
   // (called from wasm mid-render), so calling back into wasm there corrupts the
   // render; flushFree drains the queue after the entry returns.
   const pendingFree = [];
-  function freeNode(node) {
+  // Reclaim a removed subtree. A node built by dom_build carries the contiguous
+  // hid range [__hidLo,__hidHi) of every handler in its subtree, so we free them
+  // without walking. We then release handle-table slots: only the root and any
+  // descendants actually reached by dom_child (marked __reg) hold slots, so the
+  // walk is skipped entirely for untouched subtrees (e.g. a cleared lazy row).
+  function releaseHandles(node) {
+    if (node.__h != null) { nodes[node.__h] = null; node.__h = null; }
+    if (node.__reg) { const k = node.childNodes; if (k) for (let i = 0; i < k.length; i++) releaseHandles(k[i]); }
+  }
+  function freeNodeWalk(node) {
     if (!node) return;
     const hids = node.__almhids;
-    if (hids) { for (let i = 0; i < hids.length; i++) pendingFree.push(hids[i]); }
-    const kids = node.childNodes;
-    if (kids) for (let i = 0; i < kids.length; i++) freeNode(kids[i]);
+    if (hids) for (let i = 0; i < hids.length; i++) pendingFree.push(hids[i]);
+    const k = node.childNodes;
+    if (k) for (let i = 0; i < k.length; i++) freeNodeWalk(k[i]);
     if (node.__h != null) { nodes[node.__h] = null; node.__h = null; }
+  }
+  function freeNode(node) {
+    if (!node) return;
+    if (node.__hidLo != null) {
+      for (let h = node.__hidLo; h < node.__hidHi; h++) pendingFree.push(h);
+      node.__hidLo = null;
+      releaseHandles(node);
+    } else {
+      freeNodeWalk(node); // node not built via dom_build — fall back to walking
+    }
   }
   function flushFree() {
     if (pendingFree.length === 0) return;
@@ -72,6 +91,7 @@ function start(wasmPath, doc, clock) {
     const rs = () => { const n = u32(); const s = dec.decode(buf.subarray(p, p + n)); p += n; return s; };
     const stack = [];
     let root = null;
+    let hidLo = -1, hidHi = -1; // handler ids in this subtree are contiguous
     const put = (nd) => { if (stack.length) stack[stack.length - 1].appendChild(nd); else root = nd; };
     for (;;) {
       const op = buf[p++];
@@ -82,8 +102,16 @@ function start(wasmPath, doc, clock) {
       else if (op === 4) { const k = rs(), v = rs(); stack[stack.length - 1].setAttribute(k, v); }
       else if (op === 5) { const k = rs(), v = rs(); stack[stack.length - 1].style[k] = v; }
       else if (op === 6) { const nm = rs(); stack[stack.length - 1][nm] = true; }
-      else if (op === 7) { const nm = rs(); attachListener(stack[stack.length - 1], nm, u32()); }
+      else if (op === 7) {
+        const nm = rs(); const hid = u32();
+        attachListener(stack[stack.length - 1], nm, hid);
+        if (hidLo < 0) hidLo = hid;
+        hidHi = hid + 1;
+      }
     }
+    // Record the subtree's handler range on its root so removal can reclaim it
+    // without walking (see freeNode).
+    if (hidLo >= 0) { root.__hidLo = hidLo; root.__hidHi = hidHi; }
     return reg(root);
   }
   const outgoing = {}; // port name -> list of JSON strings (matches js_driver)
@@ -99,6 +127,7 @@ function start(wasmPath, doc, clock) {
     dom_insert_before: (p, n, ref) => { nodes[p].insertBefore(nodes[n], nodes[ref]); },
     dom_add_event_listener: (n, np, nl, hid) => attachListener(nodes[n], str(np, nl), hid),
     dom_build: (ptr) => domBuild(ptr),
+    dom_clear: (p) => { const par = nodes[p]; let c; while ((c = par.firstChild)) { par.removeChild(c); freeNode(c); } },
     dom_mount: (r) => { mountedRoot = nodes[r]; doc.body.appendChild(mountedRoot); },
     dom_replace_root: (r) => {
       const parent = mountedRoot ? mountedRoot.parentNode : doc.body;
@@ -106,7 +135,7 @@ function start(wasmPath, doc, clock) {
       else doc.body.appendChild(nodes[r]);
       mountedRoot = nodes[r];
     },
-    dom_child: (p, i) => { const c = nodes[p].childNodes[i]; return c.__h != null ? c.__h : reg(c); },
+    dom_child: (p, i) => { const par = nodes[p]; par.__reg = true; const c = par.childNodes[i]; return c.__h != null ? c.__h : reg(c); },
     dom_set_text: (n, s, sl) => { nodes[n].textContent = str(s, sl); },
     dom_remove_attribute: (n, k, kl) => { nodes[n].removeAttribute(str(k, kl)); },
     dom_remove_child: (p, c) => { const ch = nodes[c]; nodes[p].removeChild(ch); freeNode(ch); },
