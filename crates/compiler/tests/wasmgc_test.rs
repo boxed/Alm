@@ -589,6 +589,55 @@ fn string_from_int_zero() {
     );
 }
 
+// Function composition (>> and <<) as first-class values, applied.
+#[test]
+fn compose_operators() {
+    assert_str_prog_js_wasm(
+        "compose_ops",
+        "module Test exposing (main)\n\n\
+         inc : Int -> Int\n\
+         inc n = n + 1\n\n\
+         main : String\n\
+         main =\n    (inc >> String.fromInt) 5 ++ \":\" ++ (String.fromInt << inc) 5\n",
+    );
+}
+
+// Composition passed to a higher-order function (List.map).
+#[test]
+fn compose_in_map() {
+    assert_str_prog_js_wasm(
+        "compose_map",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    String.join \",\" (List.map (String.fromInt << (\\n -> n * 2)) [ 1, 2, 3 ])\n",
+    );
+}
+
+// String literals as case patterns.
+#[test]
+fn string_case_patterns() {
+    assert_str_prog_js_wasm(
+        "string_case",
+        "module Test exposing (main)\n\n\
+         classify : String -> String\n\
+         classify s =\n    case s of\n        \"red\" -> \"stop\"\n        \"green\" -> \"go\"\n        _ -> \"?\"\n\n\
+         main : String\n\
+         main =\n    classify \"red\" ++ classify \"green\" ++ classify \"blue\"\n",
+    );
+}
+
+// Operators used first-class then partially applied: (|>), (==), and a partially
+// applied 2-arg kernel (modBy) passed to List.map.
+#[test]
+fn operators_first_class() {
+    assert_str_prog_js_wasm(
+        "ops_first_class",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    let\n        apply = (|>)\n        eq3 = (==) 3\n    in\n    String.join \",\" (List.map String.fromInt (List.map (modBy 3) [ 4, 5, 6, 7 ]))\n        ++ \":\"\n        ++ (if apply 3 eq3 then \"y\" else \"n\")\n",
+    );
+}
+
 #[test]
 fn string_recursive_build() {
     assert_str_prog(

@@ -333,6 +333,17 @@ fn cast_to(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNonNull(HeapType::Concrete(idx))
 }
 
+/// Number of leading `->` arrows in a type — the arity of a function value.
+fn lambda_arity(t: &can::Type) -> usize {
+    let mut n = 0;
+    let mut cur = t;
+    while let can::Type::Lambda(_, b) = cur {
+        n += 1;
+        cur = b;
+    }
+    n
+}
+
 /// Nullable downcast (e.g. an eqref that may be a T_TNODE or null).
 fn cast_null(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNullable(HeapType::Concrete(idx))
@@ -12446,6 +12457,31 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::GlobalGet(G_BUMP));
         f.instruction(&Instruction::LocalSet(4));
+        // Grow linear memory if [ptr, ptr+len) would exceed the current size.
+        // The DOM-string bump allocator resets each render, but a single large
+        // render (e.g. create-10k) can exceed the initial 16 pages.
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add); // needed end (bytes)
+        f.instruction(&Instruction::MemorySize(0));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Shl); // current capacity (bytes)
+        f.instruction(&Instruction::I32GtU); // needed > capacity?
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::MemorySize(0));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Shl);
+        f.instruction(&Instruction::I32Sub); // needed - capacity (> 0)
+        f.instruction(&Instruction::I32Const(65535));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32ShrU); // round up to pages
+        f.instruction(&Instruction::MemoryGrow(0));
+        f.instruction(&Instruction::Drop); // ignore returned old size / -1
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::Block(BlockType::Empty));
@@ -15760,6 +15796,40 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(r, ctx, f)?;
                 f.instruction(&Instruction::Call(self.apply1_idx));
             }
+            // Function composition as a first-class value: synthesize a closure
+            //   f >> g  ==  \$cx -> g (f $cx)   (inner = f = l, outer = g = r)
+            //   f << g  ==  \$cx -> f (g $cx)   (inner = g = r, outer = f = l)
+            ">>" | "<<" => {
+                let (inner, outer) = if op == ">>" { (l, r) } else { (r, l) };
+                let (dom, inner_cod) = match &inner.tipe {
+                    can::Type::Lambda(a, b) => ((**a).clone(), (**b).clone()),
+                    _ => return Err(format!("wasmgc: `{op}` operand is not a function")),
+                };
+                let outer_cod = match &outer.tipe {
+                    can::Type::Lambda(_, b) => (**b).clone(),
+                    _ => return Err(format!("wasmgc: `{op}` operand is not a function")),
+                };
+                let x = TypedExpr {
+                    tipe: dom.clone(),
+                    kind: TypedKind::Local("$cx".into()),
+                    region: Region::ZERO,
+                };
+                let inner_call = TypedExpr {
+                    tipe: inner_cod,
+                    kind: TypedKind::Call(Box::new(inner.clone()), vec![x]),
+                    region: Region::ZERO,
+                };
+                let body = TypedExpr {
+                    tipe: outer_cod,
+                    kind: TypedKind::Call(Box::new(outer.clone()), vec![inner_call]),
+                    region: Region::ZERO,
+                };
+                let pat = crate::reporting::annotation::Located {
+                    region: Region::ZERO,
+                    value: can::Pattern_::Var("$cx".into()),
+                };
+                self.lift(&[(pat, dom)], &body, ctx, f)?;
+            }
             other => return Err(format!("wasmgc: unsupported binop `{other}`")),
         }
         Ok(())
@@ -15918,6 +15988,18 @@ impl<'a> Codegen<'a> {
             return self.emit_ctor(ctor.index, args, ctx, f);
         }
         if let TypedKind::Foreign(module, name) = &func.kind {
+            // A kernel applied to fewer args than its arity is a partial
+            // application: `emit_kernel` assumes saturation and would index a
+            // missing arg. Build the kernel's closure value and apply via apply1.
+            let arity = lambda_arity(&func.tipe);
+            if arity > 0 && args.len() < arity {
+                self.emit_foreign_value(module.as_str(), name.as_str(), &func.tipe, f)?;
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                    f.instruction(&Instruction::Call(self.apply1_idx));
+                }
+                return Ok(());
+            }
             return self.emit_kernel(module.as_str(), name.as_str(), args, ctx, f);
         }
         // The callee is an expression that evaluates to a closure (e.g. a
@@ -17143,6 +17225,29 @@ impl<'a> Codegen<'a> {
                 };
                 self.emit_binop(op, &args[0], &args[1], ctx, f)?;
             }
+            // Operators reachable as saturated kernels (e.g. via `(|>)` used
+            // first-class then applied): delegate to the binop lowering.
+            ("Basics", "apR") => self.emit_binop("|>", &args[0], &args[1], ctx, f)?,
+            ("Basics", "apL") => self.emit_binop("<|", &args[0], &args[1], ctx, f)?,
+            ("Basics", "composeR") => self.emit_binop(">>", &args[0], &args[1], ctx, f)?,
+            ("Basics", "composeL") => self.emit_binop("<<", &args[0], &args[1], ctx, f)?,
+            ("Basics", "eq") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.val_eq_idx));
+            }
+            ("Basics", "neq") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.val_eq_idx));
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                f.instruction(&Instruction::I31GetS);
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::RefI31);
+            }
             ("Basics", "modBy") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
@@ -18002,6 +18107,21 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I31GetS);
                 f.instruction(&Instruction::I32Const(*c as i32));
                 f.instruction(&Instruction::I32Eq);
+            }
+            Str(lit) => {
+                // scrutinee == literal, via structural equality; val_eq returns
+                // an i31 Bool, unwrapped here to the i32 the test chain expects.
+                let (off, len) = self.intern_str(lit);
+                f.instruction(&Instruction::LocalGet(s));
+                f.instruction(&Instruction::I32Const(off as i32));
+                f.instruction(&Instruction::I32Const(len as i32));
+                f.instruction(&Instruction::ArrayNewData { array_type_index: T_STR, array_data_index: 0 });
+                f.instruction(&Instruction::Call(self.val_eq_idx));
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                f.instruction(&Instruction::I31GetS);
             }
             Ctor(_, _, ctor, args) if ctor.name.as_str() == "True" => {
                 self.load_i31(s, f);
