@@ -234,7 +234,10 @@ const MATH_ATAN2: u32 = 33;
 const MATH_POW: u32 = 34;
 const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_task_resume
 const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM property true
-const N_IMPORTS: u32 = 37;
+const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
+const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
+const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
+const N_IMPORTS: u32 = 40;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -977,6 +980,8 @@ struct Codegen<'a> {
     class_list_idx: u32,
     attr_property_idx: u32,
     str_indexes_idx: u32,
+    str_from_float_idx: u32,
+    str_to_float_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
     list_map4_idx: u32,
@@ -1178,6 +1183,8 @@ impl<'a> Codegen<'a> {
             class_list_idx: 0,
             attr_property_idx: 0,
             str_indexes_idx: 0,
+            str_from_float_idx: 0,
+            str_to_float_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
             list_map4_idx: 0,
@@ -1404,6 +1411,8 @@ impl<'a> Codegen<'a> {
         self.class_list_idx = next();
         self.attr_property_idx = next();
         self.str_indexes_idx = next();
+        self.str_from_float_idx = next();
+        self.str_to_float_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
         self.list_map4_idx = next();
@@ -1582,7 +1591,9 @@ impl<'a> Codegen<'a> {
         let f64_f64_ty = self.next_type + 30; // (f64) -> f64 (Math unary)
         let f64f64_f64_ty = self.next_type + 31; // (f64,f64) -> f64 (Math atan2/pow)
         let kr_ty = self.next_type + 32; // (i32,eqref,eqref) -> () (keyed_reconcile)
-        self.next_type += 33;
+        let f64_ret_ty = self.next_type + 33; // () -> f64 (host_now)
+        let fi_i_ty = self.next_type + 34; // (f64,i32) -> i32 (host_ftoa)
+        self.next_type += 35;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -1664,6 +1675,8 @@ impl<'a> Codegen<'a> {
         let class_list = self.emit_class_list();
         let attr_property = self.emit_attr_property();
         let str_indexes = self.emit_str_indexes();
+        let str_from_float = self.emit_str_from_float();
+        let str_to_float = self.emit_str_to_float();
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
         let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
@@ -1865,6 +1878,8 @@ impl<'a> Codegen<'a> {
         types.ty().function(vec![ValType::F64], vec![ValType::F64]); // f64_f64 (Math unary)
         types.ty().function(vec![ValType::F64, ValType::F64], vec![ValType::F64]); // f64f64_f64
         types.ty().function(vec![ValType::I32, eqref(), eqref()], vec![]); // keyed_reconcile
+        types.ty().function(vec![], vec![ValType::F64]); // f64_ret (host_now)
+        types.ty().function(vec![ValType::F64, ValType::I32], vec![ValType::I32]); // fi_i (host_ftoa)
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -1950,6 +1965,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // class_list
         funcs.function(ft2); // attr_property
         funcs.function(ft2); // str_indexes
+        funcs.function(ft1); // str_from_float
+        funcs.function(ft1); // str_to_float
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
         funcs.function(ft5); // list_map4
@@ -2147,6 +2164,8 @@ impl<'a> Codegen<'a> {
         code.function(&class_list);
         code.function(&attr_property);
         code.function(&str_indexes);
+        code.function(&str_from_float);
+        code.function(&str_to_float);
         code.function(&list_intersperse);
         code.function(&list_map3);
         code.function(&list_map4);
@@ -2429,6 +2448,9 @@ impl<'a> Codegen<'a> {
             ("math_pow", f64f64_f64_ty),
             ("host_set_timeout", fi_v_ty),
             ("dom_set_property", imp_i3_v),
+            ("host_now", f64_ret_ty),
+            ("host_ftoa", fi_i_ty),
+            ("host_atof", alm_event_ty), // (ptr,len,outptr) -> ok
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -3125,6 +3147,13 @@ impl<'a> Codegen<'a> {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
             f.instruction(&Instruction::F64Const(v.into()));
             f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
+        }
+        // Time.now : a nullary Task (ctor tag 10 = Now leaf).
+        if module == "Time" && name == "now" {
+            f.instruction(&Instruction::I32Const(10));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
         // Random.independentSeed : a nullary Generator (ctor tag 14).
@@ -4870,6 +4899,22 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // Now (10): synchronous — Ok(Posix (trunc host_now())).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(0)); // Posix ctor tag 0
+        f.instruction(&Instruction::Call(HOST_NOW));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Posix
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Ok
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         // Sequence (8): run each; first Err short-circuits; else Ok(list of values)
         ctor_arg0(&mut f, 0);
         f.instruction(&Instruction::LocalSet(7)); // lst
@@ -5385,6 +5430,49 @@ impl<'a> Codegen<'a> {
         // reverse (we prepended) → ascending
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::Call(self.list_reverse_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_from_float(x) : String.fromFloat — the host renders `String(x)` into
+    /// memory (matches elm's `n + ''`), then we lift it back to a T_STR.
+    fn emit_str_from_float(&self) -> Function {
+        // param x(0):eqref (boxed Float). local len(1):i32
+        let mut f = Function::new([(1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::I32Const(0)); // outptr
+        f.instruction(&Instruction::Call(HOST_FTOA));
+        f.instruction(&Instruction::LocalSet(1)); // len
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_to_float(s) : String.toFloat — the host parses (elm semantics) and,
+    /// on success, writes the f64 to memory; we read it back as `Just`, else
+    /// `Nothing`.
+    fn emit_str_to_float(&self) -> Function {
+        // param s(0):eqref. writes/reads the f64 at memory offset 0.
+        let mut f = Function::new([]);
+        self.dom_str(&mut f, 0); // [ptr, len]
+        f.instruction(&Instruction::I32Const(0)); // outptr
+        f.instruction(&Instruction::Call(HOST_ATOF));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0)); // Just
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::F64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1)); // Nothing
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -14694,13 +14782,6 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_FRAMES));
         Self::emit_reset_render(&mut f);
-        // run initial cmd (element / document, i.e. G_KIND != 0)
-        f.instruction(&Instruction::GlobalGet(G_KIND));
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::Call(self.run_cmd_idx));
-        f.instruction(&Instruction::End);
-        Self::emit_reset_render(&mut f);
         // prev = document/application ? doc_vnode() : view model
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::I32Const(2));
@@ -14721,6 +14802,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(DOM_MOUNT));
         // register initial timer subscriptions
         f.instruction(&Instruction::Call(self.reconcile_subs_idx));
+        // Run the initial Cmd AFTER the first render/mount (element/document,
+        // G_KIND != 0) so a synchronous dispatch it triggers (e.g. Task.perform
+        // of a sync task like Time.now) patches against a mounted G_PREV/G_ROOT.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.run_cmd_idx));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
     }
@@ -16939,6 +17028,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?; // sub
                 self.emit_expr(&args[1], ctx, f)?; // s
                 f.instruction(&Instruction::Call(self.str_indexes_idx));
+            }
+            ("String", "fromFloat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_float_idx));
+            }
+            ("String", "toFloat") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_to_float_idx));
             }
             ("String", "pad") => {
                 self.emit_expr(&args[0], ctx, f)?;

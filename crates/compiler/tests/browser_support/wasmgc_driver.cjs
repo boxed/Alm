@@ -114,6 +114,15 @@ function start(wasmPath, doc, clock) {
     math_sin: Math.sin, math_cos: Math.cos, math_tan: Math.tan,
     math_asin: Math.asin, math_acos: Math.acos, math_atan: Math.atan,
     math_log: Math.log, math_atan2: Math.atan2, math_pow: Math.pow,
+    // Time.now (virtual clock) + String.fromFloat/toFloat.
+    host_now: () => clock.now(),
+    host_ftoa: (x, o) => { const b = Buffer.from(String(x)); new Uint8Array(memory.buffer, o, b.length).set(b); return b.length; },
+    host_atof: (p, l, o) => {
+      const s = Buffer.from(new Uint8Array(memory.buffer, p, l)).toString();
+      if (s.length === 0 || /[\sxbo]/.test(s)) return 0;
+      const n = +s; if (n !== n) return 0;
+      new DataView(memory.buffer).setFloat64(o, n, true); return 1;
+    },
   };
 
   instance = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(wasmPath)), { env });

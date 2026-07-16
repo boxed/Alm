@@ -8,22 +8,35 @@ use std::process::Command;
 
 use alm_compiler::{generate, project};
 
-const RUNNER: &str = r#"
+// Shared host env: Math.* plus the memory-backed host_ftoa/host_atof/host_now
+// (String.fromFloat/toFloat, Time.now). `mem` is a holder bound after instantiation
+// but only read when the imports are actually called (during render/main_int).
+const HOST_ENV: &str = r#"
+let mem;
+const HM={math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow,host_now:()=>0,
+  host_ftoa:(x,o)=>{const b=Buffer.from(String(x));new Uint8Array(mem.buffer,o,b.length).set(b);return b.length;},
+  host_atof:(p,l,o)=>{const s=Buffer.from(new Uint8Array(mem.buffer,p,l)).toString();if(s.length===0||/[\sxbo]/.test(s))return 0;const n=+s;if(n!==n)return 0;new DataView(mem.buffer).setFloat64(o,n,true);return 1;}};
+const HOST_IMPORTS={env:new Proxy(HM,{get:(t,k)=>t[k]||(()=>0)})};
+"#;
+
+const RUNNER_TAIL: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({M:{math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow}},{get:(t,k)=>t.M[k]||(()=>0)})});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), HOST_IMPORTS);
+mem = instance.exports.memory;
 console.log(instance.exports.main_int().toString());
 "#;
 
 // Runs `render()` (for `main : String`), reading the UTF-8 bytes back out of
 // the module's linear memory.
-const STR_RUNNER: &str = r#"
+const STR_RUNNER_TAIL: &str = r#"
 const fs = require('fs');
 const bytes = fs.readFileSync(process.argv[2]);
-const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy({M:{math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow}},{get:(t,k)=>t.M[k]||(()=>0)})});
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), HOST_IMPORTS);
+mem = instance.exports.memory;
 const len = instance.exports.render();
-const mem = new Uint8Array(instance.exports.memory.buffer, 0, len);
-process.stdout.write(Buffer.from(mem).toString('utf8'));
+const out = new Uint8Array(instance.exports.memory.buffer, 0, len);
+process.stdout.write(Buffer.from(out).toString('utf8'));
 "#;
 
 /// Compile a whole module whose `main : String` and assert all backends agree.
@@ -61,7 +74,7 @@ fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let runner = dir.join("run_str.cjs");
-    std::fs::write(&runner, STR_RUNNER).expect("write runner");
+    std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).expect("write runner");
     let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
 
     if check_native {
@@ -150,7 +163,7 @@ fn assert_int_prog(test_name: &str, source: &str) {
         )
     });
     let runner = dir.join("run.cjs");
-    std::fs::write(&runner, RUNNER).expect("write runner");
+    std::fs::write(&runner, format!("{HOST_ENV}{RUNNER_TAIL}")).expect("write runner");
     let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
 
     if let Some(nat) = native_out(&entry, &dir) {
@@ -365,6 +378,29 @@ fn string_replace() {
          \x20   String.replace \"o\" \"0\" \"foo boo\"\n\
          \x20       ++ \"|\"\n\
          \x20       ++ String.replace \", \" \";\" \"a, b, c\"\n",
+    );
+}
+
+#[test]
+fn string_from_to_float() {
+    // js<->wasm (both format via the host's String(x) / +s); native uses Rust
+    // float formatting which can differ.
+    assert_str_prog_js_wasm(
+        "string_from_to_float",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   [ String.fromFloat 3.14\n\
+         \x20   , String.fromFloat 100.0\n\
+         \x20   , String.fromFloat -0.5\n\
+         \x20   , case String.toFloat \"2.5\" of\n\
+         \x20       Just x -> String.fromFloat (x * 2.0)\n\
+         \x20       Nothing -> \"no\"\n\
+         \x20   , case String.toFloat \"abc\" of\n\
+         \x20       Just _ -> \"y\"\n\
+         \x20       Nothing -> \"no\"\n\
+         \x20   ]\n\
+         \x20       |> String.join \"|\"\n",
     );
 }
 
@@ -2320,6 +2356,56 @@ fn element_time_every() {
 }
 
 #[test]
+fn task_time_now() {
+    // Time.now is a synchronous Task leaf (host clock). init performs it; the
+    // model shows the clock time (0 at start), rendered identically on wasm.
+    let dir = common::test_dir("alm-wasmgc", "time_now");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Task\n\
+         import Time\n\n\
+         type Msg = Got Time.Posix\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ = ( -1, Task.perform Got Time.now )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Got t) _ = ( Time.posixToMillis t, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n = div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main =\n\
+         \x20   Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m_now.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const wg=require(S+'/wasmgc_driver.cjs');\
+             const doc=new Document();wg.start({w:?},doc);\
+             process.stdout.write(serializeBody(doc));",
+            sup = support, w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    assert_eq!(out, "<div>0</div>", "Time.now should resolve to the clock time (0)");
+}
+
+#[test]
 fn task_sleep_async() {
     // init performs `Process.sleep 1000 |> andThen (\_ -> succeed 42)`. Before
     // the clock advances both show 0; after advancing past 1000ms the suspended
@@ -2729,7 +2815,7 @@ fn bench_wasmgc_vs_js() {
             let wasm = dir.join("a.wasm");
             project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|_| panic!("wasm build failed: {name}"));
             let runner = dir.join("r.cjs");
-            std::fs::write(&runner, STR_RUNNER).unwrap();
+            std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).unwrap();
             let best = |mk: &dyn Fn() -> Command| {
                 let mut b = f64::MAX;
                 for _ in 0..5 {
