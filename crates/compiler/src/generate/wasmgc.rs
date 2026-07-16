@@ -1086,6 +1086,8 @@ struct Codegen<'a> {
     str_upper_idx: u32,
     str_lower_idx: u32,
     str_trim_idx: u32,
+    str_trim_left_idx: u32,
+    str_trim_right_idx: u32,
     str_left_idx: u32,
     str_right_idx: u32,
     str_dropleft_idx: u32,
@@ -1296,6 +1298,8 @@ impl<'a> Codegen<'a> {
             str_upper_idx: 0,
             str_lower_idx: 0,
             str_trim_idx: 0,
+            str_trim_left_idx: 0,
+            str_trim_right_idx: 0,
             str_left_idx: 0,
             str_right_idx: 0,
             str_dropleft_idx: 0,
@@ -1528,6 +1532,8 @@ impl<'a> Codegen<'a> {
         self.str_upper_idx = next();
         self.str_lower_idx = next();
         self.str_trim_idx = next();
+        self.str_trim_left_idx = next();
+        self.str_trim_right_idx = next();
         self.str_left_idx = next();
         self.str_right_idx = next();
         self.str_dropleft_idx = next();
@@ -1797,7 +1803,9 @@ impl<'a> Codegen<'a> {
         let list_map2 = self.emit_list_map2();
         let str_upper = self.emit_str_case(true);
         let str_lower = self.emit_str_case(false);
-        let str_trim = self.emit_str_trim();
+        let str_trim = self.emit_str_trim(true, true);
+        let str_trim_left = self.emit_str_trim(true, false);
+        let str_trim_right = self.emit_str_trim(false, true);
         let str_left = self.emit_str_range(false, false);
         let str_right = self.emit_str_range(true, false);
         let str_dropleft = self.emit_str_range(true, true);
@@ -2094,6 +2102,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // str_upper
         funcs.function(ft1); // str_lower
         funcs.function(ft1); // str_trim
+        funcs.function(ft1); // str_trim_left
+        funcs.function(ft1); // str_trim_right
         funcs.function(ft2); // str_left
         funcs.function(ft2); // str_right
         funcs.function(ft2); // str_dropleft
@@ -2299,6 +2309,8 @@ impl<'a> Codegen<'a> {
         code.function(&str_upper);
         code.function(&str_lower);
         code.function(&str_trim);
+        code.function(&str_trim_left);
+        code.function(&str_trim_right);
         code.function(&str_left);
         code.function(&str_right);
         code.function(&str_dropleft);
@@ -6640,7 +6652,7 @@ impl<'a> Codegen<'a> {
     }
 
     /// str_trim(s) : drop leading/trailing ASCII whitespace (space/tab/CR/LF).
-    fn emit_str_trim(&self) -> Function {
+    fn emit_str_trim(&self, left: bool, right: bool) -> Function {
         // locals: sstr(1):str, len(2), start(3), end(4), i(5), c(6):i32, out(7):str
         let mut f = Function::new([
             (1, ref_to(T_STR)),
@@ -6665,38 +6677,41 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(2));
-        // advance start past whitespace
+        // advance start past whitespace (only when trimming the left)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::ArrayGetU(T_STR));
-        f.instruction(&Instruction::LocalSet(6));
-        push_is_ws(&mut f);
-        f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        // pull end back past whitespace
+        if left {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+            f.instruction(&Instruction::Loop(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::I32GeS);
+            f.instruction(&Instruction::BrIf(1));
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::ArrayGetU(T_STR));
+            f.instruction(&Instruction::LocalSet(6));
+            push_is_ws(&mut f);
+            f.instruction(&Instruction::I32Eqz);
+            f.instruction(&Instruction::BrIf(1));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalSet(3));
+            f.instruction(&Instruction::Br(0));
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::End);
+        }
+        // pull end back past whitespace (only when trimming the right)
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32LeS);
-        f.instruction(&Instruction::BrIf(1));
+        if right {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+            f.instruction(&Instruction::Loop(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32LeS);
+            f.instruction(&Instruction::BrIf(1));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(1));
@@ -6713,6 +6728,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        }
         // out = new(end - start); copy
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
@@ -18284,6 +18300,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_trim_idx));
             }
+            ("String", "trimLeft") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_trim_left_idx));
+            }
+            ("String", "trimRight") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_trim_right_idx));
+            }
             ("String", "left") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 self.emit_expr(&args[1], ctx, f)?;
@@ -19232,9 +19256,11 @@ impl<'a> Codegen<'a> {
             // local, loaded from its sorted position in the `T_ARR`-backed record.
             Record(fields) => {
                 let tipe = tipe.ok_or_else(|| {
-                    "wasmgc: record pattern needs a known type (supported for function \
-                     and lambda parameters and let bindings)"
-                        .to_string()
+                    let names: Vec<&str> = fields.iter().map(|n| n.value.as_str()).collect();
+                    format!(
+                        "wasmgc: record pattern needs a known type (fields: {})",
+                        names.join(", ")
+                    )
                 })?;
                 for field in fields {
                     let idx = record_field_index(tipe, field.value.as_str())?;

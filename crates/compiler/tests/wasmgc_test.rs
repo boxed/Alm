@@ -641,6 +641,17 @@ fn self_recursion_through_lambda() {
     );
 }
 
+// String.trimLeft / trimRight (one-sided ASCII whitespace trim).
+#[test]
+fn string_trim_sides() {
+    assert_str_prog(
+        "str_trim_sides",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n    \"[\" ++ String.trimLeft \"  hi  \" ++ \"|\" ++ String.trimRight \"  hi  \" ++ \"]\"\n",
+    );
+}
+
 // Mutually-recursive local let functions (isEven/isOdd reference each other):
 // they must share a capture set so each can call the other.
 #[test]
@@ -2104,6 +2115,37 @@ fn keyed_reorder() {
          \x20       ]\n\n\
          main : Program () (List Int) Msg\n\
          main = Browser.sandbox { init = [ 1, 2, 3, 4 ], update = update, view = view }\n",
+    );
+}
+
+#[test]
+fn keyed_shuffle_add_remove() {
+    // A single update that simultaneously reorders survivors, drops a key, and
+    // introduces a new one: [1,2,3,4,5] -> [5,4,2,1,6]. This is the case that
+    // most stresses minimal-move (LIS) reconciliation — the surviving nodes are
+    // permuted (so the LIS/insert-before order matters), key 3 is removed, and
+    // key 6 is freshly rendered. The wasm-gc final DOM must match the JS backend
+    // exactly (same order, no dropped/duplicated nodes).
+    assert_sandbox_click(
+        "keyed_shuffle_add_remove",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (button, div, li, text)\n\
+         import Html.Keyed\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Go\n\n\
+         update : Msg -> List Int -> List Int\n\
+         update _ _ = [ 5, 4, 2, 1, 6 ]\n\n\
+         viewItem : Int -> ( String, Html.Html Msg )\n\
+         viewItem k = ( String.fromInt k, li [] [ text (String.fromInt k) ] )\n\n\
+         view : List Int -> Html.Html Msg\n\
+         view xs =\n\
+         \x20   div []\n\
+         \x20       [ button [ onClick Go ] [ text \"go\" ]\n\
+         \x20       , Html.Keyed.node \"ul\" [] (List.map viewItem xs)\n\
+         \x20       ]\n\n\
+         main : Program () (List Int) Msg\n\
+         main = Browser.sandbox { init = [ 1, 2, 3, 4, 5 ], update = update, view = view }\n",
     );
 }
 
