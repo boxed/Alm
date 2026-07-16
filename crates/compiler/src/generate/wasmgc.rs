@@ -992,6 +992,7 @@ struct Codegen<'a> {
     dict_map_idx: u32,
     dict_filter_idx: u32,
     dict_partition_idx: u32,
+    dict_merge_idx: u32,
     dict_keys_idx: u32,
     dict_values_idx: u32,
     dict_intersect_idx: u32,
@@ -1192,6 +1193,7 @@ impl<'a> Codegen<'a> {
             dict_map_idx: 0,
             dict_filter_idx: 0,
             dict_partition_idx: 0,
+            dict_merge_idx: 0,
             dict_keys_idx: 0,
             dict_values_idx: 0,
             dict_intersect_idx: 0,
@@ -1417,6 +1419,7 @@ impl<'a> Codegen<'a> {
         self.dict_map_idx = next();
         self.dict_filter_idx = next();
         self.dict_partition_idx = next();
+        self.dict_merge_idx = next();
         self.dict_keys_idx = next();
         self.dict_values_idx = next();
         self.dict_intersect_idx = next();
@@ -1676,6 +1679,7 @@ impl<'a> Codegen<'a> {
         let dict_map = self.emit_dict_map();
         let dict_filter = self.emit_dict_filter();
         let dict_partition = self.emit_dict_partition();
+        let dict_merge = self.emit_dict_merge();
         let dict_keys = self.emit_dict_project(0);
         let dict_values = self.emit_dict_project(1);
         let dict_intersect = self.emit_dict_intersect();
@@ -1961,6 +1965,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // dict_map
         funcs.function(ft2); // dict_filter
         funcs.function(ft2); // dict_partition
+        funcs.function(ft6); // dict_merge
         funcs.function(ft1); // dict_keys
         funcs.function(ft1); // dict_values
         funcs.function(ft2); // dict_intersect
@@ -2157,6 +2162,7 @@ impl<'a> Codegen<'a> {
         code.function(&dict_map);
         code.function(&dict_filter);
         code.function(&dict_partition);
+        code.function(&dict_merge);
         code.function(&dict_keys);
         code.function(&dict_values);
         code.function(&dict_intersect);
@@ -8180,6 +8186,156 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// dict_merge(leftStep, bothStep, rightStep, leftPairs, rightPairs, acc) :
+    /// the ordered 3-way merge (Dict.merge) over two ascending pair lists. For
+    /// each right entry: apply leftStep to every left entry with a smaller key,
+    /// then bothStep on a key match else rightStep; finally drain the left tail.
+    fn emit_dict_merge(&self) -> Function {
+        // params leftStep(0),bothStep(1),rightStep(2),leftPairs(3),rightPairs(4),
+        //   acc(5). locals: i(6),j(7),llen(8),rlen(9),c(10),eq(11):i32;
+        //   lpair(12),rpair(13),rk(14):eqref
+        let mut f = Function::new([(6, ValType::I32), (3, eqref())]);
+        // leftStep(lpair[0], lpair[1], acc) → acc
+        let left_step = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::LocalGet(12));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::Call(self.apply1_idx));
+            f.instruction(&Instruction::LocalGet(12));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::Call(self.apply1_idx));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::Call(self.apply1_idx));
+            f.instruction(&Instruction::LocalSet(5));
+        };
+        list_len(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(8));
+        list_len(&mut f, 4);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6)); // i
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7)); // j
+        // for j in 0..rlen
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 4, 7);
+        f.instruction(&Instruction::LocalSet(13)); // rpair
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(14)); // rk
+        // inner: while i<llen && compare(left[i].key, rk) < 0 → leftStep; i++
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1)); // i>=llen: stop
+        list_elem(&mut f, 3, 6);
+        f.instruction(&Instruction::LocalSet(12)); // lpair
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1)); // key >= rk: stop
+        left_step(&mut f);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // eq = (i<llen && compare(left[i].key, rk) == 0)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_elem(&mut f, 3, 6);
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::Call(self.val_compare_idx));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::LocalSet(11)); // eq
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // bothStep(lpair[0], lpair[1], rpair[1], acc); i++
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Else);
+        // rightStep(rk, rpair[1], acc)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 7, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // drain remaining left
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 3, 6);
+        f.instruction(&Instruction::LocalSet(12));
+        left_step(&mut f);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::End);
         f
     }
@@ -15873,6 +16029,20 @@ impl<'a> Codegen<'a> {
                 push_empty_list(f);
                 f.instruction(&Instruction::Call(self.treap_pairs_idx));
                 f.instruction(&Instruction::Call(self.dict_partition_idx));
+            }
+            // merge leftStep bothStep rightStep leftDict rightDict init
+            ("Dict", "merge") => {
+                self.emit_expr(&args[0], ctx, f)?; // leftStep
+                self.emit_expr(&args[1], ctx, f)?; // bothStep
+                self.emit_expr(&args[2], ctx, f)?; // rightStep
+                self.emit_expr(&args[3], ctx, f)?; // leftDict
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                self.emit_expr(&args[4], ctx, f)?; // rightDict
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                self.emit_expr(&args[5], ctx, f)?; // initialResult
+                f.instruction(&Instruction::Call(self.dict_merge_idx));
             }
             ("Dict", "union") => {
                 // insert all of a's pairs into b (a wins)

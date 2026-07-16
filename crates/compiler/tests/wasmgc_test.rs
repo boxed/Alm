@@ -287,6 +287,23 @@ fn maybe_result_combinators() {
 }
 
 #[test]
+fn dict_merge() {
+    assert_str_prog(
+        "dict_merge",
+        "module Test exposing (main)\n\n\
+         import Dict\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       a = Dict.fromList [ ( 1, \"a1\" ), ( 2, \"a2\" ), ( 4, \"a4\" ) ]\n\
+         \x20       b = Dict.fromList [ ( 2, \"b2\" ), ( 3, \"b3\" ), ( 4, \"b4\" ), ( 5, \"b5\" ) ]\n\
+         \x20       tag t k acc = acc ++ t ++ String.fromInt k ++ \";\"\n\
+         \x20   in\n\
+         \x20   Dict.merge (\\k _ acc -> tag \"L\" k acc) (\\k _ _ acc -> tag \"B\" k acc) (\\k _ acc -> tag \"R\" k acc) a b \"\"\n",
+    );
+}
+
+#[test]
 fn dict_partition() {
     assert_str_prog(
         "dict_partition",
