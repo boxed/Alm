@@ -344,6 +344,18 @@ fn cast_to(idx: u32) -> Instruction<'static> {
 /// `[a]`/`[e]`. Lets a record sub-pattern inside `Just`/`Ok`/`Err` resolve its
 /// fields (these unions aren't in the user-union registry).
 fn builtin_ctor_arg_types(ctor_name: &str, tipe: Option<&can::Type>) -> Option<Vec<can::Type>> {
+    // Http.Response ctors carry an Http.Metadata record as their first arg;
+    // its field SET (not the field types) is fixed, so a record pattern like
+    // `Http.BadStatus_ { statusCode } _` can resolve. (Field types are Unit
+    // placeholders — record_field_index only sorts by name.)
+    if ctor_name == "BadStatus_" || ctor_name == "GoodStatus_" {
+        let field = |n: &str| (crate::data::Name::from(n), can::Type::Unit);
+        let metadata = can::Type::Record(
+            vec![field("headers"), field("statusCode"), field("statusText"), field("url")],
+            None,
+        );
+        return Some(vec![metadata]);
+    }
     let args = match tipe {
         Some(can::Type::Type(_, _, args)) => args,
         _ => return None,
@@ -20160,6 +20172,16 @@ impl<'a> Codegen<'a> {
             ("Basics", "append") => self.emit_binop("++", &args[0], &args[1], ctx, f)?,
             ("Basics", "and") => self.emit_binop("&&", &args[0], &args[1], ctx, f)?,
             ("Basics", "or") => self.emit_binop("||", &args[0], &args[1], ctx, f)?,
+            // Comparison operators reachable as first-class values.
+            ("Basics", "lt") => self.emit_binop("<", &args[0], &args[1], ctx, f)?,
+            ("Basics", "le") => self.emit_binop("<=", &args[0], &args[1], ctx, f)?,
+            ("Basics", "gt") => self.emit_binop(">", &args[0], &args[1], ctx, f)?,
+            ("Basics", "ge") => self.emit_binop(">=", &args[0], &args[1], ctx, f)?,
+            // Debug.todo aborts (uninhabited result); Debug.log msg v = v.
+            ("Debug", "todo") => {
+                f.instruction(&Instruction::Unreachable);
+            }
+            ("Debug", "log") => self.emit_expr(&args[1], ctx, f)?,
             // Basics.never : Never -> a. Never is uninhabited, so this is never
             // actually reached; pass the (impossible) argument through.
             ("Basics", "never") => self.emit_expr(&args[0], ctx, f)?,
@@ -20978,6 +21000,14 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_CTOR)); // NotFound id
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR)); // Fail
+            }
+            // Browser.Events.onResize : headless has no window-resize events, so
+            // model it as an inert subscription (never fires). A real browser
+            // deployment would wire this to a host resize listener.
+            ("Browser.Events", "onResize") => {
+                f.instruction(&Instruction::I32Const(0)); // Sub none
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // onAnimationFrame(Delta) → SubAnimation tag6 [toMsg, deltaFlag].
             ("Browser.Events", "onAnimationFrameDelta")
