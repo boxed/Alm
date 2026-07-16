@@ -15,7 +15,8 @@ use wasm_encoder::{
     AbstractHeapType, BlockType, CodeSection, ConstExpr, DataCountSection, DataSection,
     ElementSection, Elements, EntityType, ExportKind, ExportSection, FieldType, Function,
     FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, Instruction, MemArg,
-    MemorySection, MemoryType, Module, RawSection, RefType, StorageType, TypeSection, ValType,
+    MemorySection, MemoryType, Module, RawSection, RefType, StorageType, TagKind, TagSection,
+    TagType, TypeSection, ValType,
 };
 
 use crate::ast::canonical as can;
@@ -1192,6 +1193,15 @@ struct Codegen<'a> {
     /// ctor-arg parenthesizer and the string/char escaper.
     debug_paren_idx: Option<u32>,
     debug_escape_idx: Option<u32>,
+    /// Lazily-lifted elm/bytes kernel helpers, keyed by kernel name (e.g.
+    /// "read_u16", "encode"). Each is a real function with declared locals; the
+    /// emit_kernel arm forwards its args to a `Call`. `bytes_write_idx` is the
+    /// recursive Encoder tree-writer (reserved before its body for recursion).
+    bytes_helpers: HashMap<String, u32>,
+    bytes_write_idx: Option<u32>,
+    /// Function-type index of the `[] -> []` exception tag used by Bytes.Decode
+    /// (`decodeFailure` and out-of-bounds reads throw it; `decode` catches it).
+    bytes_tag_ty: u32,
     func_index: HashMap<String, u32>,
     /// arity -> function-type index.
     fn_types: HashMap<u32, u32>,
@@ -1431,6 +1441,9 @@ impl<'a> Codegen<'a> {
             debug_renderers: HashMap::new(),
             debug_paren_idx: None,
             debug_escape_idx: None,
+            bytes_helpers: HashMap::new(),
+            bytes_write_idx: None,
+            bytes_tag_ty: 0,
             func_index: HashMap::new(),
             fn_types: HashMap::new(),
             fn_type_order: Vec::new(),
@@ -1981,7 +1994,9 @@ impl<'a> Codegen<'a> {
         let f64_ret_ty = self.next_type + 33; // () -> f64 (host_now)
         let fi_i_ty = self.next_type + 34; // (f64,i32) -> i32 (host_ftoa)
         let regex5_ty = self.next_type + 35; // (id,sp,sl,n,out) -> count
-        self.next_type += 35;
+        let bytes_tag_ty = self.next_type + 36; // [] -> [] (Bytes.Decode exception tag)
+        self.next_type += 36;
+        self.bytes_tag_ty = bytes_tag_ty;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -2299,6 +2314,7 @@ impl<'a> Codegen<'a> {
             vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32],
             vec![ValType::I32],
         ); // regex5 (host_regex_find/split): (id,sp,sl,n,out) -> count
+        types.ty().function(vec![], vec![]); // bytes_tag_ty: [] -> [] (Bytes.Decode exn)
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -2964,6 +2980,15 @@ impl<'a> Codegen<'a> {
         module.section(&imports);
         module.section(&funcs);
         module.section(&mems);
+        // Tag section (id 13) sits between Memory and Global in the binary layout
+        // (per the exception-handling proposal). One exception tag, index 0, used
+        // by Bytes.Decode for out-of-bounds / `fail` unwinding.
+        let mut tags = TagSection::new();
+        tags.tag(TagType {
+            kind: TagKind::Exception,
+            func_type_idx: self.bytes_tag_ty,
+        });
+        module.section(&tags);
         module.section(&globals);
         module.section(&exports);
         module.section(&elems);
@@ -4524,6 +4549,581 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::End);
+        f
+    }
+
+    // ===================================================================
+    // elm/bytes kernels. Bytes is a `T_STR` byte buffer (String is already
+    // UTF-8, so it shares the representation). Encoder is the elm/bytes custom
+    // type (I8=0 I16=1 I32=2 U8=3 U16=4 U32=5 F32=6 F64=7 Seq=8 Utf8=9 Bytes=10,
+    // in declaration order); `encode` walks it. Endianness LE=0/BE=1.
+    // ===================================================================
+
+    /// Reserve a lifted-function slot (uniform `(arity × eqref) -> eqref`),
+    /// returning its index; fill the body later with `lift_fill` so recursive
+    /// helpers can reference their own index.
+    fn lift_reserve(&mut self, arity: u32) -> u32 {
+        self.fn_type(arity);
+        let idx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+        idx
+    }
+    fn lift_fill(&mut self, idx: u32, arity: u32, body: Function) {
+        let slot = (idx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, body);
+    }
+
+    /// `Elm.Kernel.Bytes.encode : Encoder -> Bytes`.
+    fn bytes_encode_idx(&mut self) -> u32 {
+        if let Some(&i) = self.bytes_helpers.get("encode") {
+            return i;
+        }
+        let idx = self.lift_reserve(1);
+        self.bytes_helpers.insert("encode".into(), idx);
+        let w = self.bytes_width_idx();
+        let wr = self.bytes_write_fn();
+        let box_int = self.box_int_idx;
+        let unbox = self.unbox_int_idx;
+        // params: enc(0). locals: dest(1):T_STR, w(2):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(w));
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        // write(dest, box(0), enc) — offset return ignored
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(wr));
+        f.instruction(&Instruction::Drop);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        self.lift_fill(idx, 1, f);
+        idx
+    }
+
+    /// `getWidth : Encoder -> Int` (Seq/Utf8 store their width in arg0).
+    fn bytes_width_idx(&mut self) -> u32 {
+        if let Some(&i) = self.bytes_helpers.get("enc_width") {
+            return i;
+        }
+        let idx = self.lift_reserve(1);
+        self.bytes_helpers.insert("enc_width".into(), idx);
+        let unbox = self.unbox_int_idx;
+        let box_int = self.box_int_idx;
+        // params: enc(0). locals: tag(1):i32, w(2):i32
+        let mut f = Function::new([(2, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(1));
+        // default w=0
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        // fixed-width tags
+        let fixed: &[(&[i32], i32)] =
+            &[(&[0, 3], 1), (&[1, 4], 2), (&[2, 5, 6], 4), (&[7], 8)];
+        for (tags, wid) in fixed {
+            for &t in *tags {
+                f.instruction(&Instruction::LocalGet(1));
+                f.instruction(&Instruction::I32Const(t));
+                f.instruction(&Instruction::I32Eq);
+                f.instruction(&Instruction::If(BlockType::Empty));
+                f.instruction(&Instruction::I32Const(*wid));
+                f.instruction(&Instruction::LocalSet(2));
+                f.instruction(&Instruction::End);
+            }
+        }
+        // Seq(8)/Utf8(9): width stored in arg0
+        for t in [8, 9] {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32Const(t));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            ctor_argn(&mut f, 0, 0);
+            f.instruction(&Instruction::Call(unbox));
+            f.instruction(&Instruction::I32WrapI64);
+            f.instruction(&Instruction::LocalSet(2));
+            f.instruction(&Instruction::End);
+        }
+        // Bytes(10): width = byte length of arg0
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::End);
+        self.lift_fill(idx, 1, f);
+        idx
+    }
+
+    /// `writeEncoder : Bytes -> Int(offset) -> Encoder -> Int(newOffset)`,
+    /// recursive over `Seq`. dest=0, offBox=1, enc=2 (uniform eqref params).
+    fn bytes_write_fn(&mut self) -> u32 {
+        if let Some(i) = self.bytes_write_idx {
+            return i;
+        }
+        let idx = self.lift_reserve(3);
+        self.bytes_write_idx = Some(idx);
+        let unbox = self.unbox_int_idx;
+        let box_int = self.box_int_idx;
+        // locals: off(3),tag(4),le(5),n(6),i(7):i32; val(8):i64; child(9),lst(10):eqref
+        let mut f = Function::new([(5, ValType::I32), (1, ValType::I64), (2, eqref())]);
+        let (off, tag, le, n, i, val, child, lst) = (3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32, 10u32);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(tag));
+        // helper: is tag in set?
+        // I8(0)/U8(3): 1 byte, value = arg0
+        for (t, _sz) in [(0, 1), (3, 1)] {
+            f.instruction(&Instruction::LocalGet(tag));
+            f.instruction(&Instruction::I32Const(t));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            ctor_argn(&mut f, 2, 0);
+            f.instruction(&Instruction::Call(unbox));
+            f.instruction(&Instruction::LocalSet(val));
+            f.instruction(&Instruction::I32Const(1)); // dummy LE (unused for 1 byte)
+            f.instruction(&Instruction::LocalSet(le));
+            self.emit_write_int_bytes(&mut f, 0, off, val, le, 1);
+            f.instruction(&Instruction::LocalGet(off));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalSet(off));
+            f.instruction(&Instruction::End);
+        }
+        // I16(1)/U16(4) sz2, I32(2)/U32(5) sz4: endian=arg0, value=arg1
+        for (t, sz) in [(1, 2), (4, 2), (2, 4), (5, 4)] {
+            f.instruction(&Instruction::LocalGet(tag));
+            f.instruction(&Instruction::I32Const(t));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            self.emit_endian_le(&mut f, le);
+            ctor_argn(&mut f, 2, 1);
+            f.instruction(&Instruction::Call(unbox));
+            f.instruction(&Instruction::LocalSet(val));
+            self.emit_write_int_bytes(&mut f, 0, off, val, le, sz);
+            f.instruction(&Instruction::LocalGet(off));
+            f.instruction(&Instruction::I32Const(sz as i32));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::LocalSet(off));
+            f.instruction(&Instruction::End);
+        }
+        // F32(6): endian=arg0, value=arg1 (Float); bits = reinterpret(demote)
+        f.instruction(&Instruction::LocalGet(tag));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_endian_le(&mut f, le);
+        ctor_argn(&mut f, 2, 1);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::F32DemoteF64);
+        f.instruction(&Instruction::I32ReinterpretF32);
+        f.instruction(&Instruction::I64ExtendI32U);
+        f.instruction(&Instruction::LocalSet(val));
+        self.emit_write_int_bytes(&mut f, 0, off, val, le, 4);
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::End);
+        // F64(7)
+        f.instruction(&Instruction::LocalGet(tag));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_endian_le(&mut f, le);
+        ctor_argn(&mut f, 2, 1);
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::I64ReinterpretF64);
+        f.instruction(&Instruction::LocalSet(val));
+        self.emit_write_int_bytes(&mut f, 0, off, val, le, 8);
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::End);
+        // Utf8(9): copy arg1 string; Bytes(10): copy arg0
+        for (t, argi) in [(9, 1), (10, 0)] {
+            f.instruction(&Instruction::LocalGet(tag));
+            f.instruction(&Instruction::I32Const(t));
+            f.instruction(&Instruction::I32Eq);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            ctor_argn(&mut f, 2, argi);
+            f.instruction(&cast_to(T_STR));
+            f.instruction(&Instruction::LocalSet(child));
+            self.emit_copy_str(&mut f, 0, off, child, n, i);
+            f.instruction(&Instruction::End);
+        }
+        // Seq(8): iterate arg1 (List Encoder), thread offset via recursion
+        f.instruction(&Instruction::LocalGet(tag));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 2, 1);
+        f.instruction(&Instruction::LocalSet(lst));
+        list_len(&mut f, lst);
+        f.instruction(&Instruction::LocalSet(n));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(i));
+        f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0)); // dest
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        list_elem(&mut f, lst, i);
+        f.instruction(&Instruction::Call(idx)); // recurse
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::LocalGet(i));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // return box(off)
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::End);
+        self.lift_fill(idx, 3, f);
+        idx
+    }
+
+    /// Push nothing; set local `le` = 1 iff the Endianness ctor in `enc`(local 2)
+    /// arg0 is `LE` (tag 0).
+    fn emit_endian_le(&self, f: &mut Function, le: u32) {
+        ctor_argn(f, 2, 0);
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz); // tag==0 (LE) -> 1
+        f.instruction(&Instruction::LocalSet(le));
+    }
+
+    /// Write `size` low bytes of i64 `val` into dest(param `dest_p`) at `off`,
+    /// little-endian when `le`!=0 else big-endian.
+    fn emit_write_int_bytes(&self, f: &mut Function, dest_p: u32, off: u32, val: u32, le: u32, size: u32) {
+        for k in 0..size {
+            f.instruction(&Instruction::LocalGet(dest_p));
+            f.instruction(&cast_to(T_STR));
+            // index = off + (le ? k : size-1-k)
+            f.instruction(&Instruction::LocalGet(off));
+            f.instruction(&Instruction::I32Const(k as i32));
+            f.instruction(&Instruction::I32Const((size - 1 - k) as i32));
+            f.instruction(&Instruction::LocalGet(le));
+            f.instruction(&Instruction::Select);
+            f.instruction(&Instruction::I32Add);
+            // byte = (val >> 8k) & 0xFF
+            f.instruction(&Instruction::LocalGet(val));
+            f.instruction(&Instruction::I64Const((8 * k) as i64));
+            f.instruction(&Instruction::I64ShrU);
+            f.instruction(&Instruction::I32WrapI64);
+            f.instruction(&Instruction::I32Const(0xFF));
+            f.instruction(&Instruction::I32And);
+            f.instruction(&Instruction::ArraySet(T_STR));
+        }
+    }
+
+    /// Copy all of `src`(local `src_l`, a T_STR) into dest(param `dest_p`) at
+    /// `off`; advances `off` by the length. `len_l`,`j_l` are scratch i32.
+    fn emit_copy_str(&self, f: &mut Function, dest_p: u32, off: u32, src_l: u32, len_l: u32, j_l: u32) {
+        f.instruction(&Instruction::LocalGet(src_l));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(len_l));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(j_l));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(j_l));
+        f.instruction(&Instruction::LocalGet(len_l));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(dest_p));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::LocalGet(j_l));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(src_l));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(j_l));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(j_l));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(j_l));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // off += len
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::LocalGet(len_l));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(off));
+    }
+
+    /// Lazily lift a Bytes read/decode kernel helper by name.
+    fn bytes_kernel_idx(&mut self, name: &str) -> u32 {
+        if let Some(&i) = self.bytes_helpers.get(name) {
+            return i;
+        }
+        let (arity, body): (u32, Function) = match name {
+            "read_i8" => (2, self.emit_bytes_read(1, true, false, false)),
+            "read_u8" => (2, self.emit_bytes_read(1, false, false, false)),
+            "read_i16" => (3, self.emit_bytes_read(2, true, false, true)),
+            "read_u16" => (3, self.emit_bytes_read(2, false, false, true)),
+            "read_i32" => (3, self.emit_bytes_read(4, true, false, true)),
+            "read_u32" => (3, self.emit_bytes_read(4, false, false, true)),
+            "read_f32" => (3, self.emit_bytes_read(4, false, true, true)),
+            "read_f64" => (3, self.emit_bytes_read(8, false, true, true)),
+            "read_bytes" | "read_string" => (3, self.emit_bytes_read_slice()),
+            "decodeFailure" => (2, self.emit_bytes_decode_failure()),
+            "decode" => (2, self.emit_bytes_decode()),
+            _ => unreachable!("bytes_kernel_idx: {name}"),
+        };
+        let idx = self.lift_reserve(arity);
+        self.bytes_helpers.insert(name.into(), idx);
+        self.lift_fill(idx, arity, body);
+        idx
+    }
+
+    /// A numeric read kernel `[isLE ->] Bytes -> Int(offset) -> (Int, value)`.
+    /// Bytes are assembled LSB-first from the source position chosen by `le`, so
+    /// the same code serves both endiannesses. An out-of-bounds read throws.
+    fn emit_bytes_read(&self, size: u32, signed: bool, float: bool, endian: bool) -> Function {
+        let box_int = self.box_int_idx;
+        let unbox = self.unbox_int_idx;
+        let (bytes_p, off_p) = if endian { (1u32, 2u32) } else { (0u32, 1u32) };
+        let base = if endian { 3 } else { 2 };
+        let (off, len, le, acc) = (base, base + 1, base + 2, base + 3);
+        let mut f = Function::new([(3, ValType::I32), (1, ValType::I64)]);
+        f.instruction(&Instruction::LocalGet(off_p));
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::LocalGet(bytes_p));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(len));
+        // bounds check: off + size > len -> throw
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I32Const(size as i32));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(len));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Throw(0));
+        f.instruction(&Instruction::End);
+        // le
+        if endian {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                shared: false,
+                ty: AbstractHeapType::I31,
+            }));
+            f.instruction(&Instruction::I31GetS);
+        } else {
+            f.instruction(&Instruction::I32Const(1));
+        }
+        f.instruction(&Instruction::LocalSet(le));
+        // acc = assemble bytes LSB-first
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalSet(acc));
+        for k in 0..size {
+            f.instruction(&Instruction::LocalGet(acc));
+            f.instruction(&Instruction::LocalGet(bytes_p));
+            f.instruction(&cast_to(T_STR));
+            f.instruction(&Instruction::LocalGet(off));
+            f.instruction(&Instruction::I32Const(k as i32));
+            f.instruction(&Instruction::I32Const((size - 1 - k) as i32));
+            f.instruction(&Instruction::LocalGet(le));
+            f.instruction(&Instruction::Select);
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::ArrayGetU(T_STR));
+            f.instruction(&Instruction::I64ExtendI32U);
+            f.instruction(&Instruction::I64Const((8 * k) as i64));
+            f.instruction(&Instruction::I64Shl);
+            f.instruction(&Instruction::I64Or);
+            f.instruction(&Instruction::LocalSet(acc));
+        }
+        // elem0 = box(off + size)
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::I32Const(size as i32));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        // elem1 = the value
+        if float {
+            if size == 4 {
+                f.instruction(&Instruction::LocalGet(acc));
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(&Instruction::F32ReinterpretI32);
+                f.instruction(&Instruction::F64PromoteF32);
+            } else {
+                f.instruction(&Instruction::LocalGet(acc));
+                f.instruction(&Instruction::F64ReinterpretI64);
+            }
+            f.instruction(&Instruction::StructNew(T_FLOAT));
+        } else if signed {
+            f.instruction(&Instruction::LocalGet(acc));
+            f.instruction(&Instruction::I32WrapI64);
+            match size {
+                1 => f.instruction(&Instruction::I32Extend8S),
+                2 => f.instruction(&Instruction::I32Extend16S),
+                _ => &mut f, // size 4: full i32 already
+            };
+            f.instruction(&Instruction::I64ExtendI32S);
+            f.instruction(&Instruction::Call(box_int));
+        } else {
+            // unsigned: acc holds the exact non-negative value
+            f.instruction(&Instruction::LocalGet(acc));
+            f.instruction(&Instruction::Call(box_int));
+        }
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// `read_bytes`/`read_string` : `Int(len) -> Bytes -> Int(off) -> (Int, T_STR)`
+    /// (Bytes and String share the `T_STR` representation). Copies the slice.
+    fn emit_bytes_read_slice(&self) -> Function {
+        let box_int = self.box_int_idx;
+        let unbox = self.unbox_int_idx;
+        // params len(0), bytes(1), off(2). locals n(3),off(4),lenb(5),j(6):i32; dest(7):T_STR
+        let (n, off, lenb, j, dest) = (3u32, 4u32, 5u32, 6u32, 7u32);
+        let mut f = Function::new([(4, ValType::I32), (1, ref_to(T_STR))]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(n));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(unbox));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(off));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(lenb));
+        // bounds: off + n > lenb -> throw
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(lenb));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Throw(0));
+        f.instruction(&Instruction::End);
+        // dest = new T_STR(n); copy
+        f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(dest));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(j));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(j));
+        f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(dest));
+        f.instruction(&Instruction::LocalGet(j));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::LocalGet(j));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(j));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(j));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // tuple2[ box(off+n), dest ]
+        f.instruction(&Instruction::LocalGet(off));
+        f.instruction(&Instruction::LocalGet(n));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::LocalGet(dest));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// `decodeFailure : Bytes -> Int -> (Int, a)` — always throws (→ `decode`
+    /// returns `Nothing`). Implements `Bytes.Decode.fail`.
+    fn emit_bytes_decode_failure(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::Throw(0));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// `decode : (Bytes -> Int -> (Int, a)) -> Bytes -> Maybe a`. Runs the
+    /// decoder at offset 0 inside a `try_table`; a thrown Bytes exception
+    /// (out-of-bounds read or `fail`) yields `Nothing`, else `Just value`.
+    fn emit_bytes_decode(&self) -> Function {
+        let apply1 = self.apply1_idx;
+        let box_int = self.box_int_idx;
+        // params decoder(0), bytes(1). local val(2):eqref. Uses the legacy
+        // exception-handling `try`/`catch` (enabled by default in V8/Node,
+        // unlike the newer `try_table`/exnref which is still behind a flag).
+        let mut f = Function::new([(1, eqref())]);
+        f.instruction(&Instruction::Try(BlockType::Result(eqref())));
+        // apply1(apply1(decoder, bytes), box 0)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(apply1));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::Call(apply1));
+        // val = tuple[1]
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(2));
+        // Just(val)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Catch(0)); // the Bytes exception -> Nothing
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End); // try
+        f.instruction(&Instruction::End); // function
         f
     }
 
@@ -18154,6 +18754,38 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
+        // expectBytes (kind 3): run the Bytes decoder on the raw body under a
+        // try/catch (out-of-bounds / fail → BadBody). Inlined (this is a fixed
+        // helper, so it can't call the lazily-lifted `decode`).
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Try(BlockType::Result(eqref())));
+        ctor_argn(&mut f, 6, 1); // decoder
+        f.instruction(&Instruction::LocalGet(8)); // body (Bytes)
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Catch(0));
+        f.instruction(&Instruction::I32Const(1)); // Err
+        f.instruction(&Instruction::I32Const(4)); // BadBody
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End); // try
+        f.instruction(&Instruction::Else);
         // expectWhatever (kind 2) → Ok () ; expectString → Ok body
         f.instruction(&Instruction::I32Const(0)); // Ok
         f.instruction(&Instruction::LocalGet(4));
@@ -18167,6 +18799,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End); // kind==3 if
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
         // non-2xx: status 0 → NetworkError, else BadStatus status
@@ -20934,6 +21567,44 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(idx));
             }
+            // elm/bytes: Bytes is a T_STR byte buffer.
+            ("Elm.Kernel.Bytes", "encode") => {
+                let idx = self.bytes_encode_idx();
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(idx));
+            }
+            // width (of Bytes) and getStringWidth (of a String) are both the
+            // byte length — String is stored UTF-8, so array length is exact.
+            ("Elm.Kernel.Bytes", "width") | ("Elm.Kernel.Bytes", "getStringWidth") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&cast_to(T_STR));
+                f.instruction(&Instruction::ArrayLen);
+                f.instruction(&Instruction::I64ExtendI32S);
+                f.instruction(&Instruction::Call(self.box_int_idx));
+            }
+            // getHostEndianness le be = Task.Succeed le (the host is little-endian).
+            ("Elm.Kernel.Bytes", "getHostEndianness") => {
+                f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+                self.emit_expr(&args[0], ctx, f)?; // le
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Bytes.Decode read/run kernels: forward args to the lazily-lifted
+            // helper (which throws the Bytes exception on out-of-bounds / fail).
+            ("Elm.Kernel.Bytes", n)
+                if matches!(
+                    n,
+                    "read_i8" | "read_u8" | "read_i16" | "read_u16" | "read_i32" | "read_u32"
+                        | "read_f32" | "read_f64" | "read_bytes" | "read_string" | "decode"
+                        | "decodeFailure"
+                ) =>
+            {
+                let idx = self.bytes_kernel_idx(n);
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(idx));
+            }
             // Basics.never : Never -> a. Never is uninhabited, so this is never
             // actually reached; pass the (impossible) argument through.
             ("Basics", "never") => self.emit_expr(&args[0], ctx, f)?,
@@ -21660,6 +22331,26 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(2)); // EXPECT_WHATEVER
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // expectBytes toMsg decoder → Expect tag 3 [toMsg, decoder]. The
+            // response body is raw bytes (str_from_mem copies them verbatim into
+            // a T_STR, which is exactly a Bytes value), run through the decoder.
+            ("Http", "expectBytes") => {
+                f.instruction(&Instruction::I32Const(3)); // EXPECT_BYTES
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                self.emit_expr(&args[1], ctx, f)?; // decoder
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // multipart/part builders: the host shim ignores the request body,
+            // so these are inert placeholders (like stringBody/bytesBody).
+            ("Http", "multipartBody")
+            | ("Http", "stringPart")
+            | ("Http", "bytesPart")
+            | ("Http", "filePart") => {
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Http.stringResolver / bytesResolver toResult → the record {toResult}
