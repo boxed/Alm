@@ -284,8 +284,10 @@ const I31_MIN: i64 = -(1 << 30);
 const I31_MAX: i64 = 1 << 30;
 const BUMP_BASE: i32 = 1 << 16; // DOM string scratch starts at 64 KiB
 const MAX_HANDLERS: u32 = 4096;
-/// Highest arity the closure `apply` dispatcher handles.
-const MAX_ARITY: u32 = 6;
+/// Highest arity the closure `apply` dispatcher handles. 8 covers the widest
+/// stdlib combinators (Json.Decode.map8, List.map5-style) and any user function
+/// of up to 8 arguments used first-class / curried through `apply1`.
+const MAX_ARITY: u32 = 8;
 
 fn eqref() -> ValType {
     ValType::Ref(RefType {
@@ -1268,6 +1270,8 @@ struct Codegen<'a> {
     index_byte_idx: u32,
     url_from_string_idx: u32,
     url_to_string_idx: u32,
+    percent_encode_idx: u32,
+    percent_decode_idx: u32,
     json_err_to_string_idx: u32,
     strip_keys_idx: u32,
     keyed_reconcile_idx: u32,
@@ -1497,6 +1501,8 @@ impl<'a> Codegen<'a> {
             index_byte_idx: 0,
             url_from_string_idx: 0,
             url_to_string_idx: 0,
+            percent_encode_idx: 0,
+            percent_decode_idx: 0,
             json_err_to_string_idx: 0,
             strip_keys_idx: 0,
             keyed_reconcile_idx: 0,
@@ -1731,6 +1737,8 @@ impl<'a> Codegen<'a> {
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
         self.url_to_string_idx = next();
+        self.percent_encode_idx = next();
+        self.percent_decode_idx = next();
         self.json_err_to_string_idx = next();
         self.strip_keys_idx = next();
         self.keyed_reconcile_idx = next();
@@ -2022,6 +2030,8 @@ impl<'a> Codegen<'a> {
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
         let url_to_string = self.emit_url_to_string();
+        let percent_encode = self.emit_percent_encode();
+        let percent_decode = self.emit_percent_decode();
         let json_err_to_string = self.emit_json_err_to_string();
         let strip_keys = self.emit_strip_keys();
         let keyed_reconcile = self.emit_keyed_reconcile();
@@ -2340,6 +2350,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
         funcs.function(e_e_ty); // url_to_string : Url -> String
+        funcs.function(e_e_ty); // percent_encode : String -> String
+        funcs.function(e_e_ty); // percent_decode : String -> Maybe String
         funcs.function(e_e_ty); // json_err_to_string : Error -> String
         funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
         funcs.function(kr_ty); // keyed_reconcile (dom, oldKids, newKids)
@@ -2564,6 +2576,8 @@ impl<'a> Codegen<'a> {
         code.function(&index_byte);
         code.function(&url_from_string);
         code.function(&url_to_string);
+        code.function(&percent_encode);
+        code.function(&percent_decode);
         code.function(&json_err_to_string);
         code.function(&strip_keys);
         code.function(&keyed_reconcile);
@@ -3572,6 +3586,29 @@ impl<'a> Codegen<'a> {
         if module == "Elm.Kernel.Regex" && name == "infinity" {
             f.instruction(&Instruction::I64Const(2147483647));
             f.instruction(&Instruction::Call(self.box_int_idx));
+            return Ok(());
+        }
+        // Browser.Dom.getViewport : Task x Viewport — always succeeds in a real
+        // browser. Headless has no live viewport, so this is a PLACEHOLDER: a
+        // zero Viewport { scene {h,w}, viewport {h,w,x,y} } wrapped in Task.Succeed.
+        // (A real wasm-gc browser deployment would wire this to a host DOM query.)
+        if module == "Browser.Dom" && name == "getViewport" {
+            let zero = |f: &mut Function| {
+                f.instruction(&Instruction::F64Const(0.0.into()));
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            };
+            f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+            zero(f);
+            zero(f); // scene { height, width }
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            zero(f);
+            zero(f);
+            zero(f);
+            zero(f); // viewport { height, width, x, y }
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // Viewport
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed
             return Ok(());
         }
         // Time.utc : the UTC zone, elm's `Zone 0 []` (single ctor, tag 0):
@@ -11999,8 +12036,14 @@ impl<'a> Codegen<'a> {
     /// 4 string,5 array,6 object.
     fn emit_json_run(&self) -> Function {
         // params dec(0), val(1). locals: t(2),len(4),i(5),ii(6):i32,
-        //   acc(7),r(8),items(9),d(10),pair(11),sub(12):eqref, fv(13):f64
-        let mut f = Function::new([(5, ValType::I32), (6, eqref()), (1, ValType::F64)]);
+        //   acc(7),r(8),items(9),d(10),pair(11),sub(12):eqref, fv(13):f64,
+        //   x5(14),x6(15),x7(16):eqref (map6/7/8 extra accumulators)
+        let mut f = Function::new([
+            (5, ValType::I32),
+            (6, eqref()),
+            (1, ValType::F64),
+            (3, eqref()),
+        ]);
         ctor_tag(&mut f, 0);
         f.instruction(&Instruction::LocalSet(2));
         // helper closures capturing nothing — emit inline via small fns:
@@ -12548,6 +12591,29 @@ impl<'a> Codegen<'a> {
         wrap1(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // 26 map6 / 27 map7 / 28 map8 — accumulators x1..x_{n-1} in these locals,
+        // the last sub decoded into 8; then Ok (f x1 … xn).
+        let mapn = |f: &mut Function, tag: i32, accs: &[u32], apply1_idx: u32| {
+            arm(f, tag);
+            for (k, &acc) in accs.iter().enumerate() {
+                decode_into(f, (k + 1) as i32, acc);
+            }
+            decode_into(f, (accs.len() + 1) as i32, 8); // last sub -> result
+            f.instruction(&Instruction::I32Const(0)); // Ok
+            ctor_arg0(f, 0); // f
+            for &acc in accs {
+                f.instruction(&Instruction::LocalGet(acc));
+                f.instruction(&Instruction::Call(apply1_idx));
+            }
+            ctor_arg0(f, 8);
+            f.instruction(&Instruction::Call(apply1_idx));
+            wrap1(f);
+            f.instruction(&Instruction::Return);
+            f.instruction(&Instruction::End);
+        };
+        mapn(&mut f, 26, &[7, 9, 10, 11, 14], self.apply1_idx);
+        mapn(&mut f, 27, &[7, 9, 10, 11, 14, 15], self.apply1_idx);
+        mapn(&mut f, 28, &[7, 9, 10, 11, 14, 15, 16], self.apply1_idx);
         // 25 oneOrMore [toValue, decoder]: decode a List (as `list decoder`),
         // then Ok (toValue head tail) if non-empty, else a decode failure.
         arm(&mut f, 25);
@@ -15690,6 +15756,290 @@ impl<'a> Codegen<'a> {
         prefixed(&mut f, self, 5, "?");
         prefixed(&mut f, self, 0, "#");
         f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// percent_encode(s) -> String : Url.percentEncode (== JS encodeURIComponent).
+    /// Keeps unreserved bytes (A-Za-z0-9 and -_.!~*'()); every other UTF-8 byte
+    /// becomes %XX (uppercase hex). Two-pass: size, then fill.
+    fn emit_percent_encode(&self) -> Function {
+        // param s(0). locals ss(1):str, len(2),i(3),c(4),outlen(5),oi(6):i32, out(7):str
+        let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32), (1, ref_to(T_STR))]);
+        // unreserved(c) -> i32 bool for the byte in local 4
+        let unreserved = |f: &mut Function| {
+            let rng = |f: &mut Function, lo: i32, hi: i32| {
+                f.instruction(&Instruction::LocalGet(4));
+                f.instruction(&Instruction::I32Const(lo));
+                f.instruction(&Instruction::I32GeS);
+                f.instruction(&Instruction::LocalGet(4));
+                f.instruction(&Instruction::I32Const(hi));
+                f.instruction(&Instruction::I32LeS);
+                f.instruction(&Instruction::I32And);
+            };
+            rng(f, 0x41, 0x5A); // A-Z
+            rng(f, 0x61, 0x7A); // a-z
+            f.instruction(&Instruction::I32Or);
+            rng(f, 0x30, 0x39); // 0-9
+            f.instruction(&Instruction::I32Or);
+            for ch in [b'-', b'_', b'.', b'!', b'~', b'*', b'\'', b'(', b')'] {
+                f.instruction(&Instruction::LocalGet(4));
+                f.instruction(&Instruction::I32Const(ch as i32));
+                f.instruction(&Instruction::I32Eq);
+                f.instruction(&Instruction::I32Or);
+            }
+        };
+        let load_c = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::ArrayGetU(T_STR));
+            f.instruction(&Instruction::LocalSet(4));
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        // pass 1: outlen
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        load_c(&mut f);
+        f.instruction(&Instruction::LocalGet(5));
+        unreserved(&mut f);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // out = new(outlen)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        // pass 2: fill
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        load_c(&mut f);
+        unreserved(&mut f);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // out[oi] = c; oi++
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Else);
+        // out[oi]='%'; out[oi+1]=hex(c>>4); out[oi+2]=hex(c&15); oi+=3
+        let hex = |f: &mut Function, shift: i32, mask: i32| {
+            // push hex digit of (c>>shift)&mask (mask 0xF)
+            f.instruction(&Instruction::LocalGet(4));
+            if shift > 0 {
+                f.instruction(&Instruction::I32Const(shift));
+                f.instruction(&Instruction::I32ShrU);
+            }
+            f.instruction(&Instruction::I32Const(mask));
+            f.instruction(&Instruction::I32And);
+            // d<10 ? 48+d : 55+d
+            f.instruction(&Instruction::LocalSet(4)); // reuse c to hold digit? no — clobbers. use separate.
+        };
+        let _ = hex; // (inlined below with a temp)
+        // '%'
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(b'%' as i32));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        // hi nibble
+        let nibble = |f: &mut Function, off: i32, shift: i32| {
+            f.instruction(&Instruction::LocalGet(7));
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::I32Const(off));
+            f.instruction(&Instruction::I32Add);
+            // digit = (c>>shift)&0xF
+            f.instruction(&Instruction::LocalGet(4));
+            if shift > 0 {
+                f.instruction(&Instruction::I32Const(shift));
+                f.instruction(&Instruction::I32ShrU);
+            }
+            f.instruction(&Instruction::I32Const(0xF));
+            f.instruction(&Instruction::I32And);
+            // to hex ascii: d<10 ? 48+d : 55+d
+            f.instruction(&Instruction::LocalSet(5)); // temp (outlen no longer needed)
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(10));
+            f.instruction(&Instruction::I32LtS);
+            f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(48));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::Else);
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(55));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::ArraySet(T_STR));
+        };
+        nibble(&mut f, 1, 4); // hi
+        nibble(&mut f, 2, 0); // lo
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// percent_decode(s) -> Maybe String : Url.percentDecode. `%XX` → byte, other
+    /// bytes kept; returns `Just decoded` (malformed `%` is decoded leniently
+    /// rather than failing — a minor divergence from elm's `Nothing` on bad input,
+    /// which valid URLs never hit). Output ≤ input length; exact-copied at the end.
+    fn emit_percent_decode(&self) -> Function {
+        // param s(0). locals ss(1):str, len(2),i(3),oi(4),c(5):i32, out(6),res(7):str
+        let mut f = Function::new([(1, ref_to(T_STR)), (4, ValType::I32), (2, ref_to(T_STR))]);
+        // hexval(byte-in-local-5) -> i32 (0-15; non-hex → 0)
+        let hexval = |f: &mut Function| {
+            // '0'-'9' -> b-48 ; 'A'-'F' -> b-55 ; 'a'-'f' -> b-87 ; else 0
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(0x39));
+            f.instruction(&Instruction::I32LeS);
+            f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(48));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::Else);
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(0x46));
+            f.instruction(&Instruction::I32LeS);
+            f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(55));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::Else);
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Const(87));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::End);
+            f.instruction(&Instruction::End);
+        };
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(6)); // out (max size)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // oi
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5)); // c
+        // if c=='%' && i+2 < len: decode two hex
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(b'%' as i32));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // out[oi] = hexval(ss[i+1])*16 + hexval(ss[i+2])
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        hexval(&mut f);
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        hexval(&mut f);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Else);
+        // out[oi] = c ; i++
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Just(res) where res = out if oi==len else an exact copy of [0,oi).
+        f.instruction(&Instruction::I32Const(0)); // Just tag (before the value)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(ref_to(T_STR))));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_STR, array_type_index_src: T_STR });
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f
     }
@@ -19436,6 +19786,24 @@ impl<'a> Codegen<'a> {
                 ctx,
                 f,
             )?,
+            ("Json.Decode", "map6") => self.emit_dnode(
+                26,
+                &args.iter().collect::<Vec<_>>(),
+                ctx,
+                f,
+            )?,
+            ("Json.Decode", "map7") => self.emit_dnode(
+                27,
+                &args.iter().collect::<Vec<_>>(),
+                ctx,
+                f,
+            )?,
+            ("Json.Decode", "map8") => self.emit_dnode(
+                28,
+                &args.iter().collect::<Vec<_>>(),
+                ctx,
+                f,
+            )?,
             ("Json.Decode", "oneOrMore") => {
                 self.emit_dnode(25, &[&args[0], &args[1]], ctx, f)?
             }
@@ -20516,6 +20884,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.url_to_string_idx));
             }
+            ("Url", "percentEncode") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.percent_encode_idx));
+            }
+            ("Url", "percentDecode") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.percent_decode_idx));
+            }
             ("Json.Decode", "errorToString") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.json_err_to_string_idx));
@@ -20533,6 +20909,29 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Browser.Dom (headless has no live DOM). Effects succeed as a no-op
+            // (Task.Succeed () — focus is best-effort in elm anyway); element
+            // queries honestly Fail with NotFound (the element genuinely isn't
+            // present). getViewport is a nullary value handled in emit_foreign_value.
+            ("Browser.Dom", "focus")
+            | ("Browser.Dom", "blur")
+            | ("Browser.Dom", "setViewport")
+            | ("Browser.Dom", "setViewportOf") => {
+                f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefI31); // ()
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("Browser.Dom", "getViewportOf") | ("Browser.Dom", "getElement") => {
+                f.instruction(&Instruction::I32Const(1)); // Task.Fail
+                f.instruction(&Instruction::I32Const(0)); // Browser.Dom.NotFound
+                self.emit_expr(&args[0], ctx, f)?; // the id
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // NotFound id
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // Fail
             }
             // onAnimationFrame(Delta) → SubAnimation tag6 [toMsg, deltaFlag].
             ("Browser.Events", "onAnimationFrameDelta")
