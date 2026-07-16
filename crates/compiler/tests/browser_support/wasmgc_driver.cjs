@@ -20,7 +20,72 @@ function start(wasmPath, doc, clock) {
   let currentUrl = 'http://localhost/'; // matches js_driver's location stub
   const dec = new TextDecoder();
   const str = (p, l) => dec.decode(new Uint8Array(memory.buffer, p, l));
-  const reg = (n) => { nodes.push(n); return nodes.length - 1; };
+  const reg = (n) => { nodes.push(n); n.__h = nodes.length - 1; return nodes.length - 1; };
+  // Reclaim a removed subtree (mirrors the browser shim): release handle slots
+  // now, but QUEUE wasm-side handler frees — freeNode runs inside dom_remove_child
+  // (called from wasm mid-render), so calling back into wasm there corrupts the
+  // render; flushFree drains the queue after the entry returns.
+  const pendingFree = [];
+  function freeNode(node) {
+    if (!node) return;
+    const hids = node.__almhids;
+    if (hids) { for (let i = 0; i < hids.length; i++) pendingFree.push(hids[i]); }
+    const kids = node.childNodes;
+    if (kids) for (let i = 0; i < kids.length; i++) freeNode(kids[i]);
+    if (node.__h != null) { nodes[node.__h] = null; node.__h = null; }
+  }
+  function flushFree() {
+    if (pendingFree.length === 0) return;
+    const CHUNK = 4096;
+    for (let off = 0; off < pendingFree.length; off += CHUNK) {
+      const n = Math.min(CHUNK, pendingFree.length - off);
+      const mem = new Int32Array(memory.buffer, 0, n);
+      for (let i = 0; i < n; i++) mem[i] = pendingFree[off + i];
+      instance.exports.alm_free_handlers(0, n);
+    }
+    pendingFree.length = 0;
+  }
+  // Attach an event listener whose handler id `hid` the wasm side dispatches
+  // through (the decoder lives in the module's handler table).
+  function attachListener(node, name, hid) {
+    (node.__almhids || (node.__almhids = [])).push(hid);
+    node.addEventListener(name, (ev) => {
+      const t = (ev && ev.target) || {};
+      const payload = { target: { value: t.value || '', checked: !!t.checked } };
+      const bytes = new TextEncoder().encode(JSON.stringify(payload));
+      new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
+      const flags = instance.exports.alm_event(hid, 0, bytes.length) | 0;
+      flushFree();
+      if ((flags & 1) && ev.preventDefault) ev.preventDefault();
+      if ((flags & 2) && ev.stopPropagation) ev.stopPropagation();
+    });
+  }
+  // Build a whole subtree from the module's DOM-build bytecode stream in one
+  // call (opcodes: 0 END, 1 OPEN<tag>, 2 CLOSE, 3 TEXT<s>, 4 ATTR<k><v>,
+  // 5 STYLE<k><v>, 6 PROP<name>, 7 EVENT<name><hid>). Only the root is registered
+  // in the handle table; descendants get handles lazily via dom_child.
+  function domBuild(ptr) {
+    const buf = new Uint8Array(memory.buffer);
+    const dv = new DataView(memory.buffer);
+    let p = ptr;
+    const u32 = () => { const v = dv.getUint32(p, true); p += 4; return v; };
+    const rs = () => { const n = u32(); const s = dec.decode(buf.subarray(p, p + n)); p += n; return s; };
+    const stack = [];
+    let root = null;
+    const put = (nd) => { if (stack.length) stack[stack.length - 1].appendChild(nd); else root = nd; };
+    for (;;) {
+      const op = buf[p++];
+      if (op === 0) break;
+      else if (op === 1) { const el = doc.createElement(rs()); put(el); stack.push(el); }
+      else if (op === 2) stack.pop();
+      else if (op === 3) put(doc.createTextNode(rs()));
+      else if (op === 4) { const k = rs(), v = rs(); stack[stack.length - 1].setAttribute(k, v); }
+      else if (op === 5) { const k = rs(), v = rs(); stack[stack.length - 1].style[k] = v; }
+      else if (op === 6) { const nm = rs(); stack[stack.length - 1][nm] = true; }
+      else if (op === 7) { const nm = rs(); attachListener(stack[stack.length - 1], nm, u32()); }
+    }
+    return reg(root);
+  }
   const outgoing = {}; // port name -> list of JSON strings (matches js_driver)
   const parkedHttp = []; // in-flight HTTP requests: { reqId, url }
 
@@ -32,20 +97,8 @@ function start(wasmPath, doc, clock) {
     dom_set_property: (n, p, l) => { nodes[n][str(p, l)] = true; },
     dom_append_child: (p, c) => { nodes[p].appendChild(nodes[c]); },
     dom_insert_before: (p, n, ref) => { nodes[p].insertBefore(nodes[n], nodes[ref]); },
-    dom_add_event_listener: (n, np, nl, hid) => {
-      const name = str(np, nl);
-      nodes[n].addEventListener(name, (ev) => {
-        // Serialize a minimal event object to JSON and hand it to the module in
-        // the reserved [0, 64KiB) scratch region (bump strings live above it).
-        const t = (ev && ev.target) || {};
-        const payload = { target: { value: t.value || '', checked: !!t.checked } };
-        const bytes = new TextEncoder().encode(JSON.stringify(payload));
-        new Uint8Array(memory.buffer, 0, bytes.length).set(bytes);
-        const flags = instance.exports.alm_event(hid, 0, bytes.length) | 0;
-        if ((flags & 1) && ev.preventDefault) ev.preventDefault();
-        if ((flags & 2) && ev.stopPropagation) ev.stopPropagation();
-      });
-    },
+    dom_add_event_listener: (n, np, nl, hid) => attachListener(nodes[n], str(np, nl), hid),
+    dom_build: (ptr) => domBuild(ptr),
     dom_mount: (r) => { mountedRoot = nodes[r]; doc.body.appendChild(mountedRoot); },
     dom_replace_root: (r) => {
       const parent = mountedRoot ? mountedRoot.parentNode : doc.body;
@@ -53,14 +106,15 @@ function start(wasmPath, doc, clock) {
       else doc.body.appendChild(nodes[r]);
       mountedRoot = nodes[r];
     },
-    dom_child: (p, i) => reg(nodes[p].childNodes[i]),
+    dom_child: (p, i) => { const c = nodes[p].childNodes[i]; return c.__h != null ? c.__h : reg(c); },
     dom_set_text: (n, s, sl) => { nodes[n].textContent = str(s, sl); },
     dom_remove_attribute: (n, k, kl) => { nodes[n].removeAttribute(str(k, kl)); },
-    dom_remove_child: (p, c) => { nodes[p].removeChild(nodes[c]); },
+    dom_remove_child: (p, c) => { const ch = nodes[c]; nodes[p].removeChild(ch); freeNode(ch); },
     dom_replace: (o, nw) => {
       const old = nodes[o];
       if (old.parentNode) old.parentNode.replaceChild(nodes[nw], old);
       if (old === mountedRoot) mountedRoot = nodes[nw];
+      freeNode(old);
     },
     dom_remove_event_listener: () => {},
     host_port_out: (np, nl, jp, jl) => {

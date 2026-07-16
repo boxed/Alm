@@ -236,13 +236,14 @@ const MATH_POW: u32 = 34;
 const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_task_resume
 const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM property true
 const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before ref (ref=0 → append)
+const DOM_BUILD: u32 = 44; // (streamPtr) -> rootHandle — build a whole subtree from a bytecode stream
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
 const HOST_REGEX_COMPILE: u32 = 41; // (patPtr,patLen,flags) -> id (elm/regex)
 const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
 const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
-const N_IMPORTS: u32 = 44;
+const N_IMPORTS: u32 = 45;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -269,6 +270,8 @@ const G_SORT_CMP: u32 = 22; // List.sortWith comparator (set for the sort's dura
 const G_TASKS: u32 = 23; // suspended async tasks: [rest, toMsg, isAttempt] by slot
 const G_NEXT_TASK: u32 = 24; // next async-task slot
 const G_HTTP_RESP: u32 = 25; // the Http.Response for the task being resumed (THttpDone reads it)
+const G_STRLITS: u32 = 26; // interned string-literal pool (ref T_ARR of ref T_STR), built once at instantiation
+const G_CLOSPOOL: u32 = 27; // interned capture-free function closures (ref T_ARR of ref T_CLOS), built once
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -1211,6 +1214,18 @@ struct Codegen<'a> {
     string_data: Vec<u8>,
     /// literal text -> (offset, len) in `string_data`.
     str_offsets: HashMap<String, (u32, u32)>,
+    /// Interned string literals in id order — materialized once into the
+    /// `G_STRLITS` pool so each literal use is a pool read, not a fresh alloc.
+    str_order: Vec<String>,
+    /// literal text -> its index in `str_order` / the `G_STRLITS` pool.
+    str_ids: HashMap<String, u32>,
+    /// Capture-free top-level-function closures interned into the `G_CLOSPOOL`
+    /// pool: one shared, immutable closure per function used first-class, so the
+    /// value is reference-stable across frames (required for `Html.Lazy` memo)
+    /// and not re-allocated on each use. `(func_idx, arity)` in slot order.
+    closure_order: Vec<(u32, u32)>,
+    /// func_idx -> its slot in `closure_order` / the `G_CLOSPOOL` pool.
+    closure_slots: HashMap<u32, u32>,
     /// Synthesized-helper function indices (set once user funcs are counted).
     str_append_idx: u32,
     str_from_int_idx: u32,
@@ -1375,6 +1390,11 @@ struct Codegen<'a> {
     dispatch_msg_idx: u32,
     port_in_idx: u32,
     sub_find_port_idx: u32,
+    force_lazy_idx: u32,
+    same_lazy_idx: u32,
+    stream_ensure_idx: u32,
+    stream_str_idx: u32,
+    serialize_dom_idx: u32,
     html_map_idx: u32,
     compose3_idx: u32,
     cmd_map_idx: u32,
@@ -1399,6 +1419,7 @@ struct Codegen<'a> {
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
     tick_idx: u32,
+    free_handler_idx: u32,
     task_resume_idx: u32,
     dom_event_idx: u32,
     index_byte_idx: u32,
@@ -1450,6 +1471,10 @@ impl<'a> Codegen<'a> {
             next_type: N_FIXED,
             string_data: Vec::new(),
             str_offsets: HashMap::new(),
+            str_order: Vec::new(),
+            str_ids: HashMap::new(),
+            closure_order: Vec::new(),
+            closure_slots: HashMap::new(),
             str_append_idx: 0,
             str_from_int_idx: 0,
             apply1_idx: 0,
@@ -1613,6 +1638,11 @@ impl<'a> Codegen<'a> {
             dispatch_msg_idx: 0,
             port_in_idx: 0,
             sub_find_port_idx: 0,
+            force_lazy_idx: 0,
+            stream_ensure_idx: 0,
+            stream_str_idx: 0,
+            serialize_dom_idx: 0,
+            same_lazy_idx: 0,
             html_map_idx: 0,
             compose3_idx: 0,
             cmd_map_idx: 0,
@@ -1637,6 +1667,7 @@ impl<'a> Codegen<'a> {
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
             tick_idx: 0,
+            free_handler_idx: 0,
             task_resume_idx: 0,
             dom_event_idx: 0,
             index_byte_idx: 0,
@@ -1680,6 +1711,27 @@ impl<'a> Codegen<'a> {
         off
     }
 
+    /// Assign (or look up) a string literal's index in the `G_STRLITS` pool.
+    /// Literals are immutable, so a single shared `T_STR` per distinct text is
+    /// materialized once at instantiation and read at each use — no per-use
+    /// allocation (which `array.new_data` would incur on every evaluation).
+    /// Returns `None` for literals that shouldn't be pooled — long blobs (whose
+    /// bytes would bloat the constant initializer) and any past the pool cap —
+    /// so the caller falls back to the compact data-segment `array.new_data`.
+    /// The cap keeps both `array.new_fixed` counts under the engine's limit.
+    fn str_lit_id(&mut self, s: &str) -> Option<u32> {
+        if let Some(&id) = self.str_ids.get(s) {
+            return Some(id);
+        }
+        if s.len() > 512 || self.str_order.len() >= 8000 {
+            return None;
+        }
+        let id = self.str_order.len() as u32;
+        self.str_order.push(s.to_string());
+        self.str_ids.insert(s.to_string(), id);
+        Some(id)
+    }
+
     fn fn_type(&mut self, arity: u32) -> u32 {
         if let Some(&t) = self.fn_types.get(&arity) {
             return t;
@@ -1714,6 +1766,11 @@ impl<'a> Codegen<'a> {
         self.list_length_idx = next();
         self.list_append_idx = next();
         self.val_eq_idx = next();
+        self.force_lazy_idx = next();
+        self.stream_ensure_idx = next();
+        self.stream_str_idx = next();
+        self.serialize_dom_idx = next();
+        self.same_lazy_idx = next();
         self.list_reverse_idx = next();
         self.list_filter_idx = next();
         self.list_foldr_idx = next();
@@ -1873,6 +1930,7 @@ impl<'a> Codegen<'a> {
         self.reconcile_subs_idx = next();
         self.walk_timers_idx = next();
         self.tick_idx = next();
+        self.free_handler_idx = next();
         self.task_resume_idx = next();
         self.dom_event_idx = next();
         self.index_byte_idx = next();
@@ -2008,6 +2066,11 @@ impl<'a> Codegen<'a> {
         let list_length = self.emit_list_length();
         let list_append = self.emit_list_append();
         let val_eq = self.emit_val_eq();
+        let force_lazy = self.emit_force_lazy();
+        let stream_ensure = self.emit_stream_ensure();
+        let stream_str = self.emit_stream_str();
+        let serialize_dom = self.emit_serialize_dom();
+        let same_lazy = self.emit_same_lazy();
         let list_reverse = self.emit_list_reverse();
         let list_filter = self.emit_list_filter();
         let list_foldr = self.emit_list_foldr();
@@ -2168,6 +2231,7 @@ impl<'a> Codegen<'a> {
         let reconcile_subs = self.emit_reconcile_subs();
         let walk_timers = self.emit_walk_timers();
         let tick = self.emit_tick();
+        let free_handler = self.emit_free_handler();
         let task_resume = self.emit_task_resume();
         let dom_event = self.emit_dom_event();
         let index_byte = self.emit_index_byte();
@@ -2330,6 +2394,11 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // list_length
         funcs.function(ft2); // list_append
         funcs.function(ft2); // val_eq
+        funcs.function(e_e_ty); // force_lazy : (eqref) -> eqref
+        funcs.function(imp_i_v); // stream_ensure : (needBytes) -> ()
+        funcs.function(eqref_to_void_ty); // stream_str : (str) -> ()
+        funcs.function(eqref_to_void_ty); // serialize_dom : (node) -> ()
+        funcs.function(ee_eqref_ty); // same_lazy : (eqref,eqref) -> eqref(i31 bool)
         funcs.function(ft1); // list_reverse
         funcs.function(ft2); // list_filter
         funcs.function(ft3); // list_foldr
@@ -2489,6 +2558,7 @@ impl<'a> Codegen<'a> {
         funcs.function(json_void_ty); // reconcile_subs : () -> ()
         funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
         funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
+        funcs.function(imp_ii_v); // alm_free_handlers : (ptr, count) -> ()
         funcs.function(imp_i_v); // alm_task_resume : (slot) -> ()
         funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
@@ -2556,6 +2626,11 @@ impl<'a> Codegen<'a> {
         code.function(&list_length);
         code.function(&list_append);
         code.function(&val_eq);
+        code.function(&force_lazy);
+        code.function(&stream_ensure);
+        code.function(&stream_str);
+        code.function(&serialize_dom);
+        code.function(&same_lazy);
         code.function(&list_reverse);
         code.function(&list_filter);
         code.function(&list_foldr);
@@ -2715,6 +2790,7 @@ impl<'a> Codegen<'a> {
         code.function(&reconcile_subs);
         code.function(&walk_timers);
         code.function(&tick);
+        code.function(&free_handler);
         code.function(&task_resume);
         code.function(&dom_event);
         code.function(&index_byte);
@@ -2773,10 +2849,13 @@ impl<'a> Codegen<'a> {
         let idxs: Vec<u32> = (0..total_funcs).collect();
         elems.declared(Elements::Functions(std::borrow::Cow::Borrowed(&idxs)));
 
-        // 1 page of linear memory for string marshalling at the JS boundary.
+        // Linear memory for string marshalling at the JS boundary. Start small
+        // (page 0 holds the [0,64KiB) inbound region, page 1 the initial bump
+        // scratch) and let `emit_marshal` grow on demand — reserving 16 pages
+        // up front cost ~1 MiB of idle memory in every measurement.
         let mut mems = MemorySection::new();
         mems.memory(MemoryType {
-            minimum: 16,
+            minimum: 2,
             maximum: None,
             memory64: false,
             shared: false,
@@ -2900,7 +2979,53 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
         );
-
+        // 26=G_STRLITS: the interned string-literal pool. Immutable; built once
+        // at instantiation via a constant `array.new_fixed` of one `T_STR` per
+        // distinct literal (each itself an `array.new_fixed` of its bytes), so
+        // every literal use is a pool read rather than a fresh allocation.
+        {
+            let mut insns: Vec<Instruction> = Vec::new();
+            for s in &self.str_order {
+                for b in s.bytes() {
+                    insns.push(Instruction::I32Const(b as i32));
+                }
+                insns.push(Instruction::ArrayNewFixed {
+                    array_type_index: T_STR,
+                    array_size: s.len() as u32,
+                });
+            }
+            insns.push(Instruction::ArrayNewFixed {
+                array_type_index: T_ARR,
+                array_size: self.str_order.len() as u32,
+            });
+            globals.global(
+                GlobalType { val_type: ref_null_to(T_ARR), mutable: false, shared: false },
+                &ConstExpr::extended(insns),
+            );
+        }
+        // 27=G_CLOSPOOL: one shared closure per capture-free first-class
+        // function, built once at instantiation (`ref.func` is const-valid since
+        // every function is declared above). `applied=0` and `apply1` copies, so
+        // sharing is sound.
+        {
+            let mut insns: Vec<Instruction> = Vec::new();
+            for &(func_idx, arity) in &self.closure_order {
+                insns.push(Instruction::RefFunc(func_idx));
+                insns.push(Instruction::I32Const(arity as i32));
+                insns.push(Instruction::I32Const(0));
+                insns.push(Instruction::I32Const(arity as i32));
+                insns.push(Instruction::ArrayNewDefault(T_ARR));
+                insns.push(Instruction::StructNew(T_CLOS));
+            }
+            insns.push(Instruction::ArrayNewFixed {
+                array_type_index: T_ARR,
+                array_size: self.closure_order.len() as u32,
+            });
+            globals.global(
+                GlobalType { val_type: ref_null_to(T_ARR), mutable: false, shared: false },
+                &ConstExpr::extended(insns),
+            );
+        }
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
         for (name, ty) in [
@@ -2950,6 +3075,7 @@ impl<'a> Codegen<'a> {
             ("host_regex_compile", alm_event_ty), // (patPtr,patLen,flags) -> id (41)
             ("host_regex_find", regex5_ty), // (id,sp,sl,n,out) -> match count (42)
             ("host_regex_split", regex5_ty), // (id,sp,sl,n,out) -> piece count (43)
+            ("dom_build", i_i_ty), // (streamPtr) -> rootHandle — batched subtree build (44)
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -2966,6 +3092,7 @@ impl<'a> Codegen<'a> {
             exports.export("alm_port_in", ExportKind::Func, self.port_in_idx);
             exports.export("alm_http_response", ExportKind::Func, self.http_response_idx);
             exports.export("alm_tick", ExportKind::Func, self.tick_idx);
+            exports.export("alm_free_handlers", ExportKind::Func, self.free_handler_idx);
             exports.export("alm_task_resume", ExportKind::Func, self.task_resume_idx);
             exports.export("alm_frame", ExportKind::Func, self.frame_idx);
             exports.export("alm_dom_event", ExportKind::Func, self.dom_event_idx);
@@ -14451,40 +14578,150 @@ impl<'a> Codegen<'a> {
     /// render_dom(node) : build a real DOM subtree via host imports, returning
     /// the node handle. Attrs → set_attribute/set_style; events register a
     /// handler id; children recurse.
-    fn emit_render_dom(&self) -> Function {
-        // param node(0). locals: tag(1),i(2),h(3),hid(4):i32,
-        //   attr(5),sub(6),key(7),val(8):eqref, hcap(9):i32, hnew(10):ref null T_ARR
-        //   (9/10 grow the handler table when it would overflow).
+    /// stream_ensure(needBytes) : grow linear memory so `[G_BUMP, G_BUMP+need)`
+    /// is in bounds — the DOM-build bytecode stream is written at the bump.
+    fn emit_stream_ensure(&self) -> Function {
+        let mut f = Function::new([]); // param need(0):i32
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Add); // needed end
+        f.instruction(&Instruction::MemorySize(0));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Shl); // capacity bytes
+        f.instruction(&Instruction::I32GtU);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::MemorySize(0));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Shl);
+        f.instruction(&Instruction::I32Sub); // needed - capacity (>0)
+        f.instruction(&Instruction::I32Const(65535));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32ShrU); // round up to pages
+        f.instruction(&Instruction::MemoryGrow(0));
+        f.instruction(&Instruction::Drop);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// stream_str(s) : write `[len:u32][bytes]` for a T_STR at the bump pointer,
+    /// advancing `G_BUMP`. Part of the DOM-build bytecode.
+    fn emit_stream_str(&self) -> Function {
+        // param s(0):eqref. locals str(1):ref T_STR, len(2),i(3):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (2, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        // ensure 4 + len bytes
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::Call(self.stream_ensure_idx));
+        // store len (u32) then advance 4
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Store(mem0()));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        // copy bytes
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Store8(mem0()));
+        bump(&mut f, 3, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::End); // function body
+        f
+    }
+
+    /// serialize_dom(node) : write a vnode subtree as a DOM-build bytecode stream
+    /// at the bump pointer (opcodes: 1 OPEN <tag>, 2 CLOSE, 3 TEXT <s>, 4 ATTR
+    /// <k><v>, 5 STYLE <k><v>, 6 PROP <name>, 7 EVENT <name><hid>). Mirrors
+    /// `render_dom`'s per-node work, but emits bytes for `dom_build` to replay in
+    /// a single host call instead of a boundary crossing per DOM operation. Event
+    /// handlers are still registered in `G_HANDLERS` here (only the addEventListener
+    /// is deferred to the interpreter, via the hid in the EVENT opcode).
+    fn emit_serialize_dom(&self) -> Function {
+        // param node(0). locals: tag(1),len(2),op(3),i(4):i32,
+        //   attr(5),list(6),key(7),val(8):eqref, hcap(9):i32,
+        //   hnew(10):ref null T_ARR, knode(11):eqref
         let mut f = Function::new([
             (4, ValType::I32),
             (4, eqref()),
             (1, ValType::I32),
             (1, ref_null_to(T_ARR)),
+            (1, eqref()),
         ]);
+        // small helper: write one opcode byte at the bump, advancing.
+        let op = |f: &mut Function, code: i32| {
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::Call(self.stream_ensure_idx));
+            f.instruction(&Instruction::GlobalGet(G_BUMP));
+            f.instruction(&Instruction::I32Const(code));
+            f.instruction(&Instruction::I32Store8(mem0()));
+            f.instruction(&Instruction::GlobalGet(G_BUMP));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::GlobalSet(G_BUMP));
+        };
         ctor_tag(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
-        // VTEXT
+        // VLAZY (3): force and serialize the result.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.force_lazy_idx));
+        f.instruction(&Instruction::Call(self.serialize_dom_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VTEXT (0): TEXT <s>
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        op(&mut f, 3);
         ctor_arg0(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(7));
-        self.dom_str(&mut f, 7);
-        f.instruction(&Instruction::Call(DOM_CREATE_TEXT));
-        f.instruction(&Instruction::Else);
-        // VNODE: create element
+        f.instruction(&Instruction::Call(self.stream_str_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VNODE (1) / VKEYED (2): OPEN <tag>, attrs, kids, CLOSE
+        op(&mut f, 1);
         ctor_arg0(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(7)); // tagName
-        self.dom_str(&mut f, 7);
-        f.instruction(&Instruction::Call(DOM_CREATE_ELEMENT));
-        f.instruction(&Instruction::LocalSet(3)); // h
-        // attrs
+        f.instruction(&Instruction::Call(self.stream_str_idx));
+        // --- attrs (arg1) ---
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalSet(6));
         list_len(&mut f, 6);
-        f.instruction(&Instruction::LocalSet(2)); // len
+        f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(4)); // i (hid slot reused as attr counter)
+        f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(4));
@@ -14494,78 +14731,76 @@ impl<'a> Codegen<'a> {
         list_elem(&mut f, 6, 4);
         f.instruction(&Instruction::LocalSet(5)); // attr
         ctor_arg0(&mut f, 5);
-        f.instruction(&Instruction::LocalSet(7)); // attr key/name (arg0)
+        f.instruction(&Instruction::LocalSet(7)); // key/name
         ctor_argn(&mut f, 5, 1);
-        f.instruction(&Instruction::LocalSet(8)); // attr val/decoder (arg1)
-        // AATTR (0)
+        f.instruction(&Instruction::LocalSet(8)); // val/decoder
+        // AATTR (0): ATTR <k> <v>
         ctor_tag(&mut f, 5);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        self.dom_str(&mut f, 7);
-        self.dom_str(&mut f, 8);
-        f.instruction(&Instruction::Call(DOM_SET_ATTRIBUTE));
+        op(&mut f, 4);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
         f.instruction(&Instruction::Else);
-        // ASTYLE (1)
+        // ASTYLE (1): STYLE <k> <v>
         ctor_tag(&mut f, 5);
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        self.dom_str(&mut f, 7);
-        self.dom_str(&mut f, 8);
-        f.instruction(&Instruction::Call(DOM_SET_STYLE));
+        op(&mut f, 5);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
         f.instruction(&Instruction::Else);
-        // ABOOL (3): set the DOM property true when the Bool is true (a bare
-        // boolean attribute); false → nothing. Anything else is an AEVENT.
+        // ABOOL (3): PROP <name> if the Bool is true
         ctor_tag(&mut f, 5);
         f.instruction(&Instruction::I32Const(3));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8)); // the Bool (arg1)
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3)); // node
-        self.dom_str(&mut f, 7); // property name ptr,len
-        f.instruction(&Instruction::Call(DOM_SET_PROPERTY));
+        op(&mut f, 6);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Else);
-        // ANONE (4): a no-op attribute (empty classList) — skip. Otherwise AEVENT.
+        // ANONE (4): skip. Otherwise AEVENT (2): register handler, emit EVENT.
         ctor_tag(&mut f, 5);
         f.instruction(&Instruction::I32Const(4));
         f.instruction(&Instruction::I32Ne);
         f.instruction(&Instruction::If(BlockType::Empty));
-        // AEVENT (2): register [decoder, kind] at a fresh hid, add listener.
-        // kind = args[2] if present (advanced on-handlers), else i31(0) plain.
-        // Handler ids are allocated per new node and not reclaimed, so the table
-        // grows on demand (a large render or many updates would otherwise blow
-        // past the initial capacity). Double it whenever the next id won't fit.
+        // grow G_HANDLERS if the next id won't fit
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalTee(9)); // hcap = old length
+        f.instruction(&Instruction::LocalTee(9));
         f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
-        f.instruction(&Instruction::I32LeS); // hcap <= next id → grow
+        f.instruction(&Instruction::I32LeS);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Mul);
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
-        f.instruction(&Instruction::LocalSet(10)); // hnew
-        f.instruction(&Instruction::LocalGet(10)); // dst
-        f.instruction(&Instruction::I32Const(0)); // dst offset
-        f.instruction(&Instruction::GlobalGet(G_HANDLERS)); // src
-        f.instruction(&Instruction::I32Const(0)); // src offset
-        f.instruction(&Instruction::LocalGet(9)); // len = old length
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
         f.instruction(&Instruction::LocalGet(10));
         f.instruction(&Instruction::GlobalSet(G_HANDLERS));
         f.instruction(&Instruction::End);
+        // G_HANDLERS[hid] = [decoder, kind]
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
-        f.instruction(&Instruction::LocalGet(8)); // decoder
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
@@ -14573,30 +14808,39 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(3));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        ctor_argn(&mut f, 5, 2); // kind i31
+        ctor_argn(&mut f, 5, 2);
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        f.instruction(&Instruction::LocalGet(3)); // node
-        self.dom_str(&mut f, 7); // event name
-        f.instruction(&Instruction::GlobalGet(G_NEXT_HID)); // hid
-        f.instruction(&Instruction::Call(DOM_ADD_EVENT_LISTENER));
+        // EVENT <name> <hid>
+        op(&mut f, 7);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.stream_str_idx));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::Call(self.stream_ensure_idx));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::I32Store(mem0()));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
         f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
-        f.instruction(&Instruction::End); // close `tag != 4` (skip ANONE)
-        f.instruction(&Instruction::End); // close ABOOL/AEVENT if-else
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // tag != 4
+        f.instruction(&Instruction::End); // ABOOL else
+        f.instruction(&Instruction::End); // ASTYLE else
+        f.instruction(&Instruction::End); // AATTR else
         bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // kids
+        // --- kids (arg2) ---
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalSet(6));
         list_len(&mut f, 6);
@@ -14609,32 +14853,60 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(3));
-        // node = (VKEYED) ? kid[1] : kid
+        // knode = (VKEYED) ? kid[1] : kid
         list_elem(&mut f, 6, 4);
-        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalSet(11));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(11));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Call(self.render_dom_idx));
-        f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
+        f.instruction(&Instruction::Call(self.serialize_dom_idx));
         bump(&mut f, 4, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::End); // top-level if
-        f.instruction(&Instruction::End); // function
+        op(&mut f, 2); // CLOSE
+        f.instruction(&Instruction::End); // function body
         f
     }
+
+    /// render_dom(node) : build a real DOM subtree and return its root handle.
+    /// Serializes the subtree to a bytecode stream at the bump, then builds it in
+    /// a single `dom_build` host call — one boundary crossing per subtree instead
+    /// of one per DOM operation. The bump is restored afterward (the stream is
+    /// transient scratch).
+    fn emit_render_dom(&self) -> Function {
+        let mut f = Function::new([(1, ValType::I32)]); // param node(0); saved(1)
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.serialize_dom_idx));
+        // END opcode (0)
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::Call(self.stream_ensure_idx));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Store8(mem0()));
+        f.instruction(&Instruction::GlobalGet(G_BUMP));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        // build the subtree in one host call, then restore the bump
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(DOM_BUILD));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::GlobalSet(G_BUMP));
+        f.instruction(&Instruction::End); // function body
+        f
+    }
+
 
     /// Reset the per-render scratch (bump + handler ids) and set the model /
     /// handler-table globals; shared by browser_start and rerender.
@@ -14667,6 +14939,59 @@ impl<'a> Codegen<'a> {
         // params dom(0):i32, old(1),new(2):eqref. locals: t(3),olen(4),nlen(5),
         //   i(6),common(7),cdom(8):i32, attr(9),osub(10),nsub(11),key(12),val(13):eqref
         let mut f = Function::new([(6, ValType::I32), (5, eqref())]);
+        // --- VLAZY (tag 3) memoization, before the generic identity check ---
+        // If both sides are lazy with reference-identical f and args, the subtree
+        // is unchanged: carry the memoized forced result to the new node and
+        // return without rendering or diffing (this is what lets an unchanged
+        // `lazy` row skip its rebuild entirely). Otherwise force the lazy side(s)
+        // and fall through to the normal diff on the underlying vdom.
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.same_lazy_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // new.args[2] = old.args[2]  (transfer the memoized forced result)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // force old if lazy
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.force_lazy_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::End);
+        // force new if lazy
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.force_lazy_idx));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::End);
         // identical subtree → nothing to do
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(2));
@@ -17584,7 +17909,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // if all keys matched: patch in place and return
+        // if all keys matched: patch in place and return. Compare each child's
+        // old/new vnode FIRST and only fetch the DOM node + patch when they
+        // differ — an unchanged child (the common case: 999/1000 on select)
+        // then costs one val_eq and zero wasm↔JS boundary crossings, instead of
+        // a dom_child fetch + a patch call that re-compares and does nothing.
+        // Locals 27/28 hold the old/new child vnode.
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
@@ -17595,19 +17925,32 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::Call(DOM_CHILD));
         list_elem(&mut f, 1, 5); // oldk[i][1]
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(27));
         list_elem(&mut f, 2, 5); // newk[i][1]
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(28));
+        // if old and new differ: patch(dom_child(dom,i), old, new)
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&Instruction::LocalGet(28));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&Instruction::LocalGet(28));
         f.instruction(&Instruction::Call(self.patch_idx));
         f.instruction(&Instruction::Drop);
+        f.instruction(&Instruction::End);
         bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
@@ -18127,6 +18470,59 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f
+    }
+
+    /// alm_free_handlers(ptr, count) : null out `G_HANDLERS[hid]` for each of the
+    /// `count` handler ids stored as little-endian i32s at linear-memory `ptr`,
+    /// so the decoder closures they held can be reclaimed. Called by the host —
+    /// batched in one call — when DOM nodes carrying those handlers are removed;
+    /// handlers live in a global table (not on the node), so without this they
+    /// accumulate for every node ever rendered. Bounds-checked per id.
+    fn emit_free_handler(&self) -> Function {
+        // params ptr(0),count(1):i32. locals i(2),len(3),hid(4):i32
+        let mut f = Function::new([(3, ValType::I32)]);
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3)); // len
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // hid = load_i32(ptr + i*4)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Load(mem0()));
+        f.instruction(&Instruction::LocalSet(4));
+        // if hid < len: G_HANDLERS[hid] = null
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32LtU);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function body
         f
     }
 
@@ -19156,6 +19552,157 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// force_lazy(v) : force a VLAZY node (T_CTOR tag 3, args `[f, argsArr,
+    /// forced]`) to its underlying vdom, memoizing the result in the `forced`
+    /// slot. Applies `f` to each element of `argsArr` (once). Mirrors the JS
+    /// runtime's `_VDom_forceLazy`.
+    fn emit_force_lazy(&self) -> Function {
+        // param v(0):eqref. locals: args(1),argsArr(2):ref T_ARR; result(3):eqref; i(4),n(5):i32
+        let mut f = Function::new([(2, ref_to(T_ARR)), (1, eqref()), (2, ValType::I32)]);
+        // args = v.field1
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(1));
+        // if args[2] (forced) non-null → return it
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // result = args[0] (f); argsArr = args[1]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        // for i in 0..n: result = apply1(result, argsArr[i])
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // args[2] = result (memoize); return result
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// same_lazy(a, b) : true iff two VLAZY nodes have a reference-identical
+    /// function and reference-identical args (elementwise) — the condition under
+    /// which the memoized subtree can be reused untouched. Reference equality
+    /// (not structural) matches Elm's `Html.Lazy` semantics. Returns an `i31`
+    /// Bool.
+    fn emit_same_lazy(&self) -> Function {
+        // params a(0),b(1):eqref. locals: aA(2),bA(3):ref T_ARR; i(4),n(5):i32
+        let mut f = Function::new([(2, ref_to(T_ARR)), (2, ValType::I32)]);
+        let false_ret = |f: &mut Function| {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::RefI31);
+            f.instruction(&Instruction::Return);
+        };
+        // a.args[0] ref.eq b.args[0]  (same function)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefEq);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        // aA = a.args[1], bA = b.args[1]
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(3));
+        // lengths must match
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        // for i in 0..n: aA[i] ref.eq bA[i]
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefEq);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        false_ret(&mut f);
+        f.instruction(&Instruction::End);
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// val_eq(a, b) : structural equality, returning a Bool (`i31`). Dispatches
     /// on the runtime heap type; recurses into cons cells, ctor args, and
     /// tuple/record arrays.
@@ -19453,6 +20000,34 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CLOS));
     }
 
+    /// A capture-free top-level-function closure used first-class: read the one
+    /// shared, immutable instance from `G_CLOSPOOL` instead of allocating a fresh
+    /// closure each use. This makes the value reference-stable across frames
+    /// (so `Html.Lazy` memoization can reuse it) and cuts per-use allocation.
+    /// Safe to share because `apply1` copies the args array rather than mutating
+    /// it. Falls back to a fresh closure past the pool cap.
+    fn emit_interned_closure(&mut self, func_idx: u32, arity: u32, f: &mut Function) {
+        let slot = match self.closure_slots.get(&func_idx) {
+            Some(&s) => Some(s),
+            None if self.closure_order.len() < 8000 => {
+                let s = self.closure_order.len() as u32;
+                self.closure_order.push((func_idx, arity));
+                self.closure_slots.insert(func_idx, s);
+                Some(s)
+            }
+            None => None,
+        };
+        match slot {
+            Some(s) => {
+                f.instruction(&Instruction::GlobalGet(G_CLOSPOOL));
+                f.instruction(&Instruction::I32Const(s as i32));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_CLOS)));
+            }
+            None => self.emit_make_closure(func_idx, arity, f),
+        }
+    }
+
     /// Emit one function: N eqref params -> eqref body.
     fn emit_fn(&mut self, f: &crate::ir::mono::TypedFn) -> Result<Function, String> {
         let nparams = f.params.len() as u32;
@@ -19492,13 +20067,23 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructNew(T_FLOAT));
             }
             TypedKind::Str(s) => {
-                let (off, len) = self.intern_str(s);
-                f.instruction(&Instruction::I32Const(off as i32));
-                f.instruction(&Instruction::I32Const(len as i32));
-                f.instruction(&Instruction::ArrayNewData {
-                    array_type_index: T_STR,
-                    array_data_index: 0,
-                });
+                // Read the shared, pre-built literal from the pool instead of
+                // allocating a fresh T_STR (array.new_data) on every evaluation.
+                // Long/overflow literals fall back to the data segment.
+                if let Some(id) = self.str_lit_id(s) {
+                    f.instruction(&Instruction::GlobalGet(G_STRLITS));
+                    f.instruction(&Instruction::I32Const(id as i32));
+                    f.instruction(&Instruction::ArrayGet(T_ARR));
+                    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_STR)));
+                } else {
+                    let (off, len) = self.intern_str(s);
+                    f.instruction(&Instruction::I32Const(off as i32));
+                    f.instruction(&Instruction::I32Const(len as i32));
+                    f.instruction(&Instruction::ArrayNewData {
+                        array_type_index: T_STR,
+                        array_data_index: 0,
+                    });
+                }
             }
             TypedKind::Chr(c) => {
                 f.instruction(&Instruction::I32Const(*c as i32));
@@ -19679,8 +20264,9 @@ impl<'a> Codegen<'a> {
                 if arity == 0 {
                     f.instruction(&Instruction::Call(idx));
                 } else {
-                    // A function used as a first-class value → a closure.
-                    self.emit_make_closure(idx, arity, f);
+                    // A function used as a first-class value → a shared,
+                    // reference-stable closure (interned so Html.Lazy can memo).
+                    self.emit_interned_closure(idx, arity, f);
                 }
             }
             TypedKind::Call(func, args) => self.emit_call(func, args, ctx, f)?,
@@ -22116,13 +22702,32 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // Html.Lazy.lazyN f a…: no memoization — just apply f to the args.
-            ("Html.Lazy", n) if n.starts_with("lazy") => {
+            // VirtualDom.lazyN f a… — no memoization, just apply f to the args.
+            ("VirtualDom", n) if n.starts_with("lazy") => {
                 self.emit_expr(&args[0], ctx, f)?; // f
                 for a in &args[1..] {
                     self.emit_expr(a, ctx, f)?;
                     f.instruction(&Instruction::Call(self.apply1_idx));
                 }
+            }
+            // Html.Lazy.lazyN f a… → VLAZY node: T_CTOR tag 3 with args
+            // `[f, [a…], forced]`. The thunk is not run now; `force_lazy` runs it
+            // on first render, and `patch`/`same_lazy` reuse the memoized result
+            // when the (reference-identical) f and args are unchanged — so an
+            // unchanged `lazy` subtree costs one reference check, not a rebuild.
+            ("Html.Lazy", n) | ("VirtualDom", n) if n.starts_with("lazy") => {
+                f.instruction(&Instruction::I32Const(3)); // VLAZY tag
+                self.emit_expr(&args[0], ctx, f)?; // f
+                for a in &args[1..] {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::ArrayNewFixed {
+                    array_type_index: T_ARR,
+                    array_size: (args.len() - 1) as u32,
+                });
+                f.instruction(&Instruction::RefNull(eq_heap())); // forced = null
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Html.Keyed.node tag attrs keyed → VKEYED[tag, attrs, keyed] (tag 2).
             // Keys are preserved (not stripped) so `patch` can reconcile by key.
@@ -22888,11 +23493,18 @@ impl<'a> Codegen<'a> {
             Str(lit) => {
                 // scrutinee == literal, via structural equality; val_eq returns
                 // an i31 Bool, unwrapped here to the i32 the test chain expects.
-                let (off, len) = self.intern_str(lit);
                 f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::I32Const(off as i32));
-                f.instruction(&Instruction::I32Const(len as i32));
-                f.instruction(&Instruction::ArrayNewData { array_type_index: T_STR, array_data_index: 0 });
+                if let Some(id) = self.str_lit_id(lit) {
+                    f.instruction(&Instruction::GlobalGet(G_STRLITS));
+                    f.instruction(&Instruction::I32Const(id as i32));
+                    f.instruction(&Instruction::ArrayGet(T_ARR));
+                    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_STR)));
+                } else {
+                    let (off, len) = self.intern_str(lit);
+                    f.instruction(&Instruction::I32Const(off as i32));
+                    f.instruction(&Instruction::I32Const(len as i32));
+                    f.instruction(&Instruction::ArrayNewData { array_type_index: T_STR, array_data_index: 0 });
+                }
                 f.instruction(&Instruction::Call(self.val_eq_idx));
                 f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
                     shared: false,
