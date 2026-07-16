@@ -626,6 +626,21 @@ fn string_case_patterns() {
     );
 }
 
+// A self-recursive local function whose recursive call sits inside a nested
+// lambda (`List.map (\k -> ... go (n-1)) ...`): the direct self-call fast path
+// can't cross the lambda boundary, so `go` must be bound to a real closure.
+#[test]
+fn self_recursion_through_lambda() {
+    assert_str_prog_js_wasm(
+        "self_rec_lambda",
+        "module Test exposing (main)\n\n\
+         render : Int -> String\n\
+         render depth =\n    let\n        go n =\n            if n <= 0 then\n                \".\"\n            else\n                String.concat (List.map (\\k -> String.fromInt k ++ go (n - 1)) [ n ])\n    in\n    go depth\n\n\
+         main : String\n\
+         main =\n    render 3\n",
+    );
+}
+
 // Mutually-recursive local let functions (isEven/isOdd reference each other):
 // they must share a capture set so each can call the other.
 #[test]

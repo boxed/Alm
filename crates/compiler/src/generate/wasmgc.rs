@@ -345,6 +345,113 @@ fn list_elem_type(tipe: Option<&can::Type>) -> Option<&can::Type> {
     }
 }
 
+/// Does `name` appear in `e` anywhere OTHER than as the callee of a saturated
+/// call (`name a1 .. a_nparams`)? Saturated self-calls use the direct `SelfFn`
+/// fast path and need no closure; any other occurrence (a bare value, a partial
+/// application, a use inside a nested lambda) needs the name bound to a closure.
+fn name_used_as_value(e: &TypedExpr, name: &str, nparams: usize) -> bool {
+    use TypedKind::*;
+    match &e.kind {
+        Local(n) | Global(n) => n.as_str() == name,
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Foreign(_, _) | Ctor(_, _, _)
+        | Accessor(_) => false,
+        Negate(x) | Access(x, _) => name_used_as_value(x, name, nparams),
+        Binop(_, _, _, l, r) => {
+            name_used_as_value(l, name, nparams) || name_used_as_value(r, name, nparams)
+        }
+        List(xs) => xs.iter().any(|x| name_used_as_value(x, name, nparams)),
+        Call(func, args) => {
+            let callee_is_self_sat = matches!(&func.kind, Local(n) | Global(n) if n.as_str() == name)
+                && args.len() == nparams;
+            let callee = if callee_is_self_sat {
+                false
+            } else {
+                name_used_as_value(func, name, nparams)
+            };
+            callee || args.iter().any(|a| name_used_as_value(a, name, nparams))
+        }
+        If(bs, ow) => {
+            bs.iter().any(|(c, t)| {
+                name_used_as_value(c, name, nparams) || name_used_as_value(t, name, nparams)
+            }) || name_used_as_value(ow, name, nparams)
+        }
+        // Inside a nested lambda the direct SelfFn fast path does not apply
+        // (the lambda is its own lifted function), so ANY occurrence there — even
+        // a saturated call — must be served by the captured closure.
+        Lambda(_, body) => name_occurs(body, name),
+        Let(decls, body) => {
+            decls.iter().any(|d| let_decl_uses(d, name, nparams))
+                || name_used_as_value(body, name, nparams)
+        }
+        Case(scrut, branches) => {
+            name_used_as_value(scrut, name, nparams)
+                || branches.iter().any(|(_, b)| name_used_as_value(b, name, nparams))
+        }
+        Update(x, fields) => {
+            name_used_as_value(x, name, nparams)
+                || fields.iter().any(|(_, v)| name_used_as_value(v, name, nparams))
+        }
+        Record(fields) => fields.iter().any(|(_, v)| name_used_as_value(v, name, nparams)),
+        Tuple(a, b, c) => {
+            name_used_as_value(a, name, nparams)
+                || name_used_as_value(b, name, nparams)
+                || c.as_ref().map_or(false, |x| name_used_as_value(x, name, nparams))
+        }
+    }
+}
+
+/// Does `name` occur anywhere in `e` (as a `Local`/`Global` reference)?
+fn name_occurs(e: &TypedExpr, name: &str) -> bool {
+    use TypedKind::*;
+    match &e.kind {
+        Local(n) | Global(n) => n.as_str() == name,
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Foreign(_, _) | Ctor(_, _, _)
+        | Accessor(_) => false,
+        Negate(x) | Access(x, _) => name_occurs(x, name),
+        Binop(_, _, _, l, r) => name_occurs(l, name) || name_occurs(r, name),
+        List(xs) => xs.iter().any(|x| name_occurs(x, name)),
+        Call(func, args) => {
+            name_occurs(func, name) || args.iter().any(|a| name_occurs(a, name))
+        }
+        If(bs, ow) => {
+            bs.iter().any(|(c, t)| name_occurs(c, name) || name_occurs(t, name))
+                || name_occurs(ow, name)
+        }
+        Lambda(_, body) => name_occurs(body, name),
+        Let(decls, body) => {
+            decls.iter().any(|d| match d {
+                TypedLetDecl::Def { body, .. } => name_occurs(body, name),
+                TypedLetDecl::Destruct(_, ex) => name_occurs(ex, name),
+                TypedLetDecl::Recursive(ds) => ds.iter().any(|d2| match d2 {
+                    TypedLetDecl::Def { body, .. } => name_occurs(body, name),
+                    TypedLetDecl::Destruct(_, ex) => name_occurs(ex, name),
+                    TypedLetDecl::Recursive(_) => false,
+                }),
+            }) || name_occurs(body, name)
+        }
+        Case(scrut, branches) => {
+            name_occurs(scrut, name) || branches.iter().any(|(_, b)| name_occurs(b, name))
+        }
+        Update(x, fields) => {
+            name_occurs(x, name) || fields.iter().any(|(_, v)| name_occurs(v, name))
+        }
+        Record(fields) => fields.iter().any(|(_, v)| name_occurs(v, name)),
+        Tuple(a, b, c) => {
+            name_occurs(a, name)
+                || name_occurs(b, name)
+                || c.as_ref().map_or(false, |x| name_occurs(x, name))
+        }
+    }
+}
+
+fn let_decl_uses(d: &TypedLetDecl, name: &str, nparams: usize) -> bool {
+    match d {
+        TypedLetDecl::Def { body, .. } => name_used_as_value(body, name, nparams),
+        TypedLetDecl::Destruct(_, ex) => name_used_as_value(ex, name, nparams),
+        TypedLetDecl::Recursive(ds) => ds.iter().any(|d| let_decl_uses(d, name, nparams)),
+    }
+}
+
 /// Number of leading `->` arrows in a type — the arity of a function value.
 fn lambda_arity(t: &can::Type) -> usize {
     let mut n = 0;
@@ -2902,7 +3009,13 @@ impl<'a> Codegen<'a> {
             .filter(|(p, _)| !matches!(p.value, can::Pattern_::Var(_) | can::Pattern_::Anything))
             .map(|(p, _)| pat_size(p))
             .sum();
-        let extra = count_bindings(body) + param_dtor;
+        // If the body uses its own name as a value (not just as a saturated
+        // self-call) — e.g. inside a nested lambda `\e -> errString e`, or passed
+        // to a HOF — it needs a real closure bound to that name. Reserve one more
+        // local for it (only when needed, so hot tail-loops pay nothing).
+        let self_val = self_name.filter(|n| name_used_as_value(body, n, nparams as usize));
+        let self_extra = if self_val.is_some() { 1 } else { 0 };
+        let extra = count_bindings(body) + param_dtor + self_extra;
         let mut lf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
         let mut lctx = FnCtx::new();
         lctx.next_local = total;
@@ -2918,6 +3031,24 @@ impl<'a> Codegen<'a> {
         }
         for (i, (p, ty)) in params.iter().enumerate() {
             self.bind_pat(p, ncap + i as u32, Some(ty), &mut lctx, &mut lf)?;
+        }
+        // Build the self-closure (captures pre-applied) into the reserved local
+        // and bind the name, so value-uses resolve while calls stay direct.
+        if let Some(n) = self_val {
+            let self_slot = total + extra - 1;
+            lf.instruction(&Instruction::RefFunc(lidx));
+            lf.instruction(&Instruction::I32Const(total as i32));
+            lf.instruction(&Instruction::I32Const(ncap as i32));
+            for c in 0..ncap {
+                lf.instruction(&Instruction::LocalGet(c));
+            }
+            for _ in ncap..total {
+                lf.instruction(&Instruction::RefNull(eq_heap()));
+            }
+            lf.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: total });
+            lf.instruction(&Instruction::StructNew(T_CLOS));
+            lf.instruction(&Instruction::LocalSet(self_slot));
+            lctx.scope.push((n.to_string(), self_slot));
         }
         self.emit_tail(body, &mut lctx, &mut lf)?;
         lf.instruction(&Instruction::End);
@@ -17908,6 +18039,11 @@ impl<'a> Codegen<'a> {
             // Operators reachable as saturated kernels (e.g. via `(|>)` used
             // first-class then applied): delegate to the binop lowering.
             ("Basics", "append") => self.emit_binop("++", &args[0], &args[1], ctx, f)?,
+            ("Basics", "and") => self.emit_binop("&&", &args[0], &args[1], ctx, f)?,
+            ("Basics", "or") => self.emit_binop("||", &args[0], &args[1], ctx, f)?,
+            // Basics.never : Never -> a. Never is uninhabited, so this is never
+            // actually reached; pass the (impossible) argument through.
+            ("Basics", "never") => self.emit_expr(&args[0], ctx, f)?,
             ("Basics", "apR") => self.emit_binop("|>", &args[0], &args[1], ctx, f)?,
             ("Basics", "apL") => self.emit_binop("<|", &args[0], &args[1], ctx, f)?,
             ("Basics", "composeR") => self.emit_binop(">>", &args[0], &args[1], ctx, f)?,
@@ -18386,11 +18522,14 @@ impl<'a> Codegen<'a> {
             }
             // Html.Keyed.node tag attrs keyed → VKEYED[tag, attrs, keyed] (tag 2).
             // Keys are preserved (not stripped) so `patch` can reconcile by key.
-            ("Html.Keyed", "node") => {
+            ("Html.Keyed", "node") | ("VirtualDom", "keyedNode") | ("VirtualDom", "keyedNodeNS") => {
+                // keyedNodeNS has a leading namespace arg; tag/attrs/keyed are the
+                // trailing three (namespace doesn't affect serialization).
+                let base = args.len() - 3;
                 f.instruction(&Instruction::I32Const(2)); // VKEYED
-                self.emit_expr(&args[0], ctx, f)?; // tag
-                self.emit_expr(&args[1], ctx, f)?; // attrs
-                self.emit_expr(&args[2], ctx, f)?; // keyed children (key, node) pairs
+                self.emit_expr(&args[base], ctx, f)?; // tag
+                self.emit_expr(&args[base + 1], ctx, f)?; // attrs
+                self.emit_expr(&args[base + 2], ctx, f)?; // keyed (key, node) pairs
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
@@ -18555,10 +18694,12 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // Body builders — the host shim ignores request bodies, so any
-            // placeholder works (a unit ctor). Evaluate args for side-effect-free
-            // effect but discard.
-            ("Http", "stringBody") | ("Http", "jsonBody") | ("Http", "bytesBody") => {
+            // Body builders + Http.header — the host shim ignores request bodies
+            // and headers, so any placeholder works (a unit ctor).
+            ("Http", "stringBody")
+            | ("Http", "jsonBody")
+            | ("Http", "bytesBody")
+            | ("Http", "header") => {
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
                 f.instruction(&Instruction::StructNew(T_CTOR));
