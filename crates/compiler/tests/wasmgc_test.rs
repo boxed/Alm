@@ -400,6 +400,38 @@ fn random_generators() {
 }
 
 #[test]
+fn random_independent_seed() {
+    assert_str_prog(
+        "random_independent_seed",
+        "module Test exposing (main)\n\n\
+         import Random\n\n\
+         main : String\n\
+         main =\n\
+         \x20   let\n\
+         \x20       ( s1, seed1 ) = Random.step Random.independentSeed (Random.initialSeed 99)\n\
+         \x20       ( a, _ ) = Random.step (Random.int 0 1000000) s1\n\
+         \x20       ( b, _ ) = Random.step (Random.int 0 1000000) seed1\n\
+         \x20   in\n\
+         \x20   String.fromInt a ++ \",\" ++ String.fromInt b\n",
+    );
+}
+
+#[test]
+fn string_indexes() {
+    assert_str_prog(
+        "string_indexes",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   [ String.indexes \"ab\" \"abXabYabab\" |> List.map String.fromInt |> String.join \",\"\n\
+         \x20   , String.indexes \"\" \"xyz\" |> List.length |> String.fromInt\n\
+         \x20   , String.indexes \"z\" \"xyz\" |> List.map String.fromInt |> String.join \",\"\n\
+         \x20   ]\n\
+         \x20       |> String.join \"|\"\n",
+    );
+}
+
+#[test]
 fn random_uniform_weighted() {
     assert_str_prog(
         "random_uniform_weighted",

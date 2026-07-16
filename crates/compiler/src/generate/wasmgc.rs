@@ -976,6 +976,7 @@ struct Codegen<'a> {
     str_pad_both_idx: u32,
     class_list_idx: u32,
     attr_property_idx: u32,
+    str_indexes_idx: u32,
     list_intersperse_idx: u32,
     list_map3_idx: u32,
     list_map4_idx: u32,
@@ -1175,6 +1176,7 @@ impl<'a> Codegen<'a> {
             str_pad_both_idx: 0,
             class_list_idx: 0,
             attr_property_idx: 0,
+            str_indexes_idx: 0,
             list_intersperse_idx: 0,
             list_map3_idx: 0,
             list_map4_idx: 0,
@@ -1399,6 +1401,7 @@ impl<'a> Codegen<'a> {
         self.str_pad_both_idx = next();
         self.class_list_idx = next();
         self.attr_property_idx = next();
+        self.str_indexes_idx = next();
         self.list_intersperse_idx = next();
         self.list_map3_idx = next();
         self.list_map4_idx = next();
@@ -1657,6 +1660,7 @@ impl<'a> Codegen<'a> {
         let str_pad_both = self.emit_str_pad_both();
         let class_list = self.emit_class_list();
         let attr_property = self.emit_attr_property();
+        let str_indexes = self.emit_str_indexes();
         let list_intersperse = self.emit_list_intersperse();
         let list_map3 = self.emit_list_map3();
         let list_map4 = self.emit_list_mapn(4, self.list_map4_idx);
@@ -1941,6 +1945,7 @@ impl<'a> Codegen<'a> {
         funcs.function(ft3); // str_pad_both
         funcs.function(ft1); // class_list
         funcs.function(ft2); // attr_property
+        funcs.function(ft2); // str_indexes
         funcs.function(ft2); // list_intersperse
         funcs.function(ft4); // list_map3
         funcs.function(ft5); // list_map4
@@ -2136,6 +2141,7 @@ impl<'a> Codegen<'a> {
         code.function(&str_pad_both);
         code.function(&class_list);
         code.function(&attr_property);
+        code.function(&str_indexes);
         code.function(&list_intersperse);
         code.function(&list_map3);
         code.function(&list_map4);
@@ -3113,6 +3119,13 @@ impl<'a> Codegen<'a> {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
             f.instruction(&Instruction::F64Const(v.into()));
             f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
+        }
+        // Random.independentSeed : a nullary Generator (ctor tag 14).
+        if module == "Random" && name == "independentSeed" {
+            f.instruction(&Instruction::I32Const(14));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
         // Random.minInt / maxInt : the 32-bit signed bounds, as boxed Ints.
@@ -4396,6 +4409,49 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
 
+        // GIndep (14): Random.independentSeed. Three `int 0 0xFFFFFFFF` draws
+        // (power-of-two → just peel); newSeed = nextSeed{a:r1, b:1|(r2^r3)}.
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(14));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::LocalSet(6)); // r1
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5)); // s1
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::LocalSet(7)); // r2
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5)); // s2
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_peel_idx));
+        f.instruction(&Instruction::LocalSet(8)); // r3
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalSet(5)); // s3 (result seed)
+        // inner seed = [box(r1), box((1 | (r2^r3)) & 0xFFFFFFFF)]
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Xor);
+        f.instruction(&Instruction::I64Or);
+        f.instruction(&Instruction::I64Const(0xFFFF_FFFF));
+        f.instruction(&Instruction::I64And);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        // newSeed = nextSeed(inner)
+        f.instruction(&Instruction::Call(self.random_next_seed_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
         // GAndThen (6): t = step(g, seed); step(f t.0, t.1)
         f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::I32Const(6));
@@ -5234,6 +5290,95 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// str_indexes(sub, s) : ascending list of the byte offsets where `sub`
+    /// occurs in `s` (empty `sub` → []). Byte-indexed — exact for ASCII (which
+    /// is where it's used); JS returns UTF-16 indices for astral text.
+    fn emit_str_indexes(&self) -> Function {
+        // params sub(0), s(1). locals: subS(2),sS(3):ref T_STR;
+        //   sublen(4),slen(5),i(6),k(7),ok(8):i32; acc(9):eqref
+        let mut f = Function::new([(2, ref_to(T_STR)), (5, ValType::I32), (1, eqref())]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4)); // sublen
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5)); // slen
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(9)); // acc
+        // empty sub → []
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // while i + sublen <= slen
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::BrIf(1));
+        // ok = 1; for k in 0..sublen: if sS[i+k] != subS[k] { ok=0; break }
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3)); // sS
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(2)); // subS
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::Br(2)); // break inner
+        f.instruction(&Instruction::End);
+        bump(&mut f, 7, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // if ok: acc = cons(box(i), acc)
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // reverse (we prepended) → ascending
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.list_reverse_idx));
         f.instruction(&Instruction::End);
         f
     }
@@ -16619,6 +16764,11 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 self.emit_expr(&args[2], ctx, f)?;
                 f.instruction(&Instruction::Call(self.str_slice_idx));
+            }
+            ("String", "indexes") | ("String", "indices") => {
+                self.emit_expr(&args[0], ctx, f)?; // sub
+                self.emit_expr(&args[1], ctx, f)?; // s
+                f.instruction(&Instruction::Call(self.str_indexes_idx));
             }
             ("String", "pad") => {
                 self.emit_expr(&args[0], ctx, f)?;
