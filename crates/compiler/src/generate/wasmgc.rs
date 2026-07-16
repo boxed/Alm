@@ -14874,11 +14874,29 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::ArrayGet(T_ARR));
             f.instruction(&Instruction::LocalSet(2));
         };
-        // G_KIND = program tag (0 sandbox, 1 element, 2 document, 3 application)
+        // G_KIND = program tag (0 sandbox, 1 element, 2 document, 3 application,
+        // 4 Platform.worker)
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
         f.instruction(&Instruction::GlobalSet(G_KIND));
+        // Platform.worker (tag 4): headless — {init:0, subscriptions:1, update:2},
+        // no view. init(()) → (model, cmd); wire update/subs, skip rendering.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        field(&mut f, 0); // init
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // flags = ()
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        unpack_tuple(&mut f);
+        reload_rec(&mut f);
+        field(&mut f, 2);
+        f.instruction(&Instruction::GlobalSet(G_UPDATE));
+        field(&mut f, 1);
+        f.instruction(&Instruction::GlobalSet(G_SUBS));
+        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::I32Const(3));
         f.instruction(&Instruction::I32Eq);
@@ -14938,6 +14956,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_VIEW));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // close the worker (kind==4) branch
         // handlers = new T_ARR(MAX_HANDLERS)
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -14962,6 +14981,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(MAX_HANDLERS as i32));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::GlobalSet(G_FRAMES));
+        // Rendering/mount is skipped for Platform.worker (kind 4): headless, no view.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
         Self::emit_reset_render(&mut f);
         // prev = document/application ? doc_vnode() : view model
         f.instruction(&Instruction::GlobalGet(G_KIND));
@@ -14981,6 +15005,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_ROOT));
         f.instruction(&Instruction::GlobalGet(G_ROOT));
         f.instruction(&Instruction::Call(DOM_MOUNT));
+        f.instruction(&Instruction::End); // end: skip render/mount for worker
         // register initial timer subscriptions
         f.instruction(&Instruction::Call(self.reconcile_subs_idx));
         // Run the initial Cmd AFTER the first render/mount (element/document,
@@ -17649,6 +17674,15 @@ impl<'a> Codegen<'a> {
             ("Browser", "application") => {
                 // Program = T_CTOR tag3 [record].
                 f.instruction(&Instruction::I32Const(3));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Platform.worker { init, update, subscriptions } — a headless program
+            // (no view/DOM). Program = T_CTOR tag4 [record]; the record fields
+            // sort to init=0, subscriptions=1, update=2 (same as element sans view).
+            ("Platform", "worker") => {
+                f.instruction(&Instruction::I32Const(4));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
