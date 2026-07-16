@@ -3521,6 +3521,18 @@ impl<'a> Codegen<'a> {
                 return Ok(());
             }
         }
+        // Html.Events.keyCode : `Json.Decode.field "keyCode" Json.Decode.int`,
+        // i.e. DField(8) ["keyCode", DInt(1)].
+        if module == "Html.Events" && name == "keyCode" {
+            f.instruction(&Instruction::I32Const(8)); // DField
+            push_str_const(f, "keyCode");
+            f.instruction(&Instruction::I32Const(1)); // DInt leaf
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
         // Basics.pi / e : Float constants.
         if module == "Basics" && (name == "pi" || name == "e") {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
@@ -12468,6 +12480,62 @@ impl<'a> Codegen<'a> {
         wrap1(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // 23 map4 / 24 map5 — decode each sub-decoder (short-circuit on Err),
+        // then Ok (f x1 x2 …). x1=7, x2=9, x3=10, x4=11; result in 8.
+        let decode_into = |f: &mut Function, argn: i32, dst: u32| {
+            ctor_argn(f, 0, argn);
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::Call(self.json_run_idx));
+            f.instruction(&Instruction::LocalSet(8));
+            ctor_tag(f, 8);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(8));
+            f.instruction(&Instruction::Return);
+            f.instruction(&Instruction::End);
+            if dst != 8 {
+                ctor_arg0(f, 8);
+                f.instruction(&Instruction::LocalSet(dst));
+            }
+        };
+        arm(&mut f, 23);
+        decode_into(&mut f, 1, 7);
+        decode_into(&mut f, 2, 9);
+        decode_into(&mut f, 3, 10);
+        decode_into(&mut f, 4, 8);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        arm(&mut f, 24);
+        decode_into(&mut f, 1, 7);
+        decode_into(&mut f, 2, 9);
+        decode_into(&mut f, 3, 10);
+        decode_into(&mut f, 4, 11);
+        decode_into(&mut f, 5, 8);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         // 18 andThen
         arm(&mut f, 18);
         ctor_argn(&mut f, 0, 1); // sub
@@ -19195,6 +19263,18 @@ impl<'a> Codegen<'a> {
             ("Json.Decode", "map3") => {
                 self.emit_dnode(17, &[&args[0], &args[1], &args[2], &args[3]], ctx, f)?
             }
+            ("Json.Decode", "map4") => self.emit_dnode(
+                23,
+                &[&args[0], &args[1], &args[2], &args[3], &args[4]],
+                ctx,
+                f,
+            )?,
+            ("Json.Decode", "map5") => self.emit_dnode(
+                24,
+                &[&args[0], &args[1], &args[2], &args[3], &args[4], &args[5]],
+                ctx,
+                f,
+            )?,
             ("Json.Decode", "andThen") => self.emit_dnode(18, &[&args[0], &args[1]], ctx, f)?,
             ("Json.Decode", "oneOf") => self.emit_dnode(19, &[&args[0]], ctx, f)?,
             ("Json.Decode", "succeed") => self.emit_dnode(20, &[&args[0]], ctx, f)?,
