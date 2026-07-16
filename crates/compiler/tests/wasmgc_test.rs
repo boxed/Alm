@@ -689,6 +689,22 @@ fn string_trim_sides() {
     );
 }
 
+// A mutual-recursion group where members are also used as VALUES (collected in
+// a list) and CALLED from a nested helper function — both need each sibling
+// bound as a real closure in the lifted body, not just the direct-call fast
+// path. (This is the shape json-schema's big validator `let` has.)
+#[test]
+fn recursion_group_value_use() {
+    assert_str_prog_js_wasm(
+        "rec_group_value",
+        "module Test exposing (main)\n\n\
+         run : Int -> Int\n\
+         run start =\n    let\n        va n =\n            if n <= 0 then 0 else vb (n - 1)\n        vb n =\n            let\n                helper x =\n                    va x\n            in\n            if n <= 0 then 1 else helper (n - 1)\n        validators =\n            [ va, vb ]\n    in\n    List.sum (List.map (\\fn -> fn start) validators)\n\n\
+         main : String\n\
+         main =\n    String.fromInt (run 7)\n",
+    );
+}
+
 // Mutually-recursive local let functions (isEven/isOdd reference each other):
 // they must share a capture set so each can call the other.
 #[test]

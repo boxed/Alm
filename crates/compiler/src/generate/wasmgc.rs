@@ -468,6 +468,10 @@ fn name_occurs(e: &TypedExpr, name: &str) -> bool {
 
 fn let_decl_uses(d: &TypedLetDecl, name: &str, nparams: usize) -> bool {
     match d {
+        // A nested Def WITH params is itself lifted to a separate function, so —
+        // like a nested lambda — the direct SelfFn fast path can't reach into it;
+        // ANY occurrence of `name` there (even a saturated call) needs the closure.
+        TypedLetDecl::Def { params, body, .. } if !params.is_empty() => name_occurs(body, name),
         TypedLetDecl::Def { body, .. } => name_used_as_value(body, name, nparams),
         TypedLetDecl::Destruct(_, ex) => name_used_as_value(ex, name, nparams),
         TypedLetDecl::Recursive(ds) => ds.iter().any(|d| let_decl_uses(d, name, nparams)),
@@ -18609,16 +18613,25 @@ impl<'a> Codegen<'a> {
                 // A group of mutually-recursive local functions needs all names
                 // in scope for each body (isEven/isOdd). Emit them as one group
                 // sharing a capture set so any member can (tail-)call any other.
-                let all_fns = ds.len() >= 2
-                    && ds.iter().all(|d| {
-                        matches!(d, TypedLetDecl::Def { params, .. } if !params.is_empty())
-                    });
-                if all_fns {
-                    self.emit_recursive_group(ds, ctx, f)?;
+                // Function members are emitted FIRST so their names/closures are
+                // bound before the group's value members (which commonly reference
+                // them — e.g. a `[validateA, validateB, …]` list alongside the
+                // function definitions); a plain sequential pass would hit a
+                // forward reference and report `unbound local`.
+                let is_fn =
+                    |d: &TypedLetDecl| matches!(d, TypedLetDecl::Def { params, .. } if !params.is_empty());
+                let fns: Vec<&TypedLetDecl> = ds.iter().filter(|d| is_fn(d)).collect();
+                let vals: Vec<&TypedLetDecl> = ds.iter().filter(|d| !is_fn(d)).collect();
+                if fns.len() >= 2 {
+                    let owned: Vec<TypedLetDecl> = fns.iter().map(|d| (*d).clone()).collect();
+                    self.emit_recursive_group(&owned, ctx, f)?;
                 } else {
-                    for d2 in ds {
+                    for d2 in &fns {
                         self.emit_let_decl(d2, ctx, f)?;
                     }
+                }
+                for d2 in &vals {
+                    self.emit_let_decl(d2, ctx, f)?;
                 }
             }
         }
@@ -18697,7 +18710,21 @@ impl<'a> Codegen<'a> {
                 .filter(|(p, _)| !matches!(p.value, can::Pattern_::Var(_) | can::Pattern_::Anything))
                 .map(|(p, _)| pat_size(p))
                 .sum();
-            let extra = count_bindings(body) + param_dtor;
+            // Group members this body uses as a VALUE (not a saturated call) need
+            // a real closure bound — the SelfFn fast path only serves direct
+            // calls. Build each such sibling's closure (shared captures applied)
+            // in a reserved local. (e.g. a body that puts siblings in a list.)
+            let sibs: Vec<(usize, u32)> = defs
+                .iter()
+                .zip(&lidxs)
+                .enumerate()
+                .filter(|(_, ((n, params_m, _), _))| {
+                    name_used_as_value(body, n, params_m.len())
+                })
+                .map(|(idx, (_, &lidx_m))| (idx, lidx_m))
+                .collect();
+            let base_extra = count_bindings(body) + param_dtor;
+            let extra = base_extra + sibs.len() as u32;
             let mut lf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
             let mut lctx = FnCtx::new();
             lctx.next_local = total;
@@ -18711,6 +18738,25 @@ impl<'a> Codegen<'a> {
             }
             for (i, (p, ty)) in params.iter().enumerate() {
                 self.bind_pat(p, ncap + i as u32, Some(ty), &mut lctx, &mut lf)?;
+            }
+            // Build sibling closures (captures from this body's locals 0..ncap).
+            for (k, (idx, lidx_m)) in sibs.iter().enumerate() {
+                let (name_m, params_m, _) = defs[*idx];
+                let total_m = ncap + params_m.len() as u32;
+                let slot = total + base_extra + k as u32;
+                lf.instruction(&Instruction::RefFunc(*lidx_m));
+                lf.instruction(&Instruction::I32Const(total_m as i32));
+                lf.instruction(&Instruction::I32Const(ncap as i32));
+                for c in 0..ncap {
+                    lf.instruction(&Instruction::LocalGet(c));
+                }
+                for _ in ncap..total_m {
+                    lf.instruction(&Instruction::RefNull(eq_heap()));
+                }
+                lf.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: total_m });
+                lf.instruction(&Instruction::StructNew(T_CLOS));
+                lf.instruction(&Instruction::LocalSet(slot));
+                lctx.scope.push((name_m.to_string(), slot));
             }
             self.emit_tail(body, &mut lctx, &mut lf)?;
             lf.instruction(&Instruction::End);
