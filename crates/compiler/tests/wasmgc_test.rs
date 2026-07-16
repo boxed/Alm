@@ -626,6 +626,23 @@ fn string_case_patterns() {
     );
 }
 
+// Record destructuring in a case branch and inside a tuple pattern — both need
+// the scrutinee type threaded down to resolve sorted field positions.
+#[test]
+fn record_pattern_in_case_and_tuple() {
+    assert_str_prog_js_wasm(
+        "record_pat_nested",
+        "module Test exposing (main)\n\n\
+         type alias P = { name : String, age : Int }\n\n\
+         describe : P -> String\n\
+         describe p =\n    case p of\n        { name, age } -> name ++ \"/\" ++ String.fromInt age\n\n\
+         pair : ( P, Int ) -> String\n\
+         pair t =\n    case t of\n        ( { name }, n ) -> name ++ String.fromInt n\n\n\
+         main : String\n\
+         main =\n    describe { name = \"a\", age = 3 } ++ \":\" ++ pair ( { name = \"b\", age = 9 }, 7 )\n",
+    );
+}
+
 // Operators used first-class then partially applied: (|>), (==), and a partially
 // applied 2-arg kernel (modBy) passed to List.map.
 #[test]

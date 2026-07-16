@@ -333,6 +333,17 @@ fn cast_to(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNonNull(HeapType::Concrete(idx))
 }
 
+/// Element type of a `List a` type, when known — for threading types through
+/// cons/list patterns so a nested record pattern can resolve its field order.
+fn list_elem_type(tipe: Option<&can::Type>) -> Option<&can::Type> {
+    match tipe {
+        Some(can::Type::Type(_, n, args)) if n.as_str() == "List" && !args.is_empty() => {
+            Some(&args[0])
+        }
+        _ => None,
+    }
+}
+
 /// Number of leading `->` arrows in a type — the arity of a function value.
 fn lambda_arity(t: &can::Type) -> usize {
     let mut n = 0;
@@ -16024,7 +16035,7 @@ impl<'a> Codegen<'a> {
                 let s = ctx.bind("$scrut");
                 self.emit_expr(scrut, ctx, f)?;
                 f.instruction(&Instruction::LocalSet(s));
-                self.emit_branches_tail(branches, s, ctx, f)
+                self.emit_branches_tail(branches, s, Some(&scrut.tipe), ctx, f)
             }
             TypedKind::Let(decls, body) => {
                 let mark = ctx.scope.len();
@@ -16065,6 +16076,7 @@ impl<'a> Codegen<'a> {
         &mut self,
         branches: &[(can::Pattern, TypedExpr)],
         s: u32,
+        scrut_ty: Option<&can::Type>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -16077,11 +16089,11 @@ impl<'a> Codegen<'a> {
                 self.emit_test(pat, s, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(eqref())));
                 let mark = ctx.scope.len();
-                self.bind_pat(pat, s, None, ctx, f)?;
+                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
                 self.emit_tail(body, ctx, f)?;
                 ctx.scope.truncate(mark);
                 f.instruction(&Instruction::Else);
-                self.emit_branches_tail(rest, s, ctx, f)?;
+                self.emit_branches_tail(rest, s, scrut_ty, ctx, f)?;
                 f.instruction(&Instruction::End);
                 Ok(())
             }
@@ -17227,6 +17239,7 @@ impl<'a> Codegen<'a> {
             }
             // Operators reachable as saturated kernels (e.g. via `(|>)` used
             // first-class then applied): delegate to the binop lowering.
+            ("Basics", "append") => self.emit_binop("++", &args[0], &args[1], ctx, f)?,
             ("Basics", "apR") => self.emit_binop("|>", &args[0], &args[1], ctx, f)?,
             ("Basics", "apL") => self.emit_binop("<|", &args[0], &args[1], ctx, f)?,
             ("Basics", "composeR") => self.emit_binop(">>", &args[0], &args[1], ctx, f)?,
@@ -18046,13 +18059,14 @@ impl<'a> Codegen<'a> {
         let s = ctx.bind("$scrut");
         self.emit_expr(scrut, ctx, f)?;
         f.instruction(&Instruction::LocalSet(s));
-        self.emit_branches(branches, s, ctx, f)
+        self.emit_branches(branches, s, Some(&scrut.tipe), ctx, f)
     }
 
     fn emit_branches(
         &mut self,
         branches: &[(can::Pattern, TypedExpr)],
         s: u32,
+        scrut_ty: Option<&can::Type>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -18066,11 +18080,11 @@ impl<'a> Codegen<'a> {
                 self.emit_test(pat, s, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(eqref())));
                 let mark = ctx.scope.len();
-                self.bind_pat(pat, s, None, ctx, f)?;
+                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
                 self.emit_expr(body, ctx, f)?;
                 ctx.scope.truncate(mark);
                 f.instruction(&Instruction::Else);
-                self.emit_branches(rest, s, ctx, f)?;
+                self.emit_branches(rest, s, scrut_ty, ctx, f)?;
                 f.instruction(&Instruction::End);
                 Ok(())
             }
@@ -18248,34 +18262,48 @@ impl<'a> Codegen<'a> {
                 }
             }
             Cons(h, t) => {
+                // `elem :: rest` : head has the list element type, tail the list type.
+                let elem = list_elem_type(tipe);
                 let hs = ctx.bind("$bh");
                 self.load_cons(s, 0, f);
                 f.instruction(&Instruction::LocalSet(hs));
-                self.bind_pat(h, hs, None, ctx, f)?;
+                self.bind_pat(h, hs, elem, ctx, f)?;
                 let ts = ctx.bind("$bt");
                 self.load_cons(s, 1, f);
                 f.instruction(&Instruction::LocalSet(ts));
-                self.bind_pat(t, ts, None, ctx, f)?;
+                self.bind_pat(t, ts, tipe, ctx, f)?;
             }
             List(items) if items.is_empty() => {}
             List(items) => {
+                let elem = list_elem_type(tipe);
                 let hs = ctx.bind("$bh");
                 self.load_cons(s, 0, f);
                 f.instruction(&Instruction::LocalSet(hs));
-                self.bind_pat(&items[0], hs, None, ctx, f)?;
+                self.bind_pat(&items[0], hs, elem, ctx, f)?;
                 let ts = ctx.bind("$bt");
                 self.load_cons(s, 1, f);
                 f.instruction(&Instruction::LocalSet(ts));
-                self.bind_pat(&make_list_tail(pat, items), ts, None, ctx, f)?;
+                self.bind_pat(&make_list_tail(pat, items), ts, tipe, ctx, f)?;
             }
             Tuple(a, b, rest) => {
+                // Element types come from a `Tuple` scrutinee type, when known.
+                let elem_tys: Vec<Option<&can::Type>> = match tipe {
+                    Some(can::Type::Tuple(ta, tb, tc)) => {
+                        let mut v = vec![Some(&**ta), Some(&**tb)];
+                        if let Some(tc) = tc {
+                            v.push(Some(&**tc));
+                        }
+                        v
+                    }
+                    _ => Vec::new(),
+                };
                 let mut elems: Vec<&can::Pattern> = vec![a, b];
                 elems.extend(rest.iter());
                 for (i, ep) in elems.iter().enumerate() {
                     let sub = ctx.bind("$bt");
                     self.load_arr(s, i as u32, f);
                     f.instruction(&Instruction::LocalSet(sub));
-                    self.bind_pat(ep, sub, None, ctx, f)?;
+                    self.bind_pat(ep, sub, elem_tys.get(i).copied().flatten(), ctx, f)?;
                 }
             }
             // Record destructuring (`{ id, label }`): each named field becomes a
