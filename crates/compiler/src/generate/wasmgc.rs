@@ -452,6 +452,23 @@ fn let_decl_uses(d: &TypedLetDecl, name: &str, nparams: usize) -> bool {
     }
 }
 
+/// Logical arity of a combinator kernel whose result can itself be a function
+/// (so its instantiated type may have MORE arrows than the operation consumes).
+/// Its `emit_kernel` arm consumes exactly this many args; any surplus (from
+/// eta-expansion at the instantiated arrow count, or over-application) must be
+/// applied to the returned closure via `apply1`, not dropped.
+fn kernel_logical_arity(module: &str, name: &str) -> Option<usize> {
+    match (module, name) {
+        ("Basics", "identity") => Some(1),
+        ("Basics", "always")
+        | ("Basics", "apL")
+        | ("Basics", "apR")
+        | ("Basics", "composeL")
+        | ("Basics", "composeR") => Some(2),
+        _ => None,
+    }
+}
+
 /// Number of leading `->` arrows in a type — the arity of a function value.
 fn lambda_arity(t: &can::Type) -> usize {
     let mut n = 0;
@@ -1209,6 +1226,13 @@ struct Codegen<'a> {
     attr_map_idx: u32,
     time_adj_minutes_idx: u32,
     time_civil_idx: u32,
+    parser_is_sub_char_idx: u32,
+    parser_is_ascii_code_idx: u32,
+    parser_chomp_base10_idx: u32,
+    parser_consume_base_idx: u32,
+    parser_consume_base16_idx: u32,
+    parser_is_sub_string_idx: u32,
+    parser_find_sub_string_idx: u32,
     http_response_idx: u32,
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
@@ -1423,6 +1447,13 @@ impl<'a> Codegen<'a> {
             attr_map_idx: 0,
             time_adj_minutes_idx: 0,
             time_civil_idx: 0,
+            parser_is_sub_char_idx: 0,
+            parser_is_ascii_code_idx: 0,
+            parser_chomp_base10_idx: 0,
+            parser_consume_base_idx: 0,
+            parser_consume_base16_idx: 0,
+            parser_is_sub_string_idx: 0,
+            parser_find_sub_string_idx: 0,
             http_response_idx: 0,
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
@@ -1685,6 +1716,13 @@ impl<'a> Codegen<'a> {
         self.attr_map_idx = next();
         self.time_adj_minutes_idx = next();
         self.time_civil_idx = next();
+        self.parser_is_sub_char_idx = next();
+        self.parser_is_ascii_code_idx = next();
+        self.parser_chomp_base10_idx = next();
+        self.parser_consume_base_idx = next();
+        self.parser_consume_base16_idx = next();
+        self.parser_is_sub_string_idx = next();
+        self.parser_find_sub_string_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1960,6 +1998,13 @@ impl<'a> Codegen<'a> {
         let attr_map = self.emit_attr_map();
         let time_adj_minutes = self.emit_time_adj_minutes();
         let time_civil = self.emit_time_civil();
+        let parser_is_sub_char = self.emit_parser_is_sub_char();
+        let parser_is_ascii_code = self.emit_parser_is_ascii_code();
+        let parser_chomp_base10 = self.emit_parser_chomp_base10();
+        let parser_consume_base = self.emit_parser_consume_base();
+        let parser_consume_base16 = self.emit_parser_consume_base16();
+        let parser_is_sub_string = self.emit_parser_is_sub_string();
+        let parser_find_sub_string = self.emit_parser_find_sub_string();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -2259,6 +2304,13 @@ impl<'a> Codegen<'a> {
         funcs.function(ee_eqref_ty); // attr_map : (f, attr) -> attr
         funcs.function(ee_eqref_ty); // time_adj_minutes : (zone, posix) -> Int
         funcs.function(e_e_ty); // time_civil : minutes -> [y, m, d]
+        funcs.function(ft3); // parser_is_sub_char : (pred, offset, string) -> Int
+        funcs.function(ft3); // parser_is_ascii_code : (code, offset, string) -> Bool
+        funcs.function(ft2); // parser_chomp_base10 : (offset, string) -> Int
+        funcs.function(ft3); // parser_consume_base : (base, offset, string) -> (o, n)
+        funcs.function(ft2); // parser_consume_base16 : (offset, string) -> (o, n)
+        funcs.function(ft5); // parser_is_sub_string : (sm, o, r, c, big) -> (o, r, c)
+        funcs.function(ft5); // parser_find_sub_string : (sm, o, r, c, big) -> (o, r, c)
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -2468,6 +2520,13 @@ impl<'a> Codegen<'a> {
         code.function(&attr_map);
         code.function(&time_adj_minutes);
         code.function(&time_civil);
+        code.function(&parser_is_sub_char);
+        code.function(&parser_is_ascii_code);
+        code.function(&parser_chomp_base10);
+        code.function(&parser_consume_base);
+        code.function(&parser_consume_base16);
+        code.function(&parser_is_sub_string);
+        code.function(&parser_find_sub_string);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -3526,6 +3585,15 @@ impl<'a> Codegen<'a> {
         while let can::Type::Lambda(a, b) = cur {
             arg_types.push((**a).clone());
             cur = b;
+        }
+        // A combinator whose result can itself be a function (identity/always/
+        // `(<|)`/…) has more type-arrows than it consumes when instantiated at a
+        // function result. Cap the synthesized wrapper at the logical arity so
+        // the surplus args are applied to the returned closure by `apply1` (not
+        // dropped — which left a partial closure where a value was expected, a
+        // runtime `illegal cast`).
+        if let Some(la) = kernel_logical_arity(module, name) {
+            arg_types.truncate(la);
         }
         let arity = arg_types.len() as u32;
         if arity == 0 {
@@ -14099,6 +14167,556 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    // ---- elm/parser Elm.Kernel.Parser primitives ----
+    // Byte-offset ports (offsets are UTF-8 byte indices, not UTF-16 units):
+    // exact for ASCII input (the overwhelming real-world parser case) and
+    // internally consistent. For non-ASCII, isSubChar still decodes the full
+    // code point for its predicate; row/col count bytes (a cosmetic divergence
+    // from elm's UTF-16 columns only on multi-byte input).
+
+    /// _Parser_isSubChar(pred, offset, string) -> Int (-1 no match, -2 matched
+    /// '\n', else new byte offset). Decodes the code point at `offset` and tests
+    /// the predicate on that Char.
+    fn emit_parser_is_sub_char(&self) -> Function {
+        // params pred(0), offset(1), string(2). locals str(3),off(4),len(5),
+        //   cp(6),adv(7):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(4)); // off
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5)); // len
+        // off >= len -> -1
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I64Const(-1));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // decode cp/adv at off
+        utf8_decode(&mut f, 3, 4, 6, 7);
+        // matched = pred(chr cp)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I64Const(-1));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // matched: '\n' (cp==10) -> -2 else off+adv
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(10));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::I64Const(-2));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_isAsciiCode(code, offset, string) -> Bool.
+    fn emit_parser_is_ascii_code(&self) -> Function {
+        // params code(0), offset(1), string(2). locals str(3),off(4):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(4));
+        // off < len && big[off] == code
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_chompBase10(offset, string) -> Int : skip ASCII digits.
+    fn emit_parser_chomp_base10(&self) -> Function {
+        // params offset(0), string(1). locals str(2),off(3),len(4),code(5):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (4, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(5)); // code
+        // if code < 0x30 || code > 0x39 break
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0x30));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0x39));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_consumeBase(base, offset, string) -> (newOffset, total).
+    fn emit_parser_consume_base(&self) -> Function {
+        // params base(0), offset(1), string(2). locals str(3),off(4),len(5),
+        //   base(6),total(7),digit(8):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (6, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7)); // total
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // digit = big[off] - 0x30
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Const(0x30));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(8));
+        // if digit < 0 || base <= digit break
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1));
+        // total = base*total + digit
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_consumeBase16(offset, string) -> (newOffset, total).
+    fn emit_parser_consume_base16(&self) -> Function {
+        // params offset(0), string(1). locals str(2),off(3),len(4),total(5),code(6):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6)); // code
+        // digit value by range, else break
+        let hex_digit = |f: &mut Function, lo: i32, hi: i32, sub: i32| {
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::I32Const(lo));
+            f.instruction(&Instruction::I32GeS);
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::I32Const(hi));
+            f.instruction(&Instruction::I32LeS);
+            f.instruction(&Instruction::I32And);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::I32Const(16));
+            f.instruction(&Instruction::LocalGet(5));
+            f.instruction(&Instruction::I32Mul);
+            f.instruction(&Instruction::LocalGet(6));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::I32Const(sub));
+            f.instruction(&Instruction::I32Sub);
+            f.instruction(&Instruction::LocalSet(5));
+        };
+        // 0-9: total=16*total+code-0x30
+        hex_digit(&mut f, 0x30, 0x39, 0x30);
+        f.instruction(&Instruction::Else);
+        hex_digit(&mut f, 0x41, 0x46, 55);
+        f.instruction(&Instruction::Else);
+        hex_digit(&mut f, 0x61, 0x66, 87);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::Br(2)); // not a hex digit -> break the loop
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_isSubString(small, offset, row, col, big) -> (newOffset|-1, row, col).
+    /// Byte-level substring compare, tracking row (on '\n') and col.
+    fn emit_parser_is_sub_string(&self) -> Function {
+        // params small(0),offset(1),row(2),col(3),big(4). locals sm(5),bg(6):str,
+        //   off(7),r(8),c(9),smlen(10),i(11),good(12),code(13):i32
+        let mut f = Function::new([(2, ref_to(T_STR)), (7, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(7)); // off
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(8)); // r
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(9)); // c
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(10)); // smlen
+        // good = off + smlen <= bg.len
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(11)); // i
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // if !good || i >= smlen break
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // if sm[i] != bg[off] { good=0; break }
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::Br(2));
+        f.instruction(&Instruction::End);
+        // code = bg[off]; i++; off++
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(13));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        // if code==0x0A { r++; c=1 } else { c++ }
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::I32Const(0x0A));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Tuple3(good ? off : -1, r, c)
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// _Parser_findSubString(small, offset, row, col, big) -> (newOffset, row, col).
+    fn emit_parser_find_sub_string(&self) -> Function {
+        // params small(0),offset(1),row(2),col(3),big(4). locals sm(5),bg(6):str,
+        //   off(7),r(8),c(9),smlen(10),bglen(11),found(12),target(13),j(14),
+        //   ok(15),code(16):i32
+        let mut f = Function::new([(2, ref_to(T_STR)), (10, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(10)); // smlen
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(11)); // bglen
+        // found = indexOf(sm, bg, from=off) — scan i from off; -1 if none.
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::LocalSet(12)); // found = -1
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalSet(13)); // reuse target as scan index `i`
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        // while i + smlen <= bglen
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::BrIf(1));
+        // ok = compare sm[0..smlen] vs bg[i..]
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(15)); // ok = 1
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(14)); // j = 0
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15));
+        f.instruction(&Instruction::Br(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(14));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // if ok { found = i; break }
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalSet(12));
+        f.instruction(&Instruction::Br(2));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(13));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // target = found<0 ? bglen : found + smlen
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(13)); // target
+        // walk off..target updating row/col
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(16)); // code
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::I32Const(0x0A));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(8));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // Tuple3(found, row, col)
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// index_byte(str, ch) : first index of byte `ch` in the T_STR, or -1.
     /// (Byte-indexed — matches the backend's byte-based String slicing, which is
     /// exact for the ASCII delimiters URLs are split on.)
@@ -16045,6 +16663,23 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::LocalGet(local));
             f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(ty)));
         };
+        // Reference-equality fast-out: physically identical values are equal, so
+        // short-circuit before the deep walk. This collapses shared subtrees and
+        // strings — e.g. a model string reused across a vdom rebuild, or an
+        // unchanged keyed child — to O(1). Floats are excluded: NaN must compare
+        // unequal to itself, matching Elm/JS `==`, so a shared NaN can't fast-out.
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefEq);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         // Nil handling: a null?
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefIsNull);
@@ -17087,6 +17722,20 @@ impl<'a> Codegen<'a> {
             return self.emit_ctor(ctor.index, args, ctx, f);
         }
         if let TypedKind::Foreign(module, name) = &func.kind {
+            // A combinator whose result is a function (identity/always/`(<|)`/…)
+            // can be OVER-applied: eta-expansion at the instantiated arrow count
+            // hands it more args than it consumes. Run the kernel on its logical
+            // args, then apply the surplus to the returned closure via apply1.
+            if let Some(la) = kernel_logical_arity(module.as_str(), name.as_str()) {
+                if args.len() > la {
+                    self.emit_kernel(module.as_str(), name.as_str(), &args[..la], ctx, f)?;
+                    for a in &args[la..] {
+                        self.emit_expr(a, ctx, f)?;
+                        f.instruction(&Instruction::Call(self.apply1_idx));
+                    }
+                    return Ok(());
+                }
+            }
             // A kernel applied to fewer args than its arity is a partial
             // application: `emit_kernel` assumes saturation and would index a
             // missing arg. Build the kernel's closure value and apply via apply1.
@@ -18338,6 +18987,8 @@ impl<'a> Codegen<'a> {
             // Basics.never : Never -> a. Never is uninhabited, so this is never
             // actually reached; pass the (impossible) argument through.
             ("Basics", "never") => self.emit_expr(&args[0], ctx, f)?,
+            // Logically 2-ary; surplus args (from eta-expansion at a function
+            // result) are handled by the over-application split in emit_call.
             ("Basics", "apR") => self.emit_binop("|>", &args[0], &args[1], ctx, f)?,
             ("Basics", "apL") => self.emit_binop("<|", &args[0], &args[1], ctx, f)?,
             ("Basics", "composeR") => self.emit_binop(">>", &args[0], &args[1], ctx, f)?,
@@ -19131,6 +19782,49 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+            // elm/parser low-level kernels (byte-offset ports; see the emit_*).
+            ("Elm.Kernel.Parser", "isSubChar") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_is_sub_char_idx));
+            }
+            ("Elm.Kernel.Parser", "isAsciiCode") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_is_ascii_code_idx));
+            }
+            ("Elm.Kernel.Parser", "chompBase10") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_chomp_base10_idx));
+            }
+            ("Elm.Kernel.Parser", "consumeBase") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_consume_base_idx));
+            }
+            ("Elm.Kernel.Parser", "consumeBase16") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_consume_base16_idx));
+            }
+            ("Elm.Kernel.Parser", "isSubString") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_is_sub_string_idx));
+            }
+            ("Elm.Kernel.Parser", "findSubString") => {
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(self.parser_find_sub_string_idx));
             }
             // Time.customZone offset eras → Zone (ctor tag0 [offset, eras]).
             ("Time", "customZone") => {

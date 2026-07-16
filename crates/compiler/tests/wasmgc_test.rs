@@ -641,6 +641,24 @@ fn self_recursion_through_lambda() {
     );
 }
 
+// Combinators whose result is itself a function ((<|), (|>), (>>), always,
+// identity) get eta-expanded to their instantiated arrow count and over-applied
+// — the surplus arg must be applied to the returned closure, not dropped (which
+// left a partial closure where a value was expected: a runtime illegal cast).
+// This is the shape elm/parser's `keeper`/`ignorer` (map2 (<|) / map2 always)
+// reduce to.
+#[test]
+fn combinator_over_application() {
+    assert_str_prog_js_wasm(
+        "combinator_overapp",
+        "module Test exposing (main)\n\n\
+         add : Int -> Int -> Int\n\
+         add a b = a + b\n\n\
+         main : String\n\
+         main =\n    let\n        apL = (<|)\n        apR = (|>)\n        comp = (<<)\n        alwaysF = always\n        idF = identity\n        g1 = apL add 40\n        g2 = apR 40 add\n        g3 = comp add (\\n -> n) 5\n        g4 = alwaysF add 999\n        g5 = idF add\n    in\n    String.join \",\"\n        [ String.fromInt (g1 2)\n        , String.fromInt (g2 2)\n        , String.fromInt (g3 100)\n        , String.fromInt (g4 1 2)\n        , String.fromInt (g5 3 4)\n        ]\n",
+    );
+}
+
 // Time calendar accessors (toYear/toMonth/toDay/toWeekday/toHour/toMinute/
 // toSecond/toMillis) under UTC and a fixed custom zone — civil-date math.
 #[test]
