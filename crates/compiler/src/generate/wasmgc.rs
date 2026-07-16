@@ -1267,6 +1267,8 @@ struct Codegen<'a> {
     dom_event_idx: u32,
     index_byte_idx: u32,
     url_from_string_idx: u32,
+    url_to_string_idx: u32,
+    json_err_to_string_idx: u32,
     strip_keys_idx: u32,
     keyed_reconcile_idx: u32,
     frame_idx: u32,
@@ -1494,6 +1496,8 @@ impl<'a> Codegen<'a> {
             dom_event_idx: 0,
             index_byte_idx: 0,
             url_from_string_idx: 0,
+            url_to_string_idx: 0,
+            json_err_to_string_idx: 0,
             strip_keys_idx: 0,
             keyed_reconcile_idx: 0,
             frame_idx: 0,
@@ -1726,6 +1730,8 @@ impl<'a> Codegen<'a> {
         self.dom_event_idx = next();
         self.index_byte_idx = next();
         self.url_from_string_idx = next();
+        self.url_to_string_idx = next();
+        self.json_err_to_string_idx = next();
         self.strip_keys_idx = next();
         self.keyed_reconcile_idx = next();
         self.frame_idx = next();
@@ -2015,6 +2021,8 @@ impl<'a> Codegen<'a> {
         let dom_event = self.emit_dom_event();
         let index_byte = self.emit_index_byte();
         let url_from_string = self.emit_url_from_string();
+        let url_to_string = self.emit_url_to_string();
+        let json_err_to_string = self.emit_json_err_to_string();
         let strip_keys = self.emit_strip_keys();
         let keyed_reconcile = self.emit_keyed_reconcile();
         let frame = self.emit_frame();
@@ -2331,6 +2339,8 @@ impl<'a> Codegen<'a> {
         funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
         funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
         funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
+        funcs.function(e_e_ty); // url_to_string : Url -> String
+        funcs.function(e_e_ty); // json_err_to_string : Error -> String
         funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
         funcs.function(kr_ty); // keyed_reconcile (dom, oldKids, newKids)
         funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
@@ -2553,6 +2563,8 @@ impl<'a> Codegen<'a> {
         code.function(&dom_event);
         code.function(&index_byte);
         code.function(&url_from_string);
+        code.function(&url_to_string);
+        code.function(&json_err_to_string);
         code.function(&strip_keys);
         code.function(&keyed_reconcile);
         code.function(&frame);
@@ -12536,6 +12548,37 @@ impl<'a> Codegen<'a> {
         wrap1(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // 25 oneOrMore [toValue, decoder]: decode a List (as `list decoder`),
+        // then Ok (toValue head tail) if non-empty, else a decode failure.
+        arm(&mut f, 25);
+        f.instruction(&Instruction::I32Const(6)); // DList
+        ctor_argn(&mut f, 0, 1); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.json_run_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 8);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        ctor_arg0(&mut f, 8);
+        f.instruction(&Instruction::LocalSet(9)); // xs : List a
+        list_is_empty(&mut f, 9);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_decode_err(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        ctor_arg0(&mut f, 0); // toValue
+        list_head(&mut f, 9);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        list_tail(&mut f, 9);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        wrap1(&mut f);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         // 18 andThen
         arm(&mut f, 18);
         ctor_argn(&mut f, 0, 1); // sub
@@ -15577,6 +15620,124 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 6 });
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR)); // Just
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// url_to_string(url) -> String : elm/url's Url.toString. Record fields sort
+    /// to fragment(0) host(1) path(2) port_(3) protocol(4) query(5).
+    ///   addPort port_ (http ++ host) ++ path |> addPrefixed "?" query
+    ///     |> addPrefixed "#" fragment
+    fn emit_url_to_string(&self) -> Function {
+        // param url(0). locals result(1), tmp(2): eqref
+        let mut f = Function::new([(2, eqref())]);
+        let field = |f: &mut Function, i: i32| {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+        };
+        // result = protocol==Http ? "http://" : "https://"
+        field(&mut f, 4);
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Eqz); // Http (tag 0)?
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        push_str_const(&mut f, "http://");
+        f.instruction(&Instruction::Else);
+        push_str_const(&mut f, "https://");
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(1));
+        // result ++= host
+        f.instruction(&Instruction::LocalGet(1));
+        field(&mut f, 1);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        // addPort: port_ (field 3) Just? → ++ ":" ++ fromInt(port)
+        field(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(2));
+        ctor_tag(&mut f, 2);
+        f.instruction(&Instruction::I32Eqz); // Just (tag 0)?
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        push_str_const(&mut f, ":");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_arg0(&mut f, 2);
+        f.instruction(&Instruction::Call(self.str_from_int_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::End);
+        // result ++= path
+        f.instruction(&Instruction::LocalGet(1));
+        field(&mut f, 2);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        // addPrefixed "?" query (field 5)
+        let prefixed = |f: &mut Function, this: &Self, fld: i32, pfx: &str| {
+            field(f, fld);
+            f.instruction(&Instruction::LocalSet(2));
+            ctor_tag(f, 2);
+            f.instruction(&Instruction::I32Eqz); // Just?
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(1));
+            push_str_const(f, pfx);
+            f.instruction(&Instruction::Call(this.str_append_idx));
+            ctor_arg0(f, 2);
+            f.instruction(&Instruction::Call(this.str_append_idx));
+            f.instruction(&Instruction::LocalSet(1));
+            f.instruction(&Instruction::End);
+        };
+        prefixed(&mut f, self, 5, "?");
+        prefixed(&mut f, self, 0, "#");
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// json_err_to_string(err) -> String : Json.Decode.errorToString. Renders the
+    /// Error tree (Field=0/Index=1/OneOf=2/Failure=3). A simplified rendering —
+    /// exact byte-parity with elm's indented JSON dump is a known deferred gap;
+    /// alm's decoder errors are placeholders anyway.
+    fn emit_json_err_to_string(&self) -> Function {
+        // param err(0). local tag(1):i32
+        let mut f = Function::new([(1, ValType::I32)]);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        // Failure (3) → its message
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Field (0) name err → "field `" ++ name ++ "` " ++ rec(err)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "field `");
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        push_str_const(&mut f, "` ");
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.json_err_to_string_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Index (1) i err → "index " ++ rec(err)  (index number omitted)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "index ");
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::Call(self.json_err_to_string_idx));
+        f.instruction(&Instruction::Call(self.str_append_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // OneOf (2) or anything else → a generic message
+        push_str_const(&mut f, "oneOf");
         f.instruction(&Instruction::End);
         f
     }
@@ -19275,6 +19436,9 @@ impl<'a> Codegen<'a> {
                 ctx,
                 f,
             )?,
+            ("Json.Decode", "oneOrMore") => {
+                self.emit_dnode(25, &[&args[0], &args[1]], ctx, f)?
+            }
             ("Json.Decode", "andThen") => self.emit_dnode(18, &[&args[0], &args[1]], ctx, f)?,
             ("Json.Decode", "oneOf") => self.emit_dnode(19, &[&args[0]], ctx, f)?,
             ("Json.Decode", "succeed") => self.emit_dnode(20, &[&args[0]], ctx, f)?,
@@ -20063,6 +20227,20 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?; // Json.Value
                 f.instruction(&Instruction::Call(self.attr_property_idx));
             }
+            // VirtualDom.on name handler → AEVENT [name, decoder]. The Handler
+            // ctor (Normal/MayStopPropagation/MayPreventDefault/Custom) wraps its
+            // decoder as arg0, so extract it. (The advanced kinds' flags are
+            // dropped — same rare limitation as Html.map over an advanced event.)
+            ("VirtualDom", "on") => {
+                let h = ctx.scratch_eqref;
+                f.instruction(&Instruction::I32Const(2)); // AEVENT
+                self.emit_expr(&args[0], ctx, f)?; // name
+                self.emit_expr(&args[1], ctx, f)?; // handler
+                f.instruction(&Instruction::LocalSet(h));
+                ctor_arg0(f, h); // handler's decoder
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
             // Html.Lazy.lazyN f a…: no memoization — just apply f to the args.
             ("Html.Lazy", n) if n.starts_with("lazy") => {
                 self.emit_expr(&args[0], ctx, f)?; // f
@@ -20333,6 +20511,14 @@ impl<'a> Codegen<'a> {
             ("Url", "fromString") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.url_from_string_idx));
+            }
+            ("Url", "toString") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.url_to_string_idx));
+            }
+            ("Json.Decode", "errorToString") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.json_err_to_string_idx));
             }
             // Browser.Navigation → CMD tag 4 push / 5 replace / 6 load [url].
             ("Browser.Navigation", "pushUrl") | ("Browser.Navigation", "replaceUrl") => {
