@@ -2757,6 +2757,118 @@ fn element_http_task() {
 }
 
 #[test]
+fn cmd_map_task() {
+    // Cmd.map composes the outer wrapper into the effect's toMsg: init performs a
+    // task whose result is Got, then Cmd.map Wrapped funnels it to Wrapped (Got n).
+    let dir = common::test_dir("alm-wasmgc", "cmd_map");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Task\n\n\
+         type Inner = Got Int\n\
+         type Msg = Wrapped Inner\n\n\
+         init : () -> ( Int, Cmd Msg )\n\
+         init _ =\n    ( 0, Cmd.map Wrapped (Task.perform Got (Task.succeed 42)) )\n\n\
+         update : Msg -> Int -> ( Int, Cmd Msg )\n\
+         update (Wrapped (Got n)) _ = ( n, Cmd.none )\n\n\
+         view : Int -> Html.Html Msg\n\
+         view n =\n    div [] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("mcm.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             const tick=()=>new Promise(r=>setImmediate(r));\
+             async function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               await tick();await tick();const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
+             (async()=>{{const j=await run(js.start,{b:?});const w=await run(wg.start,{w:?});\
+               process.stdout.write([j,w].join('\\u001e'));}})();",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 2, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "Cmd.map render disagrees");
+    assert_eq!(parts[1], "<div>42</div>", "Cmd.map should route Got 42 through Wrapped");
+}
+
+// Html.Attributes.map over an event handler: clicking a button whose onClick is
+// mapped through Wrap must route to the outer Msg. WASM-ONLY — the alm JS backend
+// crashes on Html.Attributes.map (`record.decoder.run` undefined; a separate
+// alm-JS bug), so there is no JS reference to diff against; assert directly.
+#[test]
+fn attributes_map_event() {
+    let dir = common::test_dir("alm-wasmgc", "attrs_map");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, text)\n\
+         import Html.Attributes as A\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Child = Bump\n\
+         type Msg = Wrap Child\n\n\
+         update : Msg -> Int -> Int\n\
+         update _ n = n + 1\n\n\
+         view : Int -> Html Msg\n\
+         view n =\n    div [] [ button [ A.map Wrap (onClick Bump) ] [ text \"+\" ], div [] [ text (String.fromInt n) ] ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    )
+    .expect("fixture");
+    project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("mam.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const wg=require(S+'/wasmgc_driver.cjs');\
+             function findBtn(n){{if(n.tagName==='button')return n;for(const c of (n.childNodes||[])){{const r=findBtn(c);if(r)return r;}}return null;}}\
+             const doc=new Document();wg.start({w:?},doc);\
+             const b=findBtn(doc.body);dispatchEvent(b,'click',{{}});dispatchEvent(b,'click',{{}});\
+             process.stdout.write(serializeBody(doc));",
+            sup = support, w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    assert_eq!(
+        out, "<div><button>+</button><div>2</div></div>",
+        "Html.Attributes.map should route two clicks through Wrap Bump"
+    );
+}
+
+#[test]
 fn sandbox_html_map() {
     // Html.map wraps a child view's messages. Clicking the mapped button must
     // route through the outer Msg (Wrap Bump) and increment — identical in both

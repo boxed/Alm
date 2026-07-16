@@ -1084,6 +1084,10 @@ struct Codegen<'a> {
     port_in_idx: u32,
     sub_find_port_idx: u32,
     html_map_idx: u32,
+    compose3_idx: u32,
+    cmd_map_idx: u32,
+    sub_map_idx: u32,
+    attr_map_idx: u32,
     http_response_idx: u32,
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
@@ -1287,6 +1291,10 @@ impl<'a> Codegen<'a> {
             port_in_idx: 0,
             sub_find_port_idx: 0,
             html_map_idx: 0,
+            compose3_idx: 0,
+            cmd_map_idx: 0,
+            sub_map_idx: 0,
+            attr_map_idx: 0,
             http_response_idx: 0,
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
@@ -1539,6 +1547,10 @@ impl<'a> Codegen<'a> {
         self.task_run_idx = next();
         self.dict_sorted_build_idx = next();
         self.set_sorted_build_idx = next();
+        self.compose3_idx = next();
+        self.cmd_map_idx = next();
+        self.sub_map_idx = next();
+        self.attr_map_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1804,6 +1816,10 @@ impl<'a> Codegen<'a> {
         let task_run = self.emit_task_run();
         let dict_sorted_build = self.emit_sorted_build(true);
         let set_sorted_build = self.emit_sorted_build(false);
+        let compose3 = self.emit_compose3();
+        let cmd_map = self.emit_cmd_map();
+        let sub_map = self.emit_sub_map();
+        let attr_map = self.emit_attr_map();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -2093,6 +2109,10 @@ impl<'a> Codegen<'a> {
         funcs.function(ft1); // task_run (task) -> Result
         funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
         funcs.function(e_e_ty); // set_sorted_build : elems -> Set
+        funcs.function(ft3); // compose3 : (f, g, x) -> f (g x)
+        funcs.function(ee_eqref_ty); // cmd_map : (f, cmd) -> cmd
+        funcs.function(ee_eqref_ty); // sub_map : (f, sub) -> sub
+        funcs.function(ee_eqref_ty); // attr_map : (f, attr) -> attr
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -2292,6 +2312,10 @@ impl<'a> Codegen<'a> {
         code.function(&task_run);
         code.function(&dict_sorted_build);
         code.function(&set_sorted_build);
+        code.function(&compose3);
+        code.function(&cmd_map);
+        code.function(&sub_map);
+        code.function(&attr_map);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -13482,6 +13506,214 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// compose3(f, g, x) = f (g x). Reused (via a 2-arg closure) to fuse a
+    /// message-mapping function into a stored `toMsg` for Cmd.map / Sub.map.
+    fn emit_compose3(&self) -> Function {
+        let mut f = Function::new([]);
+        f.instruction(&Instruction::LocalGet(0)); // f
+        f.instruction(&Instruction::LocalGet(1)); // g
+        f.instruction(&Instruction::LocalGet(2)); // x
+        f.instruction(&Instruction::Call(self.apply1_idx)); // g x
+        f.instruction(&Instruction::Call(self.apply1_idx)); // f (g x)
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// cmd_map(f, cmd): map the messages a Cmd will produce through `f`. Only
+    /// message-producing leaves are touched — HTTP `expect` and Task
+    /// perform/attempt `toMsg` get `f` composed in; batches recurse; ports/nav/
+    /// none are returned unchanged (they produce no message).
+    fn emit_cmd_map(&self) -> Function {
+        // params f(0), cmd(1). locals tag(2):i32, expect(3), composed(4):eqref
+        let mut f = Function::new([(1, ValType::I32), (2, eqref())]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        // CMD_BATCH (1): re-wrap List (cmd_map f) over the child list.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        self.emit_make_closure(self.cmd_map_idx, 2, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx)); // cmd_map[f]
+        ctor_arg0(&mut f, 1); // the list
+        f.instruction(&Instruction::Call(self.list_map_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // CMD_HTTP (3) [url, expect]: rebuild with a mapped expect.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(3));
+        ctor_arg0(&mut f, 1); // url
+        // composed = compose3[f][expect.toMsg]
+        ctor_argn(&mut f, 1, 1);
+        f.instruction(&Instruction::LocalSet(3)); // expect
+        self.emit_make_closure(self.compose3_idx, 3, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 3); // expect.toMsg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(4)); // composed
+        // new expect: same tag; args [composed] or [composed, decoder] (JSON=1).
+        ctor_tag(&mut f, 3);
+        ctor_tag(&mut f, 3);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(ref_to(T_ARR))));
+        f.instruction(&Instruction::LocalGet(4));
+        ctor_argn(&mut f, 3, 1); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::StructNew(T_CTOR)); // new expect
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // CMD_HTTP
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // CMD_TASK_PERFORM (7) / ATTEMPT (8) [toMsg, task]: compose f into toMsg.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(7));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2)); // preserve tag 7/8
+        self.emit_make_closure(self.compose3_idx, 3, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 1); // toMsg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_argn(&mut f, 1, 1); // task
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Everything else (none / port / nav) produces no message: unchanged.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// sub_map(f, sub): map the messages a Sub will produce through `f`.
+    /// SubPort/SubTime/SubAnimation compose `f` into their `toMsg`; SubDom wraps
+    /// its decoder in DMap[f, decoder]; batches recurse; none is unchanged.
+    fn emit_sub_map(&self) -> Function {
+        // params f(0), sub(1). local tag(2):i32
+        let mut f = Function::new([(1, ValType::I32)]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        // batch (1)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        self.emit_make_closure(self.sub_map_idx, 2, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.list_map_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // SubDom (5) [name, decoder] → [name, DMap[f, decoder]]
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(5));
+        ctor_arg0(&mut f, 1); // name
+        f.instruction(&Instruction::I32Const(15)); // DMap
+        f.instruction(&Instruction::LocalGet(0)); // f
+        ctor_argn(&mut f, 1, 1); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // SubPort (2) [name, toMsg] / SubTime (4) [interval, toMsg]: arg0 kept,
+        // toMsg (arg1) composed with f.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2)); // preserve tag
+        ctor_arg0(&mut f, 1); // name/interval
+        self.emit_make_closure(self.compose3_idx, 3, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_argn(&mut f, 1, 1); // toMsg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // SubAnimation (6) [toMsg, deltaFlag]: compose toMsg (arg0), keep flag.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(6));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(6));
+        self.emit_make_closure(self.compose3_idx, 3, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 1); // toMsg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_argn(&mut f, 1, 1); // deltaFlag
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // none / unknown: unchanged.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// attr_map(f, attr): Html.Attributes.map — an AEVENT's decoder is wrapped in
+    /// DMap[f, decoder] so its message funnels through `f`; any other attribute
+    /// (static AATTR/ASTYLE/ABOOL/ANONE) produces no message and is unchanged.
+    /// (Like html_map, an advanced handler's `kind` is dropped — rare.)
+    fn emit_attr_map(&self) -> Function {
+        // params f(0), attr(1). local tag(2):i32
+        let mut f = Function::new([(1, ValType::I32)]);
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(2)); // AEVENT
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(2)); // AEVENT
+        ctor_arg0(&mut f, 1); // event name
+        f.instruction(&Instruction::I32Const(15)); // DMap
+        f.instruction(&Instruction::LocalGet(0)); // f
+        ctor_argn(&mut f, 1, 1); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // DMap
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // AEVENT
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(1)); // unchanged
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// index_byte(str, ch) : first index of byte `ch` in the T_STR, or -1.
     /// (Byte-indexed — matches the backend's byte-based String slicing, which is
     /// exact for the ASCII delimiters URLs are split on.)
@@ -17658,10 +17890,55 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            ("Html", "map") => {
+            ("Html", "map") | ("VirtualDom", "map") | ("VirtualDom", "mapDocument") | ("Svg", "map") => {
                 self.emit_expr(&args[0], ctx, f)?; // f
                 self.emit_expr(&args[1], ctx, f)?; // node
                 f.instruction(&Instruction::Call(self.html_map_idx));
+            }
+            ("Html.Attributes", "map") | ("Svg.Attributes", "map") | ("VirtualDom", "mapAttribute") => {
+                self.emit_expr(&args[0], ctx, f)?; // f
+                self.emit_expr(&args[1], ctx, f)?; // attr
+                f.instruction(&Instruction::Call(self.attr_map_idx));
+            }
+            // VirtualDom.text / Svg.text s → VTEXT [s]. Svg.node / VirtualDom.node
+            // tag attrs kids → VNODE [tag, attrs, kids] (serializes like HTML).
+            ("VirtualDom", "text") | ("Svg", "text") => {
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("VirtualDom", "node") | ("Svg", "node") | ("VirtualDom", "nodeNS") | ("Svg", "nodeNS") => {
+                // nodeNS takes a leading namespace arg; the tag/attrs/kids are the
+                // last three either way (namespace doesn't affect serialization).
+                let base = args.len() - 3;
+                f.instruction(&Instruction::I32Const(1)); // VNODE
+                self.emit_expr(&args[base], ctx, f)?; // tag name
+                self.emit_expr(&args[base + 1], ctx, f)?; // attrs
+                self.emit_expr(&args[base + 2], ctx, f)?; // kids
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // VirtualDom.attribute / property / style → AATTR / (property) / ASTYLE.
+            ("VirtualDom", "attribute") | ("VirtualDom", "attributeNS") => {
+                let base = args.len() - 2;
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                self.emit_expr(&args[base], ctx, f)?;
+                self.emit_expr(&args[base + 1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("VirtualDom", "style") => {
+                f.instruction(&Instruction::I32Const(1)); // ASTYLE
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            ("VirtualDom", "property") => {
+                self.emit_expr(&args[0], ctx, f)?; // name
+                self.emit_expr(&args[1], ctx, f)?; // Json.Value
+                f.instruction(&Instruction::Call(self.attr_property_idx));
             }
             // Html.Lazy.lazyN f a…: no memoization — just apply f to the args.
             ("Html.Lazy", n) if n.starts_with("lazy") => {
@@ -17701,7 +17978,8 @@ impl<'a> Codegen<'a> {
             }
             // SVG elements render like HTML for serialization (the namespace
             // doesn't affect the serialized string); Svg.<tag> attrs kids → VNODE.
-            ("Svg", tag) if args.len() == 2 => {
+            // `map` is Svg.map (a 2-arg mapper), handled separately below.
+            ("Svg", tag) if args.len() == 2 && tag != "map" => {
                 f.instruction(&Instruction::I32Const(1));
                 push_str_const(f, tag);
                 self.emit_expr(&args[0], ctx, f)?;
@@ -17934,6 +18212,18 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Cmd.map / Sub.map f x : rewrite the effect's message-producing
+            // leaves to funnel through `f` (see emit_cmd_map / emit_sub_map).
+            ("Platform.Cmd", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.cmd_map_idx));
+            }
+            ("Platform.Sub", "map") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.sub_map_idx));
             }
             // Html.Events: plain-message handlers → AEVENT [name, succeed msg].
             ("Html.Events", ev) if html_event_name(ev).is_some() => {
