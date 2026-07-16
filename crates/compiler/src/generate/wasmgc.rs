@@ -263,6 +263,7 @@ const G_NEXT_FRAME: u32 = 21; // next frame-sub slot (reset each reconcile)
 const G_SORT_CMP: u32 = 22; // List.sortWith comparator (set for the sort's duration)
 const G_TASKS: u32 = 23; // suspended async tasks: [rest, toMsg, isAttempt] by slot
 const G_NEXT_TASK: u32 = 24; // next async-task slot
+const G_HTTP_RESP: u32 = 25; // the Http.Response for the task being resumed (THttpDone reads it)
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -2406,6 +2407,11 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: ValType::I32, mutable: true, shared: false },
             &ConstExpr::i32_const(0),
         );
+        // 25=Http.Response for the task currently being resumed (THttpDone reads).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
+        );
 
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
@@ -3147,6 +3153,15 @@ impl<'a> Codegen<'a> {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
             f.instruction(&Instruction::F64Const(v.into()));
             f.instruction(&Instruction::StructNew(T_FLOAT));
+            return Ok(());
+        }
+        // Http.emptyBody : the host HTTP shim ignores the request body, so any
+        // placeholder value works (a unit ctor). Http.stringBody/jsonBody/
+        // bytesBody are functions handled in emit_kernel and likewise ignored.
+        if module == "Http" && name == "emptyBody" {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
         // Time.now : a nullary Task (ctor tag 10 = Now leaf).
@@ -4669,24 +4684,25 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// If the sub-result in local 1 is `Pending[ms, rest]`, return a new Pending
-    /// that re-wraps this single-sub combinator (`tag`, with the fn at the task's
-    /// arg0) around `rest` — i.e. propagate the suspension, deferring the rest of
-    /// this combinator until the async result arrives. Assumes task in local 0.
+    /// If the sub-result in local 1 is `Pending[kind, payload, rest]`, return a
+    /// new Pending that re-wraps this single-sub combinator (`tag`, with the fn
+    /// at the task's arg0) around `rest`, preserving kind+payload — i.e.
+    /// propagate the suspension. Assumes task in local 0.
     fn emit_task_pending(&self, f: &mut Function, task_tag: i32) {
         ctor_tag(f, 1);
         f.instruction(&Instruction::I32Const(2)); // Pending
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(2)); // new Pending
-        ctor_argn(f, 1, 0); // ms
+        ctor_argn(f, 1, 0); // kind
+        ctor_argn(f, 1, 1); // payload
         f.instruction(&Instruction::I32Const(task_tag));
         ctor_arg0(f, 0); // the combinator's fn
-        ctor_argn(f, 1, 1); // rest
+        ctor_argn(f, 1, 2); // rest
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::StructNew(T_CTOR)); // rewrapped task
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::StructNew(T_CTOR)); // Pending[ms, task]
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Pending[kind, payload, task]
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
     }
@@ -4882,21 +4898,55 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // Sleep (9): suspend — Pending[ms, Succeed ()]. The unit result is fed
-        // to whatever continuation follows (which ignores it).
+        // Sleep (9): suspend — Pending[kind 0 (timer), ms, Succeed ()]. The unit
+        // result is fed to whatever continuation follows (which ignores it).
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Const(9));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(2)); // Pending
-        ctor_arg0(&mut f, 0); // ms
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // kind 0 = timer
+        ctor_arg0(&mut f, 0); // ms (payload)
         f.instruction(&Instruction::I32Const(0)); // Succeed
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::RefI31); // ()
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // THttp (11): [url, resolver] → suspend on HTTP; kind 1, payload=url, and
+        // rest=THttpDone[resolver] (reads the response once it arrives).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(11));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(2)); // Pending
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31); // kind 1 = http
+        ctor_arg0(&mut f, 0); // url (payload)
+        f.instruction(&Instruction::I32Const(12)); // THttpDone
+        ctor_argn(&mut f, 0, 1); // resolver
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // THttpDone (12): the HTTP response arrived (in G_HTTP_RESP) — the result
+        // is `resolver.toResult response` (already a Result x a).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0); // resolver record {toResult}
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR)); // toResult fn
+        f.instruction(&Instruction::GlobalGet(G_HTTP_RESP));
+        f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // Now (10): synchronous — Ok(Posix (trunc host_now())).
@@ -13976,25 +14026,60 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// Arm the host wake-up for a Pending task in `r_local` at the given `slot`.
+    /// kind 0 (timer) → host_set_timeout(ms, slot); kind 1 (http) → register a
+    /// task-marker HTTP request (G_HTTP[reqId] = ctor3[slot]) and host_http(url,
+    /// reqId), so alm_http_response resumes this task. `url_scratch` holds the
+    /// URL string for marshalling.
+    fn emit_task_arm(&self, f: &mut Function, r_local: u32, url_scratch: u32, push_slot: impl Fn(&mut Function)) {
+        ctor_argn(f, r_local, 0); // kind
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty)); // nonzero → http
+        // G_HTTP[G_NEXT_REQ] = ctor tag 3 [box(slot)]  (task-http marker)
+        f.instruction(&Instruction::GlobalGet(G_HTTP));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::I32Const(3));
+        push_slot(f);
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_http(marshal url, reqId)
+        ctor_argn(f, r_local, 1); // url (payload)
+        f.instruction(&Instruction::LocalSet(url_scratch));
+        self.dom_str(f, url_scratch);
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::Call(HOST_HTTP));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_REQ));
+        f.instruction(&Instruction::Else); // timer
+        ctor_argn(f, r_local, 1); // ms (payload, boxed Float)
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        push_slot(f);
+        f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
+        f.instruction(&Instruction::End);
+    }
+
     /// Suspend a Pending task (result in local 5, Cmd in local 0 of run_cmd):
-    /// stash [rest, toMsg, isAttempt] at a fresh G_TASKS slot and arm a one-shot
-    /// timer that will call alm_task_resume(slot).
+    /// stash [rest, toMsg, isAttempt] at a fresh G_TASKS slot and arm the wake-up
+    /// (timer or HTTP) per the Pending kind. `url_scratch` = run_cmd's local 4.
     fn emit_task_suspend(&self, f: &mut Function, is_attempt: i32) {
         f.instruction(&Instruction::GlobalGet(G_TASKS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
-        ctor_argn(f, 5, 1); // rest
+        ctor_argn(f, 5, 2); // rest
         ctor_arg0(f, 0); // toMsg (Cmd arg0)
         f.instruction(&Instruction::I32Const(is_attempt));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        // host_set_timeout(ms, slot)
-        ctor_arg0(f, 5); // ms (boxed Float)
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
-        f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
-        f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
+        self.emit_task_arm(f, 5, 4, |f| { f.instruction(&Instruction::GlobalGet(G_NEXT_TASK)); });
         f.instruction(&Instruction::GlobalGet(G_NEXT_TASK));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
@@ -14006,8 +14091,8 @@ impl<'a> Codegen<'a> {
     /// message (toMsg applied to the whole Result for attempt, to the Ok value
     /// for perform).
     fn emit_task_resume(&self) -> Function {
-        // param slot(0):i32. locals: entry(1),r(2),toMsg(3):eqref
-        let mut f = Function::new([(3, eqref())]);
+        // param slot(0):i32. locals: entry(1),r(2),toMsg(3),urlScratch(4):eqref
+        let mut f = Function::new([(4, eqref())]);
         let i31 = HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 };
         f.instruction(&Instruction::GlobalGet(G_TASKS));
         f.instruction(&cast_to(T_ARR));
@@ -14021,7 +14106,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(2));
-        // still Pending? re-arm at the same slot.
+        // still Pending? update entry[0]=rest and re-arm (timer or http) at slot.
         ctor_tag(&mut f, 2);
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Eq);
@@ -14029,13 +14114,9 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
-        ctor_argn(&mut f, 2, 1); // r.rest
+        ctor_argn(&mut f, 2, 2); // r.rest
         f.instruction(&Instruction::ArraySet(T_ARR));
-        ctor_arg0(&mut f, 2); // r.ms
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
+        self.emit_task_arm(&mut f, 2, 4, |f| { f.instruction(&Instruction::LocalGet(0)); });
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // toMsg = entry[1]
@@ -14472,6 +14553,50 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         ctor_tag(&mut f, 6);
         f.instruction(&Instruction::LocalSet(4)); // expect kind
+        // Http.task marker (tag 3 [box slot]): build the Http.Response, stash it
+        // in G_HTTP_RESP, and resume the task (its THttpDone applies the resolver).
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // body = str_from_mem(ptr, len)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        // is2xx
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(200));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(300));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        // ctor tag: GoodStatus_ (4) if 2xx else BadStatus_ (3)
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::End);
+        // Metadata record [headers(empty Dict), statusCode, statusText, url]
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        push_str_const(&mut f, "");
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
+        f.instruction(&Instruction::LocalGet(8)); // body
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Http.Response
+        f.instruction(&Instruction::GlobalSet(G_HTTP_RESP));
+        // resume the task: slot = unbox(marker.arg0)
+        ctor_arg0(&mut f, 6);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::Call(self.task_resume_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         ctor_arg0(&mut f, 6);
         f.instruction(&Instruction::LocalSet(7)); // toMsg
         // body = str_from_mem(ptr, len)
@@ -17358,6 +17483,31 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(2)); // EXPECT_WHATEVER
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Http.stringResolver / bytesResolver toResult → the record {toResult}
+            // (a single-field record = T_ARR [toResult]).
+            ("Http", "stringResolver") | ("Http", "bytesResolver") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            }
+            // Http.task config → THttp [url, resolver] (Task tag 11). GET only
+            // (host_http, like the Cmd path, ignores method/headers/body).
+            // config record fields sorted: body,headers,method,resolver,timeout,url.
+            ("Http", "task") | ("Http", "riskyTask") => {
+                let r = ctx.bind("$httptask");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::LocalSet(r));
+                f.instruction(&Instruction::I32Const(11)); // THttp
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(5));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(3));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // resolver
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Browser.Events document listeners → SubDom tag5 [eventName, decoder].

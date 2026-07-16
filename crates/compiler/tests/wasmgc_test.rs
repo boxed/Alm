@@ -2557,6 +2557,72 @@ fn element_http_get() {
 }
 
 #[test]
+fn element_http_task() {
+    // Browser.element issues an Http.task at init via Task.attempt; the host
+    // settles it with a 200 then a 404. The custom stringResolver pattern-matches
+    // the Http.Response and both backends must render the same Result each time.
+    let dir = common::test_dir("alm-wasmgc", "http_task");
+    let entry = dir.join("Test.elm");
+    std::fs::write(
+        &entry,
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (div, text)\n\
+         import Http\n\
+         import Task\n\n\
+         type Msg = Got (Result String String)\n\n\
+         resolver : Http.Resolver String String\n\
+         resolver =\n    Http.stringResolver (\\resp ->\n        case resp of\n            Http.GoodStatus_ _ body -> Ok (\"good:\" ++ body)\n            Http.BadStatus_ meta _ -> Err (\"bad:\" ++ String.fromInt meta.statusCode)\n            _ -> Err \"other\")\n\n\
+         init : () -> ( String, Cmd Msg )\n\
+         init _ =\n    ( \"init\"\n    , Task.attempt Got (Http.task { method = \"GET\", headers = [], url = \"/data\", body = Http.emptyBody, resolver = resolver, timeout = Nothing })\n    )\n\n\
+         update : Msg -> String -> ( String, Cmd Msg )\n\
+         update (Got r) _ =\n    ( case r of\n        Ok b -> b\n        Err e -> e\n    , Cmd.none )\n\n\
+         view : String -> Html.Html Msg\n\
+         view s =\n    div [] [ text s ]\n\n\
+         main : Program () String Msg\n\
+         main =\n    Browser.element { init = init, update = update, view = view, subscriptions = \\_ -> Sub.none }\n",
+    )
+    .expect("fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|e| {
+        panic!("check failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let script = dir.join("m9t.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             const tick=()=>new Promise(r=>setImmediate(r));\
+             async function run(startFn,arg,status,body){{const doc=new Document();const r=startFn(arg,doc);\
+               await tick();r.resolveHttp(status,body);await tick();await tick();\
+               const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
+             (async()=>{{\
+               const j1=await run(js.start,{b:?},200,'hello');const w1=await run(wg.start,{w:?},200,'hello');\
+               const j2=await run(js.start,{b:?},404,'nope');const w2=await run(wg.start,{w:?},404,'nope');\
+               process.stdout.write([j1,w1,j2,w2].join('\\u001e'));\
+             }})();",
+            sup = support, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let parts: Vec<&str> = out.split('\u{1e}').collect();
+    assert_eq!(parts.len(), 4, "unexpected output: {out}");
+    assert_eq!(parts[0], parts[1], "200 render disagrees");
+    assert_eq!(parts[2], parts[3], "404 render disagrees");
+    assert_eq!(parts[1], "<div>good:hello</div>", "200 body");
+    assert_eq!(parts[3], "<div>bad:404</div>", "404 status");
+}
+
+#[test]
 fn sandbox_html_map() {
     // Html.map wraps a child view's messages. Clicking the mapped button must
     // route through the outer Msg (Wrap Bump) and increment — identical in both
