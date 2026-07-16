@@ -1575,6 +1575,32 @@ fn keyed_classlist_update() {
 }
 
 #[test]
+fn keyed_handler_table_grows() {
+    // Each row carries an event handler, so one render registers one handler per
+    // row. Rendering ~5000 handler-bearing rows exceeds the initial handler-table
+    // capacity (MAX_HANDLERS), which used to trap `array element access out of
+    // bounds`; the table now doubles on demand. Asserts the oversized render
+    // still matches the JS backend (js-framework-benchmark create-rows shape).
+    assert_sandbox_click(
+        "keyed_handler_table_grows",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, a, button, div, text)\n\
+         import Html.Events exposing (onClick)\n\
+         import Html.Keyed as Keyed\n\n\
+         type Msg = Run | Select Int\n\n\
+         row2 : Int -> ( String, Html Msg )\n\
+         row2 i =\n    ( String.fromInt i, div [] [ a [ onClick (Select i) ] [ text (String.fromInt i) ] ] )\n\n\
+         view : Int -> Html Msg\n\
+         view n =\n    div [] [ button [ onClick Run ] [ text \"run\" ], Keyed.node \"div\" [] (List.map row2 (List.range 1 n)) ]\n\n\
+         update : Msg -> Int -> Int\n\
+         update msg n =\n    case msg of\n        Run ->\n            5000\n\n        Select _ ->\n            n\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = update, view = view }\n",
+    );
+}
+
+#[test]
 fn sandbox_static_render() {
     assert_sandbox_html(
         "sandbox",

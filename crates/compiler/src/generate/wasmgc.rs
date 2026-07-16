@@ -12413,8 +12413,14 @@ impl<'a> Codegen<'a> {
     /// handler id; children recurse.
     fn emit_render_dom(&self) -> Function {
         // param node(0). locals: tag(1),i(2),h(3),hid(4):i32,
-        //   attr(5),sub(6),key(7),val(8):eqref
-        let mut f = Function::new([(4, ValType::I32), (4, eqref())]);
+        //   attr(5),sub(6),key(7),val(8):eqref, hcap(9):i32, hnew(10):ref null T_ARR
+        //   (9/10 grow the handler table when it would overflow).
+        let mut f = Function::new([
+            (4, ValType::I32),
+            (4, eqref()),
+            (1, ValType::I32),
+            (1, ref_null_to(T_ARR)),
+        ]);
         ctor_tag(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         // VTEXT
@@ -12492,6 +12498,30 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         // AEVENT (2): register [decoder, kind] at a fresh hid, add listener.
         // kind = args[2] if present (advanced on-handlers), else i31(0) plain.
+        // Handler ids are allocated per new node and not reclaimed, so the table
+        // grows on demand (a large render or many updates would otherwise blow
+        // past the initial capacity). Double it whenever the next id won't fit.
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalTee(9)); // hcap = old length
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::I32LeS); // hcap <= next id → grow
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(10)); // hnew
+        f.instruction(&Instruction::LocalGet(10)); // dst
+        f.instruction(&Instruction::I32Const(0)); // dst offset
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS)); // src
+        f.instruction(&Instruction::I32Const(0)); // src offset
+        f.instruction(&Instruction::LocalGet(9)); // len = old length
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::GlobalSet(G_HANDLERS));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::GlobalGet(G_HANDLERS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
