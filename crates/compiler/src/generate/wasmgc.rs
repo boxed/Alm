@@ -1207,6 +1207,8 @@ struct Codegen<'a> {
     cmd_map_idx: u32,
     sub_map_idx: u32,
     attr_map_idx: u32,
+    time_adj_minutes_idx: u32,
+    time_civil_idx: u32,
     http_response_idx: u32,
     reconcile_subs_idx: u32,
     walk_timers_idx: u32,
@@ -1419,6 +1421,8 @@ impl<'a> Codegen<'a> {
             cmd_map_idx: 0,
             sub_map_idx: 0,
             attr_map_idx: 0,
+            time_adj_minutes_idx: 0,
+            time_civil_idx: 0,
             http_response_idx: 0,
             reconcile_subs_idx: 0,
             walk_timers_idx: 0,
@@ -1679,6 +1683,8 @@ impl<'a> Codegen<'a> {
         self.cmd_map_idx = next();
         self.sub_map_idx = next();
         self.attr_map_idx = next();
+        self.time_adj_minutes_idx = next();
+        self.time_civil_idx = next();
         self.alm_event_idx = next();
         let main_int_idx = next();
         let render_idx = next();
@@ -1952,6 +1958,8 @@ impl<'a> Codegen<'a> {
         let cmd_map = self.emit_cmd_map();
         let sub_map = self.emit_sub_map();
         let attr_map = self.emit_attr_map();
+        let time_adj_minutes = self.emit_time_adj_minutes();
+        let time_civil = self.emit_time_civil();
         let alm_event = self.emit_alm_event();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
@@ -2249,6 +2257,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ee_eqref_ty); // cmd_map : (f, cmd) -> cmd
         funcs.function(ee_eqref_ty); // sub_map : (f, sub) -> sub
         funcs.function(ee_eqref_ty); // attr_map : (f, attr) -> attr
+        funcs.function(ee_eqref_ty); // time_adj_minutes : (zone, posix) -> Int
+        funcs.function(e_e_ty); // time_civil : minutes -> [y, m, d]
         funcs.function(alm_event_ty); // alm_event
         funcs.function(main_int_ty);
         funcs.function(render_ty); // render
@@ -2456,6 +2466,8 @@ impl<'a> Codegen<'a> {
         code.function(&cmd_map);
         code.function(&sub_map);
         code.function(&attr_map);
+        code.function(&time_adj_minutes);
+        code.function(&time_civil);
         code.function(&alm_event);
         code.function(&mi);
         code.function(&render);
@@ -13894,6 +13906,199 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// time_adj_minutes(zone, posix) -> Int : elm/time's toAdjustedMinutes.
+    /// `flooredDiv (posixToMillis posix) 60000 + offset`, walking the Zone's eras
+    /// (Zone = ctor [defaultOffset, eras]; Era = record {offset=0, start=1}).
+    fn emit_time_adj_minutes(&self) -> Function {
+        // params zone(0), posix(1). locals minutes(2):i64, eras(3), era(4):eqref
+        let mut f = Function::new([(1, ValType::I64), (2, eqref())]);
+        // minutes = floor(posixMillis / 60000)
+        ctor_arg0(&mut f, 1);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::F64ConvertI64S);
+        f.instruction(&Instruction::F64Const(60000.0.into()));
+        f.instruction(&Instruction::F64Div);
+        f.instruction(&Instruction::F64Floor);
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::LocalSet(2));
+        // eras = zone.arg1
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        list_is_empty(&mut f, 3);
+        f.instruction(&Instruction::BrIf(1)); // no more eras -> fallback
+        list_head(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(4)); // era record
+        // if era.start (field 1) < minutes -> minutes + era.offset (field 0)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        list_tail(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // fallback: minutes + defaultOffset (zone.arg0)
+        f.instruction(&Instruction::LocalGet(2));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// time_civil(minutes) -> [year, month, day] (boxed Ints) : elm/time's
+    /// toCivil (Howard Hinnant's civil-from-days). All `//` are non-negative
+    /// after the +719468 shift, so truncated i64 division matches.
+    fn emit_time_civil(&self) -> Function {
+        // param minutes-boxed(0). locals: m(1),rawDay(2),era(3),dayOfEra(4),
+        //   yearOfEra(5),year(6),dayOfYear(7),mp(8),month(9):i64
+        let mut f = Function::new([(9, ValType::I64)]);
+        // m = unbox(minutes)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        // rawDay = floor(m / 1440) + 719468
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::F64ConvertI64S);
+        f.instruction(&Instruction::F64Const(1440.0.into()));
+        f.instruction(&Instruction::F64Div);
+        f.instruction(&Instruction::F64Floor);
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::I64Const(719468));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(2));
+        // era = (rawDay>=0 ? rawDay : rawDay-146096) / 146097
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::I64GeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I64Const(146096));
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I64Const(146097));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(3));
+        // dayOfEra = rawDay - era*146097
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64Const(146097));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        // yearOfEra = (dayOfEra - dayOfEra/1460 + dayOfEra/36524 - dayOfEra/146096) / 365
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(1460));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(36524));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(146096));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::I64Const(365));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(5));
+        // year = yearOfEra + era*400
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I64Const(400));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(6));
+        // dayOfYear = dayOfEra - (365*yearOfEra + yearOfEra/4 - yearOfEra/100)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I64Const(365));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64Const(4));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I64Const(100));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::LocalSet(7));
+        // mp = (5*dayOfYear + 2) / 153
+        f.instruction(&Instruction::I64Const(5));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::I64Const(2));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I64Const(153));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::LocalSet(8));
+        // month = mp + (mp<10 ? 3 : -9)
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Const(10));
+        f.instruction(&Instruction::I64LtS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::I64Const(3));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I64Const(-9));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::LocalSet(9));
+        // result[0] = year + (month<=2 ? 1 : 0)
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I64Const(2));
+        f.instruction(&Instruction::I64LeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        // result[1] = month
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        // result[2] = dayOfYear - (153*mp + 2)/5 + 1
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I64Const(153));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Mul);
+        f.instruction(&Instruction::I64Const(2));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::I64Const(5));
+        f.instruction(&Instruction::I64DivS);
+        f.instruction(&Instruction::I64Sub);
+        f.instruction(&Instruction::I64Const(1));
+        f.instruction(&Instruction::I64Add);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
+        f.instruction(&Instruction::End);
+        f
+    }
+
     /// index_byte(str, ch) : first index of byte `ch` in the T_STR, or -1.
     /// (Byte-indexed — matches the backend's byte-based String slicing, which is
     /// exact for the ASCII delimiters URLs are split on.)
@@ -14245,6 +14450,79 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 2);
         f.instruction(&Instruction::LocalSet(4));
+
+        // FAST PATH — the key list is unchanged (same length, same keys in the
+        // same order): no node moved, was added, or was removed, so just patch
+        // each child in place. Covers select / update / any attribute- or
+        // text-only change — the common case — skipping the treap build+lookup
+        // and the LIS entirely. Local 6 is the "all keys equal" flag.
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 1, 5); // oldk[i][0]
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem(&mut f, 2, 5); // newk[i][0]
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz); // 1 iff keys differ
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::Br(2)); // break out of the key-check loop
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // if all keys matched: patch in place and return
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::Call(DOM_CHILD));
+        list_elem(&mut f, 1, 5); // oldk[i][1]
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem(&mut f, 2, 5); // newk[i][1]
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.patch_idx));
+        f.instruction(&Instruction::Drop);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+
         // Scratch arrays. `used`/`stay` default to null (== false); the rest are
         // fully written before they are read.
         f.instruction(&Instruction::LocalGet(3));
@@ -18853,6 +19131,102 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
                 f.instruction(&Instruction::I32Const(0));
                 f.instruction(&Instruction::ArrayGet(T_ARR));
+            }
+            // Time.customZone offset eras → Zone (ctor tag0 [offset, eras]).
+            ("Time", "customZone") => {
+                f.instruction(&Instruction::I32Const(0));
+                self.emit_expr(&args[0], ctx, f)?; // default offset
+                self.emit_expr(&args[1], ctx, f)?; // eras
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Calendar accessors (zone, posix). year/day extract from toCivil;
+            // month/weekday map the civil month / day-of-week to their ctor tags.
+            ("Time", "toYear") | ("Time", "toMonth") | ("Time", "toDay") => {
+                self.emit_expr(&args[0], ctx, f)?; // zone
+                self.emit_expr(&args[1], ctx, f)?; // posix
+                f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
+                f.instruction(&Instruction::Call(self.time_civil_idx));
+                f.instruction(&cast_to(T_ARR));
+                let field = match name {
+                    "toYear" => 0,
+                    "toMonth" => 1,
+                    _ => 2,
+                };
+                f.instruction(&Instruction::I32Const(field));
+                f.instruction(&Instruction::ArrayGet(T_ARR));
+                if name == "toMonth" {
+                    // month (1..12) -> Month ctor tag (month-1), Jan=0..Dec=11.
+                    f.instruction(&Instruction::Call(self.unbox_int_idx));
+                    f.instruction(&Instruction::I32WrapI64);
+                    f.instruction(&Instruction::I32Const(1));
+                    f.instruction(&Instruction::I32Sub);
+                    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                    f.instruction(&Instruction::StructNew(T_CTOR));
+                }
+            }
+            ("Time", "toHour") | ("Time", "toMinute") | ("Time", "toSecond")
+            | ("Time", "toMillis") => {
+                // modBy K (flooredDiv base D) — base = adjusted minutes (hour/
+                // minute) or posixMillis (second/millis); modby(box K, box value).
+                let (modulus, div): (i64, f64) = match name {
+                    "toHour" => (24, 60.0),
+                    "toMinute" => (60, 1.0),
+                    "toSecond" => (60, 1000.0),
+                    _ => (1000, 1.0),
+                };
+                f.instruction(&Instruction::I64Const(modulus));
+                f.instruction(&Instruction::Call(self.box_int_idx)); // modBy's modulus
+                if name == "toSecond" || name == "toMillis" {
+                    self.emit_expr(&args[1], ctx, f)?; // posix
+                    f.instruction(&cast_to(T_CTOR));
+                    f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+                    f.instruction(&Instruction::I32Const(0));
+                    f.instruction(&Instruction::ArrayGet(T_ARR));
+                    f.instruction(&Instruction::Call(self.unbox_int_idx));
+                } else {
+                    self.emit_expr(&args[0], ctx, f)?; // zone
+                    self.emit_expr(&args[1], ctx, f)?; // posix
+                    f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
+                    f.instruction(&Instruction::Call(self.unbox_int_idx));
+                }
+                if div != 1.0 {
+                    // flooredDiv value div
+                    f.instruction(&Instruction::F64ConvertI64S);
+                    f.instruction(&Instruction::F64Const(div.into()));
+                    f.instruction(&Instruction::F64Div);
+                    f.instruction(&Instruction::F64Floor);
+                    f.instruction(&Instruction::I64TruncF64S);
+                }
+                f.instruction(&Instruction::Call(self.box_int_idx));
+                f.instruction(&Instruction::Call(self.modby_idx));
+            }
+            ("Time", "toWeekday") => {
+                // modBy 7 (flooredDiv adjustedMinutes 1440) -> Weekday. Map the
+                // day-of-week index to the ctor tag: 0->Thu(3),1->Fri(4),2->Sat(5),
+                // 3->Sun(6),4->Mon(0),5->Tue(1),_->Wed(2).
+                f.instruction(&Instruction::I64Const(7));
+                f.instruction(&Instruction::Call(self.box_int_idx));
+                self.emit_expr(&args[0], ctx, f)?;
+                self.emit_expr(&args[1], ctx, f)?;
+                f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
+                f.instruction(&Instruction::Call(self.unbox_int_idx));
+                f.instruction(&Instruction::F64ConvertI64S);
+                f.instruction(&Instruction::F64Const(1440.0.into()));
+                f.instruction(&Instruction::F64Div);
+                f.instruction(&Instruction::F64Floor);
+                f.instruction(&Instruction::I64TruncF64S);
+                f.instruction(&Instruction::Call(self.box_int_idx));
+                f.instruction(&Instruction::Call(self.modby_idx));
+                // dow in [0,6]; ctorTag = [3,4,5,6,0,1,2][dow] = (dow+3) mod 7.
+                f.instruction(&Instruction::Call(self.unbox_int_idx));
+                f.instruction(&Instruction::I32WrapI64);
+                f.instruction(&Instruction::I32Const(3));
+                f.instruction(&Instruction::I32Add);
+                f.instruction(&Instruction::I32Const(7));
+                f.instruction(&Instruction::I32RemS);
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Platform.Cmd.batch / Platform.Sub.batch → tag1 [List].
             ("Platform.Cmd", "batch") | ("Platform.Sub", "batch") => {

@@ -641,6 +641,25 @@ fn self_recursion_through_lambda() {
     );
 }
 
+// Time calendar accessors (toYear/toMonth/toDay/toWeekday/toHour/toMinute/
+// toSecond/toMillis) under UTC and a fixed custom zone — civil-date math.
+#[test]
+fn time_calendar() {
+    assert_str_prog_js_wasm(
+        "time_calendar",
+        "module Test exposing (main)\n\n\
+         import Time\n\n\
+         monthStr : Time.Month -> String\n\
+         monthStr m =\n    case m of\n        Time.Jan -> \"Jan\"\n        Time.Jul -> \"Jul\"\n        Time.Dec -> \"Dec\"\n        _ -> \"?\"\n\n\
+         wdStr : Time.Weekday -> String\n\
+         wdStr w =\n    case w of\n        Time.Mon -> \"Mon\"\n        Time.Fri -> \"Fri\"\n        Time.Sun -> \"Sun\"\n        _ -> \"?\"\n\n\
+         show : Time.Zone -> Time.Posix -> String\n\
+         show z t =\n    String.fromInt (Time.toYear z t) ++ \"-\" ++ monthStr (Time.toMonth z t) ++ \"-\"\n        ++ String.fromInt (Time.toDay z t) ++ \" \" ++ wdStr (Time.toWeekday z t) ++ \" \"\n        ++ String.fromInt (Time.toHour z t) ++ \":\" ++ String.fromInt (Time.toMinute z t)\n        ++ \":\" ++ String.fromInt (Time.toSecond z t) ++ \".\" ++ String.fromInt (Time.toMillis z t)\n\n\
+         main : String\n\
+         main =\n    let\n        t = Time.millisToPosix 1500000123456\n    in\n    show Time.utc t ++ \" | \" ++ show (Time.customZone (5 * 60 + 30) []) t\n",
+    );
+}
+
 // String.trimLeft / trimRight (one-sided ASCII whitespace trim).
 #[test]
 fn string_trim_sides() {
