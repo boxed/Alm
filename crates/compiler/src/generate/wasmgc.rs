@@ -1015,6 +1015,93 @@ fn push_empty_list(f: &mut Function) {
     f.instruction(&Instruction::StructNew(T_LIST));
 }
 
+/// A canonical dedup key for a type, used to share `Debug.toString` renderers.
+/// All type variables collapse (they never carry a printable value) and all
+/// function types collapse to one (`<function>`), so structurally-equal types
+/// map to one renderer — and recursive types to a finite set.
+fn debug_type_key(ty: &can::Type) -> String {
+    match ty {
+        can::Type::Var(_) => "v".into(),
+        can::Type::Lambda(_, _) => "fn".into(),
+        can::Type::Unit => "U".into(),
+        can::Type::Type(h, n, args) => {
+            let inner: Vec<String> = args.iter().map(debug_type_key).collect();
+            format!("T:{h}.{n}({})", inner.join(","))
+        }
+        can::Type::Tuple(a, b, c) => {
+            let cc = c.as_ref().map(|t| debug_type_key(t)).unwrap_or_default();
+            format!("P:({},{},{cc})", debug_type_key(a), debug_type_key(b))
+        }
+        can::Type::Record(fields, _) => {
+            let mut fs: Vec<(String, String)> = fields
+                .iter()
+                .map(|(n, t)| (n.to_string(), debug_type_key(t)))
+                .collect();
+            fs.sort();
+            let inner: Vec<String> = fs.iter().map(|(n, k)| format!("{n}:{k}")).collect();
+            format!("R:{{{}}}", inner.join(","))
+        }
+    }
+}
+
+/// Substitute a union's type variables (by name) into a declared arg type.
+fn subst_type(subst: &HashMap<String, can::Type>, ty: &can::Type) -> can::Type {
+    match ty {
+        can::Type::Var(n) => subst.get(&n.to_string()).cloned().unwrap_or_else(|| ty.clone()),
+        can::Type::Lambda(a, b) => can::Type::Lambda(
+            Box::new(subst_type(subst, a)),
+            Box::new(subst_type(subst, b)),
+        ),
+        can::Type::Type(h, n, args) => can::Type::Type(
+            h.clone(),
+            n.clone(),
+            args.iter().map(|a| subst_type(subst, a)).collect(),
+        ),
+        can::Type::Tuple(a, b, c) => can::Type::Tuple(
+            Box::new(subst_type(subst, a)),
+            Box::new(subst_type(subst, b)),
+            c.as_ref().map(|t| Box::new(subst_type(subst, t))),
+        ),
+        can::Type::Record(fields, ext) => can::Type::Record(
+            fields.iter().map(|(n, t)| (n.clone(), subst_type(subst, t))).collect(),
+            ext.clone(),
+        ),
+        can::Type::Unit => can::Type::Unit,
+    }
+}
+
+/// Emit the `_Debug_addSlashes` byte classification: given the input byte in
+/// local `b` and the quote char in `qc`, set `esc` (1 if the byte must be
+/// backslash-escaped) and `sec` (the char to emit after the backslash).
+fn debug_esc_classify(f: &mut Function, b: u32, esc: u32, sec: u32, qc: u32) {
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::LocalSet(esc));
+    f.instruction(&Instruction::LocalGet(b));
+    f.instruction(&Instruction::LocalSet(sec));
+    // fixed escapes: (byte, char-after-backslash)
+    for (byte, after) in [(92, 92), (10, 110), (9, 116), (13, 114), (11, 118), (0, 48)] {
+        f.instruction(&Instruction::LocalGet(b));
+        f.instruction(&Instruction::I32Const(byte));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(esc));
+        f.instruction(&Instruction::I32Const(after));
+        f.instruction(&Instruction::LocalSet(sec));
+        f.instruction(&Instruction::End);
+    }
+    // the surrounding quote char
+    f.instruction(&Instruction::LocalGet(b));
+    f.instruction(&Instruction::LocalGet(qc));
+    f.instruction(&Instruction::I32Eq);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::LocalSet(esc));
+    f.instruction(&Instruction::LocalGet(qc));
+    f.instruction(&Instruction::LocalSet(sec));
+    f.instruction(&Instruction::End);
+}
+
 /// Copy every element of list `src` into `dst[dstoff..]`, head-first. All of
 /// `i,sd,ss,len` are scratch i32/ref locals the caller reserves. Safe on the
 /// empty list (reads the backing only when non-empty).
@@ -1062,15 +1149,26 @@ fn copy_into(
     f.instruction(&Instruction::End);
 }
 
+/// A union type's variables and constructors — used by type-directed
+/// `Debug.toString` to render custom types (constructor name + rendered args).
+#[derive(Clone)]
+pub struct UnionInfo {
+    pub vars: Vec<crate::data::Name>,
+    /// (constructor name, runtime tag = ctor index, declared arg types)
+    pub ctors: Vec<(String, u32, Vec<can::Type>)>,
+}
+
 pub fn build(
     mono: &MonoProgram,
     output: &Path,
     ports: &HashMap<String, bool>,
     ctor_arg_types: &HashMap<(String, String, u32), Vec<can::Type>>,
+    unions: &HashMap<(String, String), UnionInfo>,
 ) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     cg.ports = ports.clone();
     cg.ctor_arg_types = ctor_arg_types.clone();
+    cg.unions = unions.clone();
     let bytes = cg.build()?;
     std::fs::write(output, bytes).map_err(|e| e.to_string())
 }
@@ -1084,6 +1182,16 @@ struct Codegen<'a> {
     /// its fields resolve to sorted `T_ARR` slots. Only field *names* matter for
     /// the sort, so unsubstituted type variables in the declaration are fine.
     ctor_arg_types: HashMap<(String, String, u32), Vec<can::Type>>,
+    /// (home, union) -> its type vars + constructors. Powers `Debug.toString`.
+    unions: HashMap<(String, String), UnionInfo>,
+    /// Type-directed `Debug.toString` renderers: canonical type key -> the
+    /// lazily-lifted `(eqref)->eqref` (value->String) function index. Registered
+    /// before its body is built so recursive types resolve their own calls.
+    debug_renderers: HashMap<String, u32>,
+    /// Lazily-lifted `Debug.toString` helpers (allocated on first use): the
+    /// ctor-arg parenthesizer and the string/char escaper.
+    debug_paren_idx: Option<u32>,
+    debug_escape_idx: Option<u32>,
     func_index: HashMap<String, u32>,
     /// arity -> function-type index.
     fn_types: HashMap<u32, u32>,
@@ -1319,6 +1427,10 @@ impl<'a> Codegen<'a> {
         Codegen {
             mono,
             ctor_arg_types: HashMap::new(),
+            unions: HashMap::new(),
+            debug_renderers: HashMap::new(),
+            debug_paren_idx: None,
+            debug_escape_idx: None,
             func_index: HashMap::new(),
             fn_types: HashMap::new(),
             fn_type_order: Vec::new(),
@@ -3575,6 +3687,24 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
+        // Html.Events.targetValue = field "target" (field "value" string);
+        // targetChecked = field "target" (field "checked" bool). Nested DField.
+        if module == "Html.Events" && (name == "targetValue" || name == "targetChecked") {
+            let (inner_field, leaf) =
+                if name == "targetValue" { ("value", 0) } else { ("checked", 3) }; // DString=0, DBool=3
+            f.instruction(&Instruction::I32Const(8)); // outer DField
+            push_str_const(f, "target");
+            f.instruction(&Instruction::I32Const(8)); // inner DField
+            push_str_const(f, inner_field);
+            f.instruction(&Instruction::I32Const(leaf));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR)); // leaf decoder
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // inner field
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // outer field
+            return Ok(());
+        }
         // Basics.pi / e : Float constants.
         if module == "Basics" && (name == "pi" || name == "e") {
             let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
@@ -3779,6 +3909,622 @@ impl<'a> Codegen<'a> {
         self.lifted[slot] = (arity, lf);
         self.emit_make_closure(lidx, arity, f);
         Ok(())
+    }
+
+    // ===================================================================
+    // Debug.toString — type-directed value rendering.
+    //
+    // This is a monomorphized backend: constructor names, record field names,
+    // and the record/tuple/ctor-arg distinction are all erased at runtime (a
+    // record and a tuple are both a bare `T_ARR`; a ctor carries only a numeric
+    // tag). So a runtime-generic renderer (like the JS `_Debug_toString`) is
+    // impossible without a full shadow type-metadata system. Instead, the
+    // argument's *static* type at each `Debug.toString` site drives a renderer
+    // specialized to that type, synthesized once per type (lazily lifted, and
+    // registered before its body is built so recursive types terminate).
+    // Output is byte-for-byte identical to the JS backend's `_Debug_toString`.
+    // ===================================================================
+
+    /// Get (or lazily lift) the `(eqref)->eqref` renderer for `ty`.
+    fn debug_renderer(&mut self, ty: &can::Type) -> Result<u32, String> {
+        let key = debug_type_key(ty);
+        if let Some(&idx) = self.debug_renderers.get(&key) {
+            return Ok(idx);
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([]))); // reserve slot
+        self.debug_renderers.insert(key, lidx); // register BEFORE body (recursion)
+        let lf = self.emit_debug_render_body(ty)?;
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, lf);
+        Ok(lidx)
+    }
+
+    /// The lazily-lifted ctor-arg parenthesizer `(String)->String`.
+    fn debug_paren(&mut self) -> u32 {
+        if let Some(i) = self.debug_paren_idx {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        self.debug_paren_idx = Some(lidx);
+        let lf = self.emit_debug_paren();
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, lf);
+        lidx
+    }
+
+    /// The lazily-lifted string/char escaper `(String, isChar:i32)->String`.
+    fn debug_escape(&mut self) -> u32 {
+        if let Some(i) = self.debug_escape_idx {
+            return i;
+        }
+        self.fn_type(2);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((2, Function::new([])));
+        self.debug_escape_idx = Some(lidx);
+        let lf = self.emit_debug_escape();
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (2, lf);
+        lidx
+    }
+
+    /// Build the renderer body for `ty`. Local 0 is the value; returns a String.
+    fn emit_debug_render_body(&mut self, ty: &can::Type) -> Result<Function, String> {
+        let app = self.str_append_idx;
+        match ty {
+            can::Type::Type(_, name, targs) => {
+                match name.as_str() {
+                    "Int" => {
+                        let mut f = Function::new([]);
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::Call(self.str_from_int_idx));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "Float" => {
+                        let mut f = Function::new([]);
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::Call(self.str_from_float_idx));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "String" => {
+                        let esc = self.debug_escape();
+                        let mut f = Function::new([]);
+                        push_str_const(&mut f, "\"");
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::I32Const(0)); // isChar = false
+                        f.instruction(&Instruction::RefI31);
+                        f.instruction(&Instruction::Call(esc));
+                        f.instruction(&Instruction::Call(app));
+                        push_str_const(&mut f, "\"");
+                        f.instruction(&Instruction::Call(app));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "Char" => {
+                        let esc = self.debug_escape();
+                        let mut f = Function::new([]);
+                        push_str_const(&mut f, "'");
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::Call(self.str_from_char_idx));
+                        f.instruction(&Instruction::I32Const(1)); // isChar = true
+                        f.instruction(&Instruction::RefI31);
+                        f.instruction(&Instruction::Call(esc));
+                        f.instruction(&Instruction::Call(app));
+                        push_str_const(&mut f, "'");
+                        f.instruction(&Instruction::Call(app));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "Bool" => {
+                        let mut f = Function::new([]);
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                            shared: false,
+                            ty: AbstractHeapType::I31,
+                        }));
+                        f.instruction(&Instruction::I31GetS);
+                        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                        push_str_const(&mut f, "True");
+                        f.instruction(&Instruction::Else);
+                        push_str_const(&mut f, "False");
+                        f.instruction(&Instruction::End);
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "List" => {
+                        let elem = targs.first().ok_or("wasmgc: List needs an arg")?;
+                        let er = self.debug_renderer(elem)?;
+                        Ok(self.emit_debug_list_body(er))
+                    }
+                    "Dict" => {
+                        let k = targs.first().ok_or("wasmgc: Dict key")?.clone();
+                        let v = targs.get(1).ok_or("wasmgc: Dict value")?.clone();
+                        let list_kv = can::Type::Type(
+                            crate::data::Name::from("List"),
+                            crate::data::Name::from("List"),
+                            vec![can::Type::Tuple(Box::new(k), Box::new(v), None)],
+                        );
+                        let lr = self.debug_renderer(&list_kv)?;
+                        let mut f = Function::new([]);
+                        push_str_const(&mut f, "Dict.fromList ");
+                        f.instruction(&Instruction::LocalGet(0));
+                        push_empty_list(&mut f);
+                        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                        f.instruction(&Instruction::Call(lr));
+                        f.instruction(&Instruction::Call(app));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "Set" => {
+                        let elem = targs.first().ok_or("wasmgc: Set elem")?.clone();
+                        let list_k = can::Type::Type(
+                            crate::data::Name::from("List"),
+                            crate::data::Name::from("List"),
+                            vec![elem],
+                        );
+                        let lr = self.debug_renderer(&list_k)?;
+                        let mut f = Function::new([]);
+                        push_str_const(&mut f, "Set.fromList ");
+                        f.instruction(&Instruction::LocalGet(0));
+                        push_empty_list(&mut f);
+                        f.instruction(&Instruction::Call(self.treap_pairs_idx));
+                        f.instruction(&Instruction::Call(self.dict_keys_idx));
+                        f.instruction(&Instruction::Call(lr));
+                        f.instruction(&Instruction::Call(app));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    "Array" => {
+                        let elem = targs.first().ok_or("wasmgc: Array elem")?.clone();
+                        let list_a = can::Type::Type(
+                            crate::data::Name::from("List"),
+                            crate::data::Name::from("List"),
+                            vec![elem],
+                        );
+                        let lr = self.debug_renderer(&list_a)?;
+                        let mut f = Function::new([]);
+                        push_str_const(&mut f, "Array.fromList ");
+                        f.instruction(&Instruction::LocalGet(0));
+                        f.instruction(&Instruction::Call(self.array_tighten_idx));
+                        f.instruction(&Instruction::Call(lr));
+                        f.instruction(&Instruction::Call(app));
+                        f.instruction(&Instruction::End);
+                        Ok(f)
+                    }
+                    _ => self.emit_debug_union_body(ty),
+                }
+            }
+            can::Type::Unit => {
+                let mut f = Function::new([]);
+                push_str_const(&mut f, "()");
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            can::Type::Tuple(a, b, c) => {
+                let ra = self.debug_renderer(a)?;
+                let rb = self.debug_renderer(b)?;
+                let rc = match c {
+                    Some(t) => Some(self.debug_renderer(t)?),
+                    None => None,
+                };
+                let mut f = Function::new([]);
+                push_str_const(&mut f, "(");
+                self.load_arr(0, 0, &mut f);
+                f.instruction(&Instruction::Call(ra));
+                f.instruction(&Instruction::Call(app));
+                push_str_const(&mut f, ",");
+                f.instruction(&Instruction::Call(app));
+                self.load_arr(0, 1, &mut f);
+                f.instruction(&Instruction::Call(rb));
+                f.instruction(&Instruction::Call(app));
+                if let Some(rc) = rc {
+                    push_str_const(&mut f, ",");
+                    f.instruction(&Instruction::Call(app));
+                    self.load_arr(0, 2, &mut f);
+                    f.instruction(&Instruction::Call(rc));
+                    f.instruction(&Instruction::Call(app));
+                }
+                push_str_const(&mut f, ")");
+                f.instruction(&Instruction::Call(app));
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            can::Type::Record(fields, _) => {
+                // Fields render in alphabetical order; the runtime `T_ARR` is
+                // laid out sorted by name, so sorted position == slot index.
+                let mut fs: Vec<(String, can::Type)> =
+                    fields.iter().map(|(n, t)| (n.to_string(), t.clone())).collect();
+                fs.sort_by(|a, b| a.0.cmp(&b.0));
+                let renderers: Vec<u32> = fs
+                    .iter()
+                    .map(|(_, t)| self.debug_renderer(t))
+                    .collect::<Result<_, _>>()?;
+                let mut f = Function::new([(1, eqref())]); // local 1 = acc
+                push_str_const(&mut f, "{ ");
+                f.instruction(&Instruction::LocalSet(1));
+                for (j, ((nm, _), rid)) in fs.iter().zip(renderers).enumerate() {
+                    let prefix = if j == 0 {
+                        format!("{nm} = ")
+                    } else {
+                        format!(", {nm} = ")
+                    };
+                    f.instruction(&Instruction::LocalGet(1));
+                    push_str_const(&mut f, &prefix);
+                    f.instruction(&Instruction::Call(app));
+                    self.load_arr(0, j as u32, &mut f);
+                    f.instruction(&Instruction::Call(rid));
+                    f.instruction(&Instruction::Call(app));
+                    f.instruction(&Instruction::LocalSet(1));
+                }
+                f.instruction(&Instruction::LocalGet(1));
+                push_str_const(&mut f, " }");
+                f.instruction(&Instruction::Call(app));
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            // Functions and unresolved type vars have no printable value.
+            _ => {
+                let mut f = Function::new([]);
+                push_str_const(&mut f, "<function>");
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+        }
+    }
+
+    /// List renderer body given the element renderer index.
+    fn emit_debug_list_body(&self, er: u32) -> Function {
+        let app = self.str_append_idx;
+        // locals: acc(1):eqref, i(2):i32, n(3):i32
+        let mut f = Function::new([(1, eqref()), (2, ValType::I32)]);
+        push_str_const(&mut f, "[");
+        f.instruction(&Instruction::LocalSet(1));
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // separator before all but the first
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(1));
+        push_str_const(&mut f, ",");
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::End);
+        // acc = acc ++ render(elem i)
+        f.instruction(&Instruction::LocalGet(1));
+        list_elem(&mut f, 0, 2);
+        f.instruction(&Instruction::Call(er));
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        f.instruction(&Instruction::LocalGet(1));
+        push_str_const(&mut f, "]");
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Custom-type renderer: switch on the ctor tag, print the ctor name, then
+    /// each rendered arg (space-separated, parenthesized per the JS rule).
+    fn emit_debug_union_body(&mut self, ty: &can::Type) -> Result<Function, String> {
+        let (home, name, targs) = match ty {
+            can::Type::Type(h, n, a) => (h.to_string(), n.to_string(), a.clone()),
+            _ => unreachable!(),
+        };
+        let ctors = self
+            .union_ctors(&home, &name, &targs)
+            .ok_or_else(|| format!("wasmgc: Debug.toString: unknown type `{home}.{name}`"))?;
+        let app = self.str_append_idx;
+        let paren = self.debug_paren();
+        // Pre-allocate arg renderers (needs &mut self) before building the body.
+        let mut ctor_plan: Vec<(String, u32, Vec<u32>)> = Vec::new();
+        for (cname, tag, argtys) in &ctors {
+            let mut rids = Vec::new();
+            for at in argtys {
+                rids.push(self.debug_renderer(at)?);
+            }
+            ctor_plan.push((cname.clone(), *tag, rids));
+        }
+        // locals: acc(1):eqref, tag(2):i32
+        let mut f = Function::new([(1, eqref()), (1, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(2));
+        let n = ctor_plan.len();
+        for (i, (cname, tag, rids)) in ctor_plan.iter().enumerate() {
+            let last = i + 1 == n;
+            if !last {
+                f.instruction(&Instruction::LocalGet(2));
+                f.instruction(&Instruction::I32Const(*tag as i32));
+                f.instruction(&Instruction::I32Eq);
+                f.instruction(&Instruction::If(BlockType::Result(eqref())));
+            }
+            // render this ctor: name, then " " ++ maybe_paren(render(arg)) per arg
+            push_str_const(&mut f, cname);
+            f.instruction(&Instruction::LocalSet(1));
+            for (ai, rid) in rids.iter().enumerate() {
+                f.instruction(&Instruction::LocalGet(1));
+                push_str_const(&mut f, " ");
+                f.instruction(&Instruction::Call(app));
+                ctor_argn(&mut f, 0, ai as i32);
+                f.instruction(&Instruction::Call(*rid));
+                f.instruction(&Instruction::Call(paren));
+                f.instruction(&Instruction::Call(app));
+                f.instruction(&Instruction::LocalSet(1));
+            }
+            f.instruction(&Instruction::LocalGet(1));
+            if !last {
+                f.instruction(&Instruction::Else);
+            }
+        }
+        for _ in 0..n.saturating_sub(1) {
+            f.instruction(&Instruction::End);
+        }
+        f.instruction(&Instruction::End); // function
+        Ok(f)
+    }
+
+    /// Look up a union's constructors, substituting `targs` for its type vars.
+    /// Falls back to the builtin `Maybe`/`Result`/`Order` shapes when the type
+    /// is not in the user registry.
+    fn union_ctors(
+        &self,
+        home: &str,
+        name: &str,
+        targs: &[can::Type],
+    ) -> Option<Vec<(String, u32, Vec<can::Type>)>> {
+        if let Some(info) = self.unions.get(&(home.to_string(), name.to_string())) {
+            let subst: HashMap<String, can::Type> = info
+                .vars
+                .iter()
+                .map(|v| v.to_string())
+                .zip(targs.iter().cloned())
+                .collect();
+            return Some(
+                info.ctors
+                    .iter()
+                    .map(|(cn, tag, args)| {
+                        (
+                            cn.clone(),
+                            *tag,
+                            args.iter().map(|a| subst_type(&subst, a)).collect(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        // Builtins not always in the registry (declaration order gives the tag).
+        let a = targs.first().cloned();
+        match name {
+            "Maybe" => Some(vec![
+                ("Just".into(), 0, vec![a.unwrap_or(can::Type::Unit)]),
+                ("Nothing".into(), 1, vec![]),
+            ]),
+            "Result" => {
+                let x = targs.first().cloned().unwrap_or(can::Type::Unit);
+                let ok = targs.get(1).cloned().unwrap_or(can::Type::Unit);
+                Some(vec![("Ok".into(), 0, vec![ok]), ("Err".into(), 1, vec![x])])
+            }
+            "Order" => Some(vec![
+                ("LT".into(), 0, vec![]),
+                ("EQ".into(), 1, vec![]),
+                ("GT".into(), 2, vec![]),
+            ]),
+            _ => None,
+        }
+    }
+
+    /// maybe_paren(s) : wrap `s` in parens iff it contains a space and does not
+    /// already start with a bracket/quote (matches the JS `_Debug_toString`).
+    fn emit_debug_paren(&self) -> Function {
+        let app = self.str_append_idx;
+        // locals: str(1):T_STR, n(2), i(3), first(4), hasspace(5):i32
+        let mut f = Function::new([(1, ref_to(T_STR)), (4, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        // scan for a space (0x20)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::I32Const(32));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // first = n>0 ? str[0] : -1
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(4));
+        // paren = hasspace && first not in { '"' '{' '(' '[' }
+        f.instruction(&Instruction::LocalGet(5));
+        for c in [34, 123, 40, 91] {
+            f.instruction(&Instruction::LocalGet(4));
+            f.instruction(&Instruction::I32Const(c));
+            f.instruction(&Instruction::I32Ne);
+            f.instruction(&Instruction::I32And);
+        }
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        push_str_const(&mut f, "(");
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(app));
+        push_str_const(&mut f, ")");
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// escape(s, isChar) : add backslashes the way elm's `_Debug_addSlashes`
+    /// does — \\ \n \t \r \v \0 and the surrounding quote (' for char, " else).
+    fn emit_debug_escape(&self) -> Function {
+        // params s(0):eqref, isChar(1):i32.
+        // locals: src(2),out(3):T_STR; n(4),i(5),b(6),outlen(7),esc(8),sec(9),
+        //         j(10),qc(11):i32
+        let mut f = Function::new([(2, ref_to(T_STR)), (8, ValType::I32)]);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_STR));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(4));
+        // qc = isChar ? '\'' : '"' (isChar arrives boxed as an i31, per the
+        // uniform (eqref,eqref)->eqref lifted-function signature)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+            shared: false,
+            ty: AbstractHeapType::I31,
+        }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(39));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(34));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(11));
+        // pass 1: compute output length
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        debug_esc_classify(&mut f, 6, 8, 9, 11);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // allocate output
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayNewDefault(T_STR));
+        f.instruction(&Instruction::LocalSet(3));
+        // pass 2: fill
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayGetU(T_STR));
+        f.instruction(&Instruction::LocalSet(6));
+        debug_esc_classify(&mut f, 6, 8, 9, 11);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // out[j]='\\'; j++; out[j]=sec; j++
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(92));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::Else);
+        // out[j]=b; j++
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArraySet(T_STR));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::End);
+        f
     }
 
     /// list_append(xs, ys) : `xs ++ ys` — allocate `lenx+leny`, copy both.
@@ -20182,6 +20928,12 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Unreachable);
             }
             ("Debug", "log") => self.emit_expr(&args[1], ctx, f)?,
+            ("Debug", "toString") | ("Elm.Kernel.Debug", "toString") => {
+                let ty = crate::ir::mono::default_numbers(&args[0].tipe);
+                let idx = self.debug_renderer(&ty)?;
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(idx));
+            }
             // Basics.never : Never -> a. Never is uninhabited, so this is never
             // actually reached; pass the (impossible) argument through.
             ("Basics", "never") => self.emit_expr(&args[0], ctx, f)?,

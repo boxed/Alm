@@ -219,7 +219,7 @@ fn build_ctxs<'a>(modules: &'a [ModuleInfo<'a>]) -> HashMap<Name, ModuleCtx<'a>>
 /// disagrees with its callers' (an Int-flavored record where a Float one is
 /// expected — invalid IR). `mangle` and `layout_of` already Int-default these
 /// names, so defaulting the instance keeps symbol, layout, and body consistent.
-fn default_numbers(tipe: &can::Type) -> can::Type {
+pub fn default_numbers(tipe: &can::Type) -> can::Type {
     use can::Type::*;
     match tipe {
         Var(n) if n.as_str().starts_with("number") => {

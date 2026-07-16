@@ -247,7 +247,27 @@ pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<Bui
             }
         }
     }
-    generate::wasmgc::build(&program, output, &ports, &ctor_arg_types).map_err(|message| {
+    // Full union info, keyed by (home, union): the type variables (for arg-type
+    // substitution) and each constructor's (name, tag/index, declared arg types).
+    // Powers type-directed `Debug.toString` rendering of custom types.
+    let mut unions: HashMap<(String, String), generate::wasmgc::UnionInfo> = HashMap::new();
+    for module in &checked.modules {
+        for union in &module.unions {
+            let ctors = union
+                .ctors
+                .iter()
+                .map(|c| (c.name.to_string(), c.index, c.args.clone()))
+                .collect();
+            unions.insert(
+                (module.name.to_string(), union.name.to_string()),
+                generate::wasmgc::UnionInfo {
+                    vars: union.vars.clone(),
+                    ctors,
+                },
+            );
+        }
+    }
+    generate::wasmgc::build(&program, output, &ports, &ctor_arg_types, &unions).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

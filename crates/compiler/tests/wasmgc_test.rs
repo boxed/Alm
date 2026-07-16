@@ -689,6 +689,64 @@ fn string_trim_sides() {
     );
 }
 
+// Debug.toString across every type shape: scalars (incl. escaping), Unit,
+// lists, tuples, records (alphabetical field order), Maybe/Result, custom
+// unions (nullary + args, with the ctor-arg parenthesization rule), recursive
+// types (Tree), Dict/Set. Diffed against the JS backend's `_Debug_toString`.
+#[test]
+fn debug_to_string() {
+    assert_str_prog_js_wasm(
+        "debug_to_string",
+        r#"module Test exposing (main)
+
+import Dict
+import Set
+
+type Tree = Leaf | Node Int Tree Tree
+
+type Color = Red | Green | Blue
+
+main : String
+main =
+    let
+        n : Maybe Int
+        n = Nothing
+
+        ok : Result String Int
+        ok = Ok 3
+
+        er : Result String Int
+        er = Err "bad"
+    in
+    String.join "\n"
+        [ Debug.toString 42
+        , Debug.toString -7
+        , Debug.toString 3.14
+        , Debug.toString True
+        , Debug.toString 'a'
+        , Debug.toString '\n'
+        , Debug.toString "he\"llo\nworld\t!"
+        , Debug.toString ()
+        , Debug.toString [ 1, 2, 3 ]
+        , Debug.toString [ [ 1 ], [ 2, 3 ] ]
+        , Debug.toString ( 1, "two" )
+        , Debug.toString ( 1, 2, 3 )
+        , Debug.toString { name = "Bo", age = 5 }
+        , Debug.toString (Just 5)
+        , Debug.toString n
+        , Debug.toString (Just (Just 5))
+        , Debug.toString ok
+        , Debug.toString er
+        , Debug.toString Red
+        , Debug.toString (Node 1 Leaf (Node 2 Leaf Leaf))
+        , Debug.toString (Dict.fromList [ ( 1, "a" ), ( 2, "b" ) ])
+        , Debug.toString (Set.fromList [ 3, 1, 2 ])
+        , Debug.toString [ Just 1, Nothing ]
+        ]
+"#,
+    );
+}
+
 // A mutual-recursion group where members are also used as VALUES (collected in
 // a list) and CALLED from a nested helper function — both need each sibling
 // bound as a real closure in the lifted body, not just the direct-call fast
