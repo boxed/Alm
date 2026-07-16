@@ -2770,7 +2770,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(clos_local));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CLOS, field_index: 0 });
         f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ft)));
-        f.instruction(&Instruction::CallRef(ft));
+        // Tail call: the applied function's result IS apply1's result, so hand
+        // off the frame. Combined with `return_call apply1` at tail-position
+        // applications, this gives constant-stack recursion through closures.
+        f.instruction(&Instruction::ReturnCallRef(ft));
         f.instruction(&Instruction::Else);
         self.emit_dispatch(f, arity_local, args_local, clos_local, a + 1);
         f.instruction(&Instruction::End);
@@ -2786,12 +2789,30 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
+        self.lift_named(None, params, body, ctx, f)
+    }
+
+    /// As `lift`, but `self_name` (when set) is the recursive binding's own name:
+    /// it is excluded from captures and registered as a `SelfFn` in the lifted
+    /// body so recursive references become direct (tail-)calls.
+    fn lift_named(
+        &mut self,
+        self_name: Option<&str>,
+        params: &[(can::Pattern, can::Type)],
+        body: &TypedExpr,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
         // Names bound by the parameters.
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (p, _) in params {
             for n in pat_names(p) {
                 bound.insert(n);
             }
+        }
+        // The function's own name is not a capture — recursive uses are self-calls.
+        if let Some(n) = self_name {
+            bound.insert(n.to_string());
         }
         // Free locals of the body that are bound in the enclosing scope = captures.
         let mut free = Vec::new();
@@ -2822,10 +2843,15 @@ impl<'a> Codegen<'a> {
         for (i, (name, _)) in captures.iter().enumerate() {
             lctx.scope.push((name.clone(), i as u32));
         }
+        // Recursive self-calls in the body resolve to a direct call to `lidx`,
+        // re-supplying the captures (locals 0..ncap of this body).
+        if let Some(n) = self_name {
+            lctx.self_fns.push((n.to_string(), SelfFn { lidx, ncap, nparams }));
+        }
         for (i, (p, ty)) in params.iter().enumerate() {
             self.bind_pat(p, ncap + i as u32, Some(ty), &mut lctx, &mut lf)?;
         }
-        self.emit_expr(body, &mut lctx, &mut lf)?;
+        self.emit_tail(body, &mut lctx, &mut lf)?;
         lf.instruction(&Instruction::End);
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (total, lf);
@@ -15271,7 +15297,7 @@ impl<'a> Codegen<'a> {
         for (i, (pat, ty)) in f.params.iter().enumerate() {
             self.bind_pat(pat, i as u32, Some(ty), &mut ctx, &mut wf)?;
         }
-        self.emit_expr(&f.body, &mut ctx, &mut wf)?;
+        self.emit_tail(&f.body, &mut ctx, &mut wf)?;
         wf.instruction(&Instruction::End);
         Ok(wf)
     }
@@ -15770,9 +15796,10 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::LocalSet(slot));
                 self.bind_pat(pat, slot, Some(&expr.tipe), ctx, f)?;
             }
-            // A local function: lift it to a closure and bind the name.
+            // A local function: lift it to a closure and bind the name. The name
+            // is passed as the self-name so recursive uses become direct calls.
             TypedLetDecl::Def { name, params, body } => {
-                self.lift(params, body, ctx, f)?;
+                self.lift_named(Some(name.as_str()), params, body, ctx, f)?;
                 let slot = ctx.bind(name.as_str());
                 f.instruction(&Instruction::LocalSet(slot));
             }
@@ -15793,6 +15820,22 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
+        // Recursive self-call: a saturated call to the enclosing local function
+        // becomes a direct call to its lifted body, re-supplying the captures.
+        if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
+            if let Some(sf) = ctx.lookup_self(name.as_str()) {
+                if args.len() as u32 == sf.nparams {
+                    for c in 0..sf.ncap {
+                        f.instruction(&Instruction::LocalGet(c));
+                    }
+                    for a in args {
+                        self.emit_expr(a, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::Call(sf.lidx));
+                    return Ok(());
+                }
+            }
+        }
         // A port applied to its argument: `outPort payload` builds CMD_PORT
         // (T_CTOR tag2 [name, jsonValue]). Ports have no definition.
         if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
@@ -15858,6 +15901,169 @@ impl<'a> Codegen<'a> {
         for a in args {
             self.emit_expr(a, ctx, f)?;
             f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        Ok(())
+    }
+
+    /// Emit an expression in tail position: control-flow forms (`if`/`case`/
+    /// `let`) propagate tailness into their result sub-expressions, and an
+    /// application in tail position becomes a wasm tail call (`return_call` /
+    /// `return_call_ref`) so recursion runs in constant stack. Anything else
+    /// leaves its value on the stack for the function's implicit return.
+    fn emit_tail(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
+        match &e.kind {
+            TypedKind::If(branches, otherwise) => self.emit_if_tail(branches, otherwise, ctx, f),
+            TypedKind::Case(scrut, branches) => {
+                let s = ctx.bind("$scrut");
+                self.emit_expr(scrut, ctx, f)?;
+                f.instruction(&Instruction::LocalSet(s));
+                self.emit_branches_tail(branches, s, ctx, f)
+            }
+            TypedKind::Let(decls, body) => {
+                let mark = ctx.scope.len();
+                for d in decls {
+                    self.emit_let_decl(d, ctx, f)?;
+                }
+                self.emit_tail(body, ctx, f)?;
+                ctx.scope.truncate(mark);
+                Ok(())
+            }
+            TypedKind::Call(func, args) => self.emit_call_tail(func, args, ctx, f),
+            _ => self.emit_expr(e, ctx, f),
+        }
+    }
+
+    fn emit_if_tail(
+        &mut self,
+        branches: &[(TypedExpr, TypedExpr)],
+        otherwise: &TypedExpr,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match branches.split_first() {
+            None => self.emit_tail(otherwise, ctx, f),
+            Some(((cond, then), rest)) => {
+                self.emit_bool(cond, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                self.emit_tail(then, ctx, f)?;
+                f.instruction(&Instruction::Else);
+                self.emit_if_tail(rest, otherwise, ctx, f)?;
+                f.instruction(&Instruction::End);
+                Ok(())
+            }
+        }
+    }
+
+    fn emit_branches_tail(
+        &mut self,
+        branches: &[(can::Pattern, TypedExpr)],
+        s: u32,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match branches.split_first() {
+            None => {
+                f.instruction(&Instruction::Unreachable);
+                Ok(())
+            }
+            Some(((pat, body), rest)) => {
+                self.emit_test(pat, s, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                let mark = ctx.scope.len();
+                self.bind_pat(pat, s, None, ctx, f)?;
+                self.emit_tail(body, ctx, f)?;
+                ctx.scope.truncate(mark);
+                f.instruction(&Instruction::Else);
+                self.emit_branches_tail(rest, s, ctx, f)?;
+                f.instruction(&Instruction::End);
+                Ok(())
+            }
+        }
+    }
+
+    /// A call in tail position. Direct saturated calls to a known top-level
+    /// function become `return_call`; closure applications tail the final
+    /// `apply1` (which itself tail-dispatches). Ports/constructors/kernels build
+    /// a value in place, so they defer to the ordinary (non-tail) path.
+    fn emit_call_tail(
+        &mut self,
+        func: &TypedExpr,
+        args: &[TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        // Recursive self-call in tail position → direct tail call to the lifted
+        // body, re-supplying the captures (constant-stack self recursion).
+        if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
+            if let Some(sf) = ctx.lookup_self(name.as_str()) {
+                if args.len() as u32 == sf.nparams {
+                    for c in 0..sf.ncap {
+                        f.instruction(&Instruction::LocalGet(c));
+                    }
+                    for a in args {
+                        self.emit_expr(a, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::ReturnCall(sf.lidx));
+                    return Ok(());
+                }
+            }
+        }
+        // Ports build a Cmd/Sub value, not a call.
+        if let TypedKind::Local(name) | TypedKind::Global(name) = &func.kind {
+            if self.ports.get(name.as_str()).is_some() && args.len() == 1 {
+                return self.emit_call(func, args, ctx, f);
+            }
+        }
+        // Constructors and kernels produce a value directly.
+        if matches!(&func.kind, TypedKind::Ctor(..) | TypedKind::Foreign(..)) {
+            return self.emit_call(func, args, ctx, f);
+        }
+        if let TypedKind::Global(name) = &func.kind {
+            if let Some(&idx) = self.func_index.get(&name.to_string()) {
+                let arity = self.func_arity[&name.to_string()] as usize;
+                if args.len() == arity {
+                    for a in args {
+                        self.emit_expr(a, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::ReturnCall(idx));
+                    return Ok(());
+                } else if args.len() > arity {
+                    // Over-application: full-arity call, then tail the last apply.
+                    for a in &args[..arity] {
+                        self.emit_expr(a, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::Call(idx));
+                    self.tail_apply(&args[arity..], ctx, f)?;
+                    return Ok(());
+                }
+                // Partial application builds a closure — nothing to tail-call.
+                return self.emit_call(func, args, ctx, f);
+            }
+        }
+        // The callee is an expression evaluating to a closure (a parameter, a
+        // let-bound recursive helper, …): apply args, tail the final apply1.
+        if args.is_empty() {
+            return self.emit_call(func, args, ctx, f);
+        }
+        self.emit_expr(func, ctx, f)?;
+        self.tail_apply(args, ctx, f)
+    }
+
+    /// Given a closure value already on the stack, apply `args` via `apply1`,
+    /// with the final application emitted as a tail call. `args` is non-empty.
+    fn tail_apply(
+        &mut self,
+        args: &[TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        for (i, a) in args.iter().enumerate() {
+            self.emit_expr(a, ctx, f)?;
+            if i + 1 == args.len() {
+                f.instruction(&Instruction::ReturnCall(self.apply1_idx));
+            } else {
+                f.instruction(&Instruction::Call(self.apply1_idx));
+            }
         }
         Ok(())
     }
@@ -17970,6 +18176,17 @@ impl<'a> Codegen<'a> {
     }
 }
 
+/// A recursive local function currently being emitted: inside its own lifted
+/// body a reference to `name` is not a closure in scope but a self-call, which
+/// we compile as a direct call to the lifted wasm function `lidx`, re-supplying
+/// its `ncap` captured values (held in locals `0..ncap` of that body).
+#[derive(Clone)]
+struct SelfFn {
+    lidx: u32,
+    ncap: u32,
+    nparams: u32,
+}
+
 struct FnCtx {
     /// Scope stack of (name, local index); shadowing = last match wins.
     scope: Vec<(String, u32)>,
@@ -17979,14 +18196,25 @@ struct FnCtx {
     /// (fall back to the out-of-line helper).
     scratch_eqref: u32,
     scratch_i64: u32,
+    /// Recursive local functions in scope for self-calls (see `SelfFn`).
+    self_fns: Vec<(String, SelfFn)>,
 }
 
 impl FnCtx {
     fn new() -> Self {
-        FnCtx { scope: Vec::new(), next_local: 0, scratch_eqref: u32::MAX, scratch_i64: u32::MAX }
+        FnCtx {
+            scope: Vec::new(),
+            next_local: 0,
+            scratch_eqref: u32::MAX,
+            scratch_i64: u32::MAX,
+            self_fns: Vec::new(),
+        }
     }
     fn lookup(&self, name: &str) -> Option<u32> {
         self.scope.iter().rev().find(|(n, _)| n == name).map(|(_, i)| *i)
+    }
+    fn lookup_self(&self, name: &str) -> Option<SelfFn> {
+        self.self_fns.iter().rev().find(|(n, _)| n == name).map(|(_, s)| s.clone())
     }
     fn bind(&mut self, name: &str) -> u32 {
         let slot = self.next_local;

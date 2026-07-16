@@ -85,6 +85,23 @@ fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
     assert_eq!(js, wasm_out, "JS and WasmGC backends disagree");
 }
 
+/// Compile a `main : String` module with the WasmGC backend only and assert its
+/// output equals `expected`. For programs the JS backend can't run (e.g. deep
+/// mutual recursion, which only the WasmGC `return_call` path keeps bounded).
+fn assert_str_prog_wasm_only(test_name: &str, source: &str, expected: &str) {
+    let dir = common::test_dir("alm-wasmgc", test_name);
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let runner = dir.join("run_str.cjs");
+    std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).expect("write runner");
+    let wasm_out = run(Command::new("node").arg(&runner).arg(&wasm));
+    assert_eq!(wasm_out, expected, "WasmGC output mismatch");
+}
+
 fn run(cmd: &mut Command) -> String {
     let out = cmd.output().expect("spawn node");
     assert!(
@@ -1600,14 +1617,12 @@ fn keyed_handler_table_grows() {
     );
 }
 
-// KNOWN HOLE (blocks js-framework-benchmark create-10k): self-tail-recursive
-// functions are emitted as ordinary `call`s, so deep recursion (here 200000,
-// and the benchmark's 10000-row builder) overflows the wasm stack with
-// `Maximum call stack size exceeded`. The JS/native backends turn self
-// tail-calls into loops. Remove the #[ignore] once the WasmGC backend emits
-// `return_call` (or a loop) for self-tail-calls. Compared JS↔WasmGC only.
+// The WasmGC backend emits `return_call` for tail-position applications
+// (direct calls become `return_call`, closure applications tail the final
+// `apply1`, whose dispatch is `return_call_ref`), so deep self-tail-recursion
+// runs in constant stack. This 200000-deep count previously overflowed with
+// `Maximum call stack size exceeded`. Compared JS↔WasmGC only.
 #[test]
-#[ignore = "wasm-gc: no tail-call optimization — deep self-recursion overflows the stack"]
 fn deep_tail_recursion() {
     assert_str_prog_js_wasm(
         "deep_tail_recursion",
@@ -1616,6 +1631,40 @@ fn deep_tail_recursion() {
          count n acc =\n    if n <= 0 then acc else count (n - 1) (acc + 1)\n\n\
          main : String\n\
          main = String.fromInt (count 200000 0)\n",
+    );
+}
+
+// Tail recursion through a let-bound helper (a closure application, resolved as
+// a direct self-call): 150000 deep must run in constant stack. The JS backend
+// compiles this self-tail-call to a loop, so JS↔WasmGC agree.
+#[test]
+fn deep_tail_recursion_closure() {
+    assert_str_prog_js_wasm(
+        "deep_tail_closure",
+        "module Test exposing (main)\n\n\
+         sumTo : Int -> Int\n\
+         sumTo n =\n    let\n        go acc k =\n            if k <= 0 then acc else go (acc + 1) (k - 1)\n    in\n    go 0 n\n\n\
+         main : String\n\
+         main =\n    String.fromInt (sumTo 150000)\n",
+    );
+}
+
+// Mutual tail recursion between two top-level functions, 500000 deep. `return_call`
+// keeps the stack constant. This is WasmGC-only: neither Elm nor the alm JS
+// backend turns *mutual* tail-calls into loops, so the JS build overflows here —
+// the WasmGC backend is strictly stronger, so there is nothing to diff against.
+#[test]
+fn deep_mutual_recursion() {
+    assert_str_prog_wasm_only(
+        "deep_mutual",
+        "module Test exposing (main)\n\n\
+         isEven : Int -> Bool\n\
+         isEven n =\n    if n == 0 then True else isOdd (n - 1)\n\n\
+         isOdd : Int -> Bool\n\
+         isOdd n =\n    if n == 0 then False else isEven (n - 1)\n\n\
+         main : String\n\
+         main =\n    if isEven 500000 then \"even\" else \"odd\"\n",
+        "even",
     );
 }
 
