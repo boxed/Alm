@@ -14058,28 +14058,65 @@ impl<'a> Codegen<'a> {
     }
 
     /// keyed_reconcile(dom, oldKids, newKids) : diff two `(key, node)` child
-    /// lists by KEY, preserving DOM node identity across reorders. Matched nodes
-    /// are patched and moved into new order via appendChild (which relocates an
-    /// existing child to the end) — so after appending every target in order the
-    /// unmatched old nodes are left at the front and removed. Not LIS-minimal in
-    /// move count, but identity-preserving and O(n log n) (a key→index treap).
+    /// lists by KEY, preserving DOM node identity across reorders and moving
+    /// only the nodes that actually moved. `source[j]` is the old index of new
+    /// child j (-1 if freshly rendered); the longest-increasing-subsequence of
+    /// `source` is the set already in the right relative order, left untouched.
+    /// Nodes not in the LIS (and new nodes) are placed with `insertBefore` from
+    /// the end so the reference node is always already positioned. Mirrors the
+    /// JS runtime's `_VDom_patchKeyed`. O(n log n) via a key→index treap + LIS.
     fn emit_keyed_reconcile(&self) -> Function {
-        // params dom(0):i32, oldk(1), newk(2):eqref. locals:
-        //   olen(3),nlen(4),j(5),matched(6),unused(7),handle(8),p(9):i32;
-        //   oldHandles(10):ref T_ARR; idxMap(11),pair(12),key(13),found(14):eqref
-        let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (4, eqref())]);
+        // params dom(0):i32, oldk(1), newk(2):eqref. i32 locals:
+        //   olen(3),nlen(4),i(5),j(6),p(7),tlen(8),u(9),v(10),lo(11),hi(12),
+        //   mid(13),last(14),nextH(15),node(16),si(17),tmp(18).
+        // ref T_ARR locals: oldHandles(19),source(20),newDoms(21),stay(22),
+        //   parent(23),tails(24),used(25). eqref: idxMap(26),pair(27),found(28).
+        let mut f = Function::new([(16, ValType::I32), (7, ref_to(T_ARR)), (3, eqref())]);
         let i31 = || HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 };
+        // geti(arr, idx): push the i31-boxed i32 at arr[idx] (idx a local).
+        let geti = |f: &mut Function, arr: u32, idx: u32| {
+            f.instruction(&Instruction::LocalGet(arr));
+            f.instruction(&Instruction::LocalGet(idx));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                shared: false,
+                ty: AbstractHeapType::I31,
+            }));
+            f.instruction(&Instruction::I31GetS);
+        };
+
+        // olen, nlen
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 2);
         f.instruction(&Instruction::LocalSet(4));
-        // oldHandles = new T_ARR(olen) ; idxMap = empty treap
+        // Scratch arrays. `used`/`stay` default to null (== false); the rest are
+        // fully written before they are read.
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
-        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalSet(19)); // oldHandles
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(20)); // source
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(21)); // newDoms
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(22)); // stay
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(23)); // parent
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(24)); // tails
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(25)); // used
         f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
-        f.instruction(&Instruction::LocalSet(11));
-        // for i in 0..olen: capture child handle, index key→i
+        f.instruction(&Instruction::LocalSet(26)); // idxMap
+
+        // Phase 1 — capture each old child's DOM handle, index key→oldIndex.
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::Block(BlockType::Empty));
@@ -14089,116 +14126,352 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
         // oldHandles[i] = i31(dom_child(dom, i))
-        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(19));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Call(DOM_CHILD));
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        // idxMap = treap_insert(oldk[i][0], box(i), idxMap)
+        // idxMap = treap_insert(oldk[i][0], i31(i), idxMap)
         list_elem(&mut f, 1, 5);
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I64ExtendI32S);
-        f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::LocalGet(26));
         f.instruction(&Instruction::Call(self.treap_insert_idx));
-        f.instruction(&Instruction::LocalSet(11));
+        f.instruction(&Instruction::LocalSet(26));
         bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // for j in 0..nlen: reuse (patch) or create, then append in order
+
+        // Phase 2 — for each new child: reuse+patch a matching old node, else
+        // render fresh. Record source[j] (old index or -1) and newDoms[j].
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(6)); // matched
+        f.instruction(&Instruction::LocalSet(6)); // j
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 2, 6);
+        f.instruction(&Instruction::LocalSet(27)); // pair
+        // found = treap_get(pair[0], idxMap)
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(5)); // j
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(26));
+        f.instruction(&Instruction::Call(self.treap_get_idx));
+        f.instruction(&Instruction::LocalSet(28)); // found : Maybe Int
+        // matched? = Just AND that old index not already consumed
+        ctor_tag(&mut f, 28);
+        f.instruction(&Instruction::I32Eqz); // 1 iff Just
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        ctor_arg0(&mut f, 28);
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(7)); // p
+        f.instruction(&Instruction::LocalGet(25));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefIsNull); // 1 iff used[p] unset
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // — reuse old node p —
+        // used[p] = i31(1)
+        f.instruction(&Instruction::LocalGet(25));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // source[j] = i31(p)
+        f.instruction(&Instruction::LocalGet(20));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // newDoms[j] = i31(patch(oldHandles[p], oldk[p][1], pair[1]))
+        f.instruction(&Instruction::LocalGet(21));
+        f.instruction(&Instruction::LocalGet(6));
+        geti(&mut f, 19, 7); // oldHandles[p] → i32 dom handle
+        list_elem(&mut f, 1, 7);
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.patch_idx));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::Else);
+        // — render fresh —
+        // source[j] = i31(-1)
+        f.instruction(&Instruction::LocalGet(20));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // newDoms[j] = i31(render_dom(pair[1]))
+        f.instruction(&Instruction::LocalGet(21));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+
+        // Phase 3 — remove old nodes whose key vanished.
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(25));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefIsNull); // used[i] unset → gone
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        geti(&mut f, 19, 5); // oldHandles[i]
+        f.instruction(&Instruction::Call(DOM_REMOVE_CHILD));
+        f.instruction(&Instruction::End);
+        bump(&mut f, 5, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+
+        // Phase 4 — LIS of `source` (patience sorting). tlen = length of the
+        // `tails` stack; parent[] links each element to the predecessor in its
+        // increasing chain; the LIS members get stay[]=true.
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(8)); // tlen
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5)); // i
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        list_elem(&mut f, 2, 5);
-        f.instruction(&Instruction::LocalSet(12)); // pair
-        f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&cast_to(T_ARR));
+        geti(&mut f, 20, 5); // si = source[i]
+        f.instruction(&Instruction::LocalSet(17));
+        // if si != -1 (skip freshly-rendered nodes)
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // if tlen == 0: seed the first chain
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(24)); // tails[0] = i31(i)
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(13)); // key
-        f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::Call(self.treap_get_idx));
-        f.instruction(&Instruction::LocalSet(14)); // found : Maybe Int
-        ctor_tag(&mut f, 14);
-        f.instruction(&Instruction::I32Eqz); // Just?
-        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-        // p = unbox(found.arg0)
-        ctor_arg0(&mut f, 14);
-        f.instruction(&Instruction::Call(self.unbox_int_idx));
-        f.instruction(&Instruction::I32WrapI64);
-        f.instruction(&Instruction::LocalSet(9));
-        // patch(oldHandles[p], oldk[p][1], pair[1])
-        f.instruction(&Instruction::LocalGet(10));
-        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(23)); // parent[i] = i31(-1)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(8)); // tlen = 1
+        f.instruction(&Instruction::Else);
+        // last = tails[tlen-1]
+        f.instruction(&Instruction::LocalGet(24));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::RefCastNonNull(i31()));
         f.instruction(&Instruction::I31GetS);
-        list_elem(&mut f, 1, 9);
-        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(14));
+        // if source[last] < si: extend the longest chain
+        geti(&mut f, 20, 14);
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(23)); // parent[i] = i31(last)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::LocalGet(24)); // tails[tlen] = i31(i)
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 8, 1); // tlen++
+        f.instruction(&Instruction::Else);
+        // binary search: smallest lo with source[tails[lo]] >= si
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(11)); // lo
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(12)); // hi
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // mid = (lo+hi)>>1
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32ShrS);
+        f.instruction(&Instruction::LocalSet(13));
+        // tmp = tails[mid]
+        f.instruction(&Instruction::LocalGet(24));
+        f.instruction(&Instruction::LocalGet(13));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::Call(self.patch_idx));
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(18));
+        // if source[tmp] < si: lo = mid+1 else hi = mid
+        geti(&mut f, 20, 18);
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(13));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalSet(11));
         f.instruction(&Instruction::Else);
-        // render_dom(pair[1])
-        f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::Call(self.render_dom_idx));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::LocalSet(12));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalSet(8)); // handle
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // parent[i] = lo>0 ? tails[lo-1] : -1
+        f.instruction(&Instruction::LocalGet(23));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(24));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // tails[lo] = i31(i)
+        f.instruction(&Instruction::LocalGet(24));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End); // end source[last]<si else
+        f.instruction(&Instruction::End); // end tlen==0 else
+        f.instruction(&Instruction::End); // end si != -1
         bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // remove the (olen - matched) unmatched old nodes, now at the front
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(0));
+        // Backtrack the parent chain from the last tail: mark LIS members.
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::LocalSet(9)); // u = tlen
+        f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::Call(DOM_CHILD));
-        f.instruction(&Instruction::Call(DOM_REMOVE_CHILD));
-        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::LocalGet(24));
+        f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(10)); // v
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        // stay[v] = i31(1)
+        f.instruction(&Instruction::LocalGet(22));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // v = parent[v]
+        geti(&mut f, 23, 10);
+        f.instruction(&Instruction::LocalSet(10));
+        dec(&mut f, 9);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+
+        // Phase 5 — walk new children back-to-front; insert/move only nodes
+        // that are new or not LIS-stable, before the last-placed reference node.
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15)); // nextH = null(0)
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5)); // m = nlen-1
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        geti(&mut f, 21, 5); // node = newDoms[m]
+        f.instruction(&Instruction::LocalSet(16));
+        // move if source[m] == -1 OR stay[m] unset
+        geti(&mut f, 20, 5);
+        f.instruction(&Instruction::I32Const(-1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(22));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::Call(DOM_INSERT_BEFORE));
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(16));
+        f.instruction(&Instruction::LocalSet(15)); // nextH = node
+        dec(&mut f, 5);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function body
         f
     }
 
@@ -16168,10 +16441,135 @@ impl<'a> Codegen<'a> {
             }
             // A single-binding non-recursive group is common; flatten it.
             TypedLetDecl::Recursive(ds) => {
-                for d2 in ds {
-                    self.emit_let_decl(d2, ctx, f)?;
+                // A group of mutually-recursive local functions needs all names
+                // in scope for each body (isEven/isOdd). Emit them as one group
+                // sharing a capture set so any member can (tail-)call any other.
+                let all_fns = ds.len() >= 2
+                    && ds.iter().all(|d| {
+                        matches!(d, TypedLetDecl::Def { params, .. } if !params.is_empty())
+                    });
+                if all_fns {
+                    self.emit_recursive_group(ds, ctx, f)?;
+                } else {
+                    for d2 in ds {
+                        self.emit_let_decl(d2, ctx, f)?;
+                    }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Emit a group of mutually-recursive local functions. All share one capture
+    /// set (the union of their free enclosing locals), so each lifted body holds
+    /// the same captures at locals `0..ncap` and a saturated call to any sibling
+    /// re-supplies them directly (registered as `SelfFn`s). Each name is then
+    /// bound in the enclosing scope to a closure with the captures pre-applied.
+    fn emit_recursive_group(
+        &mut self,
+        ds: &[TypedLetDecl],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        // Destructure the group into (name, params, body).
+        let defs: Vec<(&str, &[(can::Pattern, can::Type)], &TypedExpr)> = ds
+            .iter()
+            .map(|d| match d {
+                TypedLetDecl::Def { name, params, body } => {
+                    (name.as_str(), params.as_slice(), body)
+                }
+                _ => unreachable!("emit_recursive_group: non-Def in group"),
+            })
+            .collect();
+        let group_names: std::collections::HashSet<String> =
+            defs.iter().map(|(n, _, _)| n.to_string()).collect();
+        // Shared captures: the union of every body's free vars (excluding the
+        // group names and that body's own params) that resolve in the enclosing
+        // scope. First occurrence order is preserved.
+        let mut free_order: Vec<String> = Vec::new();
+        for (_, params, body) in &defs {
+            let mut bound = group_names.clone();
+            for (p, _) in params.iter() {
+                for n in pat_names(p) {
+                    bound.insert(n);
+                }
+            }
+            let mut fr = Vec::new();
+            free_locals(body, &bound, &mut fr);
+            for n in fr {
+                if !free_order.contains(&n) {
+                    free_order.push(n);
+                }
+            }
+        }
+        let captures: Vec<(String, u32)> =
+            free_order.iter().filter_map(|n| ctx.lookup(n).map(|s| (n.clone(), s))).collect();
+        let ncap = captures.len() as u32;
+
+        // Reserve a lifted index for each function up front.
+        let mut lidxs = Vec::with_capacity(defs.len());
+        for _ in &defs {
+            let lidx = self.lifted_base + self.lifted.len() as u32;
+            self.lifted.push((0, Function::new([])));
+            lidxs.push(lidx);
+        }
+        // Shared self-fn table: every member is callable from every body.
+        let self_entries: Vec<(String, SelfFn)> = defs
+            .iter()
+            .zip(&lidxs)
+            .map(|((n, params, _), &lidx)| {
+                (n.to_string(), SelfFn { lidx, ncap, nparams: params.len() as u32 })
+            })
+            .collect();
+
+        // Emit each lifted body: [shared captures..., own params...].
+        for ((_, params, body), &lidx) in defs.iter().zip(&lidxs) {
+            let nparams = params.len() as u32;
+            let total = ncap + nparams;
+            self.fn_type(total);
+            let param_dtor: u32 = params
+                .iter()
+                .filter(|(p, _)| !matches!(p.value, can::Pattern_::Var(_) | can::Pattern_::Anything))
+                .map(|(p, _)| pat_size(p))
+                .sum();
+            let extra = count_bindings(body) + param_dtor;
+            let mut lf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
+            let mut lctx = FnCtx::new();
+            lctx.next_local = total;
+            lctx.scratch_eqref = total + extra;
+            lctx.scratch_i64 = total + extra + 1;
+            for (i, (name, _)) in captures.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            for e in &self_entries {
+                lctx.self_fns.push(e.clone());
+            }
+            for (i, (p, ty)) in params.iter().enumerate() {
+                self.bind_pat(p, ncap + i as u32, Some(ty), &mut lctx, &mut lf)?;
+            }
+            self.emit_tail(body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::End);
+            let slot = (lidx - self.lifted_base) as usize;
+            self.lifted[slot] = (total, lf);
+        }
+
+        // Bind each name in the enclosing scope to a closure with the shared
+        // captures pre-applied (so non-self references still work).
+        for ((n, params, _), &lidx) in defs.iter().zip(&lidxs) {
+            let total = ncap + params.len() as u32;
+            f.instruction(&Instruction::RefFunc(lidx));
+            f.instruction(&Instruction::I32Const(total as i32));
+            f.instruction(&Instruction::I32Const(ncap as i32));
+            for (_, s) in &captures {
+                f.instruction(&Instruction::LocalGet(*s));
+            }
+            for _ in ncap..total {
+                f.instruction(&Instruction::RefNull(eq_heap()));
+            }
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: total });
+            f.instruction(&Instruction::StructNew(T_CLOS));
+            let slot = ctx.bind(n);
+            f.instruction(&Instruction::LocalSet(slot));
         }
         Ok(())
     }

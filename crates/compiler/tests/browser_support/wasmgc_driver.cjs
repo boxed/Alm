@@ -30,6 +30,7 @@ function start(wasmPath, doc, clock) {
     dom_set_style: (n, kp, kl, vp, vl) => { nodes[n].style[str(kp, kl)] = str(vp, vl); },
     dom_set_property: (n, p, l) => { nodes[n][str(p, l)] = true; },
     dom_append_child: (p, c) => { nodes[p].appendChild(nodes[c]); },
+    dom_insert_before: (p, n, ref) => { nodes[p].insertBefore(nodes[n], nodes[ref]); },
     dom_add_event_listener: (n, np, nl, hid) => {
       const name = str(np, nl);
       nodes[n].addEventListener(name, (ev) => {

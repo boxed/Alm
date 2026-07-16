@@ -626,6 +626,34 @@ fn string_case_patterns() {
     );
 }
 
+// Mutually-recursive local let functions (isEven/isOdd reference each other):
+// they must share a capture set so each can call the other.
+#[test]
+fn mutual_let_recursion() {
+    assert_str_prog_js_wasm(
+        "mutual_let",
+        "module Test exposing (main)\n\n\
+         classify : Int -> String\n\
+         classify start =\n    let\n        isEven n =\n            if n == 0 then True else isOdd (n - 1)\n        isOdd n =\n            if n == 0 then False else isEven (n - 1)\n    in\n    if isEven start then \"even\" else \"odd\"\n\n\
+         main : String\n\
+         main =\n    classify 10 ++ \":\" ++ classify 7\n",
+    );
+}
+
+// Mutually-recursive local functions that also close over an enclosing binding
+// (the shared capture set must carry it to both).
+#[test]
+fn mutual_let_recursion_capture() {
+    assert_str_prog_js_wasm(
+        "mutual_let_cap",
+        "module Test exposing (main)\n\n\
+         run : Int -> Int\n\
+         run bump =\n    let\n        ping n acc =\n            if n == 0 then acc else pong (n - 1) (acc + bump)\n        pong n acc =\n            if n == 0 then acc else ping (n - 1) (acc + bump)\n    in\n    ping 6 0\n\n\
+         main : String\n\
+         main =\n    String.fromInt (run 5)\n",
+    );
+}
+
 // Maybe.map4 / map5 (all-Just and a Nothing short-circuit).
 #[test]
 fn maybe_map4_5() {
