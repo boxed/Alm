@@ -234,7 +234,20 @@ pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<Bui
             ports.insert(port.name.to_string(), outgoing);
         }
     }
-    generate::wasmgc::build(&program, output, &ports).map_err(|message| {
+    // Constructor argument types, keyed by (home, union, ctor-index): lets the
+    // WasmGC backend give a record sub-pattern in a ctor-arg position its type.
+    let mut ctor_arg_types: HashMap<(String, String, u32), Vec<can::Type>> = HashMap::new();
+    for module in &checked.modules {
+        for union in &module.unions {
+            for ctor in &union.ctors {
+                ctor_arg_types.insert(
+                    (module.name.to_string(), union.name.to_string(), ctor.index),
+                    ctor.args.clone(),
+                );
+            }
+        }
+    }
+    generate::wasmgc::build(&program, output, &ports, &ctor_arg_types).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

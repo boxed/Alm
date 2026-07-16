@@ -904,9 +904,11 @@ pub fn build(
     mono: &MonoProgram,
     output: &Path,
     ports: &HashMap<String, bool>,
+    ctor_arg_types: &HashMap<(String, String, u32), Vec<can::Type>>,
 ) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     cg.ports = ports.clone();
+    cg.ctor_arg_types = ctor_arg_types.clone();
     let bytes = cg.build()?;
     std::fs::write(output, bytes).map_err(|e| e.to_string())
 }
@@ -915,6 +917,11 @@ struct Codegen<'a> {
     mono: &'a MonoProgram,
     /// Port name -> outgoing? (for `Call(port, [arg])` → Cmd resolution).
     ports: HashMap<String, bool>,
+    /// (home, union, ctor-index) -> the constructor's declared argument types.
+    /// Used to give a record sub-pattern (in a ctor-arg position) its type so
+    /// its fields resolve to sorted `T_ARR` slots. Only field *names* matter for
+    /// the sort, so unsubstituted type variables in the declaration are fine.
+    ctor_arg_types: HashMap<(String, String, u32), Vec<can::Type>>,
     func_index: HashMap<String, u32>,
     /// arity -> function-type index.
     fn_types: HashMap<u32, u32>,
@@ -1128,6 +1135,7 @@ impl<'a> Codegen<'a> {
     fn new(mono: &'a MonoProgram) -> Self {
         Codegen {
             mono,
+            ctor_arg_types: HashMap::new(),
             func_index: HashMap::new(),
             fn_types: HashMap::new(),
             fn_type_order: Vec::new(),
@@ -19018,12 +19026,20 @@ impl<'a> Codegen<'a> {
             Ctor(_, _, ctor, args) if ctor.name.as_str() == "True" || ctor.name.as_str() == "False" => {
                 let _ = (ctor, args);
             }
-            Ctor(_, _, _, args) => {
+            Ctor(home, union, ctor, args) => {
+                // The constructor's declared argument types (if known) give a
+                // record sub-pattern its field set, so `{ x }` inside `Foo { x }`
+                // resolves. Field names — not their instantiation — drive the sort.
+                let arg_tys: Option<Vec<can::Type>> = self
+                    .ctor_arg_types
+                    .get(&(home.to_string(), union.to_string(), ctor.index))
+                    .cloned();
                 for (i, ap) in args.iter().enumerate() {
                     let sub = ctx.bind("$ba");
                     self.load_ctor_arg(s, i as u32, f);
                     f.instruction(&Instruction::LocalSet(sub));
-                    self.bind_pat(ap, sub, None, ctx, f)?;
+                    let ty = arg_tys.as_ref().and_then(|v| v.get(i));
+                    self.bind_pat(ap, sub, ty, ctx, f)?;
                 }
             }
             Cons(h, t) => {

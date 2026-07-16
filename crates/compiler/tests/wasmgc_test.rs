@@ -684,6 +684,21 @@ fn record_pattern_in_case_and_tuple() {
     );
 }
 
+// Record pattern in a constructor-argument position (`Move { x, y }`): the
+// constructor's declared arg type supplies the record's field set.
+#[test]
+fn record_pattern_in_ctor_arg() {
+    assert_str_prog_js_wasm(
+        "record_pat_ctor",
+        "module Test exposing (main)\n\n\
+         type Msg\n    = Move { x : Int, y : Int }\n    | Reset\n\n\
+         handle : Msg -> String\n\
+         handle msg =\n    case msg of\n        Move { x, y } -> String.fromInt x ++ \",\" ++ String.fromInt y\n        Reset -> \"reset\"\n\n\
+         main : String\n\
+         main =\n    handle (Move { x = 3, y = 7 }) ++ \";\" ++ handle Reset\n",
+    );
+}
+
 // Operators used first-class then partially applied: (|>), (==), and a partially
 // applied 2-arg kernel (modBy) passed to List.map.
 #[test]
