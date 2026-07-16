@@ -3800,6 +3800,22 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
+        // Time.getZoneName : Task x ZoneName. In elm it uses `Intl` and falls
+        // back to `Offset (-getTimezoneOffset())` when unavailable; a headless
+        // wasm host has no Intl, so we return that fallback directly, as a
+        // synchronously-resolved `Task.Succeed (Offset 0)`. ZoneName ctors:
+        // Name = 0, Offset = 1 (declaration order); Task.Succeed = tag 0.
+        if module == "Time" && name == "getZoneName" {
+            f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+            f.instruction(&Instruction::I32Const(1)); // ZoneName.Offset
+            f.instruction(&Instruction::I64Const(0));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // Offset 0
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed (Offset 0)
+            return Ok(());
+        }
         // Random.independentSeed : a nullary Generator (ctor tag 14).
         if module == "Random" && name == "independentSeed" {
             f.instruction(&Instruction::I32Const(14));
