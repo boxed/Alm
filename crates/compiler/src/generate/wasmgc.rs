@@ -337,6 +337,23 @@ fn cast_to(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNonNull(HeapType::Concrete(idx))
 }
 
+/// Argument types of a builtin parametric constructor, derived from the matched
+/// value's type. `Just` on `Maybe t` → `[t]`; `Ok`/`Err` on `Result e a` →
+/// `[a]`/`[e]`. Lets a record sub-pattern inside `Just`/`Ok`/`Err` resolve its
+/// fields (these unions aren't in the user-union registry).
+fn builtin_ctor_arg_types(ctor_name: &str, tipe: Option<&can::Type>) -> Option<Vec<can::Type>> {
+    let args = match tipe {
+        Some(can::Type::Type(_, _, args)) => args,
+        _ => return None,
+    };
+    match ctor_name {
+        "Just" => args.first().cloned().map(|t| vec![t]),
+        "Ok" => args.get(1).cloned().map(|t| vec![t]),
+        "Err" => args.first().cloned().map(|t| vec![t]),
+        _ => None,
+    }
+}
+
 /// Element type of a `List a` type, when known — for threading types through
 /// cons/list patterns so a nested record pattern can resolve its field order.
 fn list_elem_type(tipe: Option<&can::Type>) -> Option<&can::Type> {
@@ -20803,10 +20820,15 @@ impl<'a> Codegen<'a> {
                 // The constructor's declared argument types (if known) give a
                 // record sub-pattern its field set, so `{ x }` inside `Foo { x }`
                 // resolves. Field names — not their instantiation — drive the sort.
+                // User unions come from the registry; builtin parametric ctors
+                // (Just/Ok/Err) derive their arg from the matched value's type
+                // (`tipe`, threaded from the case scrutinee) — e.g. `Just { x }`
+                // on a `Maybe { x : … }` gives the record type from the Maybe arg.
                 let arg_tys: Option<Vec<can::Type>> = self
                     .ctor_arg_types
                     .get(&(home.to_string(), union.to_string(), ctor.index))
-                    .cloned();
+                    .cloned()
+                    .or_else(|| builtin_ctor_arg_types(ctor.name.as_str(), tipe));
                 for (i, ap) in args.iter().enumerate() {
                     let sub = ctx.bind("$ba");
                     self.load_ctor_arg(s, i as u32, f);
