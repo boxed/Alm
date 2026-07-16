@@ -626,6 +626,19 @@ fn string_case_patterns() {
     );
 }
 
+// Maybe.map4 / map5 (all-Just and a Nothing short-circuit).
+#[test]
+fn maybe_map4_5() {
+    assert_str_prog(
+        "maybe_map45",
+        "module Test exposing (main)\n\n\
+         sum4 : Int -> Int -> Int -> Int -> Int\n\
+         sum4 a b c d = a + b + c + d\n\n\
+         main : String\n\
+         main =\n    let\n        r4 = Maybe.map4 sum4 (Just 1) (Just 2) (Just 3) (Just 4)\n        r5 = Maybe.map5 (\\a b c d e -> a + b + c + d + e) (Just 1) (Just 2) Nothing (Just 4) (Just 5)\n    in\n    (case r4 of\n        Just n -> String.fromInt n\n        Nothing -> \"-\")\n        ++ \":\"\n        ++ (case r5 of\n            Just n -> String.fromInt n\n            Nothing -> \"nothing\")\n",
+    );
+}
+
 // Record destructuring in a case branch and inside a tuple pattern — both need
 // the scrutinee type threaded down to resolve sorted field positions.
 #[test]

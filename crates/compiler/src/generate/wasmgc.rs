@@ -234,10 +234,11 @@ const MATH_ATAN2: u32 = 33;
 const MATH_POW: u32 = 34;
 const HOST_SET_TIMEOUT: u32 = 35; // (ms:f64, slot) — one-shot timer → alm_task_resume
 const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM property true
+const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before ref (ref=0 → append)
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
-const N_IMPORTS: u32 = 40;
+const N_IMPORTS: u32 = 41;
 
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
@@ -949,6 +950,8 @@ struct Codegen<'a> {
     maybe_and_then_idx: u32,
     maybe_map2_idx: u32,
     maybe_map3_idx: u32,
+    maybe_map4_idx: u32,
+    maybe_map5_idx: u32,
     result_map2_idx: u32,
     result_map3_idx: u32,
     str_join_idx: u32,
@@ -1156,6 +1159,8 @@ impl<'a> Codegen<'a> {
             maybe_and_then_idx: 0,
             maybe_map2_idx: 0,
             maybe_map3_idx: 0,
+            maybe_map4_idx: 0,
+            maybe_map5_idx: 0,
             result_map2_idx: 0,
             result_map3_idx: 0,
             str_join_idx: 0,
@@ -1388,6 +1393,8 @@ impl<'a> Codegen<'a> {
         self.maybe_and_then_idx = next();
         self.maybe_map2_idx = next();
         self.maybe_map3_idx = next();
+        self.maybe_map4_idx = next();
+        self.maybe_map5_idx = next();
         self.str_join_idx = next();
         self.str_repeat_idx = next();
         self.str_starts_with_idx = next();
@@ -1656,6 +1663,8 @@ impl<'a> Codegen<'a> {
         let maybe_and_then = self.emit_maybe_and_then();
         let maybe_map2 = self.emit_maybe_mapn(2);
         let maybe_map3 = self.emit_maybe_mapn(3);
+        let maybe_map4 = self.emit_maybe_mapn(4);
+        let maybe_map5 = self.emit_maybe_mapn(5);
         let str_join = self.emit_str_join();
         let str_repeat = self.emit_str_repeat();
         let str_starts_with = self.emit_str_affix(false);
@@ -1950,6 +1959,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // maybe_and_then
         funcs.function(ft3); // maybe_map2
         funcs.function(ft4); // maybe_map3
+        funcs.function(ft5); // maybe_map4
+        funcs.function(ft6); // maybe_map5
         funcs.function(ft2); // str_join
         funcs.function(ft2); // str_repeat
         funcs.function(ft2); // str_starts_with
@@ -2153,6 +2164,8 @@ impl<'a> Codegen<'a> {
         code.function(&maybe_and_then);
         code.function(&maybe_map2);
         code.function(&maybe_map3);
+        code.function(&maybe_map4);
+        code.function(&maybe_map5);
         code.function(&str_join);
         code.function(&str_repeat);
         code.function(&str_starts_with);
@@ -2503,6 +2516,7 @@ impl<'a> Codegen<'a> {
             ("host_now", f64_ret_ty),
             ("host_ftoa", fi_i_ty),
             ("host_atof", alm_event_ty), // (ptr,len,outptr) -> ok
+            ("dom_insert_before", imp_i3_v), // (parent,node,ref) — index 40
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -3233,6 +3247,17 @@ impl<'a> Codegen<'a> {
         if module == "Http" && name == "emptyBody" {
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
+        // Time.utc : the UTC zone, elm's `Zone 0 []` (single ctor, tag 0):
+        // args [offset-minutes = 0, eras = []].
+        if module == "Time" && name == "utc" {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::I64Const(0));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            push_empty_list(f);
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
@@ -16579,11 +16604,16 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.maybe_and_then_idx));
             }
-            ("Maybe", "map2") | ("Maybe", "map3") => {
+            ("Maybe", "map2") | ("Maybe", "map3") | ("Maybe", "map4") | ("Maybe", "map5") => {
                 for a in args {
                     self.emit_expr(a, ctx, f)?;
                 }
-                let idx = if name == "map2" { self.maybe_map2_idx } else { self.maybe_map3_idx };
+                let idx = match name {
+                    "map2" => self.maybe_map2_idx,
+                    "map3" => self.maybe_map3_idx,
+                    "map4" => self.maybe_map4_idx,
+                    _ => self.maybe_map5_idx,
+                };
                 f.instruction(&Instruction::Call(idx));
             }
             ("Result", "withDefault") => {
@@ -18097,6 +18127,53 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::LocalGet(r));
                 f.instruction(&cast_to(T_ARR));
                 f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Http.post { url, body, expect } → CMD_HTTP [url, expect].
+            // Fields sorted: body=0, expect=1, url=2.
+            ("Http", "post") => {
+                let r = ctx.bind("$httpcfg");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::LocalSet(r));
+                f.instruction(&Instruction::I32Const(3));
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(2));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Body builders — the host shim ignores request bodies, so any
+            // placeholder works (a unit ctor). Evaluate args for side-effect-free
+            // effect but discard.
+            ("Http", "stringBody") | ("Http", "jsonBody") | ("Http", "bytesBody") => {
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Http.request / riskyRequest { method, headers, url, body, expect,
+            // timeout, tracker } → CMD_HTTP [url, expect]. The host shim ignores
+            // method/headers/body/timeout/tracker (issues a GET), like Http.get.
+            // Config fields sorted: body=0, expect=1, headers=2, method=3,
+            // timeout=4, tracker=5, url=6.
+            ("Http", "request") | ("Http", "riskyRequest") => {
+                let r = ctx.bind("$httpcfg");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::LocalSet(r));
+                f.instruction(&Instruction::I32Const(3));
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(6));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
                 f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
