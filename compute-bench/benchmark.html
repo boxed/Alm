@@ -117,9 +117,11 @@
       compute backend's real speed. These are <strong>pure-computation</strong> workloads (no DOM, no I/O)
       running the same source through alm's three backends: compiled to <strong>JavaScript</strong>,
       to <strong>WebAssembly-GC</strong>, and to a <strong>native</strong> binary. This is where WasmGC's
-      advantage shows: it <strong>beats the JS backend on every workload</strong> — 1.5–2.6× on
-      allocation-heavy list/dict/sort work, and, after unboxing numbers and inlining numeric constants,
-      ~2× on recursion and ~1.05× on float math too.
+      advantage shows: it <strong>beats the JS backend on every workload</strong> — up to
+      <strong>3.4×</strong> on the <code>map</code>/<code>filter</code>/<code>fold</code> pipeline, now that
+      wasm-gc fuses those combinators against a known callee (a specialized per-call loop that inlines the
+      lambda body, dropping the per-element <code>apply1</code> dispatch), 1.5–1.7× on dict/sort, and,
+      after unboxing numbers and inlining numeric constants, ~2× on recursion and ~1.05× on float math too.
     </p>
     <div class="tbl-scroll"><table id="t-compute"></table></div>
   </section>
@@ -173,12 +175,12 @@
   // Compute benchmarks: alm's three backends only, same Elm source, no DOM.
   // native = --target=native-typed; the custom Immix-lite GC is the default.
   const COMPUTE = [
-    { op: "fib 35",                     "alm-js": 46.3, "wasm-gc": 23.8, native: 16.7 },
-    { op: "binary-trees d14×60",        "alm-js": 8.6,  "wasm-gc": 8.4,  native: 10.0 },
-    { op: "list map/filter/fold 1M",    "alm-js": 24.2, "wasm-gc": 15.6, native: 5.2 },
-    { op: "Dict 100k build+get",        "alm-js": 31.2, "wasm-gc": 19.9, native: 33.4 },
-    { op: "mandelbrot 400²",            "alm-js": 5.71, "wasm-gc": 5.34, native: 8.4 },
-    { op: "sort 100k ints",             "alm-js": 23.9, "wasm-gc": 14.6, native: 12.6 },
+    { op: "fib 35",                     "alm-js": 47.3, "wasm-gc": 23.6, native: 16.3 },
+    { op: "binary-trees d14×60",        "alm-js": 8.7,  "wasm-gc": 8.3,  native: 10.4 },
+    { op: "list map/filter/fold 1M",    "alm-js": 31.8, "wasm-gc": 9.2,  native: 4.4 },
+    { op: "Dict 100k build+get",        "alm-js": 30.6, "wasm-gc": 19.8, native: 33.1 },
+    { op: "mandelbrot 400²",            "alm-js": 5.62, "wasm-gc": 5.24, native: 8.5 },
+    { op: "sort 100k ints",             "alm-js": 23.6, "wasm-gc": 13.7, native: 12.2 },
   ];
   const COMPUTE_COLS = ["alm-js", "wasm-gc", "native"];
 
