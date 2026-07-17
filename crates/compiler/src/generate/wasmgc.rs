@@ -566,6 +566,24 @@ fn is_float_list(tipe: &can::Type) -> bool {
     list_elem_type(Some(tipe)).map_or(false, f64_elem)
 }
 
+/// Static rep of a list value in a pattern position, from its (monomorphized)
+/// type. Lets pattern matching pick the accessor directly instead of a runtime
+/// `ref.test`; `Unknown` (type not available) falls back to the dispatch.
+#[derive(Clone, Copy, PartialEq)]
+enum ListRep {
+    Boxed,
+    F64,
+    Unknown,
+}
+
+fn list_rep_hint(tipe: Option<&can::Type>) -> ListRep {
+    match tipe {
+        Some(t) if is_float_list(t) => ListRep::F64,
+        Some(can::Type::Type(_, n, _)) if n.as_str() == "List" => ListRep::Boxed,
+        _ => ListRep::Unknown,
+    }
+}
+
 /// The result type of applying `n` arguments to a function of type `t`.
 fn peel_arrows(t: &can::Type, n: usize) -> &can::Type {
     let mut t = t;
@@ -20688,7 +20706,7 @@ impl<'a> Codegen<'a> {
                 Ok(())
             }
             Some(((pat, body), rest)) => {
-                self.emit_test(pat, s, ctx, f)?;
+                self.emit_test(pat, s, scrut_ty, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(rep_valtype(rep))));
                 let mark = ctx.scope.len();
                 self.bind_pat(pat, s, scrut_ty, ctx, f)?;
@@ -21813,7 +21831,7 @@ impl<'a> Codegen<'a> {
                 Ok(())
             }
             Some(((pat, body), rest)) => {
-                self.emit_test(pat, s, ctx, f)?;
+                self.emit_test(pat, s, scrut_ty, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(eqref())));
                 let mark = ctx.scope.len();
                 self.bind_pat(pat, s, scrut_ty, ctx, f)?;
@@ -25282,7 +25300,7 @@ impl<'a> Codegen<'a> {
                 Ok(())
             }
             Some(((pat, body), rest)) => {
-                self.emit_test(pat, s, ctx, f)?;
+                self.emit_test(pat, s, scrut_ty, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Result(eqref())));
                 let mark = ctx.scope.len();
                 self.bind_pat(pat, s, scrut_ty, ctx, f)?;
@@ -25301,6 +25319,9 @@ impl<'a> Codegen<'a> {
         &mut self,
         pat: &can::Pattern,
         s: u32,
+        // The scrutinee's (monomorphized) type, when known — used to pick a
+        // list's backing rep statically. `None` falls back to runtime dispatch.
+        tipe: Option<&can::Type>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -25310,7 +25331,7 @@ impl<'a> Codegen<'a> {
             Anything | Var(_) | Record(_) | Unit => {
                 f.instruction(&Instruction::I32Const(1));
             }
-            Alias(inner, _) => self.emit_test(inner, s, ctx, f)?,
+            Alias(inner, _) => self.emit_test(inner, s, tipe, ctx, f)?,
             Int(n) => {
                 f.instruction(&Instruction::LocalGet(s));
                 f.instruction(&Instruction::Call(self.unbox_int_idx));
@@ -25357,9 +25378,14 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Eqz);
                 let _ = args;
             }
-            Ctor(_, _, ctor, args) => {
+            Ctor(home, union, ctor, args) => {
                 // Guard on the tag, THEN test args — so the arg-extraction casts
                 // only run when the constructor matches (avoids illegal casts).
+                let arg_tys: Option<Vec<can::Type>> = self
+                    .ctor_arg_types
+                    .get(&(home.to_string(), union.to_string(), ctor.index))
+                    .cloned()
+                    .or_else(|| builtin_ctor_arg_types(ctor.name.as_str(), tipe));
                 f.instruction(&Instruction::LocalGet(s));
                 f.instruction(&cast_to(T_CTOR));
                 f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
@@ -25372,7 +25398,8 @@ impl<'a> Codegen<'a> {
                         let sub = ctx.bind("$a");
                         self.load_ctor_arg(s, i as u32, f);
                         f.instruction(&Instruction::LocalSet(sub));
-                        self.emit_test(ap, sub, ctx, f)?;
+                        let ty = arg_tys.as_ref().and_then(|v| v.get(i));
+                        self.emit_test(ap, sub, ty, ctx, f)?;
                         f.instruction(&Instruction::I32And);
                     }
                 }
@@ -25381,14 +25408,24 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::End);
             }
             List(items) if items.is_empty() => {
-                self.list_empty_test(s, f);
+                self.list_empty_test(s, list_rep_hint(tipe), f);
             }
             List(items) => {
                 // non-empty AND head matches items[0] AND tail matches List(rest)
-                self.emit_cons_test(&items[0], &make_list_tail(pat, items), s, ctx, f)?;
+                self.emit_cons_test(&items[0], &make_list_tail(pat, items), s, tipe, ctx, f)?;
             }
-            Cons(h, t) => self.emit_cons_test(h, t, s, ctx, f)?,
+            Cons(h, t) => self.emit_cons_test(h, t, s, tipe, ctx, f)?,
             Tuple(a, b, rest) => {
+                let elem_tys: Vec<Option<&can::Type>> = match tipe {
+                    Some(can::Type::Tuple(ta, tb, tc)) => {
+                        let mut v = vec![Some(&**ta), Some(&**tb)];
+                        if let Some(tc) = tc {
+                            v.push(Some(&**tc));
+                        }
+                        v
+                    }
+                    _ => Vec::new(),
+                };
                 f.instruction(&Instruction::I32Const(1));
                 let mut elems: Vec<&can::Pattern> = vec![a, b];
                 elems.extend(rest.iter());
@@ -25397,7 +25434,8 @@ impl<'a> Codegen<'a> {
                         let sub = ctx.bind("$t");
                         self.load_arr(s, i as u32, f);
                         f.instruction(&Instruction::LocalSet(sub));
-                        self.emit_test(ep, sub, ctx, f)?;
+                        let ty = elem_tys.get(i).copied().flatten();
+                        self.emit_test(ep, sub, ty, ctx, f)?;
                         f.instruction(&Instruction::I32And);
                     }
                 }
@@ -25413,27 +25451,30 @@ impl<'a> Codegen<'a> {
         h: &can::Pattern,
         t: &can::Pattern,
         s: u32,
+        tipe: Option<&can::Type>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
+        let rep = list_rep_hint(tipe);
+        let elem = list_elem_type(tipe);
         // Guard on non-empty, THEN test head/tail (head/tail are only valid on
         // a non-empty vector).
-        self.list_empty_test(s, f);
+        self.list_empty_test(s, rep, f);
         f.instruction(&Instruction::I32Eqz); // non-empty
         f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
         f.instruction(&Instruction::I32Const(1));
         if non_trivial(h) {
             let sub = ctx.bind("$h");
-            self.load_cons(s, 0, f);
+            self.load_cons(s, 0, rep, f);
             f.instruction(&Instruction::LocalSet(sub));
-            self.emit_test(h, sub, ctx, f)?;
+            self.emit_test(h, sub, elem, ctx, f)?;
             f.instruction(&Instruction::I32And);
         }
         if non_trivial(t) {
             let sub = ctx.bind("$tl");
-            self.load_cons(s, 1, f);
+            self.load_cons(s, 1, rep, f);
             f.instruction(&Instruction::LocalSet(sub));
-            self.emit_test(t, sub, ctx, f)?;
+            self.emit_test(t, sub, tipe, ctx, f)?;
             f.instruction(&Instruction::I32And);
         }
         f.instruction(&Instruction::Else);
@@ -25489,24 +25530,26 @@ impl<'a> Codegen<'a> {
             Cons(h, t) => {
                 // `elem :: rest` : head has the list element type, tail the list type.
                 let elem = list_elem_type(tipe);
+                let rep = list_rep_hint(tipe);
                 let hs = ctx.bind("$bh");
-                self.load_cons(s, 0, f);
+                self.load_cons(s, 0, rep, f);
                 f.instruction(&Instruction::LocalSet(hs));
                 self.bind_pat(h, hs, elem, ctx, f)?;
                 let ts = ctx.bind("$bt");
-                self.load_cons(s, 1, f);
+                self.load_cons(s, 1, rep, f);
                 f.instruction(&Instruction::LocalSet(ts));
                 self.bind_pat(t, ts, tipe, ctx, f)?;
             }
             List(items) if items.is_empty() => {}
             List(items) => {
                 let elem = list_elem_type(tipe);
+                let rep = list_rep_hint(tipe);
                 let hs = ctx.bind("$bh");
-                self.load_cons(s, 0, f);
+                self.load_cons(s, 0, rep, f);
                 f.instruction(&Instruction::LocalSet(hs));
                 self.bind_pat(&items[0], hs, elem, ctx, f)?;
                 let ts = ctx.bind("$bt");
-                self.load_cons(s, 1, f);
+                self.load_cons(s, 1, rep, f);
                 f.instruction(&Instruction::LocalSet(ts));
                 self.bind_pat(&make_list_tail(pat, items), ts, tipe, ctx, f)?;
             }
@@ -25570,46 +25613,65 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
     }
     /// Load a list's head (field 0) or tail (field 1) for pattern matching.
-    fn load_cons(&self, s: u32, field: u32, f: &mut Function) {
-        // With float-list unboxing on, a list value may be either rep; dispatch
-        // on the backing at runtime (head boxes the f64; tail stays T_LISTF).
-        if unbox_floatlist() {
-            f.instruction(&Instruction::LocalGet(s));
-            f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
-            f.instruction(&Instruction::If(BlockType::Result(eqref())));
-            if field == 0 {
-                list_head_f(f, s);
+    fn load_cons(&self, s: u32, field: u32, rep: ListRep, f: &mut Function) {
+        // `head` (field 0) yields an eqref element (a `T_LISTF` head is boxed);
+        // `tail` (field 1) preserves the backing rep. Use the static rep when
+        // known; only `Unknown` needs a runtime `ref.test` dispatch.
+        let head = |f: &mut Function, f64: bool| {
+            if f64 {
+                list_head_f(f, s)
             } else {
-                list_tail_f(f, s);
+                list_head(f, s)
             }
-            f.instruction(&Instruction::Else);
-            if field == 0 {
-                list_head(f, s);
+        };
+        let tail = |f: &mut Function, f64: bool| {
+            if f64 {
+                list_tail_f(f, s)
             } else {
-                list_tail(f, s);
+                list_tail(f, s)
             }
-            f.instruction(&Instruction::End);
-        } else if field == 0 {
-            list_head(f, s);
-        } else {
-            list_tail(f, s);
+        };
+        let go = |f: &mut Function, f64: bool| {
+            if field == 0 {
+                head(f, f64)
+            } else {
+                tail(f, f64)
+            }
+        };
+        match rep {
+            ListRep::Boxed => go(f, false),
+            ListRep::F64 => go(f, true),
+            ListRep::Unknown => {
+                f.instruction(&Instruction::LocalGet(s));
+                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
+                f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                go(f, true);
+                f.instruction(&Instruction::Else);
+                go(f, false);
+                f.instruction(&Instruction::End);
+            }
         }
     }
 
-    /// Push i32 (1 = empty) for a list in local `s`, dispatching on the backing
-    /// rep when float-list unboxing is on.
-    fn list_empty_test(&self, s: u32, f: &mut Function) {
-        if unbox_floatlist() {
-            f.instruction(&Instruction::LocalGet(s));
-            f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
-            f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-            list_len_f(f, s);
-            f.instruction(&Instruction::I32Eqz);
-            f.instruction(&Instruction::Else);
-            list_is_empty(f, s);
-            f.instruction(&Instruction::End);
-        } else {
-            list_is_empty(f, s);
+    /// Push i32 (1 = empty) for a list in local `s`, using the static rep when
+    /// known (only `Unknown` needs a runtime dispatch).
+    fn list_empty_test(&self, s: u32, rep: ListRep, f: &mut Function) {
+        match rep {
+            ListRep::Boxed => list_is_empty(f, s),
+            ListRep::F64 => {
+                list_len_f(f, s);
+                f.instruction(&Instruction::I32Eqz);
+            }
+            ListRep::Unknown => {
+                f.instruction(&Instruction::LocalGet(s));
+                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
+                f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                list_len_f(f, s);
+                f.instruction(&Instruction::I32Eqz);
+                f.instruction(&Instruction::Else);
+                list_is_empty(f, s);
+                f.instruction(&Instruction::End);
+            }
         }
     }
     fn load_arr(&self, s: u32, i: u32, f: &mut Function) {
