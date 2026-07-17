@@ -192,7 +192,10 @@ const T_TNODE: u32 = 8; // struct { key, value:eqref, pri:i32, left,right:(ref n
 // primitives straight into `buf` (amortized doubling) instead of allocating an
 // intermediate String per node and joining them.
 const T_SB: u32 = 9; // struct { mut buf: (ref T_STR), mut len: i32 }
-const N_FIXED: u32 = 10;
+const T_ARRF: u32 = 10; // array (mut f64) — unboxed `List Float` backing
+const T_BACKF: u32 = 11; // struct { mut i32 head, (ref T_ARRF) data }
+const T_LISTF: u32 = 12; // struct { i32 len, (ref null T_BACKF) bk } — a `List Float`
+const N_FIXED: u32 = 13;
 
 // Imported DOM host functions occupy the first function indices; defined
 // functions are therefore offset by N_IMPORTS (see build()).
@@ -532,6 +535,29 @@ fn list_elem_type(tipe: Option<&can::Type>) -> Option<&can::Type> {
         }
         _ => None,
     }
+}
+
+/// Whether `List Float` should use the unboxed `T_LISTF` (f64) backing rather
+/// than the uniform boxed eqref backing. Behind a flag while consumer coverage
+/// is completed; the fused combinator loops honor it today.
+fn unbox_floatlist() -> bool {
+    std::env::var_os("ALM_UNBOX_FLOATLIST").is_some()
+}
+
+/// Backing element kind of a list type: `F64` for an unboxed `List Float`
+/// (when enabled), else `Eqref` (the uniform boxed backing).
+fn list_kind(tipe: &can::Type) -> Rep {
+    if unbox_floatlist() && list_elem_type(Some(tipe)).map_or(false, is_float) {
+        Rep::F64
+    } else {
+        Rep::Eqref
+    }
+}
+
+/// Whether an element of type `tipe` uses the unboxed f64 slot (a `Float`, when
+/// unboxing is enabled).
+fn f64_elem(tipe: &can::Type) -> bool {
+    unbox_floatlist() && is_float(tipe)
 }
 
 /// Does `name` appear in `e` anywhere OTHER than as the callee of a saturated
@@ -1146,6 +1172,30 @@ fn list_elem(f: &mut Function, l: u32, iloc: u32) {
     f.instruction(&Instruction::LocalGet(iloc));
     f.instruction(&Instruction::I32Add);
     f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
+// f64-backed (`T_LISTF`) twins of the accessors above, for an unboxed
+// `List Float`. `len` is field 0 in both list structs, but the cast differs.
+fn list_len_f(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LISTF));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 0 });
+}
+fn list_bk_f(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LISTF));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 1 });
+}
+fn list_data_f(f: &mut Function, l: u32) {
+    list_bk_f(f, l);
+    f.instruction(&cast_to(T_BACKF));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 1 });
+}
+fn list_start_f(f: &mut Function, l: u32) {
+    list_data_f(f, l);
+    f.instruction(&Instruction::ArrayLen);
+    list_len_f(f, l);
+    f.instruction(&Instruction::I32Sub);
 }
 
 /// Push i32 1 iff the list is empty.
@@ -2513,6 +2563,21 @@ impl<'a> Codegen<'a> {
             FieldType { element_type: StorageType::Val(ref_to(T_STR)), mutable: true },
             FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
         ]); // T_SB { mut buf: (ref T_STR), mut len }
+        types.ty().array(&StorageType::Val(ValType::F64), true); // T_ARRF (mut f64)
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ref_to(T_ARRF)), mutable: false },
+        ]); // T_BACKF { mut i32 head, (ref T_ARRF) data }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType {
+                element_type: StorageType::Val(ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(T_BACKF),
+                })),
+                mutable: false,
+            },
+        ]); // T_LISTF { i32 len, (ref null T_BACKF) bk }
         for &arity in &self.fn_type_order {
             types.ty().function(vec![eqref(); arity as usize], vec![eqref()]);
         }
@@ -21850,8 +21915,15 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
+        // f64 element (source is a `List Float`) and/or f64 accumulator (the
+        // fold result is a Float). Only Inline lambdas take the f64 path.
+        let src_f64 = list_elem_type(Some(&args[2].tipe)).map_or(false, f64_elem);
+        let acc_f64 = f64_elem(&args[1].tipe);
+        if matches!(callee, Callee::Direct(_)) && (src_f64 || acc_f64) {
+            return Ok(false);
+        }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = self.build_fused_fold(&callee, rev)?;
+        let lidx = self.build_fused_fold(&callee, rev, src_f64, acc_f64)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -21864,35 +21936,54 @@ impl<'a> Codegen<'a> {
     /// Build a specialized fold loop as a lifted `(caps.., acc, xs) -> acc`
     /// function: inline the callee body (params `[element, accumulator]`) or
     /// direct-call a known function per element. `rev` walks the list tail-first
-    /// (foldr) instead of head-first (foldl). Returns its function index.
-    fn build_fused_fold(&mut self, callee: &Callee, rev: bool) -> Result<u32, String> {
+    /// (foldr) instead of head-first (foldl). With `acc_f64` the running
+    /// accumulator is kept unboxed (init unboxed once, result re-boxed at
+    /// return); with `src_f64` elements are read from the `T_LISTF` backing.
+    /// Returns its function index.
+    fn build_fused_fold(
+        &mut self,
+        callee: &Callee,
+        rev: bool,
+        src_f64: bool,
+        acc_f64: bool,
+    ) -> Result<u32, String> {
         let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 2; // captures + accumulator + list
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([]))); // reserve slot
 
-        // eqref: body-binding pool (eb) + element + scratch_eqref.
+        let src_arr = if src_f64 { T_ARRF } else { T_ARR };
+        let elem_ty = if src_f64 { ValType::F64 } else { eqref() };
         let mut lf = Function::new([
-            (eb + 2, eqref()),
-            (1, ValType::I64),  // scratch_i64
-            (3, ValType::I32),  // len, start, i
-            (1, ref_to(T_ARR)), // data
+            (eb + 1, eqref()),    // body-binding pool + scratch_eqref
+            (1, ValType::I64),    // scratch_i64
+            (3, ValType::I32),    // len, start, i
+            (1, elem_ty),         // element
+            (1, ref_to(src_arr)), // data
+            (1, ValType::F64),    // af (unboxed accumulator, used iff acc_f64)
         ]);
-        let acc = ncap; // accumulator param (reused as the mutable running acc)
+        let acc = ncap; // eqref accumulator param
         let xs = ncap + 1;
-        let elem = arity + eb;
-        let scratch_e = arity + eb + 1;
-        let scratch_i = arity + eb + 2;
-        let l_len = arity + eb + 3;
-        let l_start = arity + eb + 4;
-        let l_i = arity + eb + 5;
+        let scratch_e = arity + eb;
+        let scratch_i = arity + eb + 1;
+        let l_len = arity + eb + 2;
+        let l_start = arity + eb + 3;
+        let l_i = arity + eb + 4;
+        let elem = arity + eb + 5;
         let l_data = arity + eb + 6;
+        let af = arity + eb + 7; // unboxed accumulator
 
         let mut lctx = FnCtx::new();
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
+        if src_f64 {
+            lctx.local_rep.insert(elem, Rep::F64);
+        }
+        if acc_f64 {
+            lctx.local_rep.insert(af, Rep::F64);
+        }
         if let Callee::Inline { pnames, caps, .. } = callee {
             for (i, name) in caps.iter().enumerate() {
                 lctx.scope.push((name.clone(), i as u32));
@@ -21901,16 +21992,23 @@ impl<'a> Codegen<'a> {
                 lctx.scope.push((n.clone(), elem));
             }
             if let Some(n) = &pnames[1] {
-                lctx.scope.push((n.clone(), acc));
+                lctx.scope.push((n.clone(), if acc_f64 { af } else { acc }));
             }
         }
 
-        list_len(&mut lf, xs);
+        // Unbox the initial accumulator once (boxed Float -> f64) when f64.
+        if acc_f64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&cast_to(T_FLOAT));
+            lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+            lf.instruction(&Instruction::LocalSet(af));
+        }
+        if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut lf, xs);
+        if src_f64 { list_data_f(&mut lf, xs) } else { list_data(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_data));
-        list_start(&mut lf, xs);
+        if src_f64 { list_start_f(&mut lf, xs) } else { list_start(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_start));
         if rev {
             // foldr: walk tail-first, i = len-1 downto 0.
@@ -21937,24 +22035,38 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::LocalGet(l_start));
         lf.instruction(&Instruction::LocalGet(l_i));
         lf.instruction(&Instruction::I32Add);
-        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::ArrayGet(src_arr));
         lf.instruction(&Instruction::LocalSet(elem));
         // accumulator = callee(element, accumulator)
         match callee {
-            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
+            Callee::Inline { body, .. } => {
+                if acc_f64 {
+                    self.emit_f64(body, &mut lctx, &mut lf)?;
+                    lf.instruction(&Instruction::LocalSet(af));
+                } else {
+                    self.emit_expr(body, &mut lctx, &mut lf)?;
+                    lf.instruction(&Instruction::LocalSet(acc));
+                }
+            }
             Callee::Direct(idx) => {
                 lf.instruction(&Instruction::LocalGet(elem));
                 lf.instruction(&Instruction::LocalGet(acc));
                 lf.instruction(&Instruction::Call(*idx));
+                lf.instruction(&Instruction::LocalSet(acc));
             }
         }
-        lf.instruction(&Instruction::LocalSet(acc));
         bump(&mut lf, l_i, if rev { -1 } else { 1 });
         lf.instruction(&Instruction::Br(0));
         lf.instruction(&Instruction::End); // loop
         lf.instruction(&Instruction::End); // block
         lf.instruction(&Instruction::End); // if
-        lf.instruction(&Instruction::LocalGet(acc));
+        if acc_f64 {
+            // re-box the unboxed accumulator to a `Float`.
+            lf.instruction(&Instruction::LocalGet(af));
+            lf.instruction(&Instruction::StructNew(T_FLOAT));
+        } else {
+            lf.instruction(&Instruction::LocalGet(acc));
+        }
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);
@@ -21975,8 +22087,20 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
+        // Unboxed f64 backing: `src_f64` when the source is a `List Float`,
+        // `res_f64` when the result is. Only Inline lambdas do the f64 path
+        // (Direct callees stay on the eqref path); if the source is f64 but the
+        // callee is Direct, fall back rather than mis-read the backing.
+        let src_f64 = list_elem_type(Some(&args[1].tipe)).map_or(false, f64_elem);
+        let res_f64 = match &callee {
+            Callee::Inline { body, .. } => f64_elem(&body.tipe),
+            Callee::Direct(_) => false,
+        };
+        if matches!(callee, Callee::Direct(_)) && src_f64 {
+            return Ok(false);
+        }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = self.build_fused_map(&callee)?;
+        let lidx = self.build_fused_map(&callee, src_f64, res_f64)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -21985,26 +22109,36 @@ impl<'a> Codegen<'a> {
         Ok(true)
     }
 
-    fn build_fused_map(&mut self, callee: &Callee) -> Result<u32, String> {
+    fn build_fused_map(
+        &mut self,
+        callee: &Callee,
+        src_f64: bool,
+        res_f64: bool,
+    ) -> Result<u32, String> {
         let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 1; // captures + list
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([])));
 
+        let src_arr = if src_f64 { T_ARRF } else { T_ARR };
+        let res_arr = if res_f64 { T_ARRF } else { T_ARR };
+        let elem_ty = if src_f64 { ValType::F64 } else { eqref() };
         let mut lf = Function::new([
-            (eb + 2, eqref()),  // body-binding pool + element + scratch_eqref
-            (1, ValType::I64),  // scratch_i64
-            (3, ValType::I32),  // len, start, i
-            (2, ref_to(T_ARR)), // sdata, ndata
+            (eb + 1, eqref()),      // body-binding pool + scratch_eqref
+            (1, ValType::I64),      // scratch_i64
+            (3, ValType::I32),      // len, start, i
+            (1, elem_ty),           // element
+            (1, ref_to(src_arr)),   // sdata
+            (1, ref_to(res_arr)),   // ndata
         ]);
         let xs = ncap;
-        let elem = arity + eb;
-        let scratch_e = arity + eb + 1;
-        let scratch_i = arity + eb + 2;
-        let l_len = arity + eb + 3;
-        let l_start = arity + eb + 4;
-        let l_i = arity + eb + 5;
+        let scratch_e = arity + eb;
+        let scratch_i = arity + eb + 1;
+        let l_len = arity + eb + 2;
+        let l_start = arity + eb + 3;
+        let l_i = arity + eb + 4;
+        let elem = arity + eb + 5;
         let l_sdata = arity + eb + 6;
         let l_ndata = arity + eb + 7;
 
@@ -22012,6 +22146,9 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
+        if src_f64 {
+            lctx.local_rep.insert(elem, Rep::F64);
+        }
         if let Callee::Inline { pnames, caps, .. } = callee {
             for (i, name) in caps.iter().enumerate() {
                 lctx.scope.push((name.clone(), i as u32));
@@ -22021,16 +22158,15 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        list_len(&mut lf, xs);
+        if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
-        // ndata = new eqref[len]
-        lf.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        lf.instruction(&Instruction::ArrayNewDefault(res_arr));
         lf.instruction(&Instruction::LocalSet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut lf, xs);
+        if src_f64 { list_data_f(&mut lf, xs) } else { list_data(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_sdata));
-        list_start(&mut lf, xs);
+        if src_f64 { list_start_f(&mut lf, xs) } else { list_start(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_start));
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalSet(l_i));
@@ -22045,19 +22181,25 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::LocalGet(l_start));
         lf.instruction(&Instruction::LocalGet(l_i));
         lf.instruction(&Instruction::I32Add);
-        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::ArrayGet(src_arr));
         lf.instruction(&Instruction::LocalSet(elem));
         // ndata[i] = callee(element)
         lf.instruction(&Instruction::LocalGet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_i));
         match callee {
-            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
+            Callee::Inline { body, .. } => {
+                if res_f64 {
+                    self.emit_f64(body, &mut lctx, &mut lf)?;
+                } else {
+                    self.emit_expr(body, &mut lctx, &mut lf)?;
+                }
+            }
             Callee::Direct(idx) => {
                 lf.instruction(&Instruction::LocalGet(elem));
                 lf.instruction(&Instruction::Call(*idx));
             }
         }
-        lf.instruction(&Instruction::ArraySet(T_ARR));
+        lf.instruction(&Instruction::ArraySet(res_arr));
         bump(&mut lf, l_i, 1);
         lf.instruction(&Instruction::Br(0));
         lf.instruction(&Instruction::End); // loop
@@ -22067,8 +22209,8 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalGet(l_ndata));
-        lf.instruction(&Instruction::StructNew(T_BACK));
-        lf.instruction(&Instruction::StructNew(T_LIST));
+        lf.instruction(&Instruction::StructNew(if res_f64 { T_BACKF } else { T_BACK }));
+        lf.instruction(&Instruction::StructNew(if res_f64 { T_LISTF } else { T_LIST }));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);
