@@ -142,7 +142,7 @@
 
   <footer>
     <p><strong>How the DOM benchmark was run.</strong> krausest/js-framework-benchmark, keyed implementations, puppeteer driving system Google&nbsp;Chrome headless. elm, alm and alm-wasm share <code>Main.elm</code> verbatim: elm via the official compiler, alm to JS (both minified with the same uglify pass), alm-wasm to a WebAssembly-GC module driven by a hand-written JS shim (DOM host imports; no WASI). Duration is the median of 15 timed iterations; memory is a single sample.</p>
-    <p><strong>How the computation benchmark was run.</strong> Each workload is a value program (<code>main : Int</code>) compiled by alm to three targets from identical source. JS: the exported function called in-process under Node/v8. wasm-gc: the module's entry called on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary. All three are checked to return the same result before timing; time is the median of 25 timed calls after 10 warmup. The JS and wasm figures are timed warm and in-process; the native figure is the min of 12 process runs and so carries a fixed ~2.6&nbsp;ms of process startup (exec + heap init) that the others don't — an asymmetry that weighs on the smaller native workloads. Native uses a <strong>custom Immix-lite garbage collector</strong> (bump allocation + conservative mark-region reclaim) that replaced the Boehm collector on the allocation-heavy path — e.g. binary-trees dropped from 16.5 to 13.2&nbsp;ms, Dict 42.9 to 35.6. It's fastest on scalar loops; where it still trails wasm is the weight-balanced <code>Dict</code> tree's pointer-chasing and the stop-the-world collector's cost versus v8's JIT + generational GC.</p>
+    <p><strong>How the computation benchmark was run.</strong> Each workload is a value program (<code>main : Int</code>) compiled by alm to three targets from identical source. JS: the exported function called in-process under Node/v8. wasm-gc: the module's entry called on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary. All three are checked to return the same result before timing; time is the median of 25 timed calls after 10 warmup. The JS and wasm figures are timed warm and in-process; the native figure is the min of 12 process runs and so carries a fixed ~2.6&nbsp;ms of process startup (exec + heap init) that the others don't — an asymmetry that weighs on the smaller native workloads. Native uses a <strong>custom Immix-lite garbage collector</strong> (bump allocation + conservative mark-region reclaim), now the default — it replaced Boehm entirely, cutting binary-trees from ~16.5 to 10&nbsp;ms, Dict ~43 to 33, sort ~17 to 12.6. It's fastest on scalar loops and competitive elsewhere; the one place it still trails wasm is the weight-balanced <code>Dict</code> tree's pointer-chasing versus v8's JIT + generational GC.</p>
   </footer>
 </div>
 
@@ -171,14 +171,14 @@
   ];
   const FWS = ["elm", "alm", "alm-wasm", "react", "svelte"];
   // Compute benchmarks: alm's three backends only, same Elm source, no DOM.
-  // native = --target=native-typed with the custom Immix-lite collector.
+  // native = --target=native-typed; the custom Immix-lite GC is the default.
   const COMPUTE = [
-    { op: "fib 35",                     "alm-js": 46.0, "wasm-gc": 23.0, native: 19.1 },
-    { op: "binary-trees d14×60",        "alm-js": 8.6,  "wasm-gc": 8.0,  native: 13.2 },
-    { op: "list map/filter/fold 1M",    "alm-js": 30.0, "wasm-gc": 14.7, native: 7.0 },
-    { op: "Dict 100k build+get",        "alm-js": 30.2, "wasm-gc": 18.5, native: 35.6 },
-    { op: "mandelbrot 400²",            "alm-js": 5.60, "wasm-gc": 5.30, native: 11.2 },
-    { op: "sort 100k ints",             "alm-js": 23.4, "wasm-gc": 13.7, native: 15.4 },
+    { op: "fib 35",                     "alm-js": 46.3, "wasm-gc": 23.8, native: 16.7 },
+    { op: "binary-trees d14×60",        "alm-js": 8.6,  "wasm-gc": 8.4,  native: 10.0 },
+    { op: "list map/filter/fold 1M",    "alm-js": 24.2, "wasm-gc": 15.6, native: 5.2 },
+    { op: "Dict 100k build+get",        "alm-js": 31.2, "wasm-gc": 19.9, native: 33.4 },
+    { op: "mandelbrot 400²",            "alm-js": 5.71, "wasm-gc": 5.34, native: 8.4 },
+    { op: "sort 100k ints",             "alm-js": 23.9, "wasm-gc": 14.6, native: 12.6 },
   ];
   const COMPUTE_COLS = ["alm-js", "wasm-gc", "native"];
 
