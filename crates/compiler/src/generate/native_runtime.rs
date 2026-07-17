@@ -112,46 +112,315 @@ unsafe fn mmtk_bump(size: usize) -> *mut u8 {
     }
 }
 
-// --- Custom Immix-lite allocator (ALM_GC=immix) ---
+// --- Custom Immix-lite GC (ALM_GC=immix) ---
 //
-// A contiguous, lazily-paged mmap'd heap with an inlined bump allocator — no
-// C-ABI call and no per-object framework overhead, so it reaches the raw-bump
-// ceiling MMTk couldn't. The conservative mark-region collector is added on top
-// (object-start bitmap already reserved); until then it bump-only (leaks past
-// the heap max).
+// A contiguous, lazily-paged mmap'd heap with an inlined bump allocator (no
+// C-ABI call, no framework overhead — reaches the raw-bump ceiling MMTk
+// couldn't) plus a conservative, non-moving, block-reclaiming mark-sweep
+// collector. Layout: BLOCK-sized (32 KiB) bump regions; each object is preceded
+// by an 8-byte size header (so marking knows its exact extent) and its start
+// granule is flagged in the object-start bitmap. Collection: spill registers
+// (setjmp), conservatively scan the stack `[sp, stack_base)` and the `__DATA`
+// segment (memoized-constant globals live there), mark reachable objects, and
+// free blocks with no survivors (recycled for bump). Non-moving (conservative:
+// can't relocate). Collects only past a heap threshold, so churn workloads
+// (tiny live set) rarely trigger it and stay near the bump ceiling.
 #[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    fn pthread_self() -> *mut u8;
+    fn pthread_get_stackaddr_np(t: *mut u8) -> *mut u8;
+    fn getsegbyname(name: *const i8) -> *const ImmixSegCmd64;
+    fn _dyld_get_image_vmaddr_slide(idx: u32) -> isize;
+    // Spills callee-saved registers (setjmp) then calls immix_mark_and_sweep
+    // with the current stack pointer. Defined in immix_gc.c.
+    fn immix_collect_roots();
 }
+
+// The prefix of macOS `struct segment_command_64` we need (vmaddr/vmsize).
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+struct ImmixSegCmd64 {
+    cmd: u32,
+    cmdsize: u32,
+    segname: [u8; 16],
+    vmaddr: u64,
+    vmsize: u64,
+    // (fileoff, filesize, maxprot, initprot, nsects, flags follow — unused)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const IMMIX_HEAP_MAX: usize = 4 << 30;
+#[cfg(not(target_arch = "wasm32"))]
+const IMMIX_BLOCK: usize = 32 << 10; // 32 KiB
+#[cfg(not(target_arch = "wasm32"))]
+const IMMIX_N_BLOCKS: usize = IMMIX_HEAP_MAX / IMMIX_BLOCK;
+
 #[cfg(not(target_arch = "wasm32"))]
 static mut FLAG_IMMIX: bool = false;
 #[cfg(not(target_arch = "wasm32"))]
-static mut IMMIX_CUR: usize = 0;
+static mut IMMIX_BASE: usize = 0;
 #[cfg(not(target_arch = "wasm32"))]
-static mut IMMIX_END: usize = 0;
+static mut IMMIX_CUR: usize = 0; // bump cursor in the current block
 #[cfg(not(target_arch = "wasm32"))]
-const IMMIX_HEAP_MAX: usize = 4 << 30;
+static mut IMMIX_CUR_END: usize = 0; // end of the current block
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_NEXT_FRESH: usize = 0; // next never-used block index
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_OBJ_BM: *mut u8 = std::ptr::null_mut(); // object-start bits
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_MARK_BM: *mut u8 = std::ptr::null_mut(); // mark bits
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_BSTATE: *mut u8 = std::ptr::null_mut(); // 0 free,1 small,2 large-cont,3 large-head
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_FREE: *mut u32 = std::ptr::null_mut(); // reclaimed free-block stack
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_FREE_TOP: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_WL: *mut usize = std::ptr::null_mut(); // mark worklist (object addrs)
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_WL_TOP: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_STACK_BASE: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_DATA_LO: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_DATA_HI: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_SINCE_GC: usize = 0; // bytes allocated since last GC
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_THRESHOLD: usize = 256 << 20;
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn immix_mmap(len: usize) -> *mut u8 {
+    const PROT_RW: i32 = 0x1 | 0x2;
+    const MAP_PA: i32 = 0x1000 | 0x0002; // MAP_ANON | MAP_PRIVATE (macOS)
+    let p = mmap(std::ptr::null_mut(), len, PROT_RW, MAP_PA, -1, 0);
+    assert!(p as isize != -1, "immix: mmap failed");
+    p
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 unsafe fn immix_init() {
-    const PROT_RW: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
-    const MAP_PA: i32 = 0x1000 | 0x0002; // MAP_ANON | MAP_PRIVATE (macOS)
-    let base = mmap(std::ptr::null_mut(), IMMIX_HEAP_MAX, PROT_RW, MAP_PA, -1, 0);
-    assert!(base as isize != -1, "immix: mmap failed");
-    IMMIX_CUR = base as usize;
-    IMMIX_END = base as usize + IMMIX_HEAP_MAX;
+    IMMIX_BASE = immix_mmap(IMMIX_HEAP_MAX) as usize;
+    // 1 bit per 8-byte granule.
+    IMMIX_OBJ_BM = immix_mmap(IMMIX_HEAP_MAX / 8 / 8);
+    IMMIX_MARK_BM = immix_mmap(IMMIX_HEAP_MAX / 8 / 8);
+    IMMIX_BSTATE = immix_mmap(IMMIX_N_BLOCKS);
+    IMMIX_FREE = immix_mmap(IMMIX_N_BLOCKS * 4) as *mut u32;
+    IMMIX_WL = immix_mmap(64 << 20) as *mut usize; // 8M-entry mark stack
+    IMMIX_NEXT_FRESH = 0;
+    IMMIX_CUR = 0;
+    IMMIX_CUR_END = 0;
+    if let Ok(mb) = std::env::var("ALM_IMMIX_GC_MB") {
+        if let Ok(n) = mb.parse::<usize>() {
+            IMMIX_THRESHOLD = n << 20;
+        }
+    }
+    // Conservative-root regions: this thread's stack top, and the main image's
+    // __DATA segment (where memoized-constant globals holding heap pointers live).
+    IMMIX_STACK_BASE = pthread_get_stackaddr_np(pthread_self()) as usize;
+    let seg = getsegbyname(b"__DATA\0".as_ptr() as *const i8);
+    if !seg.is_null() {
+        let slide = _dyld_get_image_vmaddr_slide(0) as usize;
+        IMMIX_DATA_LO = (*seg).vmaddr as usize + slide;
+        IMMIX_DATA_HI = IMMIX_DATA_LO + (*seg).vmsize as usize;
+    }
 }
+
+/// Grab a fresh/recycled block and point the bump cursor at it.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+unsafe fn immix_new_block() {
+    if IMMIX_SINCE_GC >= IMMIX_THRESHOLD {
+        immix_collect_roots();
+        IMMIX_SINCE_GC = 0;
+    }
+    let idx = if IMMIX_FREE_TOP > 0 {
+        IMMIX_FREE_TOP -= 1;
+        *IMMIX_FREE.add(IMMIX_FREE_TOP)
+    } else {
+        let i = IMMIX_NEXT_FRESH;
+        assert!(i < IMMIX_N_BLOCKS, "immix: heap exhausted");
+        IMMIX_NEXT_FRESH += 1;
+        i as u32
+    };
+    *IMMIX_BSTATE.add(idx as usize) = 1; // small-occupied
+    IMMIX_CUR = IMMIX_BASE + idx as usize * IMMIX_BLOCK;
+    IMMIX_CUR_END = IMMIX_CUR + IMMIX_BLOCK;
+}
+
+/// Objects larger than a block: a contiguous span of fresh blocks, kept (never
+/// reclaimed) but still scanned when reachable. Rare (big strings/arrays).
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+unsafe fn immix_large(total: usize) -> *mut u8 {
+    let nblocks = (total + IMMIX_BLOCK - 1) / IMMIX_BLOCK;
+    let head = IMMIX_NEXT_FRESH;
+    assert!(head + nblocks <= IMMIX_N_BLOCKS, "immix: heap exhausted (large)");
+    IMMIX_NEXT_FRESH += nblocks;
+    *IMMIX_BSTATE.add(head) = 3; // large-head
+    for k in 1..nblocks {
+        *IMMIX_BSTATE.add(head + k) = 2; // large-cont
+    }
+    (IMMIX_BASE + head * IMMIX_BLOCK) as *mut u8
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_set_obj_bit(obj: usize) {
+    let g = (obj - IMMIX_BASE) >> 3;
+    *IMMIX_OBJ_BM.add(g >> 3) |= 1 << (g & 7);
+}
+
+/// Allocate `size` bytes preceded by an 8-byte size header; returns the object
+/// pointer (after the header). Bump within the current block; fall to a slow
+/// path at block boundaries / for large objects.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_alloc(size: usize) -> *mut u8 {
-    let cur = *std::ptr::addr_of!(IMMIX_CUR);
-    let aligned = (cur + 7) & !7;
-    let new = aligned + size;
-    if new <= *std::ptr::addr_of!(IMMIX_END) {
+    let total = size + 8; // size header
+    let hdr = (*std::ptr::addr_of!(IMMIX_CUR) + 7) & !7;
+    let obj = hdr + 8;
+    let new = (obj + size + 7) & !7;
+    if new <= *std::ptr::addr_of!(IMMIX_CUR_END) {
+        *(hdr as *mut usize) = size;
+        immix_set_obj_bit(obj);
         *std::ptr::addr_of_mut!(IMMIX_CUR) = new;
-        aligned as *mut u8
-    } else {
-        std::process::abort(); // out of heap (collector will reclaim instead)
+        *std::ptr::addr_of_mut!(IMMIX_SINCE_GC) += total;
+        return obj as *mut u8;
+    }
+    immix_alloc_slow(size)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+unsafe fn immix_alloc_slow(size: usize) -> *mut u8 {
+    IMMIX_SINCE_GC += size + 8;
+    if size + 8 + 8 > IMMIX_BLOCK {
+        let hdr = immix_large(size + 8) as usize;
+        let obj = hdr + 8;
+        *(hdr as *mut usize) = size;
+        immix_set_obj_bit(obj);
+        return obj as *mut u8;
+    }
+    immix_new_block();
+    let hdr = IMMIX_CUR; // block start is 8-aligned (block-size multiple)
+    let obj = hdr + 8;
+    *(hdr as *mut usize) = size;
+    immix_set_obj_bit(obj);
+    IMMIX_CUR = (obj + size + 7) & !7;
+    obj as *mut u8
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_test_obj_bit(g: usize) -> bool {
+    *IMMIX_OBJ_BM.add(g >> 3) & (1 << (g & 7)) != 0
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_test_mark(g: usize) -> bool {
+    *IMMIX_MARK_BM.add(g >> 3) & (1 << (g & 7)) != 0
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_set_mark(g: usize) {
+    *IMMIX_MARK_BM.add(g >> 3) |= 1 << (g & 7);
+}
+
+/// Conservatively consider a word: if it's an even in-heap pointer to a real
+/// object start not yet marked, mark it and push it for scanning.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_try_mark(word: usize) {
+    // Tagged ints are odd; real object pointers are 8-aligned and even.
+    if word & 7 != 0 || word < IMMIX_BASE {
+        return;
+    }
+    let top = IMMIX_BASE + IMMIX_NEXT_FRESH * IMMIX_BLOCK;
+    if word >= top {
+        return;
+    }
+    let g = (word - IMMIX_BASE) >> 3;
+    if !immix_test_obj_bit(g) || immix_test_mark(g) {
+        return;
+    }
+    immix_set_mark(g);
+    *IMMIX_WL.add(IMMIX_WL_TOP) = word;
+    IMMIX_WL_TOP += 1;
+    assert!(IMMIX_WL_TOP < (64 << 20) / 8, "immix: mark stack overflow");
+}
+
+/// Conservatively scan a word range for heap pointers.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn immix_scan_range(lo: usize, hi: usize) {
+    let mut a = (lo + 7) & !7;
+    while a + 8 <= hi {
+        immix_try_mark(*(a as *const usize));
+        a += 8;
+    }
+}
+
+/// Entry from the C register-spill trampoline: `sp` is the lowest live stack
+/// address. Marks from roots (stack + __DATA), drains the worklist scanning each
+/// live object's fields (extent from its size header), then sweeps.
+#[no_mangle]
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe extern "C" fn immix_mark_and_sweep(sp: *mut u8) {
+    // Clear mark bits over the used range.
+    let used_bytes = (IMMIX_NEXT_FRESH * IMMIX_BLOCK) / 8 / 8 + 1;
+    std::ptr::write_bytes(IMMIX_MARK_BM, 0, used_bytes);
+    IMMIX_WL_TOP = 0;
+
+    // Roots: the live stack, then the main image's __DATA (memoized globals).
+    // Capture the stack base of THIS (the collecting) thread — the Elm
+    // computation runs on a big-stack worker thread, so an init-time base from
+    // another thread would scan the wrong range and miss roots.
+    let base = pthread_get_stackaddr_np(pthread_self()) as usize;
+    immix_scan_range(sp as usize, base);
+    if IMMIX_DATA_LO != 0 {
+        immix_scan_range(IMMIX_DATA_LO, IMMIX_DATA_HI);
+    }
+
+    // Transitive mark: scan each live object's fields (exact extent via header).
+    while IMMIX_WL_TOP > 0 {
+        IMMIX_WL_TOP -= 1;
+        let obj = *IMMIX_WL.add(IMMIX_WL_TOP);
+        let size = *((obj - 8) as *const usize);
+        immix_scan_range(obj, obj + size);
+    }
+
+    // Sweep: free small-occupied blocks with no surviving object.
+    for idx in 0..IMMIX_NEXT_FRESH {
+        if *IMMIX_BSTATE.add(idx) != 1 {
+            continue; // free / large — leave alone
+        }
+        let bstart = IMMIX_BASE + idx * IMMIX_BLOCK;
+        // Don't reclaim the block currently being bumped into.
+        if IMMIX_CUR >= bstart && IMMIX_CUR < bstart + IMMIX_BLOCK {
+            continue;
+        }
+        let g0 = (bstart - IMMIX_BASE) >> 3;
+        let gn = IMMIX_BLOCK >> 3;
+        let mut live = false;
+        let mut g = g0;
+        while g < g0 + gn {
+            if immix_test_mark(g) {
+                live = true;
+                break;
+            }
+            g += 1;
+        }
+        if !live {
+            // Reclaim: clear this block's object-start bits, return to free list.
+            for gg in g0..g0 + gn {
+                *IMMIX_OBJ_BM.add(gg >> 3) &= !(1u8 << (gg & 7));
+            }
+            *IMMIX_BSTATE.add(idx) = 0;
+            *IMMIX_FREE.add(IMMIX_FREE_TOP) = idx as u32;
+            IMMIX_FREE_TOP += 1;
+        }
     }
 }
 

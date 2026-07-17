@@ -87,6 +87,21 @@ fn main() {
         .unwrap_or(false);
     assert!(ok, "compiling almmtk_stubs.c failed");
 
+    // The custom Immix-lite collector's register-spill trampoline.
+    let immix_src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("src/generate/immix_gc.c");
+    println!("cargo:rerun-if-changed={}", immix_src.display());
+    let immix_obj = out_dir.join("immix_gc.o");
+    let ok = Command::new("cc")
+        .args(["-O2", "-c"])
+        .arg(&immix_src)
+        .arg("-o")
+        .arg(&immix_obj)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ok, "compiling immix_gc.c failed");
+
     // setjmp/longjmp shim for Bytes.Decode failure (the native twin of the JS
     // runtime's exception-based decode abort). In C because `setjmp` needs
     // `returns_twice` codegen that a plain Rust extern declaration does not

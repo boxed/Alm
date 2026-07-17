@@ -51,6 +51,10 @@ pub const BYTES_JMP_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bytes
 pub const ALM_MMTK_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_mmtk.o"));
 pub const ALMMTK_STUBS_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/almmtk_stubs.o"));
 
+/// Register-spill trampoline for the custom Immix-lite collector
+/// (`immix_collect_roots`); the runtime's `immix_mark_and_sweep` does the work.
+pub const IMMIX_GC_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/immix_gc.o"));
+
 /// The same runtime as optimized LLVM bitcode. Merged into each program
 /// module (as `available_externally`) so LLVM can inline the runtime's hot
 /// primitives into generated code; the real symbols still come from the
@@ -271,6 +275,8 @@ pub(crate) fn finish<'ctx>(
             std::fs::write(&mmtk, ALM_MMTK_OBJ).map_err(|e| e.to_string())?;
             let mmtk_stubs = build_dir.join("almmtk_stubs.o");
             std::fs::write(&mmtk_stubs, ALMMTK_STUBS_OBJ).map_err(|e| e.to_string())?;
+            let immix_gc = build_dir.join("immix_gc.o");
+            std::fs::write(&immix_gc, IMMIX_GC_OBJ).map_err(|e| e.to_string())?;
             // The runtime uses the Boehm conservative GC (`libgc`) as its
             // allocator; link it in. `-lgc` from the bdw-gc install prefix.
             run_linker(
@@ -282,6 +288,7 @@ pub(crate) fn finish<'ctx>(
                     &bytes_jmp,
                     &mmtk,
                     &mmtk_stubs,
+                    &immix_gc,
                     Path::new("-L/opt/homebrew/opt/bdw-gc/lib"),
                     Path::new("-lgc"),
                     // MMTk's `sysinfo` dependency (physical-memory detection)
