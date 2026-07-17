@@ -3536,6 +3536,20 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CLOS, field_index: 2 });
         f.instruction(&Instruction::LocalSet(4)); // applied
+        // Full application (applied + 1 == arity)? Then dispatch directly,
+        // reading the already-applied args straight from the closure and the
+        // final arg from the param — no argument-array allocation. This is the
+        // overwhelmingly common case (map/filter/foldl apply a 1-arg lambda per
+        // element); allocating a fresh T_ARR each call dominated those loops.
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        self.emit_dispatch_full(&mut f, 3, 2, 1);
+        f.instruction(&Instruction::Else);
+        // Partial application: build the extended args array and a new closure.
         // na = new T_ARR arity; copy old args[0..applied]; na[applied] = arg
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -3551,33 +3565,37 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        // napplied = applied + 1
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(6));
-        // if napplied == arity { dispatch } else { new closure }
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        self.emit_dispatch(&mut f, 3, 5, 2, 1);
-        f.instruction(&Instruction::Else);
-        // new T_CLOS { func, arity, napplied, na }
+        // new T_CLOS { func, arity, applied+1, na }
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CLOS, field_index: 0 });
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_CLOS));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // if applied+1 == arity
+        f.instruction(&Instruction::End); // function body
         f
     }
 
-    /// Emit the arity-dispatch if-chain for `apply1`: when `arity_local == a`,
-    /// load `a` args and `call_ref` the closure's function; else recurse.
-    fn emit_dispatch(&self, f: &mut Function, arity_local: u32, args_local: u32, clos_local: u32, a: u32) {
+    /// Dispatch a closure whose final argument is being applied now: for the
+    /// matching arity `a`, load the `a-1` already-applied args from the closure's
+    /// args array, push the final `arg`, and `return_call_ref` the function — no
+    /// argument-array allocation. `arity_local` holds the closure arity,
+    /// `clos_local` the cast `T_CLOS`, `arg_local` the final argument.
+    fn emit_dispatch_full(&self, f: &mut Function, arity_local: u32, clos_local: u32, arg_local: u32) {
+        self.emit_dispatch_full_a(f, arity_local, clos_local, arg_local, 1);
+    }
+
+    fn emit_dispatch_full_a(
+        &self,
+        f: &mut Function,
+        arity_local: u32,
+        clos_local: u32,
+        arg_local: u32,
+        a: u32,
+    ) {
         if a > MAX_ARITY {
             f.instruction(&Instruction::Unreachable);
             return;
@@ -3587,22 +3605,23 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(a as i32));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        for k in 0..a {
-            f.instruction(&Instruction::LocalGet(args_local));
+        // The a-1 previously-applied args (captures / earlier args).
+        for k in 0..a - 1 {
+            f.instruction(&Instruction::LocalGet(clos_local));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_CLOS, field_index: 3 });
             f.instruction(&Instruction::I32Const(k as i32));
             f.instruction(&Instruction::ArrayGet(T_ARR));
         }
+        f.instruction(&Instruction::LocalGet(arg_local));
         f.instruction(&Instruction::LocalGet(clos_local));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CLOS, field_index: 0 });
         f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(ft)));
-        // Tail call: the applied function's result IS apply1's result, so hand
-        // off the frame. Combined with `return_call apply1` at tail-position
-        // applications, this gives constant-stack recursion through closures.
         f.instruction(&Instruction::ReturnCallRef(ft));
         f.instruction(&Instruction::Else);
-        self.emit_dispatch(f, arity_local, args_local, clos_local, a + 1);
+        self.emit_dispatch_full_a(f, arity_local, clos_local, arg_local, a + 1);
         f.instruction(&Instruction::End);
     }
+
 
     /// Lift a lambda / local function to a synthesized top-level wasm function
     /// (capturing free enclosing locals) and emit a closure value for it onto

@@ -292,10 +292,14 @@ var $List$range = F2(function (lo, hi) {
     return out;
 });
 var $List$map = F2(function (f, xs) {
-    return _List_fromArray(_List_toArray(xs).map(function (x) { return f(x); }));
+    var out = [];
+    for (; xs.$ === '::'; xs = xs.b) { out.push(f(xs.a)); }
+    return _List_fromArray(out);
 });
 var $List$indexedMap = F2(function (f, xs) {
-    return _List_fromArray(_List_toArray(xs).map(function (x, i) { return A2(f, i, x); }));
+    var out = [], i = 0;
+    for (; xs.$ === '::'; xs = xs.b) { out.push(A2(f, i++, xs.a)); }
+    return _List_fromArray(out);
 });
 var $List$foldl = F3(function (f, acc, xs) {
     for (; xs.$ === '::'; xs = xs.b) { acc = A2(f, xs.a, acc); }
@@ -307,7 +311,9 @@ var $List$foldr = F3(function (f, acc, xs) {
     return acc;
 });
 var $List$filter = F2(function (isGood, xs) {
-    return _List_fromArray(_List_toArray(xs).filter(function (x) { return isGood(x); }));
+    var out = [];
+    for (; xs.$ === '::'; xs = xs.b) { if (isGood(xs.a)) { out.push(xs.a); } }
+    return _List_fromArray(out);
 });
 var $List$filterMap = F2(function (f, xs) {
     var out = [];
