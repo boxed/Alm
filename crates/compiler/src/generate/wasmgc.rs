@@ -562,6 +562,29 @@ fn f64_elem(tipe: &can::Type) -> bool {
     unbox_floatlist() && is_float(tipe)
 }
 
+/// Opaque kernel types with no exposed constructors — elm's `Debug.toString`
+/// renders these as `<internals>`. An allowlist (not "anything unregistered")
+/// so a real union missing from the registry still errors loudly.
+fn is_opaque_kernel_type(home: &str, name: &str) -> bool {
+    matches!(
+        (home, name),
+        ("Json.Encode", "Value")
+            | ("Json.Decode", "Value")
+            | ("Json.Decode", "Decoder")
+            | ("Regex", "Regex")
+            | ("Bytes", "Bytes")
+            | ("Bytes.Encode", "Encoder")
+            | ("Bytes.Decode", "Decoder")
+            | ("Process", "Id")
+            | ("Platform", "Router")
+            | ("Platform", "ProcessId")
+            | ("Platform", "Task")
+            | ("Task", "Task")
+            | ("Platform.Cmd", "Cmd")
+            | ("Platform.Sub", "Sub")
+    )
+}
+
 /// Whether `tipe` is an unboxed `List Float` (uses the `T_LISTF` backing).
 fn is_float_list(tipe: &can::Type) -> bool {
     list_elem_type(Some(tipe)).map_or(false, f64_elem)
@@ -4818,9 +4841,23 @@ impl<'a> Codegen<'a> {
             can::Type::Type(h, n, a) => (h.to_string(), n.to_string(), a.clone()),
             _ => unreachable!(),
         };
-        let ctors = self
-            .union_ctors(&home, &name, &targs)
-            .ok_or_else(|| format!("wasmgc: Debug.toString: unknown type `{home}.{name}`"))?;
+        let ctors = match self.union_ctors(&home, &name, &targs) {
+            Some(c) => c,
+            None if is_opaque_kernel_type(&home, &name) => {
+                // A genuinely opaque kernel type (Json.Value, Decoder, Regex,
+                // Bytes, Process.Id, Cmd/Sub/Task, …). elm's Debug.toString
+                // renders all of these as "<internals>". (Kept to an allowlist
+                // so a real union missing from the registry still errors loudly
+                // rather than silently rendering the wrong thing.)
+                let mut f = Function::new([]);
+                push_str_const(&mut f, "<internals>");
+                f.instruction(&Instruction::End);
+                return Ok(f);
+            }
+            None => {
+                return Err(format!("wasmgc: Debug.toString: unknown type `{home}.{name}`"))
+            }
+        };
         let app = self.str_append_idx;
         let paren = self.debug_paren();
         // Pre-allocate arg renderers (needs &mut self) before building the body.
