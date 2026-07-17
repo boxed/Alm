@@ -1495,6 +1495,7 @@ struct Codegen<'a> {
     /// (`T_LISTF`) list reps, for `List Float` at unspecialized boundaries.
     listf_widen_idx: Option<u32>,
     listf_narrow_idx: Option<u32>,
+    listf_cons_idx: Option<u32>,
     list_cons_idx: u32,
     list_map_idx: u32,
     list_foldl_idx: u32,
@@ -1756,6 +1757,7 @@ impl<'a> Codegen<'a> {
             apply1_idx: 0,
             listf_widen_idx: None,
             listf_narrow_idx: None,
+            listf_cons_idx: None,
             list_cons_idx: 0,
             list_map_idx: 0,
             list_foldl_idx: 0,
@@ -21283,15 +21285,11 @@ impl<'a> Codegen<'a> {
             }
             "::" => {
                 if is_float_list(&r.tipe) {
-                    // TODO(perf): a native f64 cons would be O(1); widen/cons/
-                    // narrow is O(n) per cons. Correct meanwhile.
+                    // Native amortized-O(1) f64 cons into the T_LISTF front-slack.
+                    let c = self.listf_cons();
                     self.emit_expr(l, ctx, f)?; // boxed Float element
                     self.emit_expr(r, ctx, f)?; // T_LISTF tail
-                    let w = self.listf_widen();
-                    f.instruction(&Instruction::Call(w));
-                    f.instruction(&Instruction::Call(self.list_cons_idx));
-                    let n = self.listf_narrow();
-                    f.instruction(&Instruction::Call(n));
+                    f.instruction(&Instruction::Call(c));
                 } else {
                     self.emit_expr(l, ctx, f)?;
                     self.emit_expr(r, ctx, f)?;
@@ -22748,6 +22746,163 @@ impl<'a> Codegen<'a> {
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, f);
         self.listf_narrow_idx = Some(lidx);
+        lidx
+    }
+
+    /// Lazily build a native `::` for an unboxed `List Float`: prepend a boxed
+    /// `Float` (unboxed once here) into the front-slack of a `T_LISTF`, amortized
+    /// O(1) — the f64 twin of `list_cons`. Params: x(0) boxed Float, xs(1)
+    /// T_LISTF. Returns its function index.
+    fn listf_cons(&mut self) -> u32 {
+        if let Some(i) = self.listf_cons_idx {
+            return i;
+        }
+        self.fn_type(2);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((2, Function::new([])));
+        // locals: len(2),cap(3),start(4),newcap(5),nstart(6),k(7):i32,
+        //   bk(8):ref null T_BACKF, ndata(9),odata(10):ref T_ARRF, xf(11):f64
+        let mut f = Function::new([
+            (6, ValType::I32),
+            (1, ref_null_to(T_BACKF)),
+            (2, ref_to(T_ARRF)),
+            (1, ValType::F64),
+        ]);
+        // xf = unbox(x)
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(T_FLOAT));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(11));
+        // len = xs.len
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_LISTF));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 0 });
+        f.instruction(&Instruction::LocalSet(2));
+        // bk = xs.bk
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_LISTF));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(8));
+        // in-place fast path when bk != null
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // odata = bk.data
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACKF));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 1 });
+        f.instruction(&Instruction::LocalSet(10));
+        // cap = odata.len; start = cap - len
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(4));
+        // if start == bk.head && start > 0
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACKF));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 0 });
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // odata[start-1] = xf
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::ArraySet(T_ARRF));
+        // bk.head = start-1
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&cast_to(T_BACKF));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::StructSet { struct_type_index: T_BACKF, field_index: 0 });
+        // return {len+1, bk}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::StructNew(T_LISTF));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // grow path: newcap = 2*(len+1)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARRF));
+        f.instruction(&Instruction::LocalSet(9));
+        // nstart = newcap - (len+1)
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(6));
+        // ndata[nstart] = xf
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::ArraySet(T_ARRF));
+        // copy old elements when bk != null
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // ndata[nstart+1+k] = odata[start+k]
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARRF));
+        f.instruction(&Instruction::ArraySet(T_ARRF));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(7));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // return {len+1, {head:nstart, data:ndata}}
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::StructNew(T_BACKF));
+        f.instruction(&Instruction::StructNew(T_LISTF));
+        f.instruction(&Instruction::End);
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (2, f);
+        self.listf_cons_idx = Some(lidx);
         lidx
     }
 
