@@ -21762,6 +21762,415 @@ impl<'a> Codegen<'a> {
         Ok(())
     }
 
+    /// Resolve a list-combinator's function argument to a statically-known
+    /// callee we can inline into a fused loop. First cut: literal lambdas of
+    /// exactly `nparams` simple (var/wildcard) parameters and a small body.
+    /// Returns `(param_names, body, capture_names)` — captures are the body's
+    /// free locals bound in the enclosing scope, in first-seen order; each must
+    /// hold an eqref (unboxed scalar captures are rejected, since the synth
+    /// function's parameters are eqref). `None` means fall back to the kernel.
+    fn resolve_fusable<'e>(
+        &self,
+        callee: &'e TypedExpr,
+        nparams: usize,
+        ctx: &FnCtx,
+    ) -> Option<(Vec<Option<String>>, &'e TypedExpr, Vec<String>)> {
+        if std::env::var_os("ALM_NO_FUSE").is_some() {
+            return None;
+        }
+        let (params, body) = match &callee.kind {
+            TypedKind::Lambda(ps, b) => (ps.as_slice(), b.as_ref()),
+            _ => return None,
+        };
+        if params.len() != nparams {
+            return None;
+        }
+        let mut pnames: Vec<Option<String>> = Vec::with_capacity(nparams);
+        for (p, _) in params {
+            match &p.value {
+                can::Pattern_::Var(n) => pnames.push(Some(n.to_string())),
+                can::Pattern_::Anything => pnames.push(None),
+                _ => return None,
+            }
+        }
+        // Inlining a huge body would bloat the module for little gain; small
+        // bodies (the common combinator case) inline.
+        if expr_size(body) > 120 {
+            return None;
+        }
+        let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for n in pnames.iter().flatten() {
+            bound.insert(n.clone());
+        }
+        let mut free = Vec::new();
+        free_locals(body, &bound, &mut free);
+        // Every free local must be a plain eqref local in scope. A missing slot
+        // (recursive self-fn, or a name we can't resolve) or an unboxed scalar
+        // capture forces the kernel fallback.
+        for n in &free {
+            match ctx.lookup(n) {
+                Some(slot) if ctx.rep_of_local(slot) == Rep::Eqref => {}
+                _ => return None,
+            }
+        }
+        Some((pnames, body, free))
+    }
+
+    /// Fuse `List.foldl`/`List.foldr callee init xs` when `callee` resolves to a
+    /// known small function: synthesize a specialized lifted loop that inlines
+    /// the callee body per element. This removes the generic kernel's *two*
+    /// per-element `apply1` calls (a fold's 2-arg function is applied curried).
+    /// Returns `true` when fused (call-site code emitted), `false` to use the
+    /// kernel. `rev` selects foldr (walk tail-first) vs foldl (head-first).
+    fn try_fuse_fold(
+        &mut self,
+        args: &[TypedExpr],
+        rev: bool,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<bool, String> {
+        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 2, ctx) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        // Capture slots in the *caller* — read at the call site below.
+        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
+        let lidx = self.build_fused_fold(&pnames, body, &caps, rev)?;
+        for slot in &cap_slots {
+            f.instruction(&Instruction::LocalGet(*slot));
+        }
+        self.emit_expr(&args[1], ctx, f)?; // initial accumulator
+        self.emit_expr(&args[2], ctx, f)?; // xs
+        f.instruction(&Instruction::Call(lidx));
+        Ok(true)
+    }
+
+    /// Build a specialized fold loop as a lifted `(caps.., acc, xs) -> acc`
+    /// function that inlines `body` (params `[element, accumulator]`). `rev`
+    /// walks the list tail-first (foldr) instead of head-first (foldl). Returns
+    /// its function index.
+    fn build_fused_fold(
+        &mut self,
+        pnames: &[Option<String>],
+        body: &TypedExpr,
+        capnames: &[String],
+        rev: bool,
+    ) -> Result<u32, String> {
+        let ncap = capnames.len() as u32;
+        let arity = ncap + 2; // captures + accumulator + list
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([]))); // reserve slot
+
+        let eb = count_bindings(body);
+        // eqref: body-binding pool (eb) + element + scratch_eqref.
+        let mut lf = Function::new([
+            (eb + 2, eqref()),
+            (1, ValType::I64),  // scratch_i64
+            (3, ValType::I32),  // len, start, i
+            (1, ref_to(T_ARR)), // data
+        ]);
+        let acc = ncap; // accumulator param (reused as the mutable running acc)
+        let xs = ncap + 1;
+        let elem = arity + eb;
+        let scratch_e = arity + eb + 1;
+        let scratch_i = arity + eb + 2;
+        let l_len = arity + eb + 3;
+        let l_start = arity + eb + 4;
+        let l_i = arity + eb + 5;
+        let l_data = arity + eb + 6;
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity;
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        for (i, name) in capnames.iter().enumerate() {
+            lctx.scope.push((name.clone(), i as u32));
+        }
+        if let Some(n) = &pnames[0] {
+            lctx.scope.push((n.clone(), elem));
+        }
+        if let Some(n) = &pnames[1] {
+            lctx.scope.push((n.clone(), acc));
+        }
+
+        list_len(&mut lf, xs);
+        lf.instruction(&Instruction::LocalTee(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_data));
+        list_start(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_start));
+        if rev {
+            // foldr: walk tail-first, i = len-1 downto 0.
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32Const(1));
+            lf.instruction(&Instruction::I32Sub);
+        } else {
+            lf.instruction(&Instruction::I32Const(0));
+        }
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        if rev {
+            lf.instruction(&Instruction::I32Const(0));
+            lf.instruction(&Instruction::I32LtS);
+        } else {
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32GeS);
+        }
+        lf.instruction(&Instruction::BrIf(1));
+        // element = data[start + i]
+        lf.instruction(&Instruction::LocalGet(l_data));
+        lf.instruction(&Instruction::LocalGet(l_start));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Add);
+        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::LocalSet(elem));
+        // accumulator = <body>
+        self.emit_expr(body, &mut lctx, &mut lf)?;
+        lf.instruction(&Instruction::LocalSet(acc));
+        bump(&mut lf, l_i, if rev { -1 } else { 1 });
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if
+        lf.instruction(&Instruction::LocalGet(acc));
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
+    /// Fuse `List.map callee xs` when `callee` resolves to a known small
+    /// function: synthesize a lifted `(caps.., xs) -> list` loop that inlines
+    /// the callee body into the result-array store, skipping per-element
+    /// `apply1`. Returns `true` when fused.
+    fn try_fuse_map(
+        &mut self,
+        args: &[TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<bool, String> {
+        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 1, ctx) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
+        let lidx = self.build_fused_map(&pnames, body, &caps)?;
+        for slot in &cap_slots {
+            f.instruction(&Instruction::LocalGet(*slot));
+        }
+        self.emit_expr(&args[1], ctx, f)?; // xs
+        f.instruction(&Instruction::Call(lidx));
+        Ok(true)
+    }
+
+    fn build_fused_map(
+        &mut self,
+        pnames: &[Option<String>],
+        body: &TypedExpr,
+        capnames: &[String],
+    ) -> Result<u32, String> {
+        let ncap = capnames.len() as u32;
+        let arity = ncap + 1; // captures + list
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+
+        let eb = count_bindings(body);
+        let mut lf = Function::new([
+            (eb + 2, eqref()),  // body-binding pool + element + scratch_eqref
+            (1, ValType::I64),  // scratch_i64
+            (3, ValType::I32),  // len, start, i
+            (2, ref_to(T_ARR)), // sdata, ndata
+        ]);
+        let xs = ncap;
+        let elem = arity + eb;
+        let scratch_e = arity + eb + 1;
+        let scratch_i = arity + eb + 2;
+        let l_len = arity + eb + 3;
+        let l_start = arity + eb + 4;
+        let l_i = arity + eb + 5;
+        let l_sdata = arity + eb + 6;
+        let l_ndata = arity + eb + 7;
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity;
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        for (i, name) in capnames.iter().enumerate() {
+            lctx.scope.push((name.clone(), i as u32));
+        }
+        if let Some(n) = &pnames[0] {
+            lctx.scope.push((n.clone(), elem));
+        }
+
+        list_len(&mut lf, xs);
+        lf.instruction(&Instruction::LocalTee(l_len));
+        // ndata = new eqref[len]
+        lf.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        lf.instruction(&Instruction::LocalSet(l_ndata));
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_sdata));
+        list_start(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_start));
+        lf.instruction(&Instruction::I32Const(0));
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::I32GeS);
+        lf.instruction(&Instruction::BrIf(1));
+        // element = sdata[start + i]
+        lf.instruction(&Instruction::LocalGet(l_sdata));
+        lf.instruction(&Instruction::LocalGet(l_start));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Add);
+        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::LocalSet(elem));
+        // ndata[i] = <body>
+        lf.instruction(&Instruction::LocalGet(l_ndata));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        self.emit_expr(body, &mut lctx, &mut lf)?;
+        lf.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut lf, l_i, 1);
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if
+        // wrap ndata as {len, {head=0, ndata}}
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::I32Const(0));
+        lf.instruction(&Instruction::LocalGet(l_ndata));
+        lf.instruction(&Instruction::StructNew(T_BACK));
+        lf.instruction(&Instruction::StructNew(T_LIST));
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
+    /// Fuse `List.filter pred xs` when `pred` resolves to a known small
+    /// function: synthesize a lifted `(caps.., xs) -> list` loop that inlines
+    /// the predicate body, consing survivors (tail-first walk so the result
+    /// keeps source order). Returns `true` when fused.
+    fn try_fuse_filter(
+        &mut self,
+        args: &[TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<bool, String> {
+        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 1, ctx) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
+        let lidx = self.build_fused_filter(&pnames, body, &caps)?;
+        for slot in &cap_slots {
+            f.instruction(&Instruction::LocalGet(*slot));
+        }
+        self.emit_expr(&args[1], ctx, f)?; // xs
+        f.instruction(&Instruction::Call(lidx));
+        Ok(true)
+    }
+
+    fn build_fused_filter(
+        &mut self,
+        pnames: &[Option<String>],
+        body: &TypedExpr,
+        capnames: &[String],
+    ) -> Result<u32, String> {
+        let ncap = capnames.len() as u32;
+        let arity = ncap + 1;
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+
+        let eb = count_bindings(body);
+        let mut lf = Function::new([
+            (eb + 3, eqref()),  // body-binding pool + element + acc + scratch_eqref
+            (1, ValType::I64),  // scratch_i64
+            (3, ValType::I32),  // len, start, i
+            (1, ref_to(T_ARR)), // sdata
+        ]);
+        let xs = ncap;
+        let elem = arity + eb;
+        let acc = arity + eb + 1;
+        let scratch_e = arity + eb + 2;
+        let scratch_i = arity + eb + 3;
+        let l_len = arity + eb + 4;
+        let l_start = arity + eb + 5;
+        let l_i = arity + eb + 6;
+        let l_sdata = arity + eb + 7;
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity;
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        for (i, name) in capnames.iter().enumerate() {
+            lctx.scope.push((name.clone(), i as u32));
+        }
+        if let Some(n) = &pnames[0] {
+            lctx.scope.push((n.clone(), elem));
+        }
+
+        push_empty_list(&mut lf);
+        lf.instruction(&Instruction::LocalSet(acc)); // acc = []
+        list_len(&mut lf, xs);
+        lf.instruction(&Instruction::LocalTee(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_sdata));
+        list_start(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(l_start));
+        // i = len-1 downto 0 (cons builds forward order)
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::I32Const(1));
+        lf.instruction(&Instruction::I32Sub);
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Const(0));
+        lf.instruction(&Instruction::I32LtS);
+        lf.instruction(&Instruction::BrIf(1));
+        // element = sdata[start + i]
+        lf.instruction(&Instruction::LocalGet(l_sdata));
+        lf.instruction(&Instruction::LocalGet(l_start));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Add);
+        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::LocalSet(elem));
+        // if <body> then acc = cons(element, acc)
+        self.emit_expr(body, &mut lctx, &mut lf)?;
+        lf.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+            shared: false,
+            ty: AbstractHeapType::I31,
+        }));
+        lf.instruction(&Instruction::I31GetS);
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(elem));
+        lf.instruction(&Instruction::LocalGet(acc));
+        lf.instruction(&Instruction::Call(self.list_cons_idx));
+        lf.instruction(&Instruction::LocalSet(acc));
+        lf.instruction(&Instruction::End); // if pred
+        bump(&mut lf, l_i, -1);
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if len
+        lf.instruction(&Instruction::LocalGet(acc));
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
     /// A saturated call to a known kernel (`Foreign`).
     fn emit_kernel(
         &mut self,
@@ -21786,15 +22195,19 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.str_length_idx));
             }
             ("List", "map") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.list_map_idx));
+                if !self.try_fuse_map(args, ctx, f)? {
+                    self.emit_expr(&args[0], ctx, f)?;
+                    self.emit_expr(&args[1], ctx, f)?;
+                    f.instruction(&Instruction::Call(self.list_map_idx));
+                }
             }
             ("List", "foldl") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                self.emit_expr(&args[2], ctx, f)?;
-                f.instruction(&Instruction::Call(self.list_foldl_idx));
+                if !self.try_fuse_fold(args, false, ctx, f)? {
+                    self.emit_expr(&args[0], ctx, f)?;
+                    self.emit_expr(&args[1], ctx, f)?;
+                    self.emit_expr(&args[2], ctx, f)?;
+                    f.instruction(&Instruction::Call(self.list_foldl_idx));
+                }
             }
             ("List", "length") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -21805,15 +22218,19 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.list_reverse_idx));
             }
             ("List", "filter") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.list_filter_idx));
+                if !self.try_fuse_filter(args, ctx, f)? {
+                    self.emit_expr(&args[0], ctx, f)?;
+                    self.emit_expr(&args[1], ctx, f)?;
+                    f.instruction(&Instruction::Call(self.list_filter_idx));
+                }
             }
             ("List", "foldr") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                self.emit_expr(&args[2], ctx, f)?;
-                f.instruction(&Instruction::Call(self.list_foldr_idx));
+                if !self.try_fuse_fold(args, true, ctx, f)? {
+                    self.emit_expr(&args[0], ctx, f)?;
+                    self.emit_expr(&args[1], ctx, f)?;
+                    self.emit_expr(&args[2], ctx, f)?;
+                    f.instruction(&Instruction::Call(self.list_foldr_idx));
+                }
             }
             ("List", "append") => {
                 self.emit_expr(&args[0], ctx, f)?;
@@ -24562,6 +24979,46 @@ fn count_bindings(e: &TypedExpr) -> u32 {
                 + count_bindings(b)
                 + c.as_ref().map(|x| count_bindings(x)).unwrap_or(0)
         }
+    }
+}
+
+/// Total node count of an expression, used as a size heuristic for deciding
+/// whether inlining a callee (e.g. into a fused list combinator loop) is worth
+/// it. Cheap over-approximation — good enough for a threshold.
+fn expr_size(e: &TypedExpr) -> u32 {
+    use TypedKind::*;
+    1 + match &e.kind {
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Local(_) | Global(_) | Foreign(_, _)
+        | Accessor(_) | Ctor(_, _, _) => 0,
+        Negate(x) | Access(x, _) => expr_size(x),
+        Binop(_, _, _, l, r) => expr_size(l) + expr_size(r),
+        List(xs) => xs.iter().map(expr_size).sum(),
+        Call(g, args) => expr_size(g) + args.iter().map(expr_size).sum::<u32>(),
+        If(bs, otherwise) => {
+            bs.iter().map(|(c, t)| expr_size(c) + expr_size(t)).sum::<u32>() + expr_size(otherwise)
+        }
+        Lambda(_, b) => expr_size(b),
+        Let(decls, body) => {
+            decls.iter().map(let_size).sum::<u32>() + expr_size(body)
+        }
+        Case(scrut, branches) => {
+            expr_size(scrut) + branches.iter().map(|(_, b)| expr_size(b)).sum::<u32>()
+        }
+        Update(x, fields) => {
+            expr_size(x) + fields.iter().map(|(_, e)| expr_size(e)).sum::<u32>()
+        }
+        Record(fields) => fields.iter().map(|(_, e)| expr_size(e)).sum(),
+        Tuple(a, b, c) => {
+            expr_size(a) + expr_size(b) + c.as_ref().map(|x| expr_size(x)).unwrap_or(0)
+        }
+    }
+}
+
+fn let_size(d: &TypedLetDecl) -> u32 {
+    match d {
+        TypedLetDecl::Def { body, .. } => 1 + expr_size(body),
+        TypedLetDecl::Destruct(_, ex) => 1 + expr_size(ex),
+        TypedLetDecl::Recursive(ds) => ds.iter().map(let_size).sum(),
     }
 }
 
