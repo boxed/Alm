@@ -1,11 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/compiler", "crates/alm", "crates/alm-regex"]
-# alm-mmtk is the native MMTk GC binding. Excluded from the workspace: it needs
-# a modern toolchain (MMTk's MSRV) and pulls ~100 deps, so it's built on demand
-# by the compiler's build.rs into an isolated target dir (like the regex glue),
-# not as part of the default workspace build.
-exclude = ["crates/alm-mmtk"]
 
 [workspace.package]
 version = "0.1.0"

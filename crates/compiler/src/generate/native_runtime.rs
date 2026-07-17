@@ -25,94 +25,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // ALLOCATOR
 //
-// Native: the Boehm–Demers–Weiser conservative garbage collector (`libgc`).
-// The runtime holds Elm values as raw `u64` pointers with no ownership tracking
-// and reads them through fabricated lifetimes, so a precise collector would need
-// codegen-registered roots. A *conservative* GC needs none of that: it scans the
-// stack, registers, and statics treating any word that looks like a heap pointer
-// as a root, so it reclaims exactly the unreachable values and — because a value
-// stays live as long as any pointer to it is reachable — it also keeps the
-// runtime's raw-pointer reads valid. Elm ints are tagged (`w & 1`, i.e. odd), so
-// they are never mistaken for pointers and cause no false retention.
-//
-// `GC_malloc` returns 16-aligned, zeroed memory; every Elm allocation has align
-// ≤ 16, and `GC_memalign` covers the rare larger request. `dealloc` is a no-op —
-// the collector reclaims. The collector is initialised lazily on first
-// allocation (on whatever thread starts the program, which becomes GC-primary),
-// and the large-stack worker thread registers itself in `main`.
-//
-// Wasm: `libgc` is not linked there, so wasm keeps the leak-only bump allocator.
+// Native: the custom Immix-lite garbage collector (see below). The runtime
+// holds Elm values as raw `u64` pointers with no ownership tracking and reads
+// them through fabricated lifetimes, so a precise collector would need
+// codegen-registered roots. A *conservative* collector needs none of that: it
+// scans the stack, registers, and statics treating any word that looks like a
+// heap pointer as a root. Elm ints are tagged (`w & 1`, i.e. odd), so they are
+// never mistaken for pointers. Everything — Elm objects and the runtime's own
+// Rust `Vec`/`Box` (via the global allocator) — lives in this one heap, so it is
+// fully self-referentially scannable. `dealloc` is a no-op; the collector
+// reclaims. Wasm: no collector, a leak-only bump allocator.
 
 struct Bump;
 
-#[cfg(not(target_arch = "wasm32"))]
-#[repr(C)]
-struct GcStackBase {
-    mem_base: *mut u8,
-    // `struct GC_stack_base` is a single pointer on arm64/x86-64; an extra word
-    // over-allocates so `GC_get_stack_base` can never write past the struct.
-    _reg_base: *mut u8,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-extern "C" {
-    fn GC_init();
-    fn GC_malloc(size: usize) -> *mut u8;
-    /// One allocation-lock acquisition returns a whole chain of cleared,
-    /// pointer-scanned blocks of the given size, linked through each block's
-    /// first word. The backbone of the `alloc` cell pool below.
-    fn GC_malloc_many(size: usize) -> *mut u8;
-    fn GC_expand_hp(bytes: usize) -> i32;
-    fn GC_set_free_space_divisor(d: usize);
-    fn GC_memalign(align: usize, size: usize) -> *mut u8;
-    fn GC_realloc(p: *mut u8, size: usize) -> *mut u8;
-    fn GC_allow_register_threads();
-    fn GC_get_stack_base(sb: *mut GcStackBase) -> i32;
-    fn GC_register_my_thread(sb: *const GcStackBase) -> i32;
-    fn GC_unregister_my_thread() -> i32;
-}
-
-// The MMTk binding (crates/alm-mmtk), linked in as a C ABI. Weak stub
-// definitions (almmtk_stubs.c) satisfy the link when the real binding isn't
-// built; the real symbols override them. Used only when ALM_GC=mmtk.
-/// Mirrors MMTk's `#[repr(C)] BumpPointer { cursor, limit }` (two `Address`
-/// words). The runtime bumps `cursor` inline; MMTk's slow path refills both.
-#[cfg(not(target_arch = "wasm32"))]
-#[repr(C)]
-struct MmtkBumpPointer {
-    cursor: usize,
-    limit: usize,
-}
-#[cfg(not(target_arch = "wasm32"))]
-extern "C" {
-    fn almmtk_init(heap_bytes: usize);
-    fn almmtk_alloc(size: usize, align: usize) -> *mut u8;
-    fn almmtk_bump_pointer() -> *mut MmtkBumpPointer;
-}
-#[cfg(not(target_arch = "wasm32"))]
-static mut FLAG_MMTK: bool = false;
-#[cfg(not(target_arch = "wasm32"))]
-static mut MMTK_BP: *mut MmtkBumpPointer = std::ptr::null_mut();
-
-/// Inline MMTk bump-pointer allocation (align 8): bump `cursor` while it fits,
-/// else fall to MMTk's slow path (which refills the bump pointer). Avoids a
-/// C-ABI call per allocation — the call-per-alloc cost negated MMTk's bump win.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline]
-unsafe fn mmtk_bump(size: usize) -> *mut u8 {
-    let bp = MMTK_BP;
-    let cursor = (*bp).cursor;
-    let aligned = (cursor + 7) & !7;
-    let new_cursor = aligned + size;
-    if new_cursor <= (*bp).limit {
-        (*bp).cursor = new_cursor;
-        aligned as *mut u8
-    } else {
-        almmtk_alloc(size, 8)
-    }
-}
-
-// --- Custom Immix-lite GC (ALM_GC=immix) ---
+// --- Custom Immix-lite GC ---
 //
 // A contiguous, lazily-paged mmap'd heap with an inlined bump allocator (no
 // C-ABI call, no framework overhead — reaches the raw-bump ceiling MMTk
@@ -132,10 +58,13 @@ extern "C" {
     fn pthread_get_stackaddr_np(t: *mut u8) -> *mut u8;
     fn getsegbyname(name: *const i8) -> *const ImmixSegCmd64;
     fn _dyld_get_image_vmaddr_slide(idx: u32) -> isize;
+    fn getenv(name: *const i8) -> *const i8;
     // Spills callee-saved registers (setjmp) then calls immix_mark_and_sweep
     // with the current stack pointer. Defined in immix_gc.c.
     fn immix_collect_roots();
 }
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_INITED: bool = false;
 
 // The prefix of macOS `struct segment_command_64` we need (vmaddr/vmsize).
 #[cfg(not(target_arch = "wasm32"))]
@@ -156,8 +85,6 @@ const IMMIX_BLOCK: usize = 32 << 10; // 32 KiB
 #[cfg(not(target_arch = "wasm32"))]
 const IMMIX_N_BLOCKS: usize = IMMIX_HEAP_MAX / IMMIX_BLOCK;
 
-#[cfg(not(target_arch = "wasm32"))]
-static mut FLAG_IMMIX: bool = false;
 #[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_BASE: usize = 0;
 #[cfg(not(target_arch = "wasm32"))]
@@ -201,7 +128,16 @@ unsafe fn immix_mmap(len: usize) -> *mut u8 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn immix_init() {
+/// Initialize the immix heap on first use. MUST be allocation-free: it backs
+/// the global allocator, so any Rust allocation here (e.g. `std::env::var`,
+/// `String`) would re-enter this and recurse. Everything below is a raw libc/
+/// dyld call (`getenv`, `mmap`, `pthread`, `getsegbyname`) — no Rust heap.
+#[inline]
+unsafe fn immix_ensure_init() {
+    if IMMIX_INITED {
+        return;
+    }
+    IMMIX_INITED = true;
     IMMIX_BASE = immix_mmap(IMMIX_HEAP_MAX) as usize;
     // 1 bit per 8-byte granule.
     IMMIX_OBJ_BM = immix_mmap(IMMIX_HEAP_MAX / 8 / 8);
@@ -212,14 +148,29 @@ unsafe fn immix_init() {
     IMMIX_NEXT_FRESH = 0;
     IMMIX_CUR = 0;
     IMMIX_CUR_END = 0;
-    if let Ok(mb) = std::env::var("ALM_IMMIX_GC_MB") {
-        if let Ok(n) = mb.parse::<usize>() {
+    // getenv (not std::env::var, which allocates) — parse a base-10 MB count.
+    let ev = getenv(b"ALM_IMMIX_GC_MB\0".as_ptr() as *const i8);
+    if !ev.is_null() {
+        let mut p = ev;
+        let mut n: usize = 0;
+        let mut any = false;
+        while *p != 0 {
+            let c = *p as u8;
+            if !(b'0'..=b'9').contains(&c) {
+                any = false;
+                break;
+            }
+            n = n * 10 + (c - b'0') as usize;
+            any = true;
+            p = p.add(1);
+        }
+        if any {
             IMMIX_THRESHOLD = n << 20;
         }
     }
-    // Conservative-root regions: this thread's stack top, and the main image's
-    // __DATA segment (where memoized-constant globals holding heap pointers live).
-    IMMIX_STACK_BASE = pthread_get_stackaddr_np(pthread_self()) as usize;
+    FLAG_ARG_CHECK = !getenv(b"ALM_ARG_CHECK\0".as_ptr() as *const i8).is_null();
+    // __DATA segment (memoized-constant globals holding heap pointers). The
+    // stack base is captured per-collection on the collecting thread.
     let seg = getsegbyname(b"__DATA\0".as_ptr() as *const i8);
     if !seg.is_null() {
         let slide = _dyld_get_image_vmaddr_slide(0) as usize;
@@ -273,41 +224,43 @@ unsafe fn immix_set_obj_bit(obj: usize) {
     *IMMIX_OBJ_BM.add(g >> 3) |= 1 << (g & 7);
 }
 
-/// Allocate `size` bytes preceded by an 8-byte size header; returns the object
-/// pointer (after the header). Bump within the current block; fall to a slow
-/// path at block boundaries / for large objects.
+/// Allocate `size` bytes preceded by an 8-byte size header, with the object
+/// aligned to `align` (>= 8); returns the object pointer (after the header).
+/// Bump within the current block; fall to a slow path at block boundaries and
+/// for large objects. This is the whole runtime's allocator — Elm objects and
+/// the Rust global allocator both route here.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline]
-unsafe fn immix_alloc(size: usize) -> *mut u8 {
-    let total = size + 8; // size header
-    let hdr = (*std::ptr::addr_of!(IMMIX_CUR) + 7) & !7;
-    let obj = hdr + 8;
+unsafe fn immix_alloc(size: usize, align: usize) -> *mut u8 {
+    immix_ensure_init();
+    let align = if align < 8 { 8 } else { align };
+    let cur = *std::ptr::addr_of!(IMMIX_CUR);
+    let obj = (cur + 8 + align - 1) & !(align - 1); // 8-byte header, then aligned
     let new = (obj + size + 7) & !7;
     if new <= *std::ptr::addr_of!(IMMIX_CUR_END) {
-        *(hdr as *mut usize) = size;
+        *((obj - 8) as *mut usize) = size;
         immix_set_obj_bit(obj);
         *std::ptr::addr_of_mut!(IMMIX_CUR) = new;
-        *std::ptr::addr_of_mut!(IMMIX_SINCE_GC) += total;
+        *std::ptr::addr_of_mut!(IMMIX_SINCE_GC) += size + 8;
         return obj as *mut u8;
     }
-    immix_alloc_slow(size)
+    immix_alloc_slow(size, align)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
-unsafe fn immix_alloc_slow(size: usize) -> *mut u8 {
+unsafe fn immix_alloc_slow(size: usize, align: usize) -> *mut u8 {
     IMMIX_SINCE_GC += size + 8;
-    if size + 8 + 8 > IMMIX_BLOCK {
-        let hdr = immix_large(size + 8) as usize;
-        let obj = hdr + 8;
-        *(hdr as *mut usize) = size;
+    if size + 8 + align >= IMMIX_BLOCK {
+        let base = immix_large(size + 8 + align) as usize;
+        let obj = (base + 8 + align - 1) & !(align - 1);
+        *((obj - 8) as *mut usize) = size;
         immix_set_obj_bit(obj);
         return obj as *mut u8;
     }
     immix_new_block();
-    let hdr = IMMIX_CUR; // block start is 8-aligned (block-size multiple)
-    let obj = hdr + 8;
-    *(hdr as *mut usize) = size;
+    let obj = (IMMIX_CUR + 8 + align - 1) & !(align - 1);
+    *((obj - 8) as *mut usize) = size;
     immix_set_obj_bit(obj);
     IMMIX_CUR = (obj + size + 7) & !7;
     obj as *mut u8
@@ -425,41 +378,9 @@ pub unsafe extern "C" fn immix_mark_and_sweep(sp: *mut u8) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static mut GC_READY: bool = false;
-
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn gc_ensure_init() {
-    if !GC_READY {
-        GC_READY = true;
-        // Divisor 6 (default 3): collect harder before growing the heap —
-        // set BEFORE GC_init so the very first growth decisions use it.
-        GC_set_free_space_divisor(6);
-        FLAG_ARG_CHECK = std::env::var("ALM_ARG_CHECK").is_ok();
-        FLAG_NO_POOL = std::env::var("ALM_NO_POOL").is_ok();
-        FLAG_MMTK = std::env::var("ALM_GC").as_deref() == Ok("mmtk");
-        FLAG_IMMIX = std::env::var("ALM_GC").as_deref() == Ok("immix");
-        if FLAG_IMMIX {
-            immix_init();
-        }
-        GC_init();
-        GC_allow_register_threads();
-        // MMTk allocates the Elm heap (constructors / tnodes / Value cells) when
-        // ALM_GC=mmtk; Boehm still backs the runtime's own Rust allocations.
-        // NoGC (current plan) never collects, so give it a roomy fixed heap.
-        if FLAG_MMTK {
-            almmtk_init(4usize << 30);
-            MMTK_BP = almmtk_bump_pointer();
-        }
-        // Start with a roomy heap. Elm code allocates in torrents (every
-        // cons cell and boxed value); growing from Boehm's tiny default
-        // means near-continuous full collections — marking dominated whole
-        // workloads. 64MB keeps growth proportional to the live set (a
-        // bigger floor overshot the doubling policy to 2.3GB on
-        // elm-monocle); divisor 6 halves churn-heavy peaks
-        // (base64-bytes 1.6GB → <1GB) at no measurable time cost.
-        GC_expand_hp(64 << 20);
-    }
+    immix_ensure_init();
 }
 
 // Wasm-only leak-everything bump allocator.
@@ -471,19 +392,13 @@ static mut BUMP_END: usize = 0;
 const BUMP_CHUNK: usize = 64 << 20; // 64 MiB
 
 unsafe impl GlobalAlloc for Bump {
+    // Native: everything — Elm objects and the runtime's own Rust allocations —
+    // goes through the immix GC heap, so it's a single conservatively-scanned
+    // heap. `dealloc` is a no-op (the collector reclaims); the default
+    // `realloc` (alloc + copy + dealloc) is therefore exactly right.
     #[cfg(not(target_arch = "wasm32"))]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        gc_ensure_init();
-        let size = layout.size().max(1);
-        if layout.align() > 16 {
-            GC_memalign(layout.align(), size)
-        } else {
-            GC_malloc(size)
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
-        GC_realloc(ptr, new_size)
+        immix_alloc(layout.size().max(1), layout.align())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -712,64 +627,15 @@ pub enum Decoder {
     Lazy(u64),
 }
 
-/// Head of a free chain of `Value`-sized blocks from `GC_malloc_many`,
-/// linked through each free block's first word. The mutator is single-
-/// threaded (all Elm code runs on the one big-stack runner thread), so a
-/// plain static suffices. The static is a scanned root and the link words
-/// live inside scanned blocks, so the pooled blocks are never reclaimed
-/// out from under us; handing one out overwrites the link word.
-#[cfg(not(target_arch = "wasm32"))]
-static mut CELL_POOL: *mut u8 = std::ptr::null_mut();
-
-/// Diagnostic env flags, read ONCE at collector init (single-threaded —
-/// getenv per call took a libc lock inside the hottest paths, and a lazy
-/// OnceLock here once deadlocked the parallel test suite).
+/// Diagnostic env flag, read once at collector init.
 static mut FLAG_ARG_CHECK: bool = false;
-static mut FLAG_NO_POOL: bool = false;
 
-/// Allocate a value on the heap and return it as a value word.
-///
-/// Values are the hottest allocation in the uniform backend (every cons
-/// cell, tuple and constructor), and `GC_malloc` takes the collector's
-/// allocation lock on every call. `GC_malloc_many` amortizes that: one
-/// locked call refills a local chain of `Value`-sized blocks that we carve
-/// off lock-free.
-///
-/// (An `inline(never)` here was once thought load-bearing for the
-/// collector's root scan; the real culprit was the runtime-bitcode merge,
-/// now disabled — see `native.rs`. With every rt_* call behind a C-ABI
-/// boundary the attribute is moot, but the merge experiment flag can
-/// reintroduce cross-inlining, so it stays as cheap insurance.)
+/// Allocate a `Value` on the immix heap and return it as a value word.
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
     unsafe {
-        gc_ensure_init();
-        if *std::ptr::addr_of!(FLAG_IMMIX) {
-            let p = immix_alloc(std::mem::size_of::<Value>());
-            std::ptr::write(p as *mut Value, value);
-            return p as u64;
-        }
-        if *std::ptr::addr_of!(FLAG_MMTK) {
-            let p = mmtk_bump(std::mem::size_of::<Value>());
-            std::ptr::write(p as *mut Value, value);
-            return p as u64;
-        }
-        // DIAG: ALM_NO_POOL=1 falls back to plain Box (GC_malloc).
-        if *std::ptr::addr_of!(FLAG_NO_POOL) {
-            return Box::into_raw(Box::new(value)) as u64;
-        }
-        let mut p = *std::ptr::addr_of!(CELL_POOL);
-        if p.is_null() {
-            gc_ensure_init();
-            p = GC_malloc_many(std::mem::size_of::<Value>());
-            if p.is_null() {
-                // Refill failed (heap pressure): fall back to a plain boxed
-                // allocation rather than crashing here.
-                return Box::into_raw(Box::new(value)) as u64;
-            }
-        }
-        *std::ptr::addr_of_mut!(CELL_POOL) = *(p as *mut *mut u8);
+        let p = immix_alloc(std::mem::size_of::<Value>(), std::mem::align_of::<Value>());
         std::ptr::write(p as *mut Value, value);
         p as u64
     }
@@ -779,19 +645,6 @@ fn alloc(value: Value) -> u64 {
 fn alloc(value: Value) -> u64 {
     Box::into_raw(Box::new(value)) as u64
 }
-
-/// Per-size-class free-list pools for the typed backend's constructor
-/// allocations. Like the `Value` cell pool above, each class is refilled in
-/// bulk with `GC_malloc_many` so the collector's allocation lock is taken once
-/// per chain instead of on every `alm_alloc` — plain `GC_malloc` per node
-/// dominated allocation-heavy native workloads (binary-trees, Dict building).
-/// Every carved block is a real, individually collectable GC object, so
-/// retention and conservative scanning are unchanged. Classes cover 8..=128
-/// bytes in 8-byte steps; larger requests fall through to `GC_malloc`.
-#[cfg(not(target_arch = "wasm32"))]
-const N_ALLOC_CLASSES: usize = 16;
-#[cfg(not(target_arch = "wasm32"))]
-static mut ALLOC_POOL: [*mut u8; N_ALLOC_CLASSES] = [std::ptr::null_mut(); N_ALLOC_CLASSES];
 
 /// Raw 8-byte-aligned allocation for the typed backend's unboxed heap objects
 /// (tagged constructors, boxed recursive fields), never individually freed —
@@ -804,29 +657,9 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     let size = (size as usize).max(1);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        gc_ensure_init(); // cheap after first; latches FLAG_MMTK/FLAG_IMMIX + inits
-        if *std::ptr::addr_of!(FLAG_IMMIX) {
-            return immix_alloc(size);
-        }
-        if *std::ptr::addr_of!(FLAG_MMTK) {
-            return mmtk_bump(size);
-        }
-        let aligned = (size + 7) & !7;
-        let class = aligned >> 3; // 8B -> 1 … 128B -> 16
-        if !*std::ptr::addr_of!(FLAG_NO_POOL) && class >= 1 && class <= N_ALLOC_CLASSES {
-            let slot = (std::ptr::addr_of_mut!(ALLOC_POOL) as *mut *mut u8).add(class - 1);
-            let mut p = *slot;
-            if p.is_null() {
-                gc_ensure_init();
-                p = GC_malloc_many(aligned);
-                if p.is_null() {
-                    return std::alloc::alloc(Layout::from_size_align(aligned, 8).unwrap());
-                }
-            }
-            *slot = *(p as *mut *mut u8); // pop: pool head = block's link word (next)
-            return p;
-        }
+        return immix_alloc(size, 8);
     }
+    #[cfg(target_arch = "wasm32")]
     std::alloc::alloc(Layout::from_size_align(size, 8).unwrap())
 }
 
@@ -11793,8 +11626,7 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // a JS engine's larger, growable stack absorbs. 512MB matches "effectively
     // deep like JS" while staying bounded (a genuine infinite recursion still
     // faults, just later, rather than running unbounded).
-    // Ensure the collector is initialised on this (GC-primary) thread before we
-    // spawn, so the worker's `GC_register_my_thread` is allowed.
+    // Ensure the collector is initialised before we spawn the worker.
     gc_ensure_init();
     // DIAG: ALM_MAIN_THREAD=1 runs Elm on the primordial thread (8MB stack —
     // deep recursion will overflow) to discriminate worker-thread
@@ -11805,15 +11637,9 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     match std::thread::Builder::new()
         .stack_size(512 * 1024 * 1024)
         .spawn(|| unsafe {
-            // The collector scans registered threads' stacks; a bare `std::thread`
-            // is invisible to it, so register this thread (base .. current SP)
-            // for the duration of the program.
-            let mut sb = GcStackBase {
-                mem_base: std::ptr::null_mut(),
-                _reg_base: std::ptr::null_mut(),
-            };
-            GC_get_stack_base(&mut sb);
-            GC_register_my_thread(&sb);
+            // The immix collector scans the collecting thread's own stack (it
+            // captures the base at GC time), so this worker needs no explicit
+            // registration — the Elm computation runs and collects here.
             let rc = alm_entry();
             // Exit the PROCESS from here, WITHOUT any teardown: returning
             // (and even process::exit, via Darwin's _tlv_exit) runs this
