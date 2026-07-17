@@ -119,9 +119,10 @@
       to <strong>WebAssembly-GC</strong>, and to a <strong>native</strong> binary. This is where WasmGC's
       advantage shows: it <strong>beats the JS backend on every workload</strong> — up to
       <strong>3.4×</strong> on the <code>map</code>/<code>filter</code>/<code>fold</code> pipeline, now that
-      wasm-gc fuses those combinators against a known callee (a specialized per-call loop that inlines the
-      lambda body, dropping the per-element <code>apply1</code> dispatch), 1.5–1.7× on dict/sort, and,
-      after unboxing numbers and inlining numeric constants, ~2× on recursion and ~1.05× on float math too.
+      wasm-gc fuses those combinators against a statically-known callee — a literal lambda (inlined) or a
+      named function (direct-called) — with a specialized per-call loop that drops the per-element
+      <code>apply1</code> dispatch, matching what the native backend already does; 1.5–1.7× on dict/sort,
+      and, after unboxing numbers and inlining numeric constants, ~2× on recursion and ~1.05× on float math too.
     </p>
     <div class="tbl-scroll"><table id="t-compute"></table></div>
   </section>
