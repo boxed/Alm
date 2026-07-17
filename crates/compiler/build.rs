@@ -162,7 +162,7 @@ fn build_mmtk_binding(out_dir: &PathBuf) {
         .unwrap_or(false);
     assert!(ar_ok, "extracting libalm_mmtk.a failed");
     let exports = merge_dir.join("exports.txt");
-    std::fs::write(&exports, "_almmtk_init\n_almmtk_alloc\n").unwrap();
+    std::fs::write(&exports, "_almmtk_init\n_almmtk_alloc\n_almmtk_bump_pointer\n").unwrap();
     let objs: Vec<PathBuf> = std::fs::read_dir(&merge_dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))

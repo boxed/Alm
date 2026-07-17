@@ -75,13 +75,42 @@ extern "C" {
 // The MMTk binding (crates/alm-mmtk), linked in as a C ABI. Weak stub
 // definitions (almmtk_stubs.c) satisfy the link when the real binding isn't
 // built; the real symbols override them. Used only when ALM_GC=mmtk.
+/// Mirrors MMTk's `#[repr(C)] BumpPointer { cursor, limit }` (two `Address`
+/// words). The runtime bumps `cursor` inline; MMTk's slow path refills both.
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+struct MmtkBumpPointer {
+    cursor: usize,
+    limit: usize,
+}
 #[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn almmtk_init(heap_bytes: usize);
     fn almmtk_alloc(size: usize, align: usize) -> *mut u8;
+    fn almmtk_bump_pointer() -> *mut MmtkBumpPointer;
 }
 #[cfg(not(target_arch = "wasm32"))]
 static mut FLAG_MMTK: bool = false;
+#[cfg(not(target_arch = "wasm32"))]
+static mut MMTK_BP: *mut MmtkBumpPointer = std::ptr::null_mut();
+
+/// Inline MMTk bump-pointer allocation (align 8): bump `cursor` while it fits,
+/// else fall to MMTk's slow path (which refills the bump pointer). Avoids a
+/// C-ABI call per allocation — the call-per-alloc cost negated MMTk's bump win.
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn mmtk_bump(size: usize) -> *mut u8 {
+    let bp = MMTK_BP;
+    let cursor = (*bp).cursor;
+    let aligned = (cursor + 7) & !7;
+    let new_cursor = aligned + size;
+    if new_cursor <= (*bp).limit {
+        (*bp).cursor = new_cursor;
+        aligned as *mut u8
+    } else {
+        almmtk_alloc(size, 8)
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 static mut GC_READY: bool = false;
@@ -104,6 +133,7 @@ unsafe fn gc_ensure_init() {
         // NoGC (current plan) never collects, so give it a roomy fixed heap.
         if FLAG_MMTK {
             almmtk_init(4usize << 30);
+            MMTK_BP = almmtk_bump_pointer();
         }
         // Start with a roomy heap. Elm code allocates in torrents (every
         // cons cell and boxed value); growing from Boehm's tiny default
@@ -400,7 +430,7 @@ fn alloc(value: Value) -> u64 {
     unsafe {
         gc_ensure_init();
         if *std::ptr::addr_of!(FLAG_MMTK) {
-            let p = almmtk_alloc(std::mem::size_of::<Value>(), std::mem::align_of::<Value>());
+            let p = mmtk_bump(std::mem::size_of::<Value>());
             std::ptr::write(p as *mut Value, value);
             return p as u64;
         }
@@ -455,7 +485,7 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     {
         gc_ensure_init(); // cheap after first; latches FLAG_MMTK and inits MMTk
         if *std::ptr::addr_of!(FLAG_MMTK) {
-            return almmtk_alloc(size, 8);
+            return mmtk_bump(size);
         }
         let aligned = (size + 7) & !7;
         let class = aligned >> 3; // 8B -> 1 … 128B -> 16

@@ -18,3 +18,7 @@ __attribute__((weak)) void *almmtk_alloc(size_t size, size_t align) {
     (void)align;
     abort();
 }
+
+__attribute__((weak)) void *almmtk_bump_pointer(void) {
+    return 0;
+}

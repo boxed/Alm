@@ -13,7 +13,7 @@
 
 use std::ops::Range;
 
-use mmtk::util::alloc::AllocationError;
+use mmtk::util::alloc::{AllocationError, BumpAllocator, BumpPointer};
 use mmtk::util::copy::{CopySemantics, GCWorkerCopyContext};
 use mmtk::util::options::{GCTriggerSelector, PlanSelector};
 use mmtk::util::{Address, ObjectReference, VMMutatorThread, VMThread, VMWorkerThread};
@@ -198,6 +198,10 @@ impl ReferenceGlue<AlmVM> for AlmVM {
 
 static mut MMTK_INSTANCE: Option<&'static MMTK<AlmVM>> = None;
 static mut MUTATOR: Option<Box<Mutator<AlmVM>>> = None;
+/// Address of the default allocator's `BumpPointer` inside the (heap-pinned)
+/// mutator, so the runtime can inline the bump fast path instead of paying a
+/// C-ABI call per allocation. Stable for the mutator's lifetime.
+static mut BUMP_PTR: *mut BumpPointer = std::ptr::null_mut();
 
 /// Initialize MMTk with the NoGC plan and a fixed heap, and bind the main
 /// mutator. `heap_bytes` caps the reservation.
@@ -210,12 +214,27 @@ pub extern "C" fn almmtk_init(heap_bytes: usize) {
         .gc_trigger
         .set(GCTriggerSelector::FixedHeapSize(heap_bytes));
     let mmtk: &'static MMTK<AlmVM> = Box::leak(memory_manager::mmtk_init::<AlmVM>(&builder));
-    let mutator =
-        memory_manager::bind_mutator(mmtk, VMMutatorThread(VMThread::UNINITIALIZED));
+    let mut mutator = memory_manager::bind_mutator(mmtk, VMMutatorThread(VMThread::UNINITIALIZED));
+    // Cache the address of the default allocator's bump pointer (NoGC's Default
+    // semantics maps to a BumpAllocator) for the runtime's inline fast path.
+    let bp: *mut BumpPointer = unsafe {
+        let bump = mutator
+            .allocator_impl_mut_for_semantic::<BumpAllocator<AlmVM>>(AllocationSemantics::Default);
+        &mut bump.bump_pointer
+    };
     unsafe {
         MMTK_INSTANCE = Some(mmtk);
         MUTATOR = Some(mutator);
+        BUMP_PTR = bp;
     }
+}
+
+/// Address of the mutator's bump pointer (`#[repr(C)] { cursor, limit }` — two
+/// words). The runtime bumps `cursor` inline while `cursor + size <= limit`,
+/// calling `almmtk_alloc` only on the slow path.
+#[no_mangle]
+pub extern "C" fn almmtk_bump_pointer() -> *mut BumpPointer {
+    unsafe { BUMP_PTR }
 }
 
 /// Bump-allocate `size` bytes with `align`. Returns the raw start.
