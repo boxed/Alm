@@ -92,12 +92,12 @@
 
   <div class="lede">
     <div class="card">
-      <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Where wasm-gc wins</p>
-      <p><strong>Allocation-heavy work and tight recursion.</strong> Lists, dictionaries and sorting run <strong>1.5–2×</strong> faster — the compact heap layout and engine GC beat JS object churn. And with unboxed number representation, naive recursion (<code>fib</code>) is now <strong>~2×</strong> faster too, where it used to trail.</p>
+      <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Allocation &amp; collections</p>
+      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–2.6×</strong> faster than the JS backend — the compact heap layout and the engine's GC beat JS object churn.</p>
     </div>
     <div class="card">
-      <p class="k"><span class="dot" style="background:var(--near-bar)"></span>The last gap</p>
-      <p><strong>Float-heavy loops.</strong> Mandelbrot sits at <strong>~0.9×</strong>. Its hot recursive parameters are now unboxed <code>f64</code>, but float values bound in a <code>let</code> are still boxed — closing that would take the last workload past v8 too.</p>
+      <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Scalar &amp; float</p>
+      <p><strong>Now faster here too.</strong> With unboxed number representation (Int/Float kept in registers, not boxed) and inlined numeric constants, naive recursion runs <strong>~2×</strong> and float math (mandelbrot) <strong>~1.05×</strong> — both used to trail v8's JIT.</p>
     </div>
   </div>
 
@@ -115,14 +115,14 @@
   // ms = median across runs; spd = js/wasm (>1 wasm faster). native for reference.
   const GROUPS = [
     { title: "allocation & collection heavy", rows: [
-      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 42.3, wasm: 21.0, native: 5.6 },
-      { op: "sort + checksum",           sub: "100,000 random ints", js: 25.0, wasm: 15.6, native: 20.1 },
-      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 32.0, wasm: 20.8, native: 50.9 },
-      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 9.0, wasm: 8.5, native: 19.7 },
+      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 44.0, wasm: 20.6, native: 6.0 },
+      { op: "sort + checksum",           sub: "100,000 random ints", js: 24.2, wasm: 15.1, native: 19.6 },
+      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 30.9, wasm: 20.5, native: 50.2 },
+      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.8, wasm: 8.3, native: 19.1 },
     ]},
     { title: "scalar & float", rows: [
-      { op: "fib (naive recursion)",     sub: "fib 35",             js: 47.5, wasm: 24.5, native: 17.3 },
-      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.7,  wasm: 6.4,  native: 8.9 },
+      { op: "fib (naive recursion)",     sub: "fib 35",             js: 47.5, wasm: 24.0, native: 17.3 },
+      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.66, wasm: 5.38, native: 9.4 },
     ]},
   ];
 

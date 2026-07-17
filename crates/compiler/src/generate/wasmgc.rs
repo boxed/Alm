@@ -1604,6 +1604,11 @@ struct Codegen<'a> {
     /// sites change in place — no new functions, no re-indexing. See
     /// `compute_spec_fns`.
     spec_fns: HashMap<String, (Vec<Rep>, Rep)>,
+    /// Nullary top-level functions whose body is a bare Int/Float literal
+    /// (`maxIter = 100`). Inlined at every use so a hot loop referencing a named
+    /// constant doesn't pay a call + unbox per iteration.
+    const_int: HashMap<String, i64>,
+    const_float: HashMap<String, f64>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
     /// Their wasm function indices are `lifted_base + i`.
     lifted: Vec<(u32, Function)>,
@@ -1853,6 +1858,8 @@ impl<'a> Codegen<'a> {
             ports: HashMap::new(),
             func_arity: HashMap::new(),
             spec_fns: HashMap::new(),
+            const_int: HashMap::new(),
+            const_float: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
         }
@@ -20236,6 +20243,20 @@ impl<'a> Codegen<'a> {
     /// every scalar parameter has a trivial `Var`/`_` pattern, and at least one
     /// parameter or the return is a scalar Int/Float worth unboxing.
     fn compute_spec_fns(&mut self) {
+        // Nullary constants with a literal body — inlined at use sites.
+        for f in &self.mono.functions {
+            if f.params.is_empty() {
+                match &f.body.kind {
+                    TypedKind::Int(n) => {
+                        self.const_int.insert(f.mangled.to_string(), *n);
+                    }
+                    TypedKind::Float(x) => {
+                        self.const_float.insert(f.mangled.to_string(), *x);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut boxed: std::collections::HashSet<String> = std::collections::HashSet::new();
         for f in &self.mono.functions {
             collect_first_class(&f.body, &self.func_arity, &mut boxed);
@@ -20289,17 +20310,33 @@ impl<'a> Codegen<'a> {
             .map(|(p, _)| pat_size(p))
             .sum();
         let extra = count_bindings(&f.body) + param_dtor;
-        // Reserve two scratch locals after the binding block: one eqref + one
-        // i64 for inlining unbox_int/box_int on the arithmetic hot path.
-        let mut wf = Function::new([(extra + 1, eqref()), (1, ValType::I64)]);
+        let spec = self.spec_fns.get(&f.mangled.to_string()).cloned();
+        // Reserve scratch locals after the binding block: one eqref + one i64 for
+        // inlining unbox_int/box_int on the arithmetic hot path. Specialized
+        // (closure-free) functions also get i64/f64 pools for unboxed scalar
+        // let-bindings, so a `let x = <scalar>` never boxes only to be unboxed at
+        // its use. Pools are sized to the (over-approximate) binding count.
+        let mut wf = if spec.is_some() && extra > 0 {
+            Function::new([
+                (extra + 1, eqref()),
+                (1, ValType::I64),
+                (extra, ValType::I64),
+                (extra, ValType::F64),
+            ])
+        } else {
+            Function::new([(extra + 1, eqref()), (1, ValType::I64)])
+        };
         let mut ctx = FnCtx::new();
         ctx.next_local = nparams;
         ctx.scratch_eqref = nparams + extra;
         ctx.scratch_i64 = nparams + extra + 1;
+        if spec.is_some() && extra > 0 {
+            ctx.i64_pool_next = nparams + extra + 2;
+            ctx.f64_pool_next = nparams + extra + 2 + extra;
+        }
         // Specialized (unboxed scalar ABI): the wasm param slots already hold
         // raw i64/f64 per the function's custom type, so record those reps and
         // emit the body producing the unboxed return.
-        let spec = self.spec_fns.get(&f.mangled.to_string()).cloned();
         if let Some((param_reps, _)) = &spec {
             for (i, r) in param_reps.iter().enumerate() {
                 if *r != Rep::Eqref {
@@ -20688,7 +20725,16 @@ impl<'a> Codegen<'a> {
                     .ok_or_else(|| format!("wasmgc: unknown global `{name}`"))?;
                 let arity = self.func_arity[&key];
                 if arity == 0 {
-                    f.instruction(&Instruction::Call(idx));
+                    // Inline a nullary Int/Float constant (boxed for this context).
+                    if let Some(&n) = self.const_int.get(&key) {
+                        f.instruction(&Instruction::I64Const(n));
+                        self.emit_box_int_inline(ctx, f);
+                    } else if let Some(&x) = self.const_float.get(&key) {
+                        f.instruction(&Instruction::F64Const(x.into()));
+                        f.instruction(&Instruction::StructNew(T_FLOAT));
+                    } else {
+                        f.instruction(&Instruction::Call(idx));
+                    }
                 } else {
                     // A function used as a first-class value → a shared,
                     // reference-stable closure (interned so Html.Lazy can memo).
@@ -20715,6 +20761,13 @@ impl<'a> Codegen<'a> {
                     f.instruction(&Instruction::LocalGet(idx));
                     return Ok(());
                 }
+            }
+        }
+        // A nullary Int constant → inline the literal (no call + unbox).
+        if let TypedKind::Global(name) = &e.kind {
+            if let Some(&n) = self.const_int.get(&name.to_string()) {
+                f.instruction(&Instruction::I64Const(n));
+                return Ok(());
             }
         }
         // Saturated call to a specialized i64-returning function → unboxed call,
@@ -20834,6 +20887,13 @@ impl<'a> Codegen<'a> {
                     f.instruction(&Instruction::LocalGet(idx));
                     return Ok(());
                 }
+            }
+        }
+        // A nullary Float constant → inline the literal.
+        if let TypedKind::Global(name) = &e.kind {
+            if let Some(&x) = self.const_float.get(&name.to_string()) {
+                f.instruction(&Instruction::F64Const(x.into()));
+                return Ok(());
             }
         }
         // Saturated call to a specialized f64-returning function → unboxed call.
@@ -21122,11 +21182,30 @@ impl<'a> Codegen<'a> {
     ) -> Result<(), String> {
         match d {
             TypedLetDecl::Def { name, params, body } if params.is_empty() => {
-                self.emit_expr(body, ctx, f)?;
-                let slot = ctx.bind(name.as_str());
-                f.instruction(&Instruction::LocalSet(slot));
+                // A scalar value binding in a specialized function goes to an
+                // unboxed pool local, so its uses read it raw.
+                let rep = rep_of(&body.tipe);
+                if rep != Rep::Eqref && ctx.scalar_pool(rep) {
+                    self.emit_arg_rep(body, rep, ctx, f)?;
+                    let slot = ctx.bind_scalar(name.as_str(), rep);
+                    f.instruction(&Instruction::LocalSet(slot));
+                } else {
+                    self.emit_expr(body, ctx, f)?;
+                    let slot = ctx.bind(name.as_str());
+                    f.instruction(&Instruction::LocalSet(slot));
+                }
             }
             TypedLetDecl::Destruct(pat, expr) => {
+                // `let x = <scalar>` (a Var destructure) unboxes like a Def.
+                let rep = rep_of(&expr.tipe);
+                if let can::Pattern_::Var(nm) = &pat.value {
+                    if rep != Rep::Eqref && ctx.scalar_pool(rep) {
+                        self.emit_arg_rep(expr, rep, ctx, f)?;
+                        let slot = ctx.bind_scalar(nm.as_str(), rep);
+                        f.instruction(&Instruction::LocalSet(slot));
+                        return Ok(());
+                    }
+                }
                 // Evaluate once into a scratch local, then bind the pattern.
                 self.emit_expr(expr, ctx, f)?;
                 let slot = ctx.bind("$destr");
@@ -24336,10 +24415,15 @@ struct FnCtx {
     /// Recursive local functions in scope for self-calls (see `SelfFn`).
     self_fns: Vec<(String, SelfFn)>,
     /// Unboxed representation of a local slot, when it isn't the default
-    /// `Eqref`. Only specialized-function parameters get an `I64`/`F64` entry;
-    /// slots are never reused, so stale entries after `scope.truncate` are
-    /// harmless. Absent = `Eqref`.
+    /// `Eqref`. Specialized-function parameters and unboxed scalar let-bindings
+    /// get an `I64`/`F64` entry; slots are never reused, so stale entries after
+    /// `scope.truncate` are harmless. Absent = `Eqref`.
     local_rep: HashMap<u32, Rep>,
+    /// Next free slot in the unboxed i64/f64 local pools reserved for scalar
+    /// let-bindings (only in specialized, closure-free functions). `u32::MAX` =
+    /// no pool (non-specialized function) — scalar lets stay boxed.
+    i64_pool_next: u32,
+    f64_pool_next: u32,
 }
 
 impl FnCtx {
@@ -24351,6 +24435,8 @@ impl FnCtx {
             scratch_i64: u32::MAX,
             self_fns: Vec::new(),
             local_rep: HashMap::new(),
+            i64_pool_next: u32::MAX,
+            f64_pool_next: u32::MAX,
         }
     }
     fn lookup(&self, name: &str) -> Option<u32> {
@@ -24358,6 +24444,34 @@ impl FnCtx {
     }
     fn rep_of_local(&self, idx: u32) -> Rep {
         self.local_rep.get(&idx).copied().unwrap_or(Rep::Eqref)
+    }
+    /// Is an unboxed local pool available for `rep` (scalar let-bindings in a
+    /// specialized function)?
+    fn scalar_pool(&self, rep: Rep) -> bool {
+        match rep {
+            Rep::I64 => self.i64_pool_next != u32::MAX,
+            Rep::F64 => self.f64_pool_next != u32::MAX,
+            Rep::Eqref => false,
+        }
+    }
+    /// Bind `name` to a fresh unboxed pool slot of `rep`, recording its rep.
+    fn bind_scalar(&mut self, name: &str, rep: Rep) -> u32 {
+        let slot = match rep {
+            Rep::I64 => {
+                let s = self.i64_pool_next;
+                self.i64_pool_next += 1;
+                s
+            }
+            Rep::F64 => {
+                let s = self.f64_pool_next;
+                self.f64_pool_next += 1;
+                s
+            }
+            Rep::Eqref => unreachable!("bind_scalar called with Eqref"),
+        };
+        self.scope.push((name.to_string(), slot));
+        self.local_rep.insert(slot, rep);
+        slot
     }
     fn lookup_self(&self, name: &str) -> Option<SelfFn> {
         self.self_fns.iter().rev().find(|(n, _)| n == name).map(|(_, s)| s.clone())
