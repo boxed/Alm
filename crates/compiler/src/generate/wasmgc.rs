@@ -21774,46 +21774,63 @@ impl<'a> Codegen<'a> {
         callee: &'e TypedExpr,
         nparams: usize,
         ctx: &FnCtx,
-    ) -> Option<(Vec<Option<String>>, &'e TypedExpr, Vec<String>)> {
+    ) -> Option<Callee<'e>> {
         if std::env::var_os("ALM_NO_FUSE").is_some() {
             return None;
         }
-        let (params, body) = match &callee.kind {
-            TypedKind::Lambda(ps, b) => (ps.as_slice(), b.as_ref()),
-            _ => return None,
-        };
-        if params.len() != nparams {
-            return None;
-        }
-        let mut pnames: Vec<Option<String>> = Vec::with_capacity(nparams);
-        for (p, _) in params {
-            match &p.value {
-                can::Pattern_::Var(n) => pnames.push(Some(n.to_string())),
-                can::Pattern_::Anything => pnames.push(None),
-                _ => return None,
+        match &callee.kind {
+            TypedKind::Lambda(params, body) => {
+                if params.len() != nparams {
+                    return None;
+                }
+                let mut pnames: Vec<Option<String>> = Vec::with_capacity(nparams);
+                for (p, _) in params {
+                    match &p.value {
+                        can::Pattern_::Var(n) => pnames.push(Some(n.to_string())),
+                        can::Pattern_::Anything => pnames.push(None),
+                        _ => return None,
+                    }
+                }
+                // Inlining a huge body would bloat the module for little gain;
+                // small bodies (the common combinator case) inline.
+                if expr_size(body) > 120 {
+                    return None;
+                }
+                let mut bound: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for n in pnames.iter().flatten() {
+                    bound.insert(n.clone());
+                }
+                let mut free = Vec::new();
+                free_locals(body, &bound, &mut free);
+                // Every free local must be a plain eqref local in scope. A
+                // missing slot (recursive self-fn, or a name we can't resolve)
+                // or an unboxed scalar capture forces the kernel fallback.
+                for n in &free {
+                    match ctx.lookup(n) {
+                        Some(slot) if ctx.rep_of_local(slot) == Rep::Eqref => {}
+                        _ => return None,
+                    }
+                }
+                Some(Callee::Inline { pnames, body, caps: free })
             }
-        }
-        // Inlining a huge body would bloat the module for little gain; small
-        // bodies (the common combinator case) inline.
-        if expr_size(body) > 120 {
-            return None;
-        }
-        let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for n in pnames.iter().flatten() {
-            bound.insert(n.clone());
-        }
-        let mut free = Vec::new();
-        free_locals(body, &bound, &mut free);
-        // Every free local must be a plain eqref local in scope. A missing slot
-        // (recursive self-fn, or a name we can't resolve) or an unboxed scalar
-        // capture forces the kernel fallback.
-        for n in &free {
-            match ctx.lookup(n) {
-                Some(slot) if ctx.rep_of_local(slot) == Rep::Eqref => {}
-                _ => return None,
+            // A named top-level function: direct-call it, skipping apply1. Bail
+            // on a specialized (unboxed i64/f64 ABI) callee — its wasm signature
+            // isn't (eqref^n)->eqref — or an arity mismatch (a point-free
+            // partial application, left to the kernel for now).
+            TypedKind::Global(name) => {
+                let key = name.to_string();
+                if self.spec_fns.contains_key(&key) {
+                    return None;
+                }
+                let idx = *self.func_index.get(&key)?;
+                if *self.func_arity.get(&key)? as usize != nparams {
+                    return None;
+                }
+                Some(Callee::Direct(idx))
             }
+            _ => None,
         }
-        Some((pnames, body, free))
     }
 
     /// Fuse `List.foldl`/`List.foldr callee init xs` when `callee` resolves to a
@@ -21829,13 +21846,12 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<bool, String> {
-        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 2, ctx) {
-            Some(r) => r,
+        let callee = match self.resolve_fusable(&args[0], 2, ctx) {
+            Some(c) => c,
             None => return Ok(false),
         };
-        // Capture slots in the *caller* — read at the call site below.
-        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
-        let lidx = self.build_fused_fold(&pnames, body, &caps, rev)?;
+        let cap_slots = callee_cap_slots(&callee, ctx);
+        let lidx = self.build_fused_fold(&callee, rev)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -21846,23 +21862,16 @@ impl<'a> Codegen<'a> {
     }
 
     /// Build a specialized fold loop as a lifted `(caps.., acc, xs) -> acc`
-    /// function that inlines `body` (params `[element, accumulator]`). `rev`
-    /// walks the list tail-first (foldr) instead of head-first (foldl). Returns
-    /// its function index.
-    fn build_fused_fold(
-        &mut self,
-        pnames: &[Option<String>],
-        body: &TypedExpr,
-        capnames: &[String],
-        rev: bool,
-    ) -> Result<u32, String> {
-        let ncap = capnames.len() as u32;
+    /// function: inline the callee body (params `[element, accumulator]`) or
+    /// direct-call a known function per element. `rev` walks the list tail-first
+    /// (foldr) instead of head-first (foldl). Returns its function index.
+    fn build_fused_fold(&mut self, callee: &Callee, rev: bool) -> Result<u32, String> {
+        let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 2; // captures + accumulator + list
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([]))); // reserve slot
 
-        let eb = count_bindings(body);
         // eqref: body-binding pool (eb) + element + scratch_eqref.
         let mut lf = Function::new([
             (eb + 2, eqref()),
@@ -21884,14 +21893,16 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
-        for (i, name) in capnames.iter().enumerate() {
-            lctx.scope.push((name.clone(), i as u32));
-        }
-        if let Some(n) = &pnames[0] {
-            lctx.scope.push((n.clone(), elem));
-        }
-        if let Some(n) = &pnames[1] {
-            lctx.scope.push((n.clone(), acc));
+        if let Callee::Inline { pnames, caps, .. } = callee {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            if let Some(n) = &pnames[0] {
+                lctx.scope.push((n.clone(), elem));
+            }
+            if let Some(n) = &pnames[1] {
+                lctx.scope.push((n.clone(), acc));
+            }
         }
 
         list_len(&mut lf, xs);
@@ -21928,8 +21939,15 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::I32Add);
         lf.instruction(&Instruction::ArrayGet(T_ARR));
         lf.instruction(&Instruction::LocalSet(elem));
-        // accumulator = <body>
-        self.emit_expr(body, &mut lctx, &mut lf)?;
+        // accumulator = callee(element, accumulator)
+        match callee {
+            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
+            Callee::Direct(idx) => {
+                lf.instruction(&Instruction::LocalGet(elem));
+                lf.instruction(&Instruction::LocalGet(acc));
+                lf.instruction(&Instruction::Call(*idx));
+            }
+        }
         lf.instruction(&Instruction::LocalSet(acc));
         bump(&mut lf, l_i, if rev { -1 } else { 1 });
         lf.instruction(&Instruction::Br(0));
@@ -21953,12 +21971,12 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<bool, String> {
-        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 1, ctx) {
-            Some(r) => r,
+        let callee = match self.resolve_fusable(&args[0], 1, ctx) {
+            Some(c) => c,
             None => return Ok(false),
         };
-        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
-        let lidx = self.build_fused_map(&pnames, body, &caps)?;
+        let cap_slots = callee_cap_slots(&callee, ctx);
+        let lidx = self.build_fused_map(&callee)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -21967,19 +21985,13 @@ impl<'a> Codegen<'a> {
         Ok(true)
     }
 
-    fn build_fused_map(
-        &mut self,
-        pnames: &[Option<String>],
-        body: &TypedExpr,
-        capnames: &[String],
-    ) -> Result<u32, String> {
-        let ncap = capnames.len() as u32;
+    fn build_fused_map(&mut self, callee: &Callee) -> Result<u32, String> {
+        let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 1; // captures + list
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([])));
 
-        let eb = count_bindings(body);
         let mut lf = Function::new([
             (eb + 2, eqref()),  // body-binding pool + element + scratch_eqref
             (1, ValType::I64),  // scratch_i64
@@ -22000,11 +22012,13 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
-        for (i, name) in capnames.iter().enumerate() {
-            lctx.scope.push((name.clone(), i as u32));
-        }
-        if let Some(n) = &pnames[0] {
-            lctx.scope.push((n.clone(), elem));
+        if let Callee::Inline { pnames, caps, .. } = callee {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            if let Some(n) = &pnames[0] {
+                lctx.scope.push((n.clone(), elem));
+            }
         }
 
         list_len(&mut lf, xs);
@@ -22033,10 +22047,16 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::I32Add);
         lf.instruction(&Instruction::ArrayGet(T_ARR));
         lf.instruction(&Instruction::LocalSet(elem));
-        // ndata[i] = <body>
+        // ndata[i] = callee(element)
         lf.instruction(&Instruction::LocalGet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_i));
-        self.emit_expr(body, &mut lctx, &mut lf)?;
+        match callee {
+            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
+            Callee::Direct(idx) => {
+                lf.instruction(&Instruction::LocalGet(elem));
+                lf.instruction(&Instruction::Call(*idx));
+            }
+        }
         lf.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut lf, l_i, 1);
         lf.instruction(&Instruction::Br(0));
@@ -22065,12 +22085,12 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<bool, String> {
-        let (pnames, body, caps) = match self.resolve_fusable(&args[0], 1, ctx) {
-            Some(r) => r,
+        let callee = match self.resolve_fusable(&args[0], 1, ctx) {
+            Some(c) => c,
             None => return Ok(false),
         };
-        let cap_slots: Vec<u32> = caps.iter().map(|n| ctx.lookup(n).unwrap()).collect();
-        let lidx = self.build_fused_filter(&pnames, body, &caps)?;
+        let cap_slots = callee_cap_slots(&callee, ctx);
+        let lidx = self.build_fused_filter(&callee)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -22079,19 +22099,13 @@ impl<'a> Codegen<'a> {
         Ok(true)
     }
 
-    fn build_fused_filter(
-        &mut self,
-        pnames: &[Option<String>],
-        body: &TypedExpr,
-        capnames: &[String],
-    ) -> Result<u32, String> {
-        let ncap = capnames.len() as u32;
+    fn build_fused_filter(&mut self, callee: &Callee) -> Result<u32, String> {
+        let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 1;
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([])));
 
-        let eb = count_bindings(body);
         let mut lf = Function::new([
             (eb + 3, eqref()),  // body-binding pool + element + acc + scratch_eqref
             (1, ValType::I64),  // scratch_i64
@@ -22112,11 +22126,13 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
-        for (i, name) in capnames.iter().enumerate() {
-            lctx.scope.push((name.clone(), i as u32));
-        }
-        if let Some(n) = &pnames[0] {
-            lctx.scope.push((n.clone(), elem));
+        if let Callee::Inline { pnames, caps, .. } = callee {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            if let Some(n) = &pnames[0] {
+                lctx.scope.push((n.clone(), elem));
+            }
         }
 
         push_empty_list(&mut lf);
@@ -22146,8 +22162,14 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::I32Add);
         lf.instruction(&Instruction::ArrayGet(T_ARR));
         lf.instruction(&Instruction::LocalSet(elem));
-        // if <body> then acc = cons(element, acc)
-        self.emit_expr(body, &mut lctx, &mut lf)?;
+        // if callee(element) then acc = cons(element, acc)
+        match callee {
+            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
+            Callee::Direct(idx) => {
+                lf.instruction(&Instruction::LocalGet(elem));
+                lf.instruction(&Instruction::Call(*idx));
+            }
+        }
         lf.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
             shared: false,
             ty: AbstractHeapType::I31,
@@ -24979,6 +25001,37 @@ fn count_bindings(e: &TypedExpr) -> u32 {
                 + count_bindings(b)
                 + c.as_ref().map(|x| count_bindings(x)).unwrap_or(0)
         }
+    }
+}
+
+/// A list-combinator's function argument, resolved to something a fused loop
+/// can apply without going through the generic kernel + `apply1`.
+enum Callee<'e> {
+    /// A small literal lambda: inline its `body` per element, binding its
+    /// parameters (`pnames`, `None` = wildcard) to the loop's element/acc
+    /// locals. `caps` are the body's free locals (bound in the enclosing
+    /// scope), passed as the synth function's leading parameters.
+    Inline { pnames: Vec<Option<String>>, body: &'e TypedExpr, caps: Vec<String> },
+    /// A known top-level function of the right arity: direct-call its index per
+    /// element (no captures — top-level functions capture nothing).
+    Direct(u32),
+}
+
+/// (capture count, body-binding pool size) for sizing a fused synth function's
+/// parameters and eqref locals. A `Direct` callee has neither.
+fn callee_dims(callee: &Callee) -> (u32, u32) {
+    match callee {
+        Callee::Inline { caps, body, .. } => (caps.len() as u32, count_bindings(body)),
+        Callee::Direct(_) => (0, 0),
+    }
+}
+
+/// The caller-side local slots to push as a fused synth function's leading
+/// (capture) arguments. Empty for a `Direct` callee.
+fn callee_cap_slots(callee: &Callee, ctx: &FnCtx) -> Vec<u32> {
+    match callee {
+        Callee::Inline { caps, .. } => caps.iter().map(|n| ctx.lookup(n).unwrap()).collect(),
+        Callee::Direct(_) => Vec::new(),
     }
 }
 
