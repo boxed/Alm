@@ -4324,6 +4324,22 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed (Offset 0)
             return Ok(());
         }
+        // Time.here : Task x Zone — the local zone. A headless host has no
+        // timezone info (like getZoneName above), so resolve synchronously to
+        // the UTC fallback `Task.Succeed (Zone 0 [])` (Zone = tag 0 [offset,
+        // eras]; Task.Succeed = tag 0).
+        if module == "Time" && name == "here" {
+            f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+            f.instruction(&Instruction::I32Const(0)); // Zone tag
+            f.instruction(&Instruction::I64Const(0));
+            f.instruction(&Instruction::Call(self.box_int_idx)); // offset 0
+            push_empty_list(f); // eras []
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // Zone 0 []
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed (Zone 0 [])
+            return Ok(());
+        }
         // Random.independentSeed : a nullary Generator (ctor tag 14).
         if module == "Random" && name == "independentSeed" {
             f.instruction(&Instruction::I32Const(14));
