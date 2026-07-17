@@ -276,6 +276,7 @@ const G_NEXT_TASK: u32 = 24; // next async-task slot
 const G_HTTP_RESP: u32 = 25; // the Http.Response for the task being resumed (THttpDone reads it)
 const G_STRLITS: u32 = 26; // interned string-literal pool (ref T_ARR of ref T_STR), built once at instantiation
 const G_CLOSPOOL: u32 = 27; // interned capture-free function closures (ref T_ARR of ref T_CLOS), built once
+const G_RSEED: u32 = 28; // Random.generate's persistent Seed (eqref, null until first use → seeded from host time)
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -1084,6 +1085,7 @@ fn html_attr_name(a: &str) -> Option<&'static str> {
         "cite" => "cite",
         "datetime" => "datetime",
         "accesskey" => "accesskey",
+        "scope" => "scope",
         _ => return None,
     })
 }
@@ -3380,6 +3382,11 @@ impl<'a> Codegen<'a> {
                 &ConstExpr::extended(insns),
             );
         }
+        // 28=G_RSEED: Random.generate's persistent Seed (null until first use).
+        globals.global(
+            GlobalType { val_type: eqref(), mutable: true, shared: false },
+            &ConstExpr::ref_null(eq_heap()),
+        );
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
         for (name, ty) in [
@@ -4332,7 +4339,8 @@ impl<'a> Codegen<'a> {
             return Ok(());
         }
         let arity: u32 = match (module, name) {
-            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => 2,
+            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul")
+            | ("Basics", "idiv") | ("Basics", "fdiv") => 2,
             ("String", "append") => 2,
             ("String", "fromInt") | ("String", "length") | ("Char", "toCode") | ("Basics", "not") => 1,
             // Generic fallback: wrap any other kernel by synthesizing local
@@ -4343,7 +4351,7 @@ impl<'a> Codegen<'a> {
         let lidx = self.lifted_base + self.lifted.len() as u32;
         let mut lf = Function::new([]);
         match (module, name) {
-            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") => {
+            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") | ("Basics", "idiv") => {
                 lf.instruction(&Instruction::LocalGet(0));
                 lf.instruction(&Instruction::Call(self.unbox_int_idx));
                 lf.instruction(&Instruction::LocalGet(1));
@@ -4351,9 +4359,20 @@ impl<'a> Codegen<'a> {
                 lf.instruction(&match name {
                     "add" => Instruction::I64Add,
                     "sub" => Instruction::I64Sub,
-                    _ => Instruction::I64Mul,
+                    "mul" => Instruction::I64Mul,
+                    _ => Instruction::I64DivS, // idiv: `//` truncates toward zero
                 });
                 lf.instruction(&Instruction::Call(self.box_int_idx));
+            }
+            ("Basics", "fdiv") => {
+                lf.instruction(&Instruction::LocalGet(0));
+                lf.instruction(&cast_to(T_FLOAT));
+                lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+                lf.instruction(&Instruction::LocalGet(1));
+                lf.instruction(&cast_to(T_FLOAT));
+                lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+                lf.instruction(&Instruction::F64Div);
+                lf.instruction(&Instruction::StructNew(T_FLOAT));
             }
             ("String", "append") => {
                 lf.instruction(&Instruction::LocalGet(0));
@@ -15734,7 +15753,41 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        // CMD_RANDOM (9): [toMsg, generator]. Seed lazily from host time, step
+        // the generator against the persistent seed (advancing it), and
+        // dispatch toMsg applied to the generated value.
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(9));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_RSEED));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Call(HOST_NOW));
+        f.instruction(&Instruction::I64TruncF64S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Call(self.random_initial_seed_idx));
+        f.instruction(&Instruction::GlobalSet(G_RSEED));
         f.instruction(&Instruction::End);
+        // (value, newSeed) = random_step(generator, seed)
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::GlobalGet(G_RSEED));
+        f.instruction(&Instruction::Call(self.random_step_idx));
+        f.instruction(&Instruction::LocalSet(5)); // tuple [value, newSeed]
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_RSEED));
+        ctor_arg0(&mut f, 0); // toMsg
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::End); // CMD_RANDOM if
+        f.instruction(&Instruction::End); // run_cmd function
         f
     }
 
@@ -16208,6 +16261,22 @@ impl<'a> Codegen<'a> {
         ctor_arg0(&mut f, 1); // toMsg
         f.instruction(&Instruction::Call(self.apply1_idx));
         ctor_argn(&mut f, 1, 1); // task
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // CMD_RANDOM (9) [toMsg, generator]: compose f into toMsg.
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(9));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(9));
+        self.emit_make_closure(self.compose3_idx, 3, &mut f);
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_arg0(&mut f, 1); // toMsg
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_argn(&mut f, 1, 1); // generator
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
@@ -23205,6 +23274,16 @@ impl<'a> Codegen<'a> {
             ("Random", "initialSeed") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.random_initial_seed_idx));
+            }
+            // Random.generate toMsg gen → CMD_RANDOM (9) [toMsg, generator].
+            // run_cmd steps the generator against a persistent seed and
+            // dispatches toMsg applied to the value.
+            ("Random", "generate") => {
+                f.instruction(&Instruction::I32Const(9));
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                self.emit_expr(&args[1], ctx, f)?; // generator
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Task: reify combinators as tagged ctors; task_run interprets them.
             ("Task", "succeed") | ("Task", "fail") | ("Task", "map")
