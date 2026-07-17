@@ -44,6 +44,13 @@ pub const REGEX_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_re
 /// correctness); provides `alm_bytes_try` / `alm_bytes_fail`.
 pub const BYTES_JMP_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bytes_jmp.o"));
 
+/// The MMTk GC binding as a single relocatable object exporting only
+/// `almmtk_init`/`almmtk_alloc` (empty when ALM_BUILD_MMTK was unset), plus the
+/// weak `almmtk_*` stubs. Both are always linked; the runtime uses them only
+/// under ALM_GC=mmtk.
+pub const ALM_MMTK_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_mmtk.o"));
+pub const ALMMTK_STUBS_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/almmtk_stubs.o"));
+
 /// The same runtime as optimized LLVM bitcode. Merged into each program
 /// module (as `available_externally`) so LLVM can inline the runtime's hot
 /// primitives into generated code; the real symbols still come from the
@@ -257,6 +264,13 @@ pub(crate) fn finish<'ctx>(
             std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
             let bytes_jmp = build_dir.join("bytes_jmp.o");
             std::fs::write(&bytes_jmp, BYTES_JMP_OBJ).map_err(|e| e.to_string())?;
+            // MMTk binding object + its weak stubs (always linked; used only
+            // under ALM_GC=mmtk). The real binding's strong symbols override the
+            // stubs; when it wasn't built, the object is empty and the stubs win.
+            let mmtk = build_dir.join("alm_mmtk.o");
+            std::fs::write(&mmtk, ALM_MMTK_OBJ).map_err(|e| e.to_string())?;
+            let mmtk_stubs = build_dir.join("almmtk_stubs.o");
+            std::fs::write(&mmtk_stubs, ALMMTK_STUBS_OBJ).map_err(|e| e.to_string())?;
             // The runtime uses the Boehm conservative GC (`libgc`) as its
             // allocator; link it in. `-lgc` from the bdw-gc install prefix.
             run_linker(
@@ -266,8 +280,23 @@ pub(crate) fn finish<'ctx>(
                     &runtime,
                     &regex,
                     &bytes_jmp,
+                    &mmtk,
+                    &mmtk_stubs,
                     Path::new("-L/opt/homebrew/opt/bdw-gc/lib"),
                     Path::new("-lgc"),
+                    // MMTk's `sysinfo` dependency (physical-memory detection)
+                    // references these macOS frameworks. Harmless when the mmtk
+                    // object is the empty stand-in. (TODO: slim mmtk's deps.)
+                    Path::new("-framework"),
+                    Path::new("CoreFoundation"),
+                    Path::new("-framework"),
+                    Path::new("IOKit"),
+                    Path::new("-framework"),
+                    Path::new("SystemConfiguration"),
+                    Path::new("-framework"),
+                    Path::new("Security"),
+                    Path::new("-liconv"),
+                    Path::new("-lz"),
                     Path::new("-o"),
                     output,
                 ],

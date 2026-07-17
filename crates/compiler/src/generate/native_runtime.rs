@@ -72,6 +72,17 @@ extern "C" {
     fn GC_unregister_my_thread() -> i32;
 }
 
+// The MMTk binding (crates/alm-mmtk), linked in as a C ABI. Weak stub
+// definitions (almmtk_stubs.c) satisfy the link when the real binding isn't
+// built; the real symbols override them. Used only when ALM_GC=mmtk.
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" {
+    fn almmtk_init(heap_bytes: usize);
+    fn almmtk_alloc(size: usize, align: usize) -> *mut u8;
+}
+#[cfg(not(target_arch = "wasm32"))]
+static mut FLAG_MMTK: bool = false;
+
 #[cfg(not(target_arch = "wasm32"))]
 static mut GC_READY: bool = false;
 
@@ -85,8 +96,15 @@ unsafe fn gc_ensure_init() {
         GC_set_free_space_divisor(6);
         FLAG_ARG_CHECK = std::env::var("ALM_ARG_CHECK").is_ok();
         FLAG_NO_POOL = std::env::var("ALM_NO_POOL").is_ok();
+        FLAG_MMTK = std::env::var("ALM_GC").as_deref() == Ok("mmtk");
         GC_init();
         GC_allow_register_threads();
+        // MMTk allocates the Elm heap (constructors / tnodes / Value cells) when
+        // ALM_GC=mmtk; Boehm still backs the runtime's own Rust allocations.
+        // NoGC (current plan) never collects, so give it a roomy fixed heap.
+        if FLAG_MMTK {
+            almmtk_init(4usize << 30);
+        }
         // Start with a roomy heap. Elm code allocates in torrents (every
         // cons cell and boxed value); growing from Boehm's tiny default
         // means near-continuous full collections — marking dominated whole
@@ -380,6 +398,12 @@ static mut FLAG_NO_POOL: bool = false;
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
     unsafe {
+        gc_ensure_init();
+        if *std::ptr::addr_of!(FLAG_MMTK) {
+            let p = almmtk_alloc(std::mem::size_of::<Value>(), std::mem::align_of::<Value>());
+            std::ptr::write(p as *mut Value, value);
+            return p as u64;
+        }
         // DIAG: ALM_NO_POOL=1 falls back to plain Box (GC_malloc).
         if *std::ptr::addr_of!(FLAG_NO_POOL) {
             return Box::into_raw(Box::new(value)) as u64;
@@ -429,6 +453,10 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     let size = (size as usize).max(1);
     #[cfg(not(target_arch = "wasm32"))]
     {
+        gc_ensure_init(); // cheap after first; latches FLAG_MMTK and inits MMTk
+        if *std::ptr::addr_of!(FLAG_MMTK) {
+            return almmtk_alloc(size, 8);
+        }
         let aligned = (size + 7) & !7;
         let class = aligned >> 3; // 8B -> 1 … 128B -> 16
         if !*std::ptr::addr_of!(FLAG_NO_POOL) && class >= 1 && class <= N_ALLOC_CLASSES {

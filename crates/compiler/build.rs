@@ -66,6 +66,27 @@ fn main() {
     // build's lock. The `.a` is embedded and linked into native programs.
     build_regex_glue(&out_dir);
 
+    // The MMTk GC binding (crates/alm-mmtk). Built only when ALM_BUILD_MMTK is
+    // set (it needs a modern toolchain and pulls ~100 deps); otherwise an empty
+    // object stands in, and the runtime's weak `almmtk_*` stubs are used. Either
+    // way `libalm_mmtk.o` exists for the native backend to embed + link.
+    build_mmtk_binding(&out_dir);
+    // Weak C-ABI stubs so the runtime's `almmtk_*` references always link; the
+    // real binding's strong symbols (in libalm_mmtk.o) override them.
+    let stubs_src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("src/generate/almmtk_stubs.c");
+    println!("cargo:rerun-if-changed={}", stubs_src.display());
+    let stubs_obj = out_dir.join("almmtk_stubs.o");
+    let ok = Command::new("cc")
+        .args(["-O2", "-c"])
+        .arg(&stubs_src)
+        .arg("-o")
+        .arg(&stubs_obj)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ok, "compiling almmtk_stubs.c failed");
+
     // setjmp/longjmp shim for Bytes.Decode failure (the native twin of the JS
     // runtime's exception-based decode abort). In C because `setjmp` needs
     // `returns_twice` codegen that a plain Rust extern declaration does not
@@ -83,6 +104,76 @@ fn main() {
         .status()
         .unwrap_or_else(|e| panic!("compiling bytes_jmp.c: {e}"));
     assert!(status.success(), "compiling the bytes_jmp shim failed");
+}
+
+/// Build the MMTk binding into a single relocatable object exporting only the
+/// `almmtk_*` C entry points (all other symbols — including MMTk's bundled,
+/// version-mismatched `std` — localized, so they don't clash with the runtime's
+/// std at link, exactly like the regex glue). When ALM_BUILD_MMTK is unset,
+/// produce an empty object instead so the link still works via the weak stubs.
+fn build_mmtk_binding(out_dir: &PathBuf) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let mmtk_dir = manifest_dir.join("../alm-mmtk");
+    println!("cargo:rerun-if-changed={}", mmtk_dir.join("src/lib.rs").display());
+    println!("cargo:rerun-if-env-changed=ALM_BUILD_MMTK");
+    let merged = out_dir.join("libalm_mmtk.o");
+
+    if env::var_os("ALM_BUILD_MMTK").is_none() {
+        // Empty stand-in object.
+        let empty_c = out_dir.join("mmtk_empty.c");
+        std::fs::write(&empty_c, "").unwrap();
+        let ok = Command::new("cc")
+            .args(["-c", "-x", "c"])
+            .arg(&empty_c)
+            .arg("-o")
+            .arg(&merged)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "compiling the empty mmtk stand-in object failed");
+        return;
+    }
+
+    // Build the staticlib with a modern toolchain into an isolated target dir.
+    let mmtk_target = out_dir.join("mmtkbuild");
+    let status = Command::new("cargo")
+        .args(["+1.95", "build", "--release", "--manifest-path"])
+        .arg(mmtk_dir.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&mmtk_target)
+        // Don't inherit the outer build's toolchain pin.
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("RUSTC")
+        .env_remove("CARGO")
+        .status()
+        .unwrap_or_else(|e| panic!("building alm-mmtk (needs the 1.95 toolchain): {e}"));
+    assert!(status.success(), "building the alm-mmtk binding failed");
+
+    let mmtk_a = mmtk_target.join("release/libalm_mmtk.a");
+    let merge_dir = out_dir.join("mmtkmerge");
+    let _ = std::fs::remove_dir_all(&merge_dir);
+    std::fs::create_dir_all(&merge_dir).unwrap();
+    let ar_ok = Command::new("ar")
+        .current_dir(&merge_dir)
+        .arg("x")
+        .arg(&mmtk_a)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(ar_ok, "extracting libalm_mmtk.a failed");
+    let exports = merge_dir.join("exports.txt");
+    std::fs::write(&exports, "_almmtk_init\n_almmtk_alloc\n").unwrap();
+    let objs: Vec<PathBuf> = std::fs::read_dir(&merge_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "o").unwrap_or(false))
+        .collect();
+    let mut cmd = Command::new("ld");
+    cmd.arg("-r").arg("-exported_symbols_list").arg(&exports);
+    cmd.args(&objs);
+    cmd.arg("-o").arg(&merged);
+    let ld_ok = cmd.status().map(|s| s.success()).unwrap_or(false);
+    assert!(ld_ok, "ld -r merge of the mmtk binding failed");
 }
 
 fn build_regex_glue(out_dir: &PathBuf) {
