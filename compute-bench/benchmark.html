@@ -124,7 +124,11 @@
       into specialized per-call loops: the <code>list</code> pipeline is <strong>~4×</strong> faster than elm on
       the same JS, and <strong>Dict</strong> ~1.4×. WasmGC then beats alm-js on every workload (up to 3.5× on
       lists), and the native backend — its numeric loops auto-vectorizing to SIMD — reaches <strong>50×+</strong>
-      over official elm on list work and 2–3× on recursion/sorting.
+      over official elm on list work and 2–3× on recursion/sorting. The sharpest case is the
+      <strong>float-list</strong> row: alm stores a <code>List Float</code> as a contiguous unboxed
+      <code>f64</code> array on both native and WasmGC (no per-element heap box), so wasm-gc runs it
+      <strong>~12× faster than its own JS backend</strong> and ~45× faster than official elm's boxed
+      linked list.
     </p>
     <div class="tbl-scroll"><table id="t-compute"></table></div>
   </section>
@@ -185,6 +189,7 @@
     { op: "Dict 100k build+get",     elm: 43.7,  "alm-js": 31.4, "wasm-gc": 20.1, native: 31.4 },
     { op: "mandelbrot 400²",         elm: 5.85,  "alm-js": 5.78, "wasm-gc": 5.31, native: 6.5 },
     { op: "sort 100k ints",          elm: 24.2,  "alm-js": 23.8, "wasm-gc": 13.7, native: 10.6 },
+    { op: "float-list sum 1M",       elm: 177.0, "alm-js": 48.0, "wasm-gc": 4.0,  native: 2.1 },
   ];
   const COMPUTE_COLS = ["elm", "alm-js", "wasm-gc", "native"];
 

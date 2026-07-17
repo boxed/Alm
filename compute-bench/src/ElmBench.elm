@@ -10,6 +10,7 @@ port module ElmBench exposing (main)
 import BinaryTrees
 import DictOps
 import Fib
+import FloatSum
 import ListPipeline
 import Mandelbrot
 import Platform
@@ -42,6 +43,9 @@ run name size =
 
         "Sort" ->
             Sort.bench size
+
+        "FloatSum" ->
+            FloatSum.bench size
 
         _ ->
             0

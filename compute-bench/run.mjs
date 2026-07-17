@@ -28,6 +28,7 @@ const WORKLOADS = [
   { name: "Dict 100k build+get", module: "DictOps",      size: 100000 },
   { name: "mandelbrot 400²",     module: "Mandelbrot",   size: 400 },
   { name: "sort 100k ints",      module: "Sort",         size: 100000 },
+  { name: "float-list sum 1M",   module: "FloatSum",     size: 1000000 },
 ];
 
 const WARMUP = 10;
