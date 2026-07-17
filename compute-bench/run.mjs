@@ -1,4 +1,8 @@
 // Compute-benchmark harness. For each workload:
+//   * elm (official) — drive the workload's `bench` through a Platform.worker
+//                      port; elm runs the compute synchronously inside `send`,
+//                      so timing `send` measures compute (result dispatch is
+//                      deferred and only used for the correctness check)
 //   * alm (JS)      — call the exported `bench(size)` in-process, JIT-warmed
 //   * alm (wasm-gc) — call `main_int()` on the instantiated module, warmed
 //   * alm (native)  — spawn the AOT binary (min wall-time), then subtract the
@@ -73,6 +77,25 @@ function timeNative(bin, runs) {
   return { ms: best, out };
 }
 
+// Official-elm harness: one long-lived Platform.worker; `send` computes
+// synchronously (see timeElm), the outgoing port updates elmLast on a later
+// tick (used only to verify the result).
+const elmApp = require(path.join(build, "ElmBench.js")).Elm.ElmBench.init();
+let elmLast = null;
+elmApp.ports.fromBench.subscribe((v) => { elmLast = v; });
+
+function timeElm(name, size, warmup, timed) {
+  const send = () => elmApp.ports.toBench.send({ name, size });
+  for (let i = 0; i < warmup; i++) send();
+  const ts = [];
+  for (let i = 0; i < timed; i++) {
+    const t = process.hrtime.bigint();
+    send();
+    ts.push(Number(process.hrtime.bigint() - t) / 1e6);
+  }
+  return median(ts);
+}
+
 // Startup floor: wall-time of a no-work native binary (dyld + GC init +
 // worker-thread spawn). Subtracted from each workload's native time so the
 // reported figure is compute only, comparable to the warm in-process JS/wasm
@@ -86,33 +109,40 @@ for (const w of WORKLOADS) {
   const wasmMain = await loadWasm(path.join(build, w.module + ".wasm"));
   const nativeBin = path.join(build, w.module + ".native");
 
-  // correctness
+  // correctness (elm result arrives on a later tick — drain, then compare)
   const jsVal = BigInt(jsBench());
   const wasmVal = BigInt(wasmMain());
   const native = timeNative(nativeBin, NATIVE_RUNS);
   const natVal = BigInt(native.out);
-  if (jsVal !== wasmVal || jsVal !== natVal) {
-    console.error(`DISAGREE ${w.name}: js=${jsVal} wasm=${wasmVal} native=${natVal}`);
+  elmApp.ports.toBench.send({ name: w.module, size: w.size });
+  await new Promise((r) => setTimeout(r, 0));
+  const elmVal = BigInt(elmLast);
+  if (jsVal !== wasmVal || jsVal !== natVal || jsVal !== elmVal) {
+    console.error(`DISAGREE ${w.name}: elm=${elmVal} js=${jsVal} wasm=${wasmVal} native=${natVal}`);
     process.exit(1);
   }
 
+  const elmMs = timeElm(w.module, w.size, WARMUP, TIMED);
   const jsMs = timeCalls(jsBench, WARMUP, TIMED);
   const wasmMs = timeCalls(wasmMain, WARMUP, TIMED);
   // Subtract the fixed process-startup floor: report native COMPUTE only.
   const nativeMs = Math.max(0, native.ms - startupFloor);
-  results.push({ name: w.name, js: jsMs, wasm: wasmMs, native: nativeMs });
+  results.push({ name: w.name, elm: elmMs, js: jsMs, wasm: wasmMs, native: nativeMs });
 }
 
 const pad = (s, n) => String(s).padEnd(n);
 const num = (x) => x.toFixed(2).padStart(9);
 const col = (s) => String(s).padStart(9);
-console.log("\n" + pad("workload", 26) + col("alm-js") + col("wasm-gc") + col("native") + "   wasm vs js   native vs js");
-console.log("-".repeat(92));
+console.log(
+  "\n" + pad("workload", 26) + col("elm") + col("alm-js") + col("wasm-gc") +
+  col("native") + "   alm-js vs elm   native vs elm"
+);
+console.log("-".repeat(100));
 for (const r of results) {
   console.log(
-    pad(r.name, 26) + num(r.js) + num(r.wasm) + num(r.native) +
-    `   ${(r.js / r.wasm).toFixed(2)}x`.padStart(13) +
-    `   ${(r.js / r.native).toFixed(2)}x`.padStart(14)
+    pad(r.name, 26) + num(r.elm) + num(r.js) + num(r.wasm) + num(r.native) +
+    `   ${(r.elm / r.js).toFixed(2)}x`.padStart(15) +
+    `   ${(r.elm / r.native).toFixed(2)}x`.padStart(16)
   );
 }
 fs.writeFileSync(path.join(dir, "results.json"), JSON.stringify(results, null, 2));

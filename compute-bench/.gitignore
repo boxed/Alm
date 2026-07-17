@@ -1,2 +1,4 @@
 build/
 results.json
+elm-src/
+elm-stuff/

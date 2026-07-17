@@ -115,14 +115,16 @@
     <p class="method" style="margin-bottom:16px">
       The benchmark above is DOM-bound — every operation crosses into the browser, which hides the
       compute backend's real speed. These are <strong>pure-computation</strong> workloads (no DOM, no I/O)
-      running the same source through alm's three backends: compiled to <strong>JavaScript</strong>,
-      to <strong>WebAssembly-GC</strong>, and to a <strong>native</strong> binary. This is where WasmGC's
-      advantage shows: it <strong>beats the JS backend on every workload</strong> — up to
-      <strong>3.4×</strong> on the <code>map</code>/<code>filter</code>/<code>fold</code> pipeline, now that
-      wasm-gc fuses those combinators against a statically-known callee — a literal lambda (inlined) or a
-      named function (direct-called) — with a specialized per-call loop that drops the per-element
-      <code>apply1</code> dispatch, matching what the native backend already does; 1.5–1.7× on dict/sort,
-      and, after unboxing numbers and inlining numeric constants, ~2× on recursion and ~1.05× on float math too.
+      running the <em>same Elm source</em> through the <strong>official elm compiler</strong> and alm's three
+      backends — <strong>JavaScript</strong>, <strong>WebAssembly-GC</strong>, and a <strong>native</strong>
+      binary. Against official elm the story splits cleanly: on <strong>scalar</strong> code (recursion, float
+      math, sorting) alm-js is neck-and-neck — it emits the same shape of JavaScript — but on
+      <strong>collections</strong> it pulls away, because alm represents <code>List</code> as a growable
+      <em>vector</em> (not elm's linked-list cons cells) and fuses <code>map</code>/<code>filter</code>/<code>fold</code>
+      into specialized per-call loops: the <code>list</code> pipeline is <strong>~4×</strong> faster than elm on
+      the same JS, and <strong>Dict</strong> ~1.4×. WasmGC then beats alm-js on every workload (up to 3.5× on
+      lists), and the native backend — its numeric loops auto-vectorizing to SIMD — reaches <strong>50×+</strong>
+      over official elm on list work and 2–3× on recursion/sorting.
     </p>
     <div class="tbl-scroll"><table id="t-compute"></table></div>
   </section>
@@ -145,7 +147,7 @@
 
   <footer>
     <p><strong>How the DOM benchmark was run.</strong> krausest/js-framework-benchmark, keyed implementations, puppeteer driving system Google&nbsp;Chrome headless. elm, alm and alm-wasm share <code>Main.elm</code> verbatim: elm via the official compiler, alm to JS (both minified with the same uglify pass), alm-wasm to a WebAssembly-GC module driven by a hand-written JS shim (DOM host imports; no WASI). Duration is the median of 15 timed iterations; memory is a single sample.</p>
-    <p><strong>How the computation benchmark was run.</strong> Each workload is a value program (<code>main : Int</code>) compiled by alm to three targets from identical source. JS: the exported function called in-process under Node/v8. wasm-gc: the module's entry called on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary. All three are checked to return the same result before timing; time is the median of 25 timed calls after 10 warmup. The JS and wasm figures are timed warm and in-process; the native figure is the min of 12 process runs <strong>minus a measured startup floor</strong> — a no-work binary (dyld + heap init + worker-thread spawn, ~2&nbsp;ms) — so all three columns are compute-only and directly comparable rather than penalizing native for cold process startup the warm in-process figures never pay. Native uses a <strong>custom Immix-lite garbage collector</strong> (bump allocation + conservative mark-region reclaim), now the default — it replaced Boehm entirely, roughly halving the allocation-heavy workloads. On this compute-only basis native leads most rows; the two places it doesn't are the weight-balanced <code>Dict</code> tree's pointer-chasing (versus v8's JIT + generational GC) and <code>mandelbrot</code>, where TurboFan's scheduling of the tight scalar-float loop edges LLVM by ~20% even though the emitted loop is already optimal.</p>
+    <p><strong>How the computation benchmark was run.</strong> Each workload is a value program (<code>main : Int</code>) built from identical source by the official elm 0.19.1 compiler and by alm's three targets. elm: since official elm exposes only <code>Elm.X.init</code>, the workload's <code>bench</code> is driven through a <code>Platform.worker</code> port — elm runs the compute synchronously inside the port <code>send</code>, so that call is timed (result verified on the next tick). JS: alm's exported function called in-process under Node/v8. wasm-gc: the module's entry called on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary. All three are checked to return the same result before timing; time is the median of 25 timed calls after 10 warmup. The JS and wasm figures are timed warm and in-process; the native figure is the min of 12 process runs <strong>minus a measured startup floor</strong> — a no-work binary (dyld + heap init + worker-thread spawn, ~2&nbsp;ms) — so all three columns are compute-only and directly comparable rather than penalizing native for cold process startup the warm in-process figures never pay. Native uses a <strong>custom Immix-lite garbage collector</strong> (bump allocation + conservative mark-region reclaim), now the default — it replaced Boehm entirely, roughly halving the allocation-heavy workloads. On this compute-only basis native leads most rows; the two places it doesn't are the weight-balanced <code>Dict</code> tree's pointer-chasing (versus v8's JIT + generational GC) and <code>mandelbrot</code>, where TurboFan's scheduling of the tight scalar-float loop edges LLVM by ~20% even though the emitted loop is already optimal.</p>
   </footer>
 </div>
 
@@ -173,17 +175,18 @@
     { op: "gzipped",      elm: 10.4, alm: 7.9,  "alm-wasm": 10.5,  react: 51.4, svelte: 12.2 },
   ];
   const FWS = ["elm", "alm", "alm-wasm", "react", "svelte"];
-  // Compute benchmarks: alm's three backends only, same Elm source, no DOM.
-  // native = --target=native-typed; the custom Immix-lite GC is the default.
+  // Compute benchmarks: official elm + alm's three backends, same Elm source,
+  // no DOM. native = --target=native-typed (custom Immix-lite GC, default);
+  // elm = official 0.19.1 compiler, driven headless through a Platform.worker.
   const COMPUTE = [
-    { op: "fib 35",                     "alm-js": 47.0, "wasm-gc": 23.5, native: 14.4 },
-    { op: "binary-trees d14×60",        "alm-js": 8.7,  "wasm-gc": 8.3,  native: 8.1 },
-    { op: "list map/filter/fold 1M",    "alm-js": 32.1, "wasm-gc": 9.1,  native: 2.6 },
-    { op: "Dict 100k build+get",        "alm-js": 31.4, "wasm-gc": 20.1, native: 31.4 },
-    { op: "mandelbrot 400²",            "alm-js": 5.78, "wasm-gc": 5.31, native: 6.5 },
-    { op: "sort 100k ints",             "alm-js": 23.8, "wasm-gc": 13.7, native: 10.6 },
+    { op: "fib 35",                  elm: 46.0,  "alm-js": 47.0, "wasm-gc": 23.5, native: 14.4 },
+    { op: "binary-trees d14×60",     elm: 8.7,   "alm-js": 8.7,  "wasm-gc": 8.3,  native: 8.1 },
+    { op: "list map/filter/fold 1M", elm: 135.0, "alm-js": 32.1, "wasm-gc": 9.1,  native: 2.6 },
+    { op: "Dict 100k build+get",     elm: 43.7,  "alm-js": 31.4, "wasm-gc": 20.1, native: 31.4 },
+    { op: "mandelbrot 400²",         elm: 5.85,  "alm-js": 5.78, "wasm-gc": 5.31, native: 6.5 },
+    { op: "sort 100k ints",          elm: 24.2,  "alm-js": 23.8, "wasm-gc": 13.7, native: 10.6 },
   ];
-  const COMPUTE_COLS = ["alm-js", "wasm-gc", "native"];
+  const COMPUTE_COLS = ["elm", "alm-js", "wasm-gc", "native"];
 
   // Smoothly blend best→green, 2×→amber, 3×+→red (ratio = value / best, >= 1).
   const GOOD = [55, 168, 119], AMBER = [215, 168, 58], BAD = [221, 97, 85];
