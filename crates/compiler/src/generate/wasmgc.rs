@@ -319,6 +319,156 @@ fn is_string(tipe: &can::Type) -> bool {
     is_named_type(tipe, "String")
 }
 
+/// Stack/local representation of a value. Most values are the universal boxed
+/// `Eqref`; scalar Int/Float can be kept unboxed (`I64`/`F64`) in the params,
+/// return, and arithmetic of specialized functions (see `spec_fns`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Rep {
+    Eqref,
+    I64,
+    F64,
+}
+
+/// The unboxed representation a monomorphic type maps to (else `Eqref`). Only
+/// Int/Float are unboxed; Bool/Char (i31) stay `Eqref` since they already avoid
+/// allocation and are eqref-compatible.
+fn rep_of(tipe: &can::Type) -> Rep {
+    if is_named_type(tipe, "Float") {
+        Rep::F64
+    } else if is_named_type(tipe, "Int") {
+        Rep::I64
+    } else {
+        Rep::Eqref
+    }
+}
+
+fn rep_valtype(r: Rep) -> ValType {
+    match r {
+        Rep::Eqref => eqref(),
+        Rep::I64 => ValType::I64,
+        Rep::F64 => ValType::F64,
+    }
+}
+
+/// Collect the names of top-level functions used *first-class* — anywhere other
+/// than as the callee of a saturated direct call (passed as a value, partially
+/// or over-applied, stored, etc.). Such functions must keep the uniform boxed
+/// ABI (their `ref.func`/closure has a fixed eqref signature), so they can't be
+/// specialized to an unboxed scalar ABI.
+fn collect_first_class(
+    e: &TypedExpr,
+    arity: &HashMap<String, u32>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use TypedKind::*;
+    match &e.kind {
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Local(_) | Foreign(_, _) | Accessor(_)
+        | Ctor(_, _, _) => {}
+        Global(name) => {
+            out.insert(name.to_string());
+        }
+        Negate(x) | Access(x, _) => collect_first_class(x, arity, out),
+        Binop(_, _, _, l, r) => {
+            collect_first_class(l, arity, out);
+            collect_first_class(r, arity, out);
+        }
+        List(xs) => xs.iter().for_each(|x| collect_first_class(x, arity, out)),
+        Lambda(_, body) => collect_first_class(body, arity, out),
+        Call(func, args) => {
+            let saturated_global = matches!(&func.kind, Global(name)
+                if arity.get(&name.to_string()) == Some(&(args.len() as u32)));
+            if !saturated_global {
+                collect_first_class(func, arity, out);
+            }
+            args.iter().for_each(|a| collect_first_class(a, arity, out));
+        }
+        If(branches, otherwise) => {
+            for (c, t) in branches {
+                collect_first_class(c, arity, out);
+                collect_first_class(t, arity, out);
+            }
+            collect_first_class(otherwise, arity, out);
+        }
+        Let(decls, body) => {
+            decls.iter().for_each(|d| collect_first_class_decl(d, arity, out));
+            collect_first_class(body, arity, out);
+        }
+        Case(scrut, branches) => {
+            collect_first_class(scrut, arity, out);
+            branches.iter().for_each(|(_, b)| collect_first_class(b, arity, out));
+        }
+        Update(x, fields) => {
+            collect_first_class(x, arity, out);
+            fields.iter().for_each(|(_, v)| collect_first_class(v, arity, out));
+        }
+        Record(fields) => fields.iter().for_each(|(_, v)| collect_first_class(v, arity, out)),
+        Tuple(a, b, c) => {
+            collect_first_class(a, arity, out);
+            collect_first_class(b, arity, out);
+            if let Some(c) = c {
+                collect_first_class(c, arity, out);
+            }
+        }
+    }
+}
+
+fn collect_first_class_decl(
+    d: &crate::ir::mono::TypedLetDecl,
+    arity: &HashMap<String, u32>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use crate::ir::mono::TypedLetDecl::*;
+    match d {
+        Def { body, .. } => collect_first_class(body, arity, out),
+        Recursive(ds) => ds.iter().for_each(|d| collect_first_class_decl(d, arity, out)),
+        Destruct(_, e) => collect_first_class(e, arity, out),
+    }
+}
+
+/// Does the expression contain a nested closure — a lambda or a let-bound local
+/// function? Such closures pack captured variables into an eqref array, and
+/// that capture-packing reads locals raw; a captured unboxed scalar param would
+/// be stored without boxing. Functions containing closures are therefore not
+/// specialized (conservative; the closure-free hot loops that benefit most are
+/// unaffected).
+fn has_nested_closure(e: &TypedExpr) -> bool {
+    use TypedKind::*;
+    match &e.kind {
+        Lambda(..) => true,
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Local(_) | Global(_) | Foreign(_, _)
+        | Accessor(_) | Ctor(_, _, _) => false,
+        Negate(x) | Access(x, _) => has_nested_closure(x),
+        Binop(_, _, _, l, r) => has_nested_closure(l) || has_nested_closure(r),
+        List(xs) => xs.iter().any(has_nested_closure),
+        Call(g, args) => has_nested_closure(g) || args.iter().any(has_nested_closure),
+        If(bs, o) => {
+            bs.iter().any(|(c, t)| has_nested_closure(c) || has_nested_closure(t))
+                || has_nested_closure(o)
+        }
+        Let(decls, body) => {
+            decls.iter().any(decl_has_closure) || has_nested_closure(body)
+        }
+        Case(s, bs) => has_nested_closure(s) || bs.iter().any(|(_, b)| has_nested_closure(b)),
+        Update(x, fs) => has_nested_closure(x) || fs.iter().any(|(_, v)| has_nested_closure(v)),
+        Record(fs) => fs.iter().any(|(_, v)| has_nested_closure(v)),
+        Tuple(a, b, c) => {
+            has_nested_closure(a)
+                || has_nested_closure(b)
+                || c.as_ref().is_some_and(|c| has_nested_closure(c))
+        }
+    }
+}
+
+fn decl_has_closure(d: &crate::ir::mono::TypedLetDecl) -> bool {
+    use crate::ir::mono::TypedLetDecl::*;
+    match d {
+        // A let-bound local *function* (params) becomes a capturing closure.
+        Def { params, body, .. } => !params.is_empty() || has_nested_closure(body),
+        Recursive(_) => true,
+        Destruct(_, e) => has_nested_closure(e),
+    }
+}
+
 fn funcref() -> ValType {
     ValType::Ref(RefType {
         nullable: true,
@@ -1448,6 +1598,12 @@ struct Codegen<'a> {
     alm_event_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
+    /// Top-level functions specialized to an unboxed scalar ABI: name ->
+    /// (param reps, return rep). Only functions never used first-class (every
+    /// use is a saturated direct call) qualify, so their wasm type/body/call
+    /// sites change in place — no new functions, no re-indexing. See
+    /// `compute_spec_fns`.
+    spec_fns: HashMap<String, (Vec<Rep>, Rep)>,
     /// Lifted lambdas / local functions: (total arity incl. captures, body).
     /// Their wasm function indices are `lifted_base + i`.
     lifted: Vec<(u32, Function)>,
@@ -1696,6 +1852,7 @@ impl<'a> Codegen<'a> {
             alm_event_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
+            spec_fns: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
         }
@@ -1749,6 +1906,7 @@ impl<'a> Codegen<'a> {
             self.func_index.insert(f.mangled.to_string(), N_IMPORTS + i as u32);
             self.func_arity.insert(f.mangled.to_string(), f.params.len() as u32);
         }
+        self.compute_spec_fns();
         let n = self.mono.functions.len() as u32;
         // Synthesized helper function indices, after the imports and user funcs
         // (a running counter, so adding a helper needs no manual re-indexing).
@@ -2004,7 +2162,7 @@ impl<'a> Codegen<'a> {
         for f in &self.mono.functions {
             bodies.push(self.emit_fn(f)?);
         }
-        let func_type_idx: Vec<u32> =
+        let mut func_type_idx: Vec<u32> =
             self.mono.functions.iter().map(|f| self.fn_type(f.params.len() as u32)).collect();
         let ft1 = self.fn_type(1); // str_from_int, list_length : eqref -> eqref
         let ft2 = self.fn_type(2); // str_append, apply1, list_map
@@ -2054,8 +2212,31 @@ impl<'a> Codegen<'a> {
         let fi_i_ty = self.next_type + 34; // (f64,i32) -> i32 (host_ftoa)
         let regex5_ty = self.next_type + 35; // (id,sp,sl,n,out) -> count
         let bytes_tag_ty = self.next_type + 36; // [] -> [] (Bytes.Decode exception tag)
-        self.next_type += 36;
+        // Advance past the last custom type (bytes_tag_ty = base + 36, i.e. 37
+        // custom types total) so `next_type` is the true next-free index for the
+        // specialized-function types allocated below.
+        self.next_type = bytes_tag_ty + 1;
         self.bytes_tag_ty = bytes_tag_ty;
+
+        // Custom unboxed function types for the specialized functions. Assigned
+        // after all other types (so the fixed offsets above are undisturbed) and
+        // emitted at the end of the type section in this same order. Distinct
+        // signatures are deduplicated.
+        let mut spec_sigs: Vec<(Vec<Rep>, Rep)> = Vec::new();
+        let mut spec_sig_idx: HashMap<(Vec<Rep>, Rep), u32> = HashMap::new();
+        for (i, mf) in self.mono.functions.iter().enumerate() {
+            if let Some(sig) = self.spec_fns.get(&mf.mangled.to_string()) {
+                let idx = *spec_sig_idx.entry(sig.clone()).or_insert_with(|| {
+                    let t = self.next_type;
+                    self.next_type += 1;
+                    spec_sigs.push(sig.clone());
+                    t
+                });
+                func_type_idx[i] = idx;
+            }
+        }
+        let spec_types_base = self.next_type - spec_sigs.len() as u32;
+        let _ = spec_types_base;
 
         // Synthesized helper bodies.
         let str_append = self.emit_str_append();
@@ -2380,6 +2561,12 @@ impl<'a> Codegen<'a> {
             vec![ValType::I32],
         ); // regex5 (host_regex_find/split): (id,sp,sl,n,out) -> count
         types.ty().function(vec![], vec![]); // bytes_tag_ty: [] -> [] (Bytes.Decode exn)
+        // Unboxed scalar-ABI types for specialized functions (order matches the
+        // indices assigned in `spec_sig_idx`).
+        for (params, ret) in &spec_sigs {
+            let ps: Vec<ValType> = params.iter().map(|r| rep_valtype(*r)).collect();
+            types.ty().function(ps, vec![rep_valtype(*ret)]);
+        }
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
         let mut funcs = FunctionSection::new();
@@ -20042,6 +20229,55 @@ impl<'a> Codegen<'a> {
     }
 
     /// Emit one function: N eqref params -> eqref body.
+    /// Decide which top-level functions get the unboxed scalar ABI. A function
+    /// qualifies when: it is never used first-class (so its index is only ever a
+    /// direct `call`/`return_call` target), it has arity ≥ 1 (arity-0 constants
+    /// and `main` are called by synthesized boxed-ABI callers), it is not a port,
+    /// every scalar parameter has a trivial `Var`/`_` pattern, and at least one
+    /// parameter or the return is a scalar Int/Float worth unboxing.
+    fn compute_spec_fns(&mut self) {
+        let mut boxed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in &self.mono.functions {
+            collect_first_class(&f.body, &self.func_arity, &mut boxed);
+        }
+        for f in &self.mono.functions {
+            let name = f.mangled.to_string();
+            if f.params.is_empty() || boxed.contains(&name) || self.ports.contains_key(name.as_str())
+            {
+                continue;
+            }
+            // A captured unboxed scalar param would be packed into an eqref array
+            // unboxed; skip functions that contain closures.
+            if has_nested_closure(&f.body) {
+                continue;
+            }
+            let mut param_reps = Vec::with_capacity(f.params.len());
+            let mut ok = true;
+            let mut any_scalar = false;
+            for (pat, ty) in &f.params {
+                let r = rep_of(ty);
+                if r != Rep::Eqref {
+                    any_scalar = true;
+                    if !matches!(pat.value, can::Pattern_::Var(_) | can::Pattern_::Anything) {
+                        ok = false;
+                        break;
+                    }
+                }
+                param_reps.push(r);
+            }
+            if !ok {
+                continue;
+            }
+            let ret = rep_of(&f.body.tipe);
+            if ret != Rep::Eqref {
+                any_scalar = true;
+            }
+            if any_scalar {
+                self.spec_fns.insert(name, (param_reps, ret));
+            }
+        }
+    }
+
     fn emit_fn(&mut self, f: &crate::ir::mono::TypedFn) -> Result<Function, String> {
         let nparams = f.params.len() as u32;
         // Extra eqref locals for `let`/`case`/destructure bindings, plus any
@@ -20060,12 +20296,186 @@ impl<'a> Codegen<'a> {
         ctx.next_local = nparams;
         ctx.scratch_eqref = nparams + extra;
         ctx.scratch_i64 = nparams + extra + 1;
+        // Specialized (unboxed scalar ABI): the wasm param slots already hold
+        // raw i64/f64 per the function's custom type, so record those reps and
+        // emit the body producing the unboxed return.
+        let spec = self.spec_fns.get(&f.mangled.to_string()).cloned();
+        if let Some((param_reps, _)) = &spec {
+            for (i, r) in param_reps.iter().enumerate() {
+                if *r != Rep::Eqref {
+                    ctx.local_rep.insert(i as u32, *r);
+                }
+            }
+        }
         for (i, (pat, ty)) in f.params.iter().enumerate() {
             self.bind_pat(pat, i as u32, Some(ty), &mut ctx, &mut wf)?;
         }
-        self.emit_tail(&f.body, &mut ctx, &mut wf)?;
+        match &spec {
+            Some((_, ret)) => self.emit_tail_scalar(&f.body, *ret, &mut ctx, &mut wf)?,
+            None => self.emit_tail(&f.body, &mut ctx, &mut wf)?,
+        }
         wf.instruction(&Instruction::End);
         Ok(wf)
+    }
+
+    /// Emit an expression as the argument of a call whose parameter has the
+    /// given rep: unboxed for scalar params, boxed eqref otherwise.
+    fn emit_arg_rep(
+        &mut self,
+        e: &TypedExpr,
+        rep: Rep,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match rep {
+            Rep::I64 => self.emit_i64(e, ctx, f),
+            Rep::F64 => self.emit_f64(e, ctx, f),
+            Rep::Eqref => self.emit_expr(e, ctx, f),
+        }
+    }
+
+    /// Box an on-stack unboxed value of `rep` into an eqref.
+    fn box_rep(&self, rep: Rep, ctx: &FnCtx, f: &mut Function) {
+        match rep {
+            Rep::I64 => self.emit_box_int_inline(ctx, f),
+            Rep::F64 => {
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            }
+            Rep::Eqref => {}
+        }
+    }
+
+    /// If `func`/`args` is a saturated direct call to a specialized function,
+    /// emit it with unboxed args and leave its unboxed scalar result on the
+    /// stack (returning the result rep). Otherwise returns `None` and emits
+    /// nothing.
+    fn try_emit_spec_call(
+        &mut self,
+        func: &TypedExpr,
+        args: &[TypedExpr],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<Option<Rep>, String> {
+        if let TypedKind::Global(name) = &func.kind {
+            if let Some((preps, ret)) = self.spec_fns.get(&name.to_string()).cloned() {
+                if args.len() == preps.len() {
+                    let idx = self.func_index[&name.to_string()];
+                    for (a, pr) in args.iter().zip(&preps) {
+                        self.emit_arg_rep(a, *pr, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::Call(idx));
+                    return Ok(Some(ret));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Tail-emit an expression producing the given non-eqref scalar rep (the
+    /// return rep of a specialized function). Mirrors `emit_tail` but threads
+    /// the unboxed result type through `if`/`case`/`let` and preserves
+    /// `return_call` for tail calls to other specialized functions.
+    fn emit_tail_scalar(
+        &mut self,
+        e: &TypedExpr,
+        rep: Rep,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        if rep == Rep::Eqref {
+            return self.emit_tail(e, ctx, f);
+        }
+        match &e.kind {
+            TypedKind::If(branches, otherwise) => {
+                self.emit_if_tail_scalar(branches, otherwise, rep, ctx, f)
+            }
+            TypedKind::Case(scrut, branches) => {
+                let s = ctx.bind("$scrut");
+                self.emit_expr(scrut, ctx, f)?;
+                f.instruction(&Instruction::LocalSet(s));
+                self.emit_branches_tail_scalar(branches, s, Some(&scrut.tipe), rep, ctx, f)
+            }
+            TypedKind::Let(decls, body) => {
+                let mark = ctx.scope.len();
+                for d in decls {
+                    self.emit_let_decl(d, ctx, f)?;
+                }
+                self.emit_tail_scalar(body, rep, ctx, f)?;
+                ctx.scope.truncate(mark);
+                Ok(())
+            }
+            TypedKind::Call(func, args) => {
+                // Tail call to a specialized function with the matching return
+                // rep → unboxed `return_call`. Anything else falls back to the
+                // non-tail unboxed emit (correct; loses TCO only for the rare
+                // scalar-returning call that crosses an ABI boundary).
+                if let TypedKind::Global(name) = &func.kind {
+                    if let Some((preps, ret)) = self.spec_fns.get(&name.to_string()).cloned() {
+                        if ret == rep && args.len() == preps.len() {
+                            let idx = self.func_index[&name.to_string()];
+                            for (a, pr) in args.iter().zip(&preps) {
+                                self.emit_arg_rep(a, *pr, ctx, f)?;
+                            }
+                            f.instruction(&Instruction::ReturnCall(idx));
+                            return Ok(());
+                        }
+                    }
+                }
+                self.emit_arg_rep(e, rep, ctx, f)
+            }
+            _ => self.emit_arg_rep(e, rep, ctx, f),
+        }
+    }
+
+    fn emit_if_tail_scalar(
+        &mut self,
+        branches: &[(TypedExpr, TypedExpr)],
+        otherwise: &TypedExpr,
+        rep: Rep,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match branches.split_first() {
+            None => self.emit_tail_scalar(otherwise, rep, ctx, f),
+            Some(((cond, then), rest)) => {
+                self.emit_bool(cond, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(rep_valtype(rep))));
+                self.emit_tail_scalar(then, rep, ctx, f)?;
+                f.instruction(&Instruction::Else);
+                self.emit_if_tail_scalar(rest, otherwise, rep, ctx, f)?;
+                f.instruction(&Instruction::End);
+                Ok(())
+            }
+        }
+    }
+
+    fn emit_branches_tail_scalar(
+        &mut self,
+        branches: &[(can::Pattern, TypedExpr)],
+        s: u32,
+        scrut_ty: Option<&can::Type>,
+        rep: Rep,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match branches.split_first() {
+            None => {
+                f.instruction(&Instruction::Unreachable);
+                Ok(())
+            }
+            Some(((pat, body), rest)) => {
+                self.emit_test(pat, s, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(rep_valtype(rep))));
+                let mark = ctx.scope.len();
+                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
+                self.emit_tail_scalar(body, rep, ctx, f)?;
+                ctx.scope.truncate(mark);
+                f.instruction(&Instruction::Else);
+                self.emit_branches_tail_scalar(rest, s, scrut_ty, rep, ctx, f)?;
+                f.instruction(&Instruction::End);
+                Ok(())
+            }
+        }
     }
 
     /// Emit an expression, leaving one `eqref` on the stack.
@@ -20265,6 +20675,9 @@ impl<'a> Codegen<'a> {
                     .lookup(name.as_str())
                     .ok_or_else(|| format!("wasmgc: unbound local `{name}`"))?;
                 f.instruction(&Instruction::LocalGet(idx));
+                // An unboxed (specialized-param) slot must be re-boxed to satisfy
+                // emit_expr's eqref contract.
+                self.box_rep(ctx.rep_of_local(idx), ctx, f);
             }
             TypedKind::Let(decls, body) => self.emit_let(decls, body, ctx, f)?,
             TypedKind::Global(name) => {
@@ -20294,6 +20707,63 @@ impl<'a> Codegen<'a> {
         if let TypedKind::Int(n) = &e.kind {
             f.instruction(&Instruction::I64Const(*n));
             return Ok(());
+        }
+        // A specialized-function parameter is already held as a raw i64.
+        if let TypedKind::Local(name) = &e.kind {
+            if let Some(idx) = ctx.lookup(name.as_str()) {
+                if ctx.rep_of_local(idx) == Rep::I64 {
+                    f.instruction(&Instruction::LocalGet(idx));
+                    return Ok(());
+                }
+            }
+        }
+        // Saturated call to a specialized i64-returning function → unboxed call,
+        // no box→unbox round-trip.
+        if let TypedKind::Call(func, args) = &e.kind {
+            if let TypedKind::Global(name) = &func.kind {
+                if let Some((preps, ret)) = self.spec_fns.get(&name.to_string()).cloned() {
+                    if ret == Rep::I64 && args.len() == preps.len() {
+                        self.try_emit_spec_call(func, args, ctx, f)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // Arithmetic sub-tree: emit it directly unboxed, so nested operations
+        // (`a*b - c*d`) never box each intermediate only to unbox it again. Only
+        // the outermost use (via `emit_expr`) boxes the final result.
+        if let TypedKind::Negate(x) = &e.kind {
+            if !is_float(&x.tipe) {
+                f.instruction(&Instruction::I64Const(0));
+                self.emit_i64(x, ctx, f)?;
+                f.instruction(&Instruction::I64Sub);
+                return Ok(());
+            }
+        }
+        if let TypedKind::Binop(op, _, _, l, r) = &e.kind {
+            match op.as_str() {
+                "+" | "-" | "*" | "//" => {
+                    self.emit_i64(l, ctx, f)?;
+                    self.emit_i64(r, ctx, f)?;
+                    f.instruction(&match op.as_str() {
+                        "+" => Instruction::I64Add,
+                        "-" => Instruction::I64Sub,
+                        "*" => Instruction::I64Mul,
+                        _ => Instruction::I64DivS,
+                    });
+                    return Ok(());
+                }
+                "^" => {
+                    self.emit_i64(l, ctx, f)?;
+                    f.instruction(&Instruction::F64ConvertI64S);
+                    self.emit_i64(r, ctx, f)?;
+                    f.instruction(&Instruction::F64ConvertI64S);
+                    f.instruction(&Instruction::Call(MATH_POW));
+                    f.instruction(&Instruction::I64TruncF64S);
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         self.emit_expr(e, ctx, f)?;
         // Int is i31ref (small) or boxed T_INT (large). Inline the read when a
@@ -20357,6 +20827,62 @@ impl<'a> Codegen<'a> {
 
     /// Emit a `Float`-typed expression, leaving an unboxed `f64`.
     fn emit_f64(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
+        // A specialized-function parameter is already held as a raw f64.
+        if let TypedKind::Local(name) = &e.kind {
+            if let Some(idx) = ctx.lookup(name.as_str()) {
+                if ctx.rep_of_local(idx) == Rep::F64 {
+                    f.instruction(&Instruction::LocalGet(idx));
+                    return Ok(());
+                }
+            }
+        }
+        // Saturated call to a specialized f64-returning function → unboxed call.
+        if let TypedKind::Call(func, args) = &e.kind {
+            if let TypedKind::Global(name) = &func.kind {
+                if let Some((preps, ret)) = self.spec_fns.get(&name.to_string()).cloned() {
+                    if ret == Rep::F64 && args.len() == preps.len() {
+                        self.try_emit_spec_call(func, args, ctx, f)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // Literal / arithmetic sub-tree: emit directly unboxed. A `T_FLOAT` is
+        // otherwise allocated for every intermediate (`a*b - c*d` = 3 allocs)
+        // only to be unboxed immediately. Recursing keeps the whole tree in f64
+        // registers; only the outermost use (via `emit_expr`) boxes the result.
+        match &e.kind {
+            TypedKind::Float(x) => {
+                f.instruction(&Instruction::F64Const((*x).into()));
+                return Ok(());
+            }
+            TypedKind::Negate(x) if is_float(&x.tipe) => {
+                self.emit_f64(x, ctx, f)?;
+                f.instruction(&Instruction::F64Neg);
+                return Ok(());
+            }
+            TypedKind::Binop(op, _, _, l, r) if is_float(&l.tipe) => match op.as_str() {
+                "+" | "-" | "*" | "/" => {
+                    self.emit_f64(l, ctx, f)?;
+                    self.emit_f64(r, ctx, f)?;
+                    f.instruction(&match op.as_str() {
+                        "+" => Instruction::F64Add,
+                        "-" => Instruction::F64Sub,
+                        "*" => Instruction::F64Mul,
+                        _ => Instruction::F64Div,
+                    });
+                    return Ok(());
+                }
+                "^" => {
+                    self.emit_f64(l, ctx, f)?;
+                    self.emit_f64(r, ctx, f)?;
+                    f.instruction(&Instruction::Call(MATH_POW));
+                    return Ok(());
+                }
+                _ => {}
+            },
+            _ => {}
+        }
         self.emit_expr(e, ctx, f)?;
         f.instruction(&cast_to(T_FLOAT));
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
@@ -20835,6 +21361,12 @@ impl<'a> Codegen<'a> {
             }
         }
         if let TypedKind::Global(name) = &func.kind {
+            // Specialized (unboxed scalar ABI) callee: emit args unboxed, then
+            // box the result back to eqref for this (eqref) context.
+            if let Some(ret) = self.try_emit_spec_call(func, args, ctx, f)? {
+                self.box_rep(ret, ctx, f);
+                return Ok(());
+            }
             if let Some(&idx) = self.func_index.get(&name.to_string()) {
                 let arity = self.func_arity[&name.to_string()] as usize;
                 if args.len() == arity {
@@ -21024,6 +21556,26 @@ impl<'a> Codegen<'a> {
             return self.emit_call(func, args, ctx, f);
         }
         if let TypedKind::Global(name) = &func.kind {
+            // Specialized callee in an eqref-return tail position. If it returns
+            // eqref too, `return_call` is valid (result types match) — this keeps
+            // TCO for eqref-returning specialized functions (e.g. a scalar-param
+            // list/dict builder recursing to great depth). If it returns a scalar
+            // the rep can't cross the boundary, so emit a boxed non-tail call.
+            if let Some((preps, ret)) = self.spec_fns.get(&name.to_string()).cloned() {
+                if args.len() == preps.len() {
+                    let idx = self.func_index[&name.to_string()];
+                    for (a, pr) in args.iter().zip(&preps) {
+                        self.emit_arg_rep(a, *pr, ctx, f)?;
+                    }
+                    if ret == Rep::Eqref {
+                        f.instruction(&Instruction::ReturnCall(idx));
+                    } else {
+                        f.instruction(&Instruction::Call(idx));
+                        self.box_rep(ret, ctx, f);
+                    }
+                    return Ok(());
+                }
+            }
             if let Some(&idx) = self.func_index.get(&name.to_string()) {
                 let arity = self.func_arity[&name.to_string()] as usize;
                 if args.len() == arity {
@@ -23783,6 +24335,11 @@ struct FnCtx {
     scratch_i64: u32,
     /// Recursive local functions in scope for self-calls (see `SelfFn`).
     self_fns: Vec<(String, SelfFn)>,
+    /// Unboxed representation of a local slot, when it isn't the default
+    /// `Eqref`. Only specialized-function parameters get an `I64`/`F64` entry;
+    /// slots are never reused, so stale entries after `scope.truncate` are
+    /// harmless. Absent = `Eqref`.
+    local_rep: HashMap<u32, Rep>,
 }
 
 impl FnCtx {
@@ -23793,10 +24350,14 @@ impl FnCtx {
             scratch_eqref: u32::MAX,
             scratch_i64: u32::MAX,
             self_fns: Vec::new(),
+            local_rep: HashMap::new(),
         }
     }
     fn lookup(&self, name: &str) -> Option<u32> {
         self.scope.iter().rev().find(|(n, _)| n == name).map(|(_, i)| *i)
+    }
+    fn rep_of_local(&self, idx: u32) -> Rep {
+        self.local_rep.get(&idx).copied().unwrap_or(Rep::Eqref)
     }
     fn lookup_self(&self, name: &str) -> Option<SelfFn> {
         self.self_fns.iter().rev().find(|(n, _)| n == name).map(|(_, s)| s.clone())
