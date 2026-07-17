@@ -173,9 +173,9 @@
   // Compute benchmarks: alm's three backends only, same Elm source, no DOM.
   const COMPUTE = [
     { op: "fib 35",                     "alm-js": 47.5, "wasm-gc": 24.2, native: 17.0 },
-    { op: "binary-trees d14×60",        "alm-js": 8.9,  "wasm-gc": 8.3,  native: 19.4 },
+    { op: "binary-trees d14×60",        "alm-js": 8.9,  "wasm-gc": 8.4,  native: 13.7 },
     { op: "list map/filter/fold 1M",    "alm-js": 33.7, "wasm-gc": 16.0, native: 6.0 },
-    { op: "Dict 100k build+get",        "alm-js": 31.0, "wasm-gc": 20.9, native: 50.5 },
+    { op: "Dict 100k build+get",        "alm-js": 31.0, "wasm-gc": 20.3, native: 44.7 },
     { op: "mandelbrot 400²",            "alm-js": 5.66, "wasm-gc": 5.40, native: 9.5 },
     { op: "sort 100k ints",             "alm-js": 24.4, "wasm-gc": 14.8, native: 19.9 },
   ];

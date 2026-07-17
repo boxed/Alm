@@ -405,17 +405,47 @@ fn alloc(value: Value) -> u64 {
     Box::into_raw(Box::new(value)) as u64
 }
 
-/// Raw 8-byte-aligned allocation for the typed backend's unboxed heap
-/// objects (tagged constructors, boxed recursive fields). Bump-allocated,
-/// never freed — like everything else here.
+/// Per-size-class free-list pools for the typed backend's constructor
+/// allocations. Like the `Value` cell pool above, each class is refilled in
+/// bulk with `GC_malloc_many` so the collector's allocation lock is taken once
+/// per chain instead of on every `alm_alloc` — plain `GC_malloc` per node
+/// dominated allocation-heavy native workloads (binary-trees, Dict building).
+/// Every carved block is a real, individually collectable GC object, so
+/// retention and conservative scanning are unchanged. Classes cover 8..=128
+/// bytes in 8-byte steps; larger requests fall through to `GC_malloc`.
+#[cfg(not(target_arch = "wasm32"))]
+const N_ALLOC_CLASSES: usize = 16;
+#[cfg(not(target_arch = "wasm32"))]
+static mut ALLOC_POOL: [*mut u8; N_ALLOC_CLASSES] = [std::ptr::null_mut(); N_ALLOC_CLASSES];
+
+/// Raw 8-byte-aligned allocation for the typed backend's unboxed heap objects
+/// (tagged constructors, boxed recursive fields), never individually freed —
+/// the collector reclaims.
 #[no_mangle]
 pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     // Fixed-width u64 (not usize) so the ABI matches the typed backend's i64
     // declaration on every target — usize is 32-bit on wasm32, which would
     // otherwise make the linked call invalid.
-    let size = size as usize;
-    let layout = Layout::from_size_align(size.max(1), 8).unwrap();
-    std::alloc::alloc(layout)
+    let size = (size as usize).max(1);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let aligned = (size + 7) & !7;
+        let class = aligned >> 3; // 8B -> 1 … 128B -> 16
+        if !*std::ptr::addr_of!(FLAG_NO_POOL) && class >= 1 && class <= N_ALLOC_CLASSES {
+            let slot = (std::ptr::addr_of_mut!(ALLOC_POOL) as *mut *mut u8).add(class - 1);
+            let mut p = *slot;
+            if p.is_null() {
+                gc_ensure_init();
+                p = GC_malloc_many(aligned);
+                if p.is_null() {
+                    return std::alloc::alloc(Layout::from_size_align(aligned, 8).unwrap());
+                }
+            }
+            *slot = *(p as *mut *mut u8); // pop: pool head = block's link word (next)
+            return p;
+        }
+    }
+    std::alloc::alloc(Layout::from_size_align(size, 8).unwrap())
 }
 
 // Typed list backing for the monomorphized backend: a header
@@ -4113,7 +4143,12 @@ unsafe fn tsize(n: u64) -> u32 {
 }
 unsafe fn tnode(key: u64, val: u64, left: u64, right: u64) -> u64 {
     let size = 1 + tsize(left) + tsize(right);
-    Box::into_raw(Box::new(TNode { key, val, size, left, right })) as u64
+    // Allocate through the pooled `alm_alloc` (amortized GC lock) rather than
+    // `Box::new` (plain GC_malloc, locked per node) — Dict/Set/Array building
+    // path-copies O(log n) nodes per update, so the per-node lock dominated.
+    let p = alm_alloc(core::mem::size_of::<TNode>() as u64) as *mut TNode;
+    p.write(TNode { key, val, size, left, right });
+    p as u64
 }
 unsafe fn t_single_l(k: u64, v: u64, l: u64, r: u64) -> u64 {
     let rr = tref(r);
