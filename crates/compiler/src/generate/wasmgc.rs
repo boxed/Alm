@@ -19530,6 +19530,63 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.task_resume_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
+        // expectStringResponse / expectBytesResponse (kind 4) [toMsg, toResult]:
+        // build the full Http.Response and let `toResult` map it to a Result,
+        // then apply toMsg and dispatch.
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // body = str_from_mem(ptr, len)  (a T_STR; also a valid Bytes)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Call(self.str_from_mem_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        // response = status==0 ? NetworkError_ : (2xx ? GoodStatus_ : BadStatus_)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(2)); // NetworkError_
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(200));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(300));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        f.instruction(&Instruction::I32Const(4)); // GoodStatus_
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(3)); // BadStatus_
+        f.instruction(&Instruction::End);
+        // Metadata [headers(null Dict), statusCode, statusText "", url ""]
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        push_str_const(&mut f, "");
+        push_str_const(&mut f, "");
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
+        f.instruction(&Instruction::LocalGet(8)); // body
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(9)); // response
+        // result = responseToResult(response)
+        ctor_argn(&mut f, 6, 1);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalSet(9));
+        // msg = toMsg(result); dispatch
+        ctor_arg0(&mut f, 6);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         ctor_arg0(&mut f, 6);
         f.instruction(&Instruction::LocalSet(7)); // toMsg
         // body = str_from_mem(ptr, len)
@@ -24816,6 +24873,17 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Const(3)); // EXPECT_BYTES
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 self.emit_expr(&args[1], ctx, f)?; // decoder
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // expectStringResponse toMsg toResult / expectBytesResponse (same
+            // shape; the T_STR body doubles as a Bytes value) → Expect tag 4
+            // [toMsg, responseToResult]. The handler builds the full
+            // Http.Response and lets `responseToResult` map it to a Result.
+            ("Http", "expectStringResponse") | ("Http", "expectBytesResponse") => {
+                f.instruction(&Instruction::I32Const(4)); // EXPECT_RESPONSE
+                self.emit_expr(&args[0], ctx, f)?; // toMsg
+                self.emit_expr(&args[1], ctx, f)?; // responseToResult
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
