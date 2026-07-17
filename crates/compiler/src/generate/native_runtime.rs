@@ -112,6 +112,49 @@ unsafe fn mmtk_bump(size: usize) -> *mut u8 {
     }
 }
 
+// --- Custom Immix-lite allocator (ALM_GC=immix) ---
+//
+// A contiguous, lazily-paged mmap'd heap with an inlined bump allocator — no
+// C-ABI call and no per-object framework overhead, so it reaches the raw-bump
+// ceiling MMTk couldn't. The conservative mark-region collector is added on top
+// (object-start bitmap already reserved); until then it bump-only (leaks past
+// the heap max).
+#[cfg(not(target_arch = "wasm32"))]
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+}
+#[cfg(not(target_arch = "wasm32"))]
+static mut FLAG_IMMIX: bool = false;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_CUR: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+static mut IMMIX_END: usize = 0;
+#[cfg(not(target_arch = "wasm32"))]
+const IMMIX_HEAP_MAX: usize = 4 << 30;
+
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn immix_init() {
+    const PROT_RW: i32 = 0x1 | 0x2; // PROT_READ | PROT_WRITE
+    const MAP_PA: i32 = 0x1000 | 0x0002; // MAP_ANON | MAP_PRIVATE (macOS)
+    let base = mmap(std::ptr::null_mut(), IMMIX_HEAP_MAX, PROT_RW, MAP_PA, -1, 0);
+    assert!(base as isize != -1, "immix: mmap failed");
+    IMMIX_CUR = base as usize;
+    IMMIX_END = base as usize + IMMIX_HEAP_MAX;
+}
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+unsafe fn immix_alloc(size: usize) -> *mut u8 {
+    let cur = *std::ptr::addr_of!(IMMIX_CUR);
+    let aligned = (cur + 7) & !7;
+    let new = aligned + size;
+    if new <= *std::ptr::addr_of!(IMMIX_END) {
+        *std::ptr::addr_of_mut!(IMMIX_CUR) = new;
+        aligned as *mut u8
+    } else {
+        std::process::abort(); // out of heap (collector will reclaim instead)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 static mut GC_READY: bool = false;
 
@@ -126,6 +169,10 @@ unsafe fn gc_ensure_init() {
         FLAG_ARG_CHECK = std::env::var("ALM_ARG_CHECK").is_ok();
         FLAG_NO_POOL = std::env::var("ALM_NO_POOL").is_ok();
         FLAG_MMTK = std::env::var("ALM_GC").as_deref() == Ok("mmtk");
+        FLAG_IMMIX = std::env::var("ALM_GC").as_deref() == Ok("immix");
+        if FLAG_IMMIX {
+            immix_init();
+        }
         GC_init();
         GC_allow_register_threads();
         // MMTk allocates the Elm heap (constructors / tnodes / Value cells) when
@@ -429,6 +476,11 @@ static mut FLAG_NO_POOL: bool = false;
 fn alloc(value: Value) -> u64 {
     unsafe {
         gc_ensure_init();
+        if *std::ptr::addr_of!(FLAG_IMMIX) {
+            let p = immix_alloc(std::mem::size_of::<Value>());
+            std::ptr::write(p as *mut Value, value);
+            return p as u64;
+        }
         if *std::ptr::addr_of!(FLAG_MMTK) {
             let p = mmtk_bump(std::mem::size_of::<Value>());
             std::ptr::write(p as *mut Value, value);
@@ -483,7 +535,10 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     let size = (size as usize).max(1);
     #[cfg(not(target_arch = "wasm32"))]
     {
-        gc_ensure_init(); // cheap after first; latches FLAG_MMTK and inits MMTk
+        gc_ensure_init(); // cheap after first; latches FLAG_MMTK/FLAG_IMMIX + inits
+        if *std::ptr::addr_of!(FLAG_IMMIX) {
+            return immix_alloc(size);
+        }
         if *std::ptr::addr_of!(FLAG_MMTK) {
             return mmtk_bump(size);
         }
