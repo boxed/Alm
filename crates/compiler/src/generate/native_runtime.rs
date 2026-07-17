@@ -1800,6 +1800,12 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
 
 #[inline]
 unsafe fn value_cmp(a: u64, b: u64) -> i32 {
+    // Two tagged ints: compare directly as i64 — no f64 round-trip (which also
+    // lost precision past 2^53). The hottest comparison (Dict/Set/sort keys).
+    if is_int(a) && is_int(b) {
+        let (x, y) = (int_val(a), int_val(b));
+        return (x > y) as i32 - (x < y) as i32;
+    }
     if is_num(a) && is_num(b) {
         let (x, y) = (num(a), num(b));
         return if x < y {
@@ -4198,12 +4204,23 @@ unsafe fn tbalance(k: u64, v: u64, l: u64, r: u64) -> u64 {
         tnode(k, v, l, r)
     }
 }
+/// Key comparison for the ordered-collection trees, with an inlined fast path
+/// for two tagged ints (a direct i64 compare) so the hot Dict/Set/Array loops
+/// avoid a call into the large general `value_cmp` per node.
+#[inline]
+unsafe fn key_cmp(a: u64, b: u64) -> i32 {
+    if is_int(a) && is_int(b) {
+        let (x, y) = (int_val(a), int_val(b));
+        return (x > y) as i32 - (x < y) as i32;
+    }
+    value_cmp(a, b)
+}
 unsafe fn tinsert(n: u64, k: u64, v: u64) -> u64 {
     if n == 0 {
         return tnode(k, v, 0, 0);
     }
     let nd = tref(n);
-    match value_cmp(k, nd.key) {
+    match key_cmp(k, nd.key) {
         c if c < 0 => tbalance(nd.key, nd.val, tinsert(nd.left, k, v), nd.right),
         c if c > 0 => tbalance(nd.key, nd.val, nd.left, tinsert(nd.right, k, v)),
         _ => tnode(k, v, nd.left, nd.right),
@@ -4213,7 +4230,7 @@ unsafe fn tfind(n: u64, k: u64) -> Option<u64> {
     let mut cur = n;
     while cur != 0 {
         let nd = tref(cur);
-        match value_cmp(k, nd.key) {
+        match key_cmp(k, nd.key) {
             c if c < 0 => cur = nd.left,
             c if c > 0 => cur = nd.right,
             _ => return Some(nd.val),
@@ -4254,7 +4271,7 @@ unsafe fn tremove(n: u64, k: u64) -> u64 {
         return 0;
     }
     let nd = tref(n);
-    match value_cmp(k, nd.key) {
+    match key_cmp(k, nd.key) {
         c if c < 0 => tbalance(nd.key, nd.val, tremove(nd.left, k), nd.right),
         c if c > 0 => tbalance(nd.key, nd.val, nd.left, tremove(nd.right, k)),
         _ => t_glue(nd.left, nd.right),
