@@ -4955,6 +4955,24 @@ impl<'a> Codegen<'a> {
                 ("EQ".into(), 1, vec![]),
                 ("GT".into(), 2, vec![]),
             ]),
+            // Json.Decode.Error (elm/json): a real recursive union whose ctors
+            // aren't in the registry. Decl order = Field/Index/OneOf/Failure
+            // (matches ctor.index). Failure carries a Json Value (→ <internals>).
+            "Error" if home == "Json.Decode" => {
+                use crate::data::Name;
+                let err = can::Type::Type(Name::from("Json.Decode"), Name::from("Error"), vec![]);
+                let string = can::Type::Type(Name::from("String"), Name::from("String"), vec![]);
+                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), vec![]);
+                let value = can::Type::Type(Name::from("Json.Encode"), Name::from("Value"), vec![]);
+                let list_err =
+                    can::Type::Type(Name::from("List"), Name::from("List"), vec![err.clone()]);
+                Some(vec![
+                    ("Field".into(), 0, vec![string.clone(), err.clone()]),
+                    ("Index".into(), 1, vec![int, err]),
+                    ("OneOf".into(), 2, vec![list_err]),
+                    ("Failure".into(), 3, vec![string, value]),
+                ])
+            }
             _ => None,
         }
     }
