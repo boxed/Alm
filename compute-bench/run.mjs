@@ -1,7 +1,10 @@
 // Compute-benchmark harness. For each workload:
 //   * alm (JS)      — call the exported `bench(size)` in-process, JIT-warmed
 //   * alm (wasm-gc) — call `main_int()` on the instantiated module, warmed
-//   * alm (native)  — spawn the AOT binary (min wall-time; incl ~1ms startup)
+//   * alm (native)  — spawn the AOT binary (min wall-time), then subtract the
+//                     measured startup floor (a noop binary) so the figure is
+//                     COMPUTE only — matching how JS/wasm are timed (warm,
+//                     in-process, no process startup).
 // All three run the SAME Main.elm. Correctness is checked (all agree) before
 // timing. Timing = median of TIMED runs after WARMUP runs.
 import fs from "node:fs";
@@ -70,6 +73,12 @@ function timeNative(bin, runs) {
   return { ms: best, out };
 }
 
+// Startup floor: wall-time of a no-work native binary (dyld + GC init +
+// worker-thread spawn). Subtracted from each workload's native time so the
+// reported figure is compute only, comparable to the warm in-process JS/wasm
+// numbers. Roughly constant across these similarly-sized binaries.
+const startupFloor = timeNative(path.join(build, "Noop.native"), NATIVE_RUNS).ms;
+
 const results = [];
 for (const w of WORKLOADS) {
   const js = require(path.join(build, w.module + ".js"))[w.module];
@@ -89,7 +98,9 @@ for (const w of WORKLOADS) {
 
   const jsMs = timeCalls(jsBench, WARMUP, TIMED);
   const wasmMs = timeCalls(wasmMain, WARMUP, TIMED);
-  results.push({ name: w.name, js: jsMs, wasm: wasmMs, native: native.ms });
+  // Subtract the fixed process-startup floor: report native COMPUTE only.
+  const nativeMs = Math.max(0, native.ms - startupFloor);
+  results.push({ name: w.name, js: jsMs, wasm: wasmMs, native: nativeMs });
 }
 
 const pad = (s, n) => String(s).padEnd(n);
@@ -105,4 +116,8 @@ for (const r of results) {
   );
 }
 fs.writeFileSync(path.join(dir, "results.json"), JSON.stringify(results, null, 2));
-console.log("\nwrote results.json  (ms, lower is better; median of " + TIMED + " timed after " + WARMUP + " warmup; native = min of " + NATIVE_RUNS + ")");
+console.log(
+  "\nwrote results.json  (ms, lower is better; median of " + TIMED + " timed after " +
+  WARMUP + " warmup; native = min of " + NATIVE_RUNS + " minus a " +
+  startupFloor.toFixed(2) + "ms startup floor)"
+);
