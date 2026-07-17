@@ -537,11 +537,12 @@ fn list_elem_type(tipe: Option<&can::Type>) -> Option<&can::Type> {
     }
 }
 
-/// Whether `List Float` should use the unboxed `T_LISTF` (f64) backing rather
-/// than the uniform boxed eqref backing. Behind a flag while consumer coverage
-/// is completed; the fused combinator loops honor it today.
+/// Whether `List Float` uses the unboxed `T_LISTF` (f64) backing rather than
+/// the uniform boxed eqref backing. Now the DEFAULT; `ALM_BOX_FLOATLIST=1` is a
+/// kill-switch back to the boxed rep (the whole eqref path is retained behind
+/// it) pending broader registry-conformance validation.
 fn unbox_floatlist() -> bool {
-    std::env::var_os("ALM_UNBOX_FLOATLIST").is_some()
+    std::env::var_os("ALM_BOX_FLOATLIST").is_none()
 }
 
 /// Backing element kind of a list type: `F64` for an unboxed `List Float`
