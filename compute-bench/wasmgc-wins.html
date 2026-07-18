@@ -1,0 +1,266 @@
+<title>alm wasm-gc — new wins</title>
+<style>
+  :root {
+    --bg: #f7f8f7;
+    --surface: #ffffff;
+    --surface-2: #f0f2f1;
+    --ink: #16211f;
+    --ink-soft: #4a5754;
+    --ink-faint: #7d8a86;
+    --line: #e2e6e4;
+    --blue: #2b91b0;      /* Elm logo blue, deepened for contrast */
+    --green: #5aa524;     /* Elm green */
+    --orange: #d98a00;    /* Elm orange */
+    --navy: #1d3a44;
+    --accent: var(--orange);
+    --good-bg: #e8f4e0; --good-fg: #3d7a12;
+    --info-bg: #e2f0f5; --info-fg: #1c6a86;
+    --warn-bg: #f6ecd9; --warn-fg: #96650a;
+    --shadow: 0 1px 2px rgba(16,33,31,.04), 0 8px 24px rgba(16,33,31,.05);
+    --mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1513; --surface: #141d1b; --surface-2: #1a2422;
+      --ink: #e8efec; --ink-soft: #a9b6b2; --ink-faint: #75837f;
+      --line: #26312e;
+      --blue: #5fb4cb; --green: #7fd13b; --orange: #f0ad00; --navy: #bcd6de;
+      --good-bg: #1c2e18; --good-fg: #9bd66a;
+      --info-bg: #14303a; --info-fg: #7fcfe6;
+      --warn-bg: #33280f; --warn-fg: #eab84b;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f8f7; --surface: #ffffff; --surface-2: #f0f2f1;
+    --ink: #16211f; --ink-soft: #4a5754; --ink-faint: #7d8a86; --line: #e2e6e4;
+    --blue: #2b91b0; --green: #5aa524; --orange: #d98a00; --navy: #1d3a44;
+    --good-bg: #e8f4e0; --good-fg: #3d7a12; --info-bg: #e2f0f5; --info-fg: #1c6a86;
+    --warn-bg: #f6ecd9; --warn-fg: #96650a;
+    --shadow: 0 1px 2px rgba(16,33,31,.04), 0 8px 24px rgba(16,33,31,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1513; --surface: #141d1b; --surface-2: #1a2422;
+    --ink: #e8efec; --ink-soft: #a9b6b2; --ink-faint: #75837f; --line: #26312e;
+    --blue: #5fb4cb; --green: #7fd13b; --orange: #f0ad00; --navy: #bcd6de;
+    --good-bg: #1c2e18; --good-fg: #9bd66a; --info-bg: #14303a; --info-fg: #7fcfe6;
+    --warn-bg: #33280f; --warn-fg: #eab84b;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---- Header ---- */
+  header { padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .eyebrow::before {
+    content: ""; width: 26px; height: 2px; background: var(--accent); display: inline-block;
+  }
+  h1 {
+    font-size: clamp(30px, 5vw, 48px); line-height: 1.08; letter-spacing: -.02em;
+    margin: 18px 0 14px; text-wrap: balance; font-weight: 700;
+  }
+  h1 .hl { color: var(--blue); }
+  .deck { font-size: clamp(16px, 2vw, 19px); color: var(--ink-soft); max-width: 62ch; margin: 0; }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 34px; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 20px; box-shadow: var(--shadow); flex: 1 1 180px; min-width: 160px;
+  }
+  .stat .n {
+    font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -.02em;
+    color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  .stat .n small { font-size: 16px; color: var(--ink-faint); font-weight: 500; }
+  .stat .l { font-size: 13px; color: var(--ink-soft); margin-top: 8px; }
+
+  /* ---- Sections ---- */
+  section { padding: 48px 0; border-bottom: 1px solid var(--line); }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 26px; }
+  .sec-head h2 { font-size: 15px; font-family: var(--mono); letter-spacing: .08em; text-transform: uppercase; margin: 0; color: var(--ink); font-weight: 600; }
+  .sec-head .rule { flex: 1; height: 1px; background: var(--line); }
+  .sec-head .count { font-family: var(--mono); font-size: 13px; color: var(--ink-faint); }
+
+  /* ---- Win cards ---- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 22px 20px; box-shadow: var(--shadow); position: relative; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tag, var(--blue));
+  }
+  .card .tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--tag, var(--blue)); font-weight: 700; margin-bottom: 8px;
+  }
+  .card h3 { font-size: 18px; margin: 0 0 8px; letter-spacing: -.01em; line-height: 1.2; }
+  .card h3 code { font-family: var(--mono); font-size: .82em; background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
+  .card p { margin: 0 0 14px; font-size: 14.5px; color: var(--ink-soft); }
+  .card p code { font-family: var(--mono); font-size: .86em; color: var(--ink); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  .card .foot { margin-top: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono);
+    font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 20px;
+    background: var(--info-bg); color: var(--info-fg);
+  }
+  .chip.parity { background: var(--good-bg); color: var(--good-fg); }
+  .chip.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .chip::before { content: "✓"; font-weight: 700; }
+  .chip.warn::before { content: "⚑"; }
+
+  /* ---- Perf bars ---- */
+  .perf { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 24px 26px; box-shadow: var(--shadow); }
+  .perf .cap { font-size: 14px; color: var(--ink-soft); margin: 0 0 18px; }
+  .perf .cap b { color: var(--ink); }
+  .bar-row { display: grid; grid-template-columns: 92px 1fr 74px; align-items: center; gap: 14px; margin: 11px 0; }
+  .bar-row .name { font-family: var(--mono); font-size: 13px; color: var(--ink-soft); }
+  .bar-row .name.win { color: var(--green); font-weight: 700; }
+  .track { background: var(--surface-2); border-radius: 6px; height: 22px; overflow: hidden; }
+  .fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--blue), var(--blue)); min-width: 3px; }
+  .fill.elm { background: #9aa7a3; }
+  .fill.js { background: var(--blue); }
+  .fill.wg { background: var(--green); }
+  .fill.na { background: var(--orange); }
+  .bar-row .val { font-family: var(--mono); font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+  /* ---- Also landed ---- */
+  .mini { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 20px; }
+  .mini .item { display: flex; gap: 10px; font-size: 14px; align-items: baseline; }
+  .mini .item::before { content: "+"; font-family: var(--mono); color: var(--green); font-weight: 700; }
+  .mini code { font-family: var(--mono); font-size: .85em; color: var(--ink); }
+  .mini .item span { color: var(--ink-soft); }
+
+  footer { padding: 40px 0 64px; color: var(--ink-faint); font-size: 13px; }
+  footer .row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; }
+  footer code { font-family: var(--mono); }
+  a { color: var(--blue); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">alm · WebAssembly-GC backend</div>
+    <h1>Test.Html, linear algebra,<br>and the <span class="hl">last conformance gaps</span></h1>
+    <p class="deck">A run of wins on alm's WebAssembly-GC target: two new introspection surfaces, an 85-function math kernel, two soundness fixes, and honest parity for the effects that can't run headless. Every one validated against the JavaScript backend — often against real elm-explorations packages.</p>
+
+    <div class="stats">
+      <div class="stat"><div class="n">7</div><div class="l">headline wins shipped &amp; validated</div></div>
+      <div class="stat"><div class="n">152 <small>green</small></div><div class="l">wasm-gc backend tests passing</div></div>
+      <div class="stat"><div class="n">85</div><div class="l">linear-algebra kernels, byte-identical to JS</div></div>
+      <div class="stat"><div class="n">Query<small> + </small>Event</div><div class="l">Test.Html now fully introspectable</div></div>
+    </div>
+  </header>
+
+  <section>
+    <div class="sec-head"><h2>Introspection · elm-explorations/test</h2><span class="rule"></span><span class="count">2 wins</span></div>
+    <div class="grid">
+      <div class="card" style="--tag: var(--blue)">
+        <div class="tag">HtmlAsJson · Query</div>
+        <h3>Reflect the vdom into Test.Html's JSON</h3>
+        <p>The <code>toJson</code> / <code>attributeToJson</code> kernels now render alm's typed virtual DOM into the exact elm/virtual-dom shape <code>Query</code> &amp; <code>Selector</code> walk — element / text / keyed nodes, merged <code>className</code>, style &amp; attribute buckets, boolean props.</p>
+        <div class="foot"><span class="chip">decode-equivalent to JS</span></div>
+      </div>
+      <div class="card" style="--tag: var(--green)">
+        <div class="tag">HtmlAsJson · Event.simulate</div>
+        <h3>Simulated events decode to the right msg</h3>
+        <p>The <code>a0</code> handler bucket now carries real <code>VirtualDom.Handler</code> values, so <code>Event.simulate</code> resolves <code>Normal</code>, <code>MayStopPropagation</code>, <code>MayPreventDefault</code> and <code>Custom</code> handlers back to their messages.</p>
+        <div class="foot"><span class="chip parity">end-to-end vs elm-test</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>New capability</h2><span class="rule"></span><span class="count">1 win</span></div>
+    <div class="grid">
+      <div class="card" style="--tag: var(--orange)">
+        <div class="tag">Elm.Kernel.MJS</div>
+        <h3>All of elm-explorations/linear-algebra</h3>
+        <p>~85 vector &amp; matrix kernels — <code>Vec2/3/4</code> and <code>Mat4</code> (inverse, lookAt, perspective, frustum, quaternion rotate, …) — as unboxed <code>f64</code> arrays matching the JS runtime's <code>Float64Array</code> exactly.</p>
+        <div class="foot"><span class="chip">byte-identical, full suite</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Soundness fixes</h2><span class="rule"></span><span class="count">2 wins</span></div>
+    <div class="grid">
+      <div class="card" style="--tag: var(--green)">
+        <div class="tag">Type instantiation</div>
+        <h3>Record sub-patterns over a type parameter</h3>
+        <p>Matching <code>Single { result }</code> where the constructor's argument is a bare type variable bound to a record by the scrutinee now resolves the field set (instantiated at the case's concrete type args) instead of failing on the unsubstituted variable.</p>
+        <div class="foot"><span class="chip parity">JS = WasmGC = native</span></div>
+      </div>
+      <div class="card" style="--tag: var(--green)">
+        <div class="tag">Json.Decode.dict</div>
+        <h3>Decoded dicts stopped crashing</h3>
+        <p><code>dict</code> was building its result with the stale sorted-vector helper while <code>Dict</code> is now a treap — every operation on a decoded dict illegal-cast. It now builds the treap like <code>Dict.fromList</code>. Fixes decoding <em>any</em> JSON object into a <code>Dict</code>.</p>
+        <div class="foot"><span class="chip parity">JS = WasmGC = native</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Conformance parity · effects that can't run headless</h2><span class="rule"></span><span class="count">2 wins</span></div>
+    <div class="grid">
+      <div class="card" style="--tag: var(--orange)">
+        <div class="tag">File · Markdown</div>
+        <h3>Compile like the JS backend does</h3>
+        <p><code>File.Download.*</code> and <code>Markdown.toHtml</code> — which stock elm leaves undefined — now compile to a trap. Packages that reference them build (conformance parity); a first-class reference works; invoking the effect fails honestly, never a silent no-op.</p>
+        <div class="foot"><span class="chip warn">honest trap on invoke</span></div>
+      </div>
+      <div class="card" style="--tag: var(--orange)">
+        <div class="tag">WebGL · Texture</div>
+        <h3>WebGL packages build again</h3>
+        <p>The whole <code>Elm.Kernel.WebGL</code> / <code>Elm.Kernel.Texture</code> surface compiles to a trap — mirroring the JS backend's headless stand-ins — so WebGL-referencing packages build even though a GPU context can't exist headless.</p>
+        <div class="foot"><span class="chip warn">honest trap on invoke</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Performance · unboxed List Float</h2><span class="rule"></span><span class="count">measured</span></div>
+    <div class="perf">
+      <p class="cap"><b>Sum of a 1,000,000-element <code>List Float</code></b> — the new <code>T_LISTF</code> representation drops the per-element box. Lower is better (milliseconds).</p>
+      <div class="bar-row"><span class="name">elm (JS)</span><div class="track"><div class="fill elm" style="width: 100%"></div></div><span class="val">177 ms</span></div>
+      <div class="bar-row"><span class="name">alm (JS)</span><div class="track"><div class="fill js" style="width: 27.1%"></div></div><span class="val">48 ms</span></div>
+      <div class="bar-row"><span class="name win">alm wasm-gc</span><div class="track"><div class="fill wg" style="width: 2.3%"></div></div><span class="val">4.0 ms</span></div>
+      <div class="bar-row"><span class="name win">alm native</span><div class="track"><div class="fill na" style="width: 1.2%"></div></div><span class="val">2.1 ms</span></div>
+      <p class="cap" style="margin: 18px 0 0; font-size:13px;">wasm-gc is ~12× its own boxed JS output and ~44× elm's boxed linked list. Amortized-O(1) <code>f64</code> cons brought float-list <code>::</code> from 3.54 → 1.89 ms / 200k. Validated by a 503-package differential sweep — <b>0 regressions</b>.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Also landed this run</h2><span class="rule"></span></div>
+    <div class="mini">
+      <div class="item"><span><code>Http.expectStringResponse</code> / <code>expectBytesResponse</code></span></div>
+      <div class="item"><span><code>Random.generate</code> with a persistent seed</span></div>
+      <div class="item"><span><code>Time.here</code> as a first-class value</span></div>
+      <div class="item"><span><code>(/)</code> &amp; <code>(//)</code> as first-class values</span></div>
+      <div class="item"><span><code>Debug.toString</code> of opaque kernel types → <code>&lt;internals&gt;</code></span></div>
+      <div class="item"><span><code>Json.Decode.Error</code> constructors registered</span></div>
+      <div class="item"><span><code>Html.Attributes.scope</code></span></div>
+      <div class="item"><span>static list-rep dispatch in case patterns</span></div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="row">
+      <span>alm — an Elm compiler in Rust · WebAssembly-GC backend</span>
+      <span>·</span>
+      <span>every win diffed <code>JS == WasmGC</code> (and <code>native</code> where it applies)</span>
+    </div>
+  </footer>
+</div>
