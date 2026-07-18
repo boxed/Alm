@@ -26568,6 +26568,18 @@ impl<'a> Codegen<'a> {
                 }
                 f.instruction(&Instruction::Call(idx));
             }
+            // Effects with no faithful headless implementation. elm's own JS
+            // backend leaves these kernels undefined (a package referencing them
+            // compiles, then throws a `ReferenceError` only if the effect is
+            // actually run). Mirror that: compile to a trap so the package builds
+            // — matching the JS backend's conformance — while failing honestly (a
+            // wasm trap, not a silent no-op) if the effect is ever invoked.
+            //   - File.Download.{string,url,bytes}: needs a browser download.
+            //   - Markdown.toHtml{,With}: needs a CommonMark parser.
+            ("Elm.Kernel.File", "download" | "downloadUrl" | "downloadBytes")
+            | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith") => {
+                f.instruction(&Instruction::Unreachable);
+            }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
         }
         Ok(())

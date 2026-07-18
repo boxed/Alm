@@ -3552,3 +3552,28 @@ main =
 "#;
     assert_str_prog("ctor_record_subpat", src);
 }
+
+#[test]
+fn unimplemented_effect_kernels_compile_as_traps() {
+    // elm's own JS backend leaves File.Download / Markdown.toHtml kernels
+    // undefined: a package referencing them compiles, then throws only if the
+    // effect is actually run. WasmGC mirrors this — the kernels compile to a
+    // trap, so a first-class reference (never invoked) builds and runs fine,
+    // and only invoking the effect would trap. Here the references are held but
+    // not invoked, so the program runs normally.
+    let src = r#"module Test exposing (main)
+
+dl : String -> String -> String -> cmd
+dl = Elm.Kernel.File.download
+
+md : attrs -> String -> html
+md = Elm.Kernel.Markdown.toHtml
+
+refs : List ()
+refs = [ always () dl, always () md ]
+
+main : String
+main = String.fromInt (List.length refs)
+"#;
+    assert_str_prog_wasm_only("unimpl_effect_traps", src, "2");
+}
