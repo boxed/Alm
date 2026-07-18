@@ -498,6 +498,100 @@ fn cast_to(idx: u32) -> Instruction<'static> {
     Instruction::RefCastNonNull(HeapType::Concrete(idx))
 }
 
+// --- Elm.Kernel.MJS emission helpers (Vec/Mat = T_ARRF f64 arrays) ---
+/// push `a[i]` (f64) from an f64-array param/local.
+fn mjs_af(f: &mut Function, a: u32, i: i32) {
+    f.instruction(&Instruction::LocalGet(a));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_ARRF)));
+    f.instruction(&Instruction::I32Const(i));
+    f.instruction(&Instruction::ArrayGet(T_ARRF));
+}
+/// unbox a boxed-Float param → f64.
+fn mjs_scf(f: &mut Function, a: u32) {
+    f.instruction(&Instruction::LocalGet(a));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_FLOAT)));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+}
+/// record[i] (boxed Float) → f64.
+fn mjs_recf(f: &mut Function, r: u32, i: i32) {
+    f.instruction(&Instruction::LocalGet(r));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_ARR)));
+    f.instruction(&Instruction::I32Const(i));
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+    f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_FLOAT)));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+}
+fn mjs_arrf(f: &mut Function, n: u32) {
+    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARRF, array_size: n });
+}
+/// normalize the 3 f64 locals (a0,a1,a2) in place; `im` is a scratch f64 local.
+fn mjs_norm3(f: &mut Function, a0: u32, a1: u32, a2: u32, im: u32) {
+    use Instruction as I;
+    f.instruction(&I::F64Const(1.0.into()));
+    for a in [a0, a1, a2] { f.instruction(&I::LocalGet(a)); f.instruction(&I::LocalGet(a)); f.instruction(&I::F64Mul); }
+    f.instruction(&I::F64Add); f.instruction(&I::F64Add);
+    f.instruction(&I::F64Sqrt); f.instruction(&I::F64Div); f.instruction(&I::LocalSet(im));
+    for a in [a0, a1, a2] { f.instruction(&I::LocalGet(a)); f.instruction(&I::LocalGet(im)); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(a)); }
+}
+/// build a frustum matrix from six f64 local indices, push the T_ARRF[16].
+fn mjs_frustum(f: &mut Function, left: u32, right: u32, bottom: u32, top: u32, znear: u32, zfar: u32) {
+    use Instruction as I;
+    let g = |f: &mut Function, a: u32| { f.instruction(&I::LocalGet(a)); };
+    for i in 0..16 {
+        match i {
+            0 => { f.instruction(&I::F64Const(2.0.into())); g(f, znear); f.instruction(&I::F64Mul); g(f, right); g(f, left); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            5 => { f.instruction(&I::F64Const(2.0.into())); g(f, znear); f.instruction(&I::F64Mul); g(f, top); g(f, bottom); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            8 => { g(f, right); g(f, left); f.instruction(&I::F64Add); g(f, right); g(f, left); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            9 => { g(f, top); g(f, bottom); f.instruction(&I::F64Add); g(f, top); g(f, bottom); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            10 => { g(f, zfar); g(f, znear); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); g(f, zfar); g(f, znear); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            11 => { f.instruction(&I::F64Const((-1.0f64).into())); }
+            14 => { f.instruction(&I::F64Const((-2.0f64).into())); g(f, zfar); f.instruction(&I::F64Mul); g(f, znear); f.instruction(&I::F64Mul); g(f, zfar); g(f, znear); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            _ => { f.instruction(&I::F64Const(0.0.into())); }
+        };
+    }
+    mjs_arrf(f, 16);
+}
+/// build an ortho matrix from six f64 local indices, push the T_ARRF[16].
+fn mjs_ortho(f: &mut Function, left: u32, right: u32, bottom: u32, top: u32, znear: u32, zfar: u32) {
+    use Instruction as I;
+    let g = |f: &mut Function, a: u32| { f.instruction(&I::LocalGet(a)); };
+    for i in 0..16 {
+        match i {
+            0 => { f.instruction(&I::F64Const(2.0.into())); g(f, right); g(f, left); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            5 => { f.instruction(&I::F64Const(2.0.into())); g(f, top); g(f, bottom); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            10 => { f.instruction(&I::F64Const((-2.0f64).into())); g(f, zfar); g(f, znear); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            12 => { g(f, right); g(f, left); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); g(f, right); g(f, left); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            13 => { g(f, top); g(f, bottom); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); g(f, top); g(f, bottom); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            14 => { g(f, zfar); g(f, znear); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); g(f, zfar); g(f, znear); f.instruction(&I::F64Sub); f.instruction(&I::F64Div); }
+            15 => { f.instruction(&I::F64Const(1.0.into())); }
+            _ => { f.instruction(&I::F64Const(0.0.into())); }
+        };
+    }
+    mjs_arrf(f, 16);
+}
+/// Mat4.inverse cofactor table: for each of the 16 output slots, six signed
+/// `sign * m[i]*m[j]*m[k]` terms (ported verbatim from runtime.js `_MJS_m4x4inverse`).
+fn mjs_inverse_terms() -> Vec<Vec<(i32, i32, i32, i32)>> {
+    vec![
+        vec![(1, 5, 10, 15), (-1, 5, 11, 14), (-1, 9, 6, 15), (1, 9, 7, 14), (1, 13, 6, 11), (-1, 13, 7, 10)], // r0
+        vec![(-1, 1, 10, 15), (1, 1, 11, 14), (1, 9, 2, 15), (-1, 9, 3, 14), (-1, 13, 2, 11), (1, 13, 3, 10)], // r1
+        vec![(1, 1, 6, 15), (-1, 1, 7, 14), (-1, 5, 2, 15), (1, 5, 3, 14), (1, 13, 2, 7), (-1, 13, 3, 6)], // r2
+        vec![(-1, 1, 6, 11), (1, 1, 7, 10), (1, 5, 2, 11), (-1, 5, 3, 10), (-1, 9, 2, 7), (1, 9, 3, 6)], // r3
+        vec![(-1, 4, 10, 15), (1, 4, 11, 14), (1, 8, 6, 15), (-1, 8, 7, 14), (-1, 12, 6, 11), (1, 12, 7, 10)], // r4
+        vec![(1, 0, 10, 15), (-1, 0, 11, 14), (-1, 8, 2, 15), (1, 8, 3, 14), (1, 12, 2, 11), (-1, 12, 3, 10)], // r5
+        vec![(-1, 0, 6, 15), (1, 0, 7, 14), (1, 4, 2, 15), (-1, 4, 3, 14), (-1, 12, 2, 7), (1, 12, 3, 6)], // r6
+        vec![(1, 0, 6, 11), (-1, 0, 7, 10), (-1, 4, 2, 11), (1, 4, 3, 10), (1, 8, 2, 7), (-1, 8, 3, 6)], // r7
+        vec![(1, 4, 9, 15), (-1, 4, 11, 13), (-1, 8, 5, 15), (1, 8, 7, 13), (1, 12, 5, 11), (-1, 12, 7, 9)], // r8
+        vec![(-1, 0, 9, 15), (1, 0, 11, 13), (1, 8, 1, 15), (-1, 8, 3, 13), (-1, 12, 1, 11), (1, 12, 3, 9)], // r9
+        vec![(1, 0, 5, 15), (-1, 0, 7, 13), (-1, 4, 1, 15), (1, 4, 3, 13), (1, 12, 1, 7), (-1, 12, 3, 5)], // r10
+        vec![(-1, 0, 5, 11), (1, 0, 7, 9), (1, 4, 1, 11), (-1, 4, 3, 9), (-1, 8, 1, 7), (1, 8, 3, 5)], // r11
+        vec![(-1, 4, 9, 14), (1, 4, 10, 13), (1, 8, 5, 14), (-1, 8, 6, 13), (-1, 12, 5, 10), (1, 12, 6, 9)], // r12
+        vec![(1, 0, 9, 14), (-1, 0, 10, 13), (-1, 8, 1, 14), (1, 8, 2, 13), (1, 12, 1, 10), (-1, 12, 2, 9)], // r13
+        vec![(-1, 0, 5, 14), (1, 0, 6, 13), (1, 4, 1, 14), (-1, 4, 2, 13), (-1, 12, 1, 6), (1, 12, 2, 5)], // r14
+        vec![(1, 0, 5, 10), (-1, 0, 6, 9), (-1, 4, 1, 10), (1, 4, 2, 9), (1, 8, 1, 6), (-1, 8, 2, 5)], // r15
+    ]
+}
+
 /// Argument types of a builtin parametric constructor, derived from the matched
 /// value's type. `Just` on `Maybe t` → `[t]`; `Ok`/`Err` on `Result e a` →
 /// `[a]`/`[e]`. Lets a record sub-pattern inside `Just`/`Ok`/`Err` resolve its
@@ -1545,6 +1639,8 @@ struct Codegen<'a> {
     htmljson_node_idx: Option<u32>,
     htmljson_facts_idx: Option<u32>,
     htmljson_attr_idx: Option<u32>,
+    /// elm-explorations/linear-algebra `Elm.Kernel.MJS` synth fns, by name.
+    mjs_idx: HashMap<String, u32>,
     list_cons_idx: u32,
     list_map_idx: u32,
     list_foldl_idx: u32,
@@ -1810,6 +1906,7 @@ impl<'a> Codegen<'a> {
             htmljson_node_idx: None,
             htmljson_facts_idx: None,
             htmljson_attr_idx: None,
+            mjs_idx: HashMap::new(),
             list_cons_idx: 0,
             list_map_idx: 0,
             list_foldl_idx: 0,
@@ -4213,6 +4310,12 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
             f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
+        // elm-explorations/linear-algebra: Mat4.identity is a nullary matrix value.
+        if module == "Elm.Kernel.MJS" && name == "m4x4identity" {
+            let idx = self.mjs("m4x4identity").unwrap();
+            f.instruction(&Instruction::Call(idx));
             return Ok(());
         }
         // Json.Encode.null : a JSON Value with tag 0, no args.
@@ -23574,6 +23677,530 @@ impl<'a> Codegen<'a> {
         lidx
     }
 
+    /// elm-explorations/linear-algebra `Elm.Kernel.MJS`: pure vector/matrix math.
+    /// Vec2/3/4 and Mat4 are all `Float64Array` in the JS runtime → `T_ARRF`
+    /// (unboxed f64 array) here; scalars are boxed `Float` (`T_FLOAT`); records
+    /// are `T_ARR` of boxed floats (sorted field order); `Mat4.inverse` returns
+    /// `Maybe`. Ported verbatim from `runtime.js`, so f64 arithmetic matches the
+    /// JS backend exactly. Each function is lazily lifted + cached by name.
+    fn mjs(&mut self, name: &str) -> Option<u32> {
+        if let Some(&i) = self.mjs_idx.get(name) {
+            return Some(i);
+        }
+        // element of an f64-array param: a[i]
+        fn af(f: &mut Function, a: u32, i: i32) {
+            f.instruction(&Instruction::LocalGet(a));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_ARRF)));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARRF));
+        }
+        // unbox a boxed-Float param → f64
+        fn scf(f: &mut Function, a: u32) {
+            f.instruction(&Instruction::LocalGet(a));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_FLOAT)));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        }
+        // record[i] (boxed Float) → f64
+        fn recf(f: &mut Function, r: u32, i: i32) {
+            f.instruction(&Instruction::LocalGet(r));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::RefCastNonNull(HeapType::Concrete(T_FLOAT)));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        }
+        fn boxf(f: &mut Function) {
+            f.instruction(&Instruction::StructNew(T_FLOAT));
+        }
+        fn arrf(f: &mut Function, n: u32) {
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARRF, array_size: n });
+        }
+        use Instruction as I;
+
+        let arity: u32 = match name {
+            "m4x4identity" => 0,
+            "v2getX" | "v2getY" | "v2negate" | "v2length" | "v2lengthSquared"
+            | "v2normalize" | "v2toRecord" | "v2fromRecord" | "v3getX" | "v3getY" | "v3getZ"
+            | "v3negate" | "v3length" | "v3lengthSquared" | "v3normalize" | "v3toRecord"
+            | "v3fromRecord" | "v4getX" | "v4getY" | "v4getZ" | "v4getW" | "v4negate"
+            | "v4length" | "v4lengthSquared" | "v4normalize" | "v4toRecord" | "v4fromRecord"
+            | "m4x4fromRecord" | "m4x4toRecord" | "m4x4inverse" | "m4x4inverseOrthonormal"
+            | "m4x4transpose" | "m4x4makeScale" | "m4x4makeTranslate" => 1,
+            "v2" => 2,
+            "v3" => 3,
+            "v4" => 4,
+            "v2setX" | "v2setY" | "v2add" | "v2sub" | "v2direction" | "v2distance"
+            | "v2distanceSquared" | "v2scale" | "v2dot" | "v3add" | "v3sub" | "v3direction"
+            | "v3distance" | "v3distanceSquared" | "v3scale" | "v3dot" | "v3cross" | "v3mul4x4"
+            | "v4add" | "v4sub" | "v4direction" | "v4distance" | "v4distanceSquared" | "v4scale"
+            | "v4dot" | "m4x4mul" | "m4x4mulAffine" | "m4x4makeRotate" | "m4x4scale"
+            | "m4x4translate" => 2,
+            "v3setX" | "v3setY" | "v3setZ" | "v4setX" | "v4setY" | "v4setZ" | "m4x4rotate"
+            | "m4x4makeScale3" | "m4x4makeTranslate3" | "m4x4makeLookAt" | "m4x4makeBasis" => 3,
+            "m4x4makePerspective" | "m4x4makeOrtho2D" | "m4x4scale3" | "m4x4translate3" => 4,
+            "m4x4makeFrustum" | "m4x4makeOrtho" => 6,
+            _ => return None,
+        };
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+        self.mjs_idx.insert(name.to_string(), lidx);
+
+        // Extra locals (beyond the `arity` eqref params) per function.
+        let locals: Vec<(u32, ValType)> = match name {
+            "v2direction" => vec![(3, ValType::F64)],
+            "v3direction" => vec![(4, ValType::F64)],
+            "v4direction" => vec![(5, ValType::F64)],
+            "v2distance" | "v2distanceSquared" => vec![(2, ValType::F64)],
+            "v3distance" | "v3distanceSquared" => vec![(3, ValType::F64)],
+            "v4distance" | "v4distanceSquared" => vec![(4, ValType::F64)],
+            "v2normalize" | "v3normalize" | "v4normalize" | "v3mul4x4" => vec![(1, ValType::F64)],
+            "m4x4makeRotate" => vec![(7, ValType::F64)],
+            "m4x4makePerspective" | "m4x4makeFrustum" | "m4x4makeOrtho" | "m4x4makeOrtho2D" => vec![(6, ValType::F64)],
+            "m4x4rotate" => vec![(22, ValType::F64)],
+            "m4x4makeLookAt" => vec![(21, ValType::F64)],
+            "m4x4inverse" => vec![(1, ref_to(T_ARRF)), (2, ValType::F64), (1, ValType::I32)],
+            _ => vec![],
+        };
+        let mut f = Function::new(locals);
+        // f64 scratch locals begin right after the eqref params.
+        let l = arity;
+
+        match name {
+            // ---- Vector constructors ----
+            "v2" => { scf(&mut f, 0); scf(&mut f, 1); arrf(&mut f, 2); }
+            "v3" => { scf(&mut f, 0); scf(&mut f, 1); scf(&mut f, 2); arrf(&mut f, 3); }
+            "v4" => { scf(&mut f, 0); scf(&mut f, 1); scf(&mut f, 2); scf(&mut f, 3); arrf(&mut f, 4); }
+            // ---- Getters (a[i] → boxed Float) ----
+            "v2getX" | "v3getX" | "v4getX" => { af(&mut f, 0, 0); boxf(&mut f); }
+            "v2getY" | "v3getY" | "v4getY" => { af(&mut f, 0, 1); boxf(&mut f); }
+            "v3getZ" | "v4getZ" => { af(&mut f, 0, 2); boxf(&mut f); }
+            "v4getW" => { af(&mut f, 0, 3); boxf(&mut f); }
+            // ---- Setters (scalar x, vector a) → copy with one slot replaced ----
+            "v2setX" => { scf(&mut f, 0); af(&mut f, 1, 1); arrf(&mut f, 2); }
+            "v2setY" => { af(&mut f, 1, 0); scf(&mut f, 0); arrf(&mut f, 2); }
+            "v3setX" => { scf(&mut f, 0); af(&mut f, 1, 1); af(&mut f, 1, 2); arrf(&mut f, 3); }
+            "v3setY" => { af(&mut f, 1, 0); scf(&mut f, 0); af(&mut f, 1, 2); arrf(&mut f, 3); }
+            "v3setZ" => { af(&mut f, 1, 0); af(&mut f, 1, 1); scf(&mut f, 0); arrf(&mut f, 3); }
+            "v4setX" => { scf(&mut f, 0); af(&mut f, 1, 1); af(&mut f, 1, 2); af(&mut f, 1, 3); arrf(&mut f, 4); }
+            "v4setY" => { af(&mut f, 1, 0); scf(&mut f, 0); af(&mut f, 1, 2); af(&mut f, 1, 3); arrf(&mut f, 4); }
+            "v4setZ" => { af(&mut f, 1, 0); af(&mut f, 1, 1); scf(&mut f, 0); af(&mut f, 1, 3); arrf(&mut f, 4); }
+            "v4setW" => { af(&mut f, 1, 0); af(&mut f, 1, 1); af(&mut f, 1, 2); scf(&mut f, 0); arrf(&mut f, 4); }
+            // ---- toRecord (build T_ARR of boxed floats, sorted field order) ----
+            // v2 {x,y}→[x,y]; v3 {x,y,z}→[x,y,z]; v4 {w,x,y,z}→[w,x,y,z].
+            "v2toRecord" => { for i in 0..2 { af(&mut f, 0, i); boxf(&mut f); } f.instruction(&I::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); }
+            "v3toRecord" => { for i in 0..3 { af(&mut f, 0, i); boxf(&mut f); } f.instruction(&I::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 }); }
+            "v4toRecord" => { for i in [3, 0, 1, 2] { af(&mut f, 0, i); boxf(&mut f); } f.instruction(&I::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 }); }
+            // ---- fromRecord (read sorted record slots → f64 vector) ----
+            "v2fromRecord" => { for i in 0..2 { recf(&mut f, 0, i); } arrf(&mut f, 2); }
+            "v3fromRecord" => { for i in 0..3 { recf(&mut f, 0, i); } arrf(&mut f, 3); }
+            // record {w,x,y,z} sorted [w,x,y,z]=idx[0,1,2,3]; vector order x,y,z,w.
+            "v4fromRecord" => { for i in [1, 2, 3, 0] { recf(&mut f, 0, i); } arrf(&mut f, 4); }
+            // ---- Elementwise add / sub / negate ----
+            "v2add" | "v3add" | "v4add" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(&mut f, 0, i); af(&mut f, 1, i); f.instruction(&I::F64Add); }
+                arrf(&mut f, d as u32);
+            }
+            "v2sub" | "v3sub" | "v4sub" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(&mut f, 0, i); af(&mut f, 1, i); f.instruction(&I::F64Sub); }
+                arrf(&mut f, d as u32);
+            }
+            "v2negate" | "v3negate" | "v4negate" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(&mut f, 0, i); f.instruction(&I::F64Neg); }
+                arrf(&mut f, d as u32);
+            }
+            // ---- scale (k, a) → a*k ----
+            "v2scale" | "v3scale" | "v4scale" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(&mut f, 1, i); scf(&mut f, 0); f.instruction(&I::F64Mul); }
+                arrf(&mut f, d as u32);
+            }
+            // ---- dot (→ boxed Float) ----
+            "v2dot" | "v3dot" | "v4dot" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d {
+                    af(&mut f, 0, i); af(&mut f, 1, i); f.instruction(&I::F64Mul);
+                    if i > 0 { f.instruction(&I::F64Add); }
+                }
+                boxf(&mut f);
+            }
+            // ---- lengthSquared / length (→ boxed Float) ----
+            "v2lengthSquared" | "v3lengthSquared" | "v4lengthSquared" | "v2length" | "v3length" | "v4length" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d {
+                    af(&mut f, 0, i); af(&mut f, 0, i); f.instruction(&I::F64Mul);
+                    if i > 0 { f.instruction(&I::F64Add); }
+                }
+                if name.ends_with("length") { f.instruction(&I::F64Sqrt); }
+                boxf(&mut f);
+            }
+            // ---- distance / distanceSquared (dx = a[i]-b[i] into locals) ----
+            "v2distance" | "v2distanceSquared" | "v3distance" | "v3distanceSquared"
+            | "v4distance" | "v4distanceSquared" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(&mut f, 0, i); af(&mut f, 1, i); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + i as u32)); }
+                for i in 0..d {
+                    f.instruction(&I::LocalGet(l + i as u32)); f.instruction(&I::LocalGet(l + i as u32)); f.instruction(&I::F64Mul);
+                    if i > 0 { f.instruction(&I::F64Add); }
+                }
+                if name.ends_with("distance") { f.instruction(&I::F64Sqrt); }
+                boxf(&mut f);
+            }
+            // ---- normalize: im = 1/len; a*im ----
+            "v2normalize" | "v3normalize" | "v4normalize" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                // im = 1.0 / sqrt(sum a[i]^2)  → local l
+                f.instruction(&I::F64Const(1.0.into()));
+                for i in 0..d { af(&mut f, 0, i); af(&mut f, 0, i); f.instruction(&I::F64Mul); if i > 0 { f.instruction(&I::F64Add); } }
+                f.instruction(&I::F64Sqrt);
+                f.instruction(&I::F64Div);
+                f.instruction(&I::LocalSet(l));
+                for i in 0..d { af(&mut f, 0, i); f.instruction(&I::LocalGet(l)); f.instruction(&I::F64Mul); }
+                arrf(&mut f, d as u32);
+            }
+            _ => { /* matrix + remaining vector ops emitted in mjs_more */ self.mjs_more(name, &mut f, arity); }
+        }
+        f.instruction(&I::End);
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, f);
+        Some(lidx)
+    }
+
+    /// Vector `direction`/`cross`/`mul4x4` and all Matrix4 ops (the cases too big
+    /// for the inline `mjs` match). `l = arity` is the first scratch-local index.
+    fn mjs_more(&mut self, name: &str, f: &mut Function, arity: u32) {
+        use Instruction as I;
+        let af = mjs_af;
+        let scf = mjs_scf;
+        let arrf = mjs_arrf;
+        let l = arity;
+        let k = |f: &mut Function, x: f64| { f.instruction(&I::F64Const(x.into())); };
+        // push m[16] result: `push16(f, |f,i| emit element i)`.
+        fn push16(f: &mut Function, mut emit: impl FnMut(&mut Function, i32)) {
+            for i in 0..16 { emit(f, i); }
+            mjs_arrf(f, 16);
+        }
+        match name {
+            // ---- direction: d = a-b; normalize ----
+            "v2direction" | "v3direction" | "v4direction" => {
+                let d = if name.starts_with("v2") { 2 } else if name.starts_with("v3") { 3 } else { 4 };
+                for i in 0..d { af(f, 0, i); af(f, 1, i); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + i as u32)); }
+                k(f, 1.0);
+                for i in 0..d { f.instruction(&I::LocalGet(l + i as u32)); f.instruction(&I::LocalGet(l + i as u32)); f.instruction(&I::F64Mul); if i > 0 { f.instruction(&I::F64Add); } }
+                f.instruction(&I::F64Sqrt);
+                f.instruction(&I::F64Div);
+                f.instruction(&I::LocalSet(l + d as u32)); // im
+                for i in 0..d { f.instruction(&I::LocalGet(l + i as u32)); f.instruction(&I::LocalGet(l + d as u32)); f.instruction(&I::F64Mul); }
+                arrf(f, d as u32);
+            }
+            // ---- v3cross ----
+            "v3cross" => {
+                af(f, 0, 1); af(f, 1, 2); f.instruction(&I::F64Mul); af(f, 0, 2); af(f, 1, 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub);
+                af(f, 0, 2); af(f, 1, 0); f.instruction(&I::F64Mul); af(f, 0, 0); af(f, 1, 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub);
+                af(f, 0, 0); af(f, 1, 1); f.instruction(&I::F64Mul); af(f, 0, 1); af(f, 1, 0); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub);
+                arrf(f, 3);
+            }
+            // ---- v3mul4x4 (m=0, v=1) ----
+            "v3mul4x4" => {
+                // w = v·(m3,m7,m11) + m15  → local l
+                af(f, 1, 0); af(f, 0, 3); f.instruction(&I::F64Mul);
+                af(f, 1, 1); af(f, 0, 7); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                af(f, 1, 2); af(f, 0, 11); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                af(f, 0, 15); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l));
+                for (c, t) in [(0, 12), (1, 13), (2, 14)] {
+                    af(f, 1, 0); af(f, 0, c); f.instruction(&I::F64Mul);
+                    af(f, 1, 1); af(f, 0, c + 4); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                    af(f, 1, 2); af(f, 0, c + 8); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                    af(f, 0, t); f.instruction(&I::F64Add);
+                    f.instruction(&I::LocalGet(l)); f.instruction(&I::F64Div);
+                }
+                arrf(f, 3);
+            }
+            // ---- m4x4identity ----
+            "m4x4identity" => {
+                let id = [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.];
+                push16(f, |f, i| k(f, id[i as usize]));
+            }
+            // ---- transpose / fromRecord / toRecord share the col↔row index map ----
+            "m4x4transpose" => {
+                let seq = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+                push16(f, |f, i| af(f, 0, seq[i as usize]));
+            }
+            "m4x4fromRecord" => {
+                let seq = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+                push16(f, |f, i| mjs_recf(f, 0, seq[i as usize]));
+            }
+            "m4x4toRecord" => {
+                let seq = [0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+                for i in 0..16 { af(f, 0, seq[i]); f.instruction(&I::StructNew(T_FLOAT)); }
+                f.instruction(&I::ArrayNewFixed { array_type_index: T_ARR, array_size: 16 });
+            }
+            // ---- mul: r[col*4+row] = Σ_k a[k*4+row]*b[col*4+k] ----
+            "m4x4mul" => {
+                push16(f, |f, idx| {
+                    let (col, row) = (idx / 4, idx % 4);
+                    for kk in 0..4 { af(f, 0, kk * 4 + row); af(f, 1, col * 4 + kk); f.instruction(&I::F64Mul); if kk > 0 { f.instruction(&I::F64Add); } }
+                });
+            }
+            "m4x4mulAffine" => {
+                push16(f, |f, idx| {
+                    let (col, row) = (idx / 4, idx % 4);
+                    if row == 3 {
+                        k(f, if col == 3 { 1.0 } else { 0.0 });
+                    } else {
+                        for kk in 0..3 { af(f, 0, kk * 4 + row); af(f, 1, col * 4 + kk); f.instruction(&I::F64Mul); if kk > 0 { f.instruction(&I::F64Add); } }
+                        if col == 3 { af(f, 0, 12 + row); f.instruction(&I::F64Add); }
+                    }
+                });
+            }
+            // ---- makeBasis: columns 0-2 are vx/vy/vz (rows 0-2), col3 = (0,0,0,1) ----
+            "m4x4makeBasis" => {
+                push16(f, |f, idx| {
+                    let (col, row) = (idx / 4, idx % 4);
+                    if col == 3 { k(f, if row == 3 { 1.0 } else { 0.0 }); }
+                    else if row == 3 { k(f, 0.0); }
+                    else { af(f, col as u32, row); }
+                });
+            }
+            // ---- makeScale3 / makeScale (diagonal) ----
+            "m4x4makeScale3" | "m4x4makeScale" => {
+                let sc = |f: &mut Function, d: i32| if name.ends_with("Scale3") { scf(f, d as u32) } else { af(f, 0, d) };
+                push16(f, |f, idx| match idx {
+                    0 => sc(f, 0), 5 => sc(f, 1), 10 => sc(f, 2), 15 => k(f, 1.0), _ => k(f, 0.0),
+                });
+            }
+            // ---- scale3 / scale (column scale of m) ----
+            "m4x4scale3" | "m4x4scale" => {
+                let is3 = name.ends_with("scale3");
+                let m = if is3 { 3 } else { 1 };
+                let comp = move |f: &mut Function, d: i32| if is3 { scf(f, d as u32) } else { af(f, 0, d) };
+                push16(f, |f, i| {
+                    af(f, m, i);
+                    match i { 0..=3 => { comp(f, 0); f.instruction(&I::F64Mul); }
+                              4..=7 => { comp(f, 1); f.instruction(&I::F64Mul); }
+                              8..=11 => { comp(f, 2); f.instruction(&I::F64Mul); }
+                              _ => {} }
+                });
+            }
+            // ---- makeTranslate3 / makeTranslate ----
+            "m4x4makeTranslate3" | "m4x4makeTranslate" => {
+                let tr = |f: &mut Function, d: i32| if name.ends_with("Translate3") { scf(f, d as u32) } else { af(f, 0, d) };
+                push16(f, |f, idx| match idx {
+                    0 | 5 | 10 | 15 => k(f, 1.0), 12 => tr(f, 0), 13 => tr(f, 1), 14 => tr(f, 2), _ => k(f, 0.0),
+                });
+            }
+            // ---- translate3 / translate ----
+            "m4x4translate3" | "m4x4translate" => {
+                let is3 = name.ends_with("translate3");
+                let m = if is3 { 3 } else { 1 };
+                let comp = move |f: &mut Function, d: i32| if is3 { scf(f, d as u32) } else { af(f, 0, d) };
+                push16(f, |f, i| {
+                    if i < 12 { af(f, m, i); }
+                    else {
+                        let row = i - 12;
+                        af(f, m, row); comp(f, 0); f.instruction(&I::F64Mul);
+                        af(f, m, 4 + row); comp(f, 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                        af(f, m, 8 + row); comp(f, 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                        af(f, m, 12 + row); f.instruction(&I::F64Add);
+                    }
+                });
+            }
+            // ---- makeFrustum(left,right,bottom,top,znear,zfar) ----
+            "m4x4makeFrustum" => {
+                for i in 0..6 { scf(f, i); f.instruction(&I::LocalSet(l + i)); }
+                mjs_frustum(f, l, l + 1, l + 2, l + 3, l + 4, l + 5);
+            }
+            "m4x4makePerspective" => {
+                // ymax=znear*tan(fovy*PI/360); ymin=-ymax; xmin=ymin*aspect; xmax=ymax*aspect
+                scf(f, 0); k(f, std::f64::consts::PI / 360.0); f.instruction(&I::F64Mul); f.instruction(&I::Call(MATH_SIN + 2)); scf(f, 2); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l)); // ymax
+                f.instruction(&I::LocalGet(l)); f.instruction(&I::F64Neg); f.instruction(&I::LocalSet(l + 1)); // ymin
+                f.instruction(&I::LocalGet(l + 1)); scf(f, 1); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 2)); // xmin
+                f.instruction(&I::LocalGet(l)); scf(f, 1); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 3)); // xmax
+                scf(f, 2); f.instruction(&I::LocalSet(l + 4)); // znear
+                scf(f, 3); f.instruction(&I::LocalSet(l + 5)); // zfar
+                // frustum(left=xmin=l+2, right=xmax=l+3, bottom=ymin=l+1, top=ymax=l, znear=l+4, zfar=l+5)
+                mjs_frustum(f, l + 2, l + 3, l + 1, l, l + 4, l + 5);
+            }
+            "m4x4makeOrtho" => {
+                for i in 0..6 { scf(f, i); f.instruction(&I::LocalSet(l + i)); }
+                mjs_ortho(f, l, l + 1, l + 2, l + 3, l + 4, l + 5);
+            }
+            "m4x4makeOrtho2D" => {
+                // left0,right1,bottom2,top3; znear=-1, zfar=1
+                for i in 0..4 { scf(f, i); f.instruction(&I::LocalSet(l + i)); }
+                k(f, -1.0); f.instruction(&I::LocalSet(l + 4));
+                k(f, 1.0); f.instruction(&I::LocalSet(l + 5));
+                mjs_ortho(f, l, l + 1, l + 2, l + 3, l + 4, l + 5);
+            }
+            // ---- makeRotate(angle, axis) ----
+            "m4x4makeRotate" => {
+                // im=1/len(axis); x,y,z; c=cos,c1=1-c,s=sin
+                k(f, 1.0);
+                af(f, 1, 0); af(f, 1, 0); f.instruction(&I::F64Mul);
+                af(f, 1, 1); af(f, 1, 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                af(f, 1, 2); af(f, 1, 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                f.instruction(&I::F64Sqrt); f.instruction(&I::F64Div); f.instruction(&I::LocalSet(l)); // im
+                for i in 0..3 { af(f, 1, i); f.instruction(&I::LocalGet(l)); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 1 + i as u32)); } // x,y,z
+                scf(f, 0); f.instruction(&I::Call(MATH_SIN + 1)); f.instruction(&I::LocalSet(l + 4)); // c=cos
+                k(f, 1.0); f.instruction(&I::LocalGet(l + 4)); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 5)); // c1
+                scf(f, 0); f.instruction(&I::Call(MATH_SIN)); f.instruction(&I::LocalSet(l + 6)); // s
+                let (x, y, z, c, c1, s) = (l + 1, l + 2, l + 3, l + 4, l + 5, l + 6);
+                let g = |f: &mut Function, a: u32| { f.instruction(&I::LocalGet(a)); };
+                push16(f, |f, idx| match idx {
+                    0 => { g(f, x); g(f, x); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); }
+                    1 => { g(f, y); g(f, x); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, z); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); }
+                    2 => { g(f, z); g(f, x); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, y); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); }
+                    4 => { g(f, x); g(f, y); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, z); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); }
+                    5 => { g(f, y); g(f, y); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); }
+                    6 => { g(f, y); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, x); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); }
+                    8 => { g(f, x); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, y); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); }
+                    9 => { g(f, y); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, x); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); }
+                    10 => { g(f, z); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); }
+                    15 => k(f, 1.0),
+                    _ => k(f, 0.0),
+                });
+            }
+            // ---- rotate(angle, axis, m) ----
+            "m4x4rotate" => {
+                k(f, 1.0);
+                af(f, 1, 0); af(f, 1, 0); f.instruction(&I::F64Mul);
+                af(f, 1, 1); af(f, 1, 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                af(f, 1, 2); af(f, 1, 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                f.instruction(&I::F64Sqrt); f.instruction(&I::F64Div); f.instruction(&I::LocalSet(l)); // im
+                for i in 0..3 { af(f, 1, i); f.instruction(&I::LocalGet(l)); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 1 + i as u32)); } // x,y,z
+                scf(f, 0); f.instruction(&I::Call(MATH_SIN + 1)); f.instruction(&I::LocalSet(l + 4)); // c
+                k(f, 1.0); f.instruction(&I::LocalGet(l + 4)); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 5)); // c1
+                scf(f, 0); f.instruction(&I::Call(MATH_SIN)); f.instruction(&I::LocalSet(l + 6)); // s
+                let (x, y, z, c1, s) = (l + 1, l + 2, l + 3, l + 5, l + 6);
+                let g = |f: &mut Function, a: u32| { f.instruction(&I::LocalGet(a)); };
+                // xs,ys,zs
+                for (o, v) in [(7u32, x), (8, y), (9, z)] { g(f, v); g(f, s); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + o)); }
+                // xyc1,xzc1,yzc1
+                g(f, x); g(f, y); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 10));
+                g(f, x); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 11));
+                g(f, y); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); f.instruction(&I::LocalSet(l + 12));
+                let (xs, ys, zs, xyc1, xzc1, yzc1) = (l + 7, l + 8, l + 9, l + 10, l + 11, l + 12);
+                let (c, cc) = (l + 4, l + 5);
+                let _ = cc;
+                // t11..t33 (l+13..l+21) in order t11,t21,t31,t12,t22,t32,t13,t23,t33
+                // t11=x*x*c1+c
+                g(f, x); g(f, x); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 13));
+                // t21=xyc1+zs
+                g(f, xyc1); g(f, zs); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 14));
+                // t31=xzc1-ys
+                g(f, xzc1); g(f, ys); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 15));
+                // t12=xyc1-zs
+                g(f, xyc1); g(f, zs); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 16));
+                // t22=y*y*c1+c
+                g(f, y); g(f, y); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 17));
+                // t32=yzc1+xs
+                g(f, yzc1); g(f, xs); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 18));
+                // t13=xzc1+ys
+                g(f, xzc1); g(f, ys); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 19));
+                // t23=yzc1-xs
+                g(f, yzc1); g(f, xs); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 20));
+                // t33=z*z*c1+c
+                g(f, z); g(f, z); f.instruction(&I::F64Mul); g(f, c1); f.instruction(&I::F64Mul); g(f, c); f.instruction(&I::F64Add); f.instruction(&I::LocalSet(l + 21));
+                // r[col*4+row]: col<3 → Σ_{kk=0..2} m[kk*4+row]*t{kk+1}{col+1}; col3 → m[12+row]
+                push16(f, |f, idx| {
+                    let (col, row) = (idx / 4, idx % 4);
+                    if col < 3 {
+                        for kk in 0..3 { af(f, 2, kk * 4 + row); f.instruction(&I::LocalGet(l + 13 + (col * 3 + kk) as u32)); f.instruction(&I::F64Mul); if kk > 0 { f.instruction(&I::F64Add); } }
+                    } else {
+                        af(f, 2, 12 + row);
+                    }
+                });
+            }
+            // ---- makeLookAt(eye, center, up) ----
+            "m4x4makeLookAt" => {
+                let g = |f: &mut Function, a: u32| { f.instruction(&I::LocalGet(a)); };
+                // z = normalize(eye-center)  → z0,z1,z2 = l,l+1,l+2 ; im at l+9
+                for i in 0..3 { af(f, 0, i); af(f, 1, i); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + i as u32)); }
+                mjs_norm3(f, l, l + 1, l + 2, l + 9);
+                // x = normalize(cross(up,z)) → l+3,l+4,l+5 ; up=param2
+                af(f, 2, 1); g(f, l + 2); f.instruction(&I::F64Mul); af(f, 2, 2); g(f, l + 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 3));
+                af(f, 2, 2); g(f, l); f.instruction(&I::F64Mul); af(f, 2, 0); g(f, l + 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 4));
+                af(f, 2, 0); g(f, l + 1); f.instruction(&I::F64Mul); af(f, 2, 1); g(f, l); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 5));
+                mjs_norm3(f, l + 3, l + 4, l + 5, l + 9);
+                // y = normalize(cross(z,x)) → l+6,l+7,l+8
+                g(f, l + 1); g(f, l + 5); f.instruction(&I::F64Mul); g(f, l + 2); g(f, l + 4); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 6));
+                g(f, l + 2); g(f, l + 3); f.instruction(&I::F64Mul); g(f, l); g(f, l + 5); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 7));
+                g(f, l); g(f, l + 4); f.instruction(&I::F64Mul); g(f, l + 1); g(f, l + 3); f.instruction(&I::F64Mul); f.instruction(&I::F64Sub); f.instruction(&I::LocalSet(l + 8));
+                let (z0, z1, z2) = (l, l + 1, l + 2);
+                let (x0, x1, x2) = (l + 3, l + 4, l + 5);
+                let (y0, y1, y2) = (l + 6, l + 7, l + 8);
+                // result columns: (x0,y0,z0,0),(x1,y1,z1,0),(x2,y2,z2,0),(-x·eye,-y·eye,-z·eye,1)
+                let dotneg = move |f: &mut Function, a0: u32, a1: u32, a2: u32| {
+                    g(f, a0); af(f, 0, 0); f.instruction(&I::F64Mul);
+                    g(f, a1); af(f, 0, 1); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                    g(f, a2); af(f, 0, 2); f.instruction(&I::F64Mul); f.instruction(&I::F64Add);
+                    f.instruction(&I::F64Neg);
+                };
+                push16(f, |f, idx| match idx {
+                    0 => g(f, x0), 1 => g(f, y0), 2 => g(f, z0), 3 => k(f, 0.0),
+                    4 => g(f, x1), 5 => g(f, y1), 6 => g(f, z1), 7 => k(f, 0.0),
+                    8 => g(f, x2), 9 => g(f, y2), 10 => g(f, z2), 11 => k(f, 0.0),
+                    12 => dotneg(f, x0, x1, x2), 13 => dotneg(f, y0, y1, y2), 14 => dotneg(f, z0, z1, z2),
+                    _ => k(f, 1.0),
+                });
+            }
+            // ---- inverseOrthonormal ----
+            "m4x4inverseOrthonormal" => {
+                // dot((r0,r4,r8),t) where (r0,r4,r8)=(m0,m1,m2) [transpose col0],
+                // t=(m12,m13,m14); r12/r13/r14 = -dot(...).
+                push16(f, |f, idx| match idx {
+                    0 => af(f, 0, 0), 1 => af(f, 0, 4), 2 => af(f, 0, 8), 3 => k(f, 0.0),
+                    4 => af(f, 0, 1), 5 => af(f, 0, 5), 6 => af(f, 0, 9), 7 => k(f, 0.0),
+                    8 => af(f, 0, 2), 9 => af(f, 0, 6), 10 => af(f, 0, 10), 11 => k(f, 0.0),
+                    12 => { af(f, 0, 0); af(f, 0, 12); f.instruction(&I::F64Mul); af(f, 0, 1); af(f, 0, 13); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); af(f, 0, 2); af(f, 0, 14); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); }
+                    13 => { af(f, 0, 4); af(f, 0, 12); f.instruction(&I::F64Mul); af(f, 0, 5); af(f, 0, 13); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); af(f, 0, 6); af(f, 0, 14); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); }
+                    14 => { af(f, 0, 8); af(f, 0, 12); f.instruction(&I::F64Mul); af(f, 0, 9); af(f, 0, 13); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); af(f, 0, 10); af(f, 0, 14); f.instruction(&I::F64Mul); f.instruction(&I::F64Add); f.instruction(&I::F64Neg); }
+                    _ => af(f, 0, 15),
+                });
+            }
+            // ---- inverse → Maybe Mat4 ----
+            "m4x4inverse" => {
+                let (rloc, det, idet, iloc) = (l, l + 1, l + 2, l + 3);
+                // cofactor table: for each output index, 6 signed m[i]*m[j]*m[k] terms.
+                let terms = mjs_inverse_terms();
+                push16(f, |f, idx| {
+                    for (t, &(sign, i, j, kk)) in terms[idx as usize].iter().enumerate() {
+                        af(f, 0, i); af(f, 0, j); f.instruction(&I::F64Mul); af(f, 0, kk); f.instruction(&I::F64Mul);
+                        if t == 0 { if sign < 0 { f.instruction(&I::F64Neg); } }
+                        else if sign > 0 { f.instruction(&I::F64Add); } else { f.instruction(&I::F64Sub); }
+                    }
+                });
+                f.instruction(&I::LocalSet(rloc));
+                // det = m0*r0 + m1*r4 + m2*r8 + m3*r12
+                for (t, (mi, ri)) in [(0, 0), (1, 4), (2, 8), (3, 12)].into_iter().enumerate() {
+                    af(f, 0, mi); af(f, rloc, ri); f.instruction(&I::F64Mul); if t > 0 { f.instruction(&I::F64Add); }
+                }
+                f.instruction(&I::LocalSet(det));
+                f.instruction(&I::LocalGet(det)); k(f, 0.0); f.instruction(&I::F64Eq);
+                f.instruction(&I::If(BlockType::Result(eqref())));
+                f.instruction(&I::I32Const(1)); f.instruction(&I::RefNull(HeapType::Concrete(T_ARR))); f.instruction(&I::StructNew(T_CTOR)); // Nothing
+                f.instruction(&I::Else);
+                k(f, 1.0); f.instruction(&I::LocalGet(det)); f.instruction(&I::F64Div); f.instruction(&I::LocalSet(idet));
+                f.instruction(&I::I32Const(0)); f.instruction(&I::LocalSet(iloc));
+                f.instruction(&I::Block(BlockType::Empty));
+                f.instruction(&I::Loop(BlockType::Empty));
+                f.instruction(&I::LocalGet(iloc)); f.instruction(&I::I32Const(16)); f.instruction(&I::I32GeS); f.instruction(&I::BrIf(1));
+                f.instruction(&I::LocalGet(rloc)); f.instruction(&I::LocalGet(iloc));
+                f.instruction(&I::LocalGet(rloc)); f.instruction(&I::LocalGet(iloc)); f.instruction(&I::ArrayGet(T_ARRF)); f.instruction(&I::LocalGet(idet)); f.instruction(&I::F64Mul);
+                f.instruction(&I::ArraySet(T_ARRF));
+                f.instruction(&I::LocalGet(iloc)); f.instruction(&I::I32Const(1)); f.instruction(&I::I32Add); f.instruction(&I::LocalSet(iloc));
+                f.instruction(&I::Br(0));
+                f.instruction(&I::End); f.instruction(&I::End);
+                f.instruction(&I::I32Const(0)); f.instruction(&I::LocalGet(rloc)); f.instruction(&I::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 }); f.instruction(&I::StructNew(T_CTOR)); // Just
+                f.instruction(&I::End);
+            }
+            _ => {}
+        }
+    }
+
     /// A saturated call to a known kernel (`Foreign`).
     fn emit_kernel(
         &mut self,
@@ -25932,6 +26559,14 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::RefI31);
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // elm-explorations/linear-algebra: pure vector/matrix math kernels.
+            ("Elm.Kernel.MJS", n) if self.mjs(n).is_some() => {
+                let idx = self.mjs(n).unwrap();
+                for a in args {
+                    self.emit_expr(a, ctx, f)?;
+                }
+                f.instruction(&Instruction::Call(idx));
             }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
         }

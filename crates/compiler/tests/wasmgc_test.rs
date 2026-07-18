@@ -3458,3 +3458,56 @@ fn htmljson_reflects_query_shape() {
     // Empty fact buckets are omitted (matching elm/virtual-dom).
     assert!(!json.contains(r#""a0":{}"#), "empty event bucket not omitted: {json}");
 }
+
+#[test]
+fn mjs_linear_algebra_matches_js() {
+    // elm-explorations/linear-algebra can't be pulled into the inline single-module
+    // harness, so reference the `Elm.Kernel.MJS` kernels directly (tyvar-typed
+    // wrappers, exactly as Math.Vector3/Matrix4 do) and diff JS↔WasmGC. Native has
+    // no MJS backend, so this is a JS↔WasmGC comparison only.
+    let src = r#"module Test exposing (main)
+
+v3 : Float -> Float -> Float -> v
+v3 = Elm.Kernel.MJS.v3
+getX : v -> Float
+getX = Elm.Kernel.MJS.v3getX
+getY : v -> Float
+getY = Elm.Kernel.MJS.v3getY
+getZ : v -> Float
+getZ = Elm.Kernel.MJS.v3getZ
+dot : v -> v -> Float
+dot = Elm.Kernel.MJS.v3dot
+cross : v -> v -> v
+cross = Elm.Kernel.MJS.v3cross
+len : v -> Float
+len = Elm.Kernel.MJS.v3length
+norm : v -> v
+norm = Elm.Kernel.MJS.v3normalize
+makeRotate : Float -> v -> m
+makeRotate = Elm.Kernel.MJS.m4x4makeRotate
+mul : m -> m -> m
+mul = Elm.Kernel.MJS.m4x4mul
+transform : m -> v -> v
+transform = Elm.Kernel.MJS.v3mul4x4
+
+f : Float -> String
+f x = String.fromFloat x
+
+a : v
+a = v3 1 2 3
+b : v
+b = v3 4 5 7
+r : m
+r = makeRotate 1.5 (v3 0 1 0)
+
+main : String
+main =
+    String.join ","
+        [ f (getX a), f (dot a b), f (len a)
+        , (let c = cross a b in f (getX c) ++ ";" ++ f (getY c) ++ ";" ++ f (getZ c))
+        , (let n = norm a in f (getX n))
+        , (let t = transform (mul r r) a in f (getX t) ++ ";" ++ f (getZ t))
+        ]
+"#;
+    assert_str_prog_js_wasm("mjs_linalg", src);
+}
