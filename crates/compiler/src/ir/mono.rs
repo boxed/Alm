@@ -292,8 +292,19 @@ fn poly_rec_error(module: &Name, name: &Name) -> String {
 
 fn type_too_large_error(module: &Name, name: &Name, limit: usize) -> String {
     format!(
-        "`{}.{}` monomorphizes to a type with over {} nodes (deeply-nested type aliases expanded and duplicated across a scheme); the monomorphizer cannot compile it without exhausting memory.",
-        module, name, limit
+        "`{module}.{name}` expands to a type with over {limit} nodes, which the \
+         monomorphizer cannot compile without exhausting memory.\n\n\
+         This is triggered by using a function whose type involves deeply-nested \
+         type aliases (records inside records — e.g. style or attribute types) at \
+         a FULLY GENERIC type. The aliases are expanded at every occurrence, so a \
+         type that is small when shared balloons into millions of duplicated \
+         nodes. The very same function compiles fine when it is used at a \
+         CONCRETE type.\n\n\
+         To fix: constrain the type at the use site with a type annotation so \
+         `{name}`'s type variables become concrete (e.g. annotate the value or \
+         the surrounding function) instead of leaving it fully polymorphic. \
+         Referencing `{module}.{name}` only as a generic value (never applied to \
+         concrete arguments) is what forces the blow-up."
     )
 }
 
