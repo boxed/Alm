@@ -1845,6 +1845,20 @@ fn rewrite_local_uses(
                 let m = mangle_local(n, &tipe);
                 if emitted.contains(m.as_str()) {
                     *n = m;
+                } else {
+                    // The use is at a type carrying a free variable the fixpoint
+                    // never instantiated concretely (e.g. a phantom `state` param:
+                    // `done` returns `P.Done x : Step state a` for ANY state). Such
+                    // a variable can't affect the value's layout — a layout-relevant
+                    // one would have been constrained and seen — so any existing
+                    // specialization of `n` is runtime-compatible (all boxed eqref
+                    // in wasm-gc). Route to one so the reference resolves instead of
+                    // dangling. (A package whose exact mangle IS emitted never
+                    // reaches this branch, so it can't regress a working build.)
+                    let prefix = format!("{}$", n.as_str());
+                    if let Some(any) = emitted.iter().find(|e| e.starts_with(&prefix)) {
+                        *n = Name::from(any.as_str());
+                    }
                 }
             }
         }
