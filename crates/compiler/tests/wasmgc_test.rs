@@ -3583,3 +3583,29 @@ main = String.fromInt (List.length refs)
 "#;
     assert_str_prog_wasm_only("unimpl_effect_traps", src, "4");
 }
+
+#[test]
+fn json_decode_dict_builds_a_usable_dict() {
+    // `Json.Decode.dict` built its result with the stale sorted-vector helper
+    // while the rest of Dict.* is a treap (T_TNODE) — so any Dict operation on a
+    // decoded dict illegal-cast at runtime. (This also blocked Test.Html.Event
+    // a0 handler decoding, which uses `dict (map handler value)`.) Now it builds
+    // the treap like Dict.fromList.
+    let src = r#"module Test exposing (main)
+
+import Json.Decode as D
+import Dict
+
+main : String
+main =
+    case D.decodeString (D.dict D.int) "{\"a\":7,\"b\":9,\"c\":2}" of
+        Ok d ->
+            String.fromInt (Dict.size d)
+                ++ "/" ++ String.join "," (Dict.keys d)
+                ++ "/" ++ String.fromInt (Maybe.withDefault 0 (Dict.get "b" d))
+
+        Err _ ->
+            "ERR"
+"#;
+    assert_str_prog("json_dict", src);
+}

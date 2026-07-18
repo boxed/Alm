@@ -14483,11 +14483,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(12));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        // Ok (Dict.fromList kv)
+        // Ok (Dict.fromList kv). Dict is a treap (`T_TNODE`); build it exactly as
+        // `Dict.fromList` does — insert the `[key, value]` pairs into an empty
+        // treap. (The old sorted-vector `dict_from_list` produced a `T_LIST` the
+        // treap-based Dict.* ops then illegal-cast.)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
-        push_empty_list(&mut f);
-        f.instruction(&Instruction::Call(self.dict_from_list_idx));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
+        f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
         wrap1(&mut f);
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0));
@@ -23264,10 +23267,10 @@ impl<'a> Codegen<'a> {
         let cons = self.list_cons_idx;
         let app = self.str_append_idx;
         let veq = self.val_eq_idx;
-        // param node(0). eqref 1..=10, i32 11..=13.
-        let mut f = Function::new([(10, eqref()), (3, ValType::I32)]);
+        // param node(0). eqref 1..=10, i32 11..=14.
+        let mut f = Function::new([(10, eqref()), (4, ValType::I32)]);
         let (attrs, attr, a0, a1, a3, props, classes, key, val, tmp) = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-        let (len, i, atag) = (11, 12, 13);
+        let (len, i, atag, kind) = (11, 12, 13, 14);
         for l in [a0, a1, a3, props] {
             push_empty_list(&mut f);
             f.instruction(&Instruction::LocalSet(l));
@@ -23345,8 +23348,46 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(cons));
         f.instruction(&Instruction::LocalSet(a1));
         f.instruction(&Instruction::End);
-        // AEVENT (2): a0 events carry raw decoders (needed only by Event.simulate,
-        // not Query) — deferred; a0 stays an empty object for now.
+        // AEVENT (2): a0[name] = the shape Test.Html.Event.simulate reads. Its
+        // `eventDecoder` runs `Elm.Kernel.HtmlAsJson.eventHandler` (= ctor arg0)
+        // on the captured entry to get a `VirtualDom.Handler`, then pattern-matches
+        // it (Normal 0 / MayStopPropagation 1 / MayPreventDefault 2 / Custom 3) to
+        // pull out the decoder. So: entry = CTOR{0,[handler]}, handler =
+        // CTOR{kind,[decoder]}. `kind` is the AEVENT attr's 3rd arg (an i31, absent
+        // → Normal); those tags line up 1:1 with VirtualDom.Handler's ctors.
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // kind = attr has >=3 args ? i31(arg2) : 0
+        f.instruction(&Instruction::LocalGet(attr));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        ctor_argn(&mut f, attr, 2);
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(kind));
+        // pair = [name, CTOR{0,[ CTOR{kind,[decoder]} ]}]
+        f.instruction(&Instruction::LocalGet(key));
+        f.instruction(&Instruction::I32Const(0)); // entry tag
+        f.instruction(&Instruction::LocalGet(kind)); // handler tag
+        f.instruction(&Instruction::LocalGet(val)); // decoder
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // handler
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // entry
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(a0));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(a0));
+        f.instruction(&Instruction::End);
         // ABOOL (3): props = cons([key, JBool val], props)
         f.instruction(&Instruction::LocalGet(atag));
         f.instruction(&Instruction::I32Const(3));
@@ -23370,7 +23411,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(props));
         f.instruction(&Instruction::LocalSet(tmp));
         // Prepend each bucket only when non-empty (matching elm/virtual-dom, which
-        // omits empty fact buckets). a0 stays empty (events deferred) → omitted.
+        // omits empty fact buckets).
         for (nm, bucket) in [("a0", a0), ("a1", a1), ("a3", a3)] {
             list_len(&mut f, bucket);
             f.instruction(&Instruction::If(BlockType::Empty));
