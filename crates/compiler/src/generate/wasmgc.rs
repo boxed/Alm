@@ -4343,6 +4343,16 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
         }
+        // Browser.Navigation.reload / reloadAndSkipCache are nullary `Cmd msg`
+        // values (unlike back/forward, which take a Key + Int and go through
+        // emit_kernel). Headless has no page to reload, so they are an inert Cmd
+        // (tag0, no args) — matching elm run headless.
+        if module == "Browser.Navigation" && (name == "reload" || name == "reloadAndSkipCache") {
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
         // elm-explorations/linear-algebra: Mat4.identity is a nullary matrix value.
         if module == "Elm.Kernel.MJS" && name == "m4x4identity" {
             let idx = self.mjs("m4x4identity").unwrap();
