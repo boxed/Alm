@@ -1205,6 +1205,8 @@ fn html_attr_name(a: &str) -> Option<&'static str> {
         "scope" => "scope",
         "align" => "align",
         "draggable" => "draggable",
+        "media" => "media",
+        "list" => "list",
         _ => return None,
     })
 }
@@ -1247,6 +1249,7 @@ fn html_bool_attr_name(a: &str) -> Option<&'static str> {
         "loop" => "loop",
         "default" => "default",
         "novalidate" => "novalidate",
+        "contenteditable" => "contentEditable",
         _ => return None,
     })
 }
@@ -25385,6 +25388,7 @@ impl<'a> Codegen<'a> {
             // a curried/first-class use). The binop lowering handles Int vs Float.
             ("Basics", "idiv") => self.emit_binop("//", &args[0], &args[1], ctx, f)?,
             ("Basics", "fdiv") => self.emit_binop("/", &args[0], &args[1], ctx, f)?,
+            ("Basics", "pow") => self.emit_binop("^", &args[0], &args[1], ctx, f)?,
             // Debug.todo aborts (uninhabited result); Debug.log msg v = v.
             ("Debug", "todo") => {
                 f.instruction(&Instruction::Unreachable);
@@ -26659,10 +26663,16 @@ impl<'a> Codegen<'a> {
             // actually run). Mirror that: compile to a trap so the package builds
             // — matching the JS backend's conformance — while failing honestly (a
             // wasm trap, not a silent no-op) if the effect is ever invoked.
-            //   - File.Download.{string,url,bytes}: needs a browser download.
-            //   - Markdown.toHtml{,With}: needs a CommonMark parser.
-            ("Elm.Kernel.File", "download" | "downloadUrl" | "downloadBytes")
+            //   - File.Download.* / File.Select.* / File.* accessors: a File only
+            //     exists via a browser upload, absent headless (Markdown needs a
+            //     CommonMark parser; Http.cancel/fileBody need a live request/File;
+            //     Benchmark/Test.runThunk are runner internals).
+            ("Elm.Kernel.File", _)
+            | ("File", "name" | "size" | "mime" | "lastModified" | "toString" | "toBytes" | "toUrl")
             | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith")
+            | ("Http", "cancel" | "fileBody")
+            | ("Elm.Kernel.Benchmark", _)
+            | ("Elm.Kernel.Test", "runThunk")
             // elm-explorations/webgl: real rendering needs a GPU/DOM `gl` context,
             // absent headless. The JS backend keeps data-only stand-ins purely so
             // WebGL-referencing modules compile; we compile the whole WebGL/Texture
