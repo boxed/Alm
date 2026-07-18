@@ -3402,3 +3402,59 @@ fn bench_wasmgc_vs_js() {
         eprintln!("BENCH {name:24} JS {js:7.1}ms  WasmGC {wg:7.1}ms  ratio {:.2}x", wg / js);
     }
 }
+
+/// Compile a `main : String` program that JSON-encodes `Elm.Kernel.HtmlAsJson.toJson`
+/// of some Html and run it on the WasmGC backend, returning the JSON. This is the
+/// exact reflection Test.Html's `Query`/`Selector` decoder consumes. The JS
+/// backend's identical translation (and the shape the decoder reads) is pinned by
+/// `html_query_test`; here we assert the WasmGC translation produces the same
+/// decode-relevant structure.
+fn htmljson_wasm(test_name: &str, view_body: &str) -> String {
+    let source = format!(
+        "module Test exposing (main)\n\nimport Html\nimport Html.Attributes as A\nimport Html.Keyed\nimport Json.Encode\n\ntoJson : Html.Html msg -> Json.Encode.Value\ntoJson =\n    Elm.Kernel.HtmlAsJson.toJson\n\nview : Html.Html ()\nview =\n{}\n\nmain : String\nmain =\n    Json.Encode.encode 0 (toJson view)\n",
+        view_body
+    );
+    let dir = common::test_dir("alm-wasmgc", test_name);
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, &source).expect("write fixture");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let runner = dir.join("run_str.cjs");
+    std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).expect("write runner");
+    run(Command::new("node").arg(&runner).arg(&wasm))
+}
+
+#[test]
+fn htmljson_reflects_query_shape() {
+    let json = htmljson_wasm(
+        "html_to_json",
+        "    Html.div\n        [ A.class \"container\", A.id \"main\", A.style \"color\" \"red\", A.disabled True ]\n        [ Html.span [ A.class \"label\", A.class \"big\" ] [ Html.text \"hi\" ]\n        , Html.node \"custom-el\" [ A.attribute \"data-x\" \"y\" ] []\n        , Html.Keyed.node \"ul\"\n            []\n            [ ( \"k1\", Html.li [ A.class \"item\" ] [ Html.text \"a\" ] )\n            , ( \"k2\", Html.li [] [ Html.text \"b\" ] )\n            ]\n        ]",
+    );
+    // Element node: $=1, tag in c, facts in d, kids in e, int descendant count b.
+    assert!(json.contains(r#""$":1"#), "no element node: {json}");
+    assert!(json.contains(r#""c":"div""#), "no div tag: {json}");
+    assert!(json.contains(r#""b":"#), "no descendant count: {json}");
+    // Merged classes as top-level className.
+    assert!(json.contains(r#""className":"container""#), "no root className: {json}");
+    assert!(json.contains(r#""className":"label big""#), "no merged className: {json}");
+    // Style bucket a1; string attr bucket a3 (id or data-x land here in the typed
+    // vdom — the decoder unions a3 with top-level string props, so this matches).
+    assert!(json.contains(r#""a1":{"color":"red"}"#), "no style bucket: {json}");
+    assert!(json.contains(r#""data-x":"y""#), "no attribute: {json}");
+    assert!(json.contains(r#""id":"main""#), "no id: {json}");
+    // Bool property as a top-level fact.
+    assert!(json.contains(r#""disabled":true"#), "no bool prop: {json}");
+    // Text node: $=0, text under a.
+    assert!(json.contains(r#"{"$":0,"a":"hi"}"#), "no text node: {json}");
+    // Custom element tag preserved.
+    assert!(json.contains(r#""c":"custom-el""#), "no custom tag: {json}");
+    // Keyed node: $=2, kids are {a:key, b:child}.
+    assert!(json.contains(r#""$":2"#), "no keyed node: {json}");
+    assert!(json.contains(r#""c":"ul""#), "no ul tag: {json}");
+    assert!(json.contains(r#""a":"k1""#), "no key: {json}");
+    assert!(json.contains(r#""className":"item""#), "no keyed child className: {json}");
+    // Empty fact buckets are omitted (matching elm/virtual-dom).
+    assert!(!json.contains(r#""a0":{}"#), "empty event bucket not omitted: {json}");
+}

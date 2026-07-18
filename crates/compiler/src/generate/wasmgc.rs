@@ -1539,6 +1539,12 @@ struct Codegen<'a> {
     listf_widen_idx: Option<u32>,
     listf_narrow_idx: Option<u32>,
     listf_cons_idx: Option<u32>,
+    /// Lazily-lifted Test.Html introspection helpers (Elm.Kernel.HtmlAsJson):
+    /// translate a vdom node / attribute into the elm/virtual-dom `$`-tagged
+    /// Json.Value shape the elm-explorations/test decoder reads.
+    htmljson_node_idx: Option<u32>,
+    htmljson_facts_idx: Option<u32>,
+    htmljson_attr_idx: Option<u32>,
     list_cons_idx: u32,
     list_map_idx: u32,
     list_foldl_idx: u32,
@@ -1801,6 +1807,9 @@ impl<'a> Codegen<'a> {
             listf_widen_idx: None,
             listf_narrow_idx: None,
             listf_cons_idx: None,
+            htmljson_node_idx: None,
+            htmljson_facts_idx: None,
+            htmljson_attr_idx: None,
             list_cons_idx: 0,
             list_map_idx: 0,
             list_foldl_idx: 0,
@@ -23121,6 +23130,450 @@ impl<'a> Codegen<'a> {
         lidx
     }
 
+    /// Build a `Json.Value` object from a list of (key,value) `pairs` (a
+    /// `List (String, Value)`): `T_CTOR{tag:6, args:[pairs]}`.
+    fn hj_object(f: &mut Function, pairs_local: u32) {
+        f.instruction(&Instruction::I32Const(6)); // JOBJECT
+        f.instruction(&Instruction::LocalGet(pairs_local));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+    }
+
+    /// Push a `Json.Value` string (`T_CTOR{tag:4,[str]}`) from a string local.
+    fn hj_string(f: &mut Function, str_local: u32) {
+        f.instruction(&Instruction::I32Const(4)); // JSTRING
+        f.instruction(&Instruction::LocalGet(str_local));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+    }
+
+    /// Elm.Kernel.HtmlAsJson.toJson's `_HtmlAsJson_facts`: bucket a vdom node's
+    /// attrs into the elm/virtual-dom facts object (a0 events / a1 styles / a3
+    /// attributes / top-level className + bool props). `node` is a VNODE/VKEYED
+    /// whose attrs are at arg1.
+    fn htmljson_facts(&mut self) -> u32 {
+        if let Some(i) = self.htmljson_facts_idx {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        let cons = self.list_cons_idx;
+        let app = self.str_append_idx;
+        let veq = self.val_eq_idx;
+        // param node(0). eqref 1..=10, i32 11..=13.
+        let mut f = Function::new([(10, eqref()), (3, ValType::I32)]);
+        let (attrs, attr, a0, a1, a3, props, classes, key, val, tmp) = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        let (len, i, atag) = (11, 12, 13);
+        for l in [a0, a1, a3, props] {
+            push_empty_list(&mut f);
+            f.instruction(&Instruction::LocalSet(l));
+        }
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::LocalSet(classes));
+        ctor_argn(&mut f, 0, 1); // attrs = node.attrs
+        f.instruction(&Instruction::LocalSet(attrs));
+        list_len(&mut f, attrs);
+        f.instruction(&Instruction::LocalSet(len));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(i));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(i));
+        f.instruction(&Instruction::LocalGet(len));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, attrs, i);
+        f.instruction(&Instruction::LocalSet(attr));
+        ctor_tag(&mut f, attr);
+        f.instruction(&Instruction::LocalSet(atag));
+        ctor_arg0(&mut f, attr);
+        f.instruction(&Instruction::LocalSet(key));
+        ctor_argn(&mut f, attr, 1);
+        f.instruction(&Instruction::LocalSet(val));
+        // AATTR (0): class/className merge into `classes`, else a3[key]=string.
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(key));
+        push_str_const(&mut f, "class");
+        f.instruction(&Instruction::Call(veq));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalGet(key));
+        push_str_const(&mut f, "className");
+        f.instruction(&Instruction::Call(veq));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // classes = classes==null ? val : classes ++ " " ++ val
+        f.instruction(&Instruction::LocalGet(classes));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(val));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(classes));
+        push_str_const(&mut f, " ");
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::LocalGet(val));
+        f.instruction(&Instruction::Call(app));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalSet(classes));
+        f.instruction(&Instruction::Else);
+        // a3 = cons([key, JString val], a3)
+        f.instruction(&Instruction::LocalGet(key));
+        Self::hj_string(&mut f, val);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(a3));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(a3));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // AATTR
+        // ASTYLE (1): a1 = cons([key, JString val], a1)
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(key));
+        Self::hj_string(&mut f, val);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(a1));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(a1));
+        f.instruction(&Instruction::End);
+        // AEVENT (2): a0 events carry raw decoders (needed only by Event.simulate,
+        // not Query) — deferred; a0 stays an empty object for now.
+        // ABOOL (3): props = cons([key, JBool val], props)
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(key));
+        f.instruction(&Instruction::I32Const(1)); // JBOOL
+        f.instruction(&Instruction::LocalGet(val));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(props));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(props));
+        f.instruction(&Instruction::End);
+        bump(&mut f, i, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        // facts = props; then prepend a0/a1/a3 buckets + className.
+        f.instruction(&Instruction::LocalGet(props));
+        f.instruction(&Instruction::LocalSet(tmp));
+        // Prepend each bucket only when non-empty (matching elm/virtual-dom, which
+        // omits empty fact buckets). a0 stays empty (events deferred) → omitted.
+        for (nm, bucket) in [("a0", a0), ("a1", a1), ("a3", a3)] {
+            list_len(&mut f, bucket);
+            f.instruction(&Instruction::If(BlockType::Empty));
+            push_str_const(&mut f, nm);
+            Self::hj_object(&mut f, bucket);
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::LocalGet(tmp));
+            f.instruction(&Instruction::Call(cons));
+            f.instruction(&Instruction::LocalSet(tmp));
+            f.instruction(&Instruction::End);
+        }
+        // if classes != null: prepend ["className", JString classes]
+        f.instruction(&Instruction::LocalGet(classes));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "className");
+        Self::hj_string(&mut f, classes);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        f.instruction(&Instruction::End);
+        Self::hj_object(&mut f, tmp);
+        f.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, f);
+        self.htmljson_facts_idx = Some(lidx);
+        lidx
+    }
+
+    /// Elm.Kernel.HtmlAsJson.toJson's `_HtmlAsJson_translate`: a vdom node →
+    /// the elm/virtual-dom `$`-tagged Json.Value. VTEXT=0 → {$:0,a:text};
+    /// VNODE=1 / VKEYED=2 → {$:tag, c:name, d:facts, e:[kids], b:count};
+    /// VLAZY=3 is forced first. (VKEYED kids are {a:key, b:child}.)
+    fn htmljson_node(&mut self) -> u32 {
+        if let Some(i) = self.htmljson_node_idx {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        self.htmljson_node_idx = Some(lidx); // register before body (recursion)
+        let facts = self.htmljson_facts();
+        let cons = self.list_cons_idx;
+        let force = self.force_lazy_idx;
+        let box_int = self.box_int_idx;
+        // param node(0). eqref 1..=6, i32 7..=10.
+        let mut f = Function::new([(6, eqref()), (4, ValType::I32)]);
+        let (obj, kids, kid, transl, tmp, kkey) = (1, 2, 3, 4, 5, 6);
+        let (ntag, klen, ki, keyed) = (7, 8, 9, 10);
+        // small helper: push JInt(n)
+        let jint = |f: &mut Function, n: i32| {
+            f.instruction(&Instruction::I32Const(2));
+            f.instruction(&Instruction::I64Const(n as i64));
+            f.instruction(&Instruction::Call(box_int));
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+            f.instruction(&Instruction::StructNew(T_CTOR));
+        };
+        // force any VLAZY (tag 3) wrapper(s).
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(force));
+        f.instruction(&Instruction::LocalSet(0));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(ntag));
+        // VTEXT (0): {$: JInt 0, a: JString text}. One-armed if (the then-branch
+        // Returns), so it must be Empty-typed — the tail is unreachable.
+        f.instruction(&Instruction::LocalGet(ntag));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, "$");
+        jint(&mut f, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // ["$",0]
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(kkey)); // text
+        push_str_const(&mut f, "a");
+        Self::hj_string(&mut f, kkey);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // ["a",JString]
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(cons)); // cons(pairA, []) → [pairA]
+        f.instruction(&Instruction::Call(cons)); // cons(pair$, [pairA]) → [pair$,pairA]
+        f.instruction(&Instruction::LocalSet(tmp));
+        Self::hj_object(&mut f, tmp);
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // VNODE (1) / VKEYED (2): build the node object.
+        f.instruction(&Instruction::LocalGet(ntag));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalSet(keyed));
+        // e = JArray of translated kids (reverse-iterate + cons → source order).
+        ctor_argn(&mut f, 0, 2);
+        f.instruction(&Instruction::LocalSet(kids));
+        list_len(&mut f, kids);
+        f.instruction(&Instruction::LocalSet(klen));
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(obj)); // reuse obj as kid accumulator
+        f.instruction(&Instruction::LocalGet(klen));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(ki));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(ki));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, kids, ki);
+        f.instruction(&Instruction::LocalSet(kid));
+        // keyed? kid is [key, child]; else kid is child.
+        f.instruction(&Instruction::LocalGet(keyed));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(kid));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(kkey)); // key
+        f.instruction(&Instruction::LocalGet(kid));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(kid)); // child
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(kid));
+        f.instruction(&Instruction::Call(lidx)); // translate child
+        f.instruction(&Instruction::LocalSet(transl));
+        // entry = keyed ? {a:JString key, b:transl} : transl
+        f.instruction(&Instruction::LocalGet(keyed));
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        push_str_const(&mut f, "a");
+        Self::hj_string(&mut f, kkey);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        push_str_const(&mut f, "b");
+        f.instruction(&Instruction::LocalGet(transl));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        Self::hj_object(&mut f, tmp);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(transl));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(obj));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(obj));
+        bump(&mut f, ki, -1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // node object pairs: [$, c, d, e, b] consed onto an empty list.
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(tmp));
+        // ("b", JInt 0) — virtual-dom descendant count, unused by Test.Html queries
+        push_str_const(&mut f, "b");
+        jint(&mut f, 0);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        // ("e", JArray kids)
+        push_str_const(&mut f, "e");
+        f.instruction(&Instruction::I32Const(5));
+        f.instruction(&Instruction::LocalGet(obj));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        // ("d", facts(node))
+        push_str_const(&mut f, "d");
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Call(facts));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        // ("c", JString tag)
+        push_str_const(&mut f, "c");
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(kkey));
+        Self::hj_string(&mut f, kkey);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        // ("$", JInt ntag)
+        push_str_const(&mut f, "$");
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalGet(ntag));
+        f.instruction(&Instruction::I64ExtendI32S);
+        f.instruction(&Instruction::Call(box_int));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::LocalGet(tmp));
+        f.instruction(&Instruction::Call(cons));
+        f.instruction(&Instruction::LocalSet(tmp));
+        Self::hj_object(&mut f, tmp);
+        f.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, f);
+        lidx
+    }
+
+    /// Elm.Kernel.HtmlAsJson.attributeToJson's `_HtmlAsJson_attribute`: a single
+    /// attr → `{$: "aN", n: key, o: value}` (a1 style / a2 prop / a3 attribute).
+    fn htmljson_attr(&mut self) -> u32 {
+        if let Some(i) = self.htmljson_attr_idx {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        let cons = self.list_cons_idx;
+        let box_int = self.box_int_idx;
+        // param attr(0). eqref 1..=3, i32 4.
+        let mut f = Function::new([(3, eqref()), (1, ValType::I32)]);
+        let (key, val, tmp) = (1, 2, 3);
+        let atag = 4;
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(atag));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(key));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(val));
+        // AAttr (0) → a3 [key, JString val]; AStyle (1) → a1; both o = JString val.
+        // ABOOL (3) → a2, o = {a: JBool val}. Others → JNull.
+        let build = |f: &mut Function, s_tag: &str, key: u32, tmp: u32, oval_is_bool: bool, val: u32| {
+            // o value
+            if oval_is_bool {
+                // {a: JBool val}
+                push_str_const(f, "a");
+                f.instruction(&Instruction::I32Const(1)); // JBOOL
+                f.instruction(&Instruction::LocalGet(val));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                push_empty_list(f);
+                f.instruction(&Instruction::Call(cons));
+                f.instruction(&Instruction::LocalSet(tmp));
+                push_str_const(f, "o");
+                Self::hj_object(f, tmp);
+            } else {
+                push_str_const(f, "o");
+                Self::hj_string(f, val);
+            }
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // ["o", oval]
+            push_str_const(f, "n");
+            Self::hj_string(f, key);
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // ["n", key]
+            push_str_const(f, "$");
+            push_str_const(f, s_tag);
+            f.instruction(&Instruction::LocalSet(tmp));
+            Self::hj_string(f, tmp);
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // ["$", sTag]
+            push_empty_list(f);
+            f.instruction(&Instruction::Call(cons)); // cons($, [])
+            f.instruction(&Instruction::Call(cons)); // cons(n, ...)
+            f.instruction(&Instruction::Call(cons)); // cons(o, ...)
+            f.instruction(&Instruction::LocalSet(tmp));
+            Self::hj_object(f, tmp);
+        };
+        let _ = box_int;
+        // AAttr (0)
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        build(&mut f, "a3", key, tmp, false, val);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        build(&mut f, "a1", key, tmp, false, val);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(atag));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        build(&mut f, "a2", key, tmp, true, val);
+        f.instruction(&Instruction::Else);
+        // AEVENT / ANONE → JNull
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, f);
+        self.htmljson_attr_idx = Some(lidx);
+        lidx
+    }
+
     /// A saturated call to a known kernel (`Foreign`).
     fn emit_kernel(
         &mut self,
@@ -24230,6 +24683,25 @@ impl<'a> Codegen<'a> {
                 let idx = self.debug_renderer(&ty)?;
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(idx));
+            }
+            // elm-explorations/test's HtmlAsJson: reflect a Html node / attribute
+            // into the same Json.Value shape Test.Html's Query walks. eventHandler
+            // and taggerFunction extract the arg0 payload of a wrapper ctor.
+            ("Elm.Kernel.HtmlAsJson", "toJson") => {
+                let idx = self.htmljson_node();
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(idx));
+            }
+            ("Elm.Kernel.HtmlAsJson", "attributeToJson") => {
+                let idx = self.htmljson_attr();
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(idx));
+            }
+            ("Elm.Kernel.HtmlAsJson", "eventHandler")
+            | ("Elm.Kernel.HtmlAsJson", "taggerFunction") => {
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::LocalSet(ctx.scratch_eqref));
+                ctor_arg0(f, ctx.scratch_eqref);
             }
             // elm/bytes: Bytes is a T_STR byte buffer.
             ("Elm.Kernel.Bytes", "encode") => {
