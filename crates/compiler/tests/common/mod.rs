@@ -105,9 +105,15 @@ pub fn write_js(tag: &str, javascript: &str) -> PathBuf {
 /// Run a node script, panicking (with the generated JS attached) if node
 /// exits nonzero. Returns trimmed stdout.
 pub fn run_node(script: &str, javascript_for_error: &str) -> String {
+    // Neutralize inherited color forcing (FORCE_COLOR / CLICOLOR_FORCE): with
+    // it set, node wraps numbers in ANSI escapes (`\u{1b}[33m42\u{1b}[39m`) and
+    // every numeric backend-vs-JS comparison spuriously fails.
     let output = Command::new("node")
         .arg("-e")
         .arg(script)
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
         .output()
         .expect("failed to run node");
     if !output.status.success() {

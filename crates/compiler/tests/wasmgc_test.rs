@@ -103,6 +103,11 @@ fn assert_str_prog_wasm_only(test_name: &str, source: &str, expected: &str) {
 }
 
 fn run(cmd: &mut Command) -> String {
+    // Strip inherited color forcing: with FORCE_COLOR set, node wraps numbers
+    // in ANSI escapes (`\u{1b}[33m42\u{1b}[39m`) and every numeric diff fails.
+    cmd.env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1");
     let out = cmd.output().expect("spawn node");
     assert!(
         out.status.success(),

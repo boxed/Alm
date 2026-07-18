@@ -44,6 +44,12 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
 }
 
 fn run(command: &mut Command) -> String {
+    // Strip inherited color forcing: with FORCE_COLOR set, node wraps numbers
+    // in ANSI escapes (`\u{1b}[33m42\u{1b}[39m`) and every numeric diff fails.
+    command
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1");
     let output = command.output().expect("spawn");
     assert!(
         output.status.success(),

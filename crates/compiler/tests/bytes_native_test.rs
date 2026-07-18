@@ -585,6 +585,9 @@ fn bytes_roundtrip_wasm() {
     let output = Command::new("node")
         .arg("--no-warnings")
         .arg(&runner)
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
         .output()
         .expect("spawn node");
     assert!(

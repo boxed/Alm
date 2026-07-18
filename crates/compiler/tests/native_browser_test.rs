@@ -118,6 +118,9 @@ fn run_steps(
         .arg(&wasm)
         .arg(&steps_file)
         .arg(flags)
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
         .output()
         .expect("spawn node");
     assert!(
