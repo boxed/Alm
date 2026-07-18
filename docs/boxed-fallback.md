@@ -1,6 +1,34 @@
 # Boxed-fallback compilation for un-monomorphizable polymorphic code
 
-Status: proposed. Owner: TBD. Scope: `crates/compiler/src/ir/mono.rs`, `crates/compiler/src/generate/wasmgc.rs`, `crates/compiler/src/generate/typed.rs`.
+Status: **NARROWED / MOSTLY SHELVED** (2026-07-18). The general boxed-fallback
+(type-erasure) direction below was reconsidered: erasure discards
+monomorphization's payoff (unboxed scalars, specialized layouts — the reason
+alm-wasm beats JS on compute-bench), and alm is deliberately a
+monomorphize-to-fast-code compiler. Re-sorting the three motivating packages by
+whether they *fundamentally* require erasure:
+
+- **elm-charts** — NOT fundamental. A plain bug in `spec_let` (the lambda-style
+  member KNOWN GAP): finite, ground instances, one just never gets emitted.
+  Fix inside monomorphization; stays fully specialized. **This is the active
+  work.**
+- **athlete** — NOT fundamental. Finite ground instances, just too many → OOM.
+  A mono scaling/dedup problem, not a representation problem.
+- **elm-ui-explorer** — genuinely polymorphic-recursive (a theorem: infinitely
+  many ground types), so no monomorphizer can compile it. The clean compile
+  error it emits today is the defensible answer (this is also Rust's answer —
+  polymorphic recursion is rejected, you `Box` manually). Erasure would be the
+  *only* way to compile it, and if ever built must be a narrow, opt-in,
+  clearly-labeled path for **provable polymorphic recursion only** — never a
+  general fallback.
+
+The erased-representation design that follows is retained for reference in case
+that one narrow case is ever pursued. It is NOT the current plan.
+
+---
+
+Original spec (retained for reference; see status note above).
+
+Scope: `crates/compiler/src/ir/mono.rs`, `crates/compiler/src/generate/wasmgc.rs`, `crates/compiler/src/generate/typed.rs`.
 
 ## 1. Problem
 
