@@ -1,4 +1,4 @@
-<title>Elm vs alm vs alm-wasm vs React vs Svelte — runtime benchmark</title>
+<title>Elm vs alm-js vs alm-wasm vs React vs Svelte — runtime benchmark</title>
 <style>
   :root {
     --bg: #fbfbfc; --panel: #ffffff; --ink: #1a1e26; --ink-soft: #566072; --ink-faint: #8a93a3;
@@ -80,10 +80,10 @@
 <div class="wrap">
   <header>
     <p class="eyebrow">js-framework-benchmark · keyed · headless chrome</p>
-    <h1>Elm <span class="vs">vs</span> alm <span class="vs">vs</span> alm-wasm <span class="vs">vs</span> React <span class="vs">vs</span> Svelte</h1>
+    <h1>Elm <span class="vs">vs</span> alm-js <span class="vs">vs</span> alm-wasm <span class="vs">vs</span> React <span class="vs">vs</span> Svelte</h1>
     <p class="method">
       Runtime, memory and size for one identical keyed table app. <strong>elm</strong>,
-      <strong>alm</strong> and <strong>alm-wasm</strong> compile the <em>same</em>
+      <strong>alm-js</strong> and <strong>alm-wasm</strong> compile the <em>same</em>
       <code>Main.elm</code> — alm-wasm to <strong>WebAssembly-GC</strong>, run in the browser through a
       thin JS shim. Duration is the median of 15 iterations; lower is better everywhere. In each row
       the bar shows the result as a share of that row's best (fullest = fastest), colored by how close
@@ -157,28 +157,28 @@
 
 <script>
   const BULK = [
-    { op: "create 1k rows",  elm: 29.3, alm: 24.5, "alm-wasm": 27.0, react: 25.0, svelte: 21.8 },
-    { op: "replace all 1k",  elm: 28.1, alm: 27.1, "alm-wasm": 30.6, react: 30.7, svelte: 24.8 },
-    { op: "create 10k rows", elm: 275.9, alm: 268.3, "alm-wasm": 304.8, react: 450.2, svelte: 236.5 },
-    { op: "clear 1k rows",   elm: 11.1, alm: 10.8, "alm-wasm": 12.7, react: 17.1, svelte: 10.2 },
+    { op: "create 1k rows",  elm: 29.3, "alm-js": 24.5, "alm-wasm": 27.0, react: 25.0, svelte: 21.8 },
+    { op: "replace all 1k",  elm: 28.1, "alm-js": 27.1, "alm-wasm": 30.6, react: 30.7, svelte: 24.8 },
+    { op: "create 10k rows", elm: 275.9, "alm-js": 268.3, "alm-wasm": 304.8, react: 450.2, svelte: 236.5 },
+    { op: "clear 1k rows",   elm: 11.1, "alm-js": 10.8, "alm-wasm": 12.7, react: 17.1, svelte: 10.2 },
   ];
   const INCR = [
-    { op: "select row",        elm: 5.3,  alm: 4.9,  "alm-wasm": 4.3, react: 5.8,  svelte: 5.8 },
-    { op: "update every 10th", elm: 15.9, alm: 16.7, "alm-wasm": 15.5, react: 14.9, svelte: 14.5 },
-    { op: "swap 2 rows",       elm: 16.5, alm: 17.6, "alm-wasm": 17.1, react: 97.6, svelte: 15.0 },
-    { op: "remove row",        elm: 11.9, alm: 11.8, "alm-wasm": 11.6, react: 11.6, svelte: 10.6 },
-    { op: "append 1k to 10k",  elm: 33.2, alm: 27.9, "alm-wasm": 30.9, react: 29.0, svelte: 24.3 },
+    { op: "select row",        elm: 5.3,  "alm-js": 4.9,  "alm-wasm": 4.3, react: 5.8,  svelte: 5.8 },
+    { op: "update every 10th", elm: 15.9, "alm-js": 16.7, "alm-wasm": 15.5, react: 14.9, svelte: 14.5 },
+    { op: "swap 2 rows",       elm: 16.5, "alm-js": 17.6, "alm-wasm": 17.1, react: 97.6, svelte: 15.0 },
+    { op: "remove row",        elm: 11.9, "alm-js": 11.8, "alm-wasm": 11.6, react: 11.6, svelte: 10.6 },
+    { op: "append 1k to 10k",  elm: 33.2, "alm-js": 27.9, "alm-wasm": 30.9, react: 29.0, svelte: 24.3 },
   ];
   const MEM = [
-    { op: "ready (empty)",     elm: 0.69, alm: 0.65, "alm-wasm": 0.83, react: 1.19, svelte: 0.63 },
-    { op: "after creating 1k", elm: 3.66, alm: 4.25, "alm-wasm": 4.64, react: 4.43, svelte: 2.81 },
-    { op: "5× create + clear", elm: 1.04, alm: 0.91, "alm-wasm": 1.01, react: 1.98, svelte: 0.97 },
+    { op: "ready (empty)",     elm: 0.69, "alm-js": 0.65, "alm-wasm": 0.83, react: 1.19, svelte: 0.63 },
+    { op: "after creating 1k", elm: 3.66, "alm-js": 4.25, "alm-wasm": 4.64, react: 4.43, svelte: 2.81 },
+    { op: "5× create + clear", elm: 1.04, "alm-js": 0.91, "alm-wasm": 1.01, react: 1.98, svelte: 0.97 },
   ];
   const SIZE = [
-    { op: "uncompressed", elm: 31.7, alm: 21.5, "alm-wasm": 35.9, react: 190.3, svelte: 34.3 },
-    { op: "gzipped",      elm: 10.4, alm: 7.9,  "alm-wasm": 10.5,  react: 51.4, svelte: 12.2 },
+    { op: "uncompressed", elm: 31.7, "alm-js": 21.5, "alm-wasm": 35.9, react: 190.3, svelte: 34.3 },
+    { op: "gzipped",      elm: 10.4, "alm-js": 7.9,  "alm-wasm": 10.5,  react: 51.4, svelte: 12.2 },
   ];
-  const FWS = ["elm", "alm", "alm-wasm", "react", "svelte"];
+  const FWS = ["elm", "alm-js", "alm-wasm", "react", "svelte"];
   // Compute benchmarks: official elm + alm's three backends, same Elm source,
   // no DOM. native = --target=native-typed (custom Immix-lite GC, default);
   // elm = official 0.19.1 compiler, driven headless through a Platform.worker.
