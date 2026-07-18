@@ -266,11 +266,61 @@ pub fn default_numbers(tipe: &can::Type) -> can::Type {
 /// are implemented natively — see `is_native_shunted_module` in `project.rs`.)
 const POLY_REC_DEPTH_LIMIT: usize = 200;
 
+/// Node-count beyond which an instance type is treated as un-monomorphizable.
+/// Distinct from the DEPTH watchdog: a type can be shallow yet enormous when
+/// deeply-nested record/style aliases expand and a type variable bound to one
+/// such expansion is substituted into a scheme that mentions it many times
+/// (elm-athlete/athlete's `BodyBuilder.computeBlock`: a 3.8k-node scheme whose
+/// `a` binds a 97k-node expanded style type, referenced ~9× → an 879k-node
+/// instance that OOMs the specializer while it clones the type per body node).
+/// Report a clean error instead of exhausting memory (a real risk to the host).
+/// The true fix is structural type sharing (interning) so duplicated subtypes
+/// don't clone; until then this bounds the damage. Tunable for investigation.
+fn spec_type_node_limit() -> usize {
+    std::env::var("ALM_SPEC_TYPE_NODE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400_000)
+}
+
 fn poly_rec_error(module: &Name, name: &Name) -> String {
     format!(
         "`{}.{}` uses polymorphic recursion (each recursive call at a more deeply nested type), which the native backend's monomorphizer cannot yet compile.",
         module, name
     )
+}
+
+fn type_too_large_error(module: &Name, name: &Name, limit: usize) -> String {
+    format!(
+        "`{}.{}` monomorphizes to a type with over {} nodes (deeply-nested type aliases expanded and duplicated across a scheme); the monomorphizer cannot compile it without exhausting memory.",
+        module, name, limit
+    )
+}
+
+/// Whether `tipe` has more than `limit` nodes. Stops counting at the limit, so
+/// this is O(limit), not O(size) — cheap for the common small type, bounded for
+/// a pathological one.
+fn type_exceeds_nodes(tipe: &can::Type, limit: usize) -> bool {
+    fn go(t: &can::Type, n: &mut usize, limit: usize) -> bool {
+        *n += 1;
+        if *n > limit {
+            return true;
+        }
+        use can::Type::*;
+        match t {
+            Var(_) | Unit => false,
+            Lambda(a, b) => go(a, n, limit) || go(b, n, limit),
+            Type(_, _, args) => args.iter().any(|a| go(a, n, limit)),
+            Tuple(a, b, c) => {
+                go(a, n, limit)
+                    || go(b, n, limit)
+                    || c.as_ref().map_or(false, |c| go(c, n, limit))
+            }
+            Record(fields, _) => fields.iter().any(|(_, t)| go(t, n, limit)),
+        }
+    }
+    let mut n = 0;
+    go(tipe, &mut n, limit)
 }
 
 fn enqueue(
@@ -282,6 +332,13 @@ fn enqueue(
     if type_depth(&instance.tipe) > POLY_REC_DEPTH_LIMIT {
         if set.error.is_none() {
             set.error = Some(poly_rec_error(&instance.module, &instance.name));
+        }
+        return;
+    }
+    let node_limit = spec_type_node_limit();
+    if type_exceeds_nodes(&instance.tipe, node_limit) {
+        if set.error.is_none() {
+            set.error = Some(type_too_large_error(&instance.module, &instance.name, node_limit));
         }
         return;
     }
@@ -571,6 +628,13 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         // seed was shallow. See `POLY_REC_DEPTH_LIMIT`.
         if type_depth(&instance.tipe) > POLY_REC_DEPTH_LIMIT {
             error = Some(poly_rec_error(&instance.module, &instance.name));
+            break;
+        }
+        // Node-count watchdog (bloated-alias types, see `spec_type_node_limit`):
+        // caught here before `spec.expr` clones the type across every body node.
+        let node_limit = spec_type_node_limit();
+        if type_exceeds_nodes(&instance.tipe, node_limit) {
+            error = Some(type_too_large_error(&instance.module, &instance.name, node_limit));
             break;
         }
         // Specialize at the number-defaulted type (see `default_numbers`); the
