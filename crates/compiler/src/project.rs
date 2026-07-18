@@ -201,10 +201,15 @@ pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<Bui
     let checked = check_project(entry)?;
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
+    // The native `Deque` shunt (see `is_native_shunted_module`) does NOT apply
+    // here: wasm-gc has no `deque_*` kernels, so shunting only turns every
+    // `Deque.*` into an unsupported-kernel error. Compile the module from source
+    // instead — folkertdev/elm-deque is a regular type that monomorphizes fine
+    // (robinheghan/elm-deque's non-regular finger-tree still can't, but it failed
+    // here either way).
     let infos: Vec<crate::ir::mono::ModuleInfo> = checked
         .modules
         .iter()
-        .filter(|module| !is_native_shunted_module(module.name.as_str()))
         .map(|module| crate::ir::mono::ModuleInfo {
             name: module.name.clone(),
             module,

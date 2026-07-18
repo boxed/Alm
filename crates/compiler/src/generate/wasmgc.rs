@@ -4360,6 +4360,15 @@ impl<'a> Codegen<'a> {
                 return Ok(());
             }
         }
+        // elm/file's `File.decoder : Decoder File` — a File is an opaque JS value,
+        // so it decodes as the opaque-value decoder (tag 4). (Materializing a real
+        // File still needs a browser upload; the other File.* ops trap.)
+        if module == "File" && name == "decoder" {
+            f.instruction(&Instruction::I32Const(4)); // DValue
+            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            return Ok(());
+        }
         // Html.Events.keyCode : `Json.Decode.field "keyCode" Json.Decode.int`,
         // i.e. DField(8) ["keyCode", DInt(1)].
         if module == "Html.Events" && name == "keyCode" {
@@ -6704,6 +6713,20 @@ impl<'a> Codegen<'a> {
         ctor_argn(&mut f, 0, 0);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+
+        // GLazy (8): force the `() -> Generator` thunk, then step the result.
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::I32Const(8));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_argn(&mut f, 0, 0); // thunk
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31); // ()
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::LocalGet(1)); // seed
+        f.instruction(&Instruction::Call(self.random_step_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
 
@@ -24475,7 +24498,7 @@ impl<'a> Codegen<'a> {
             | ("Random", "map") | ("Random", "map2") | ("Random", "map3")
             | ("Random", "andThen") | ("Random", "pair")
             | ("Random", "map4") | ("Random", "map5") | ("Random", "list")
-            | ("Random", "weighted") | ("Random", "uniform") => {
+            | ("Random", "weighted") | ("Random", "uniform") | ("Random", "lazy") => {
                 let tag: i32 = match name {
                     "int" => 0,
                     "float" => 1,
@@ -24485,6 +24508,7 @@ impl<'a> Codegen<'a> {
                     "map3" => 5,
                     "andThen" => 6,
                     "pair" => 7,
+                    "lazy" => 8,
                     "map4" => 9,
                     "map5" => 10,
                     "list" => 11,
@@ -26329,8 +26353,18 @@ impl<'a> Codegen<'a> {
             // Browser.Events.onResize : headless has no window-resize events, so
             // model it as an inert subscription (never fires). A real browser
             // deployment would wire this to a host resize listener.
-            ("Browser.Events", "onResize") => {
+            // onResize / onVisibilityChange: headless has no window-resize or
+            // page-visibility events, so both are inert subscriptions (never fire).
+            // A real browser deployment would wire them to host listeners.
+            ("Browser.Events", "onResize") | ("Browser.Events", "onVisibilityChange") => {
                 f.instruction(&Instruction::I32Const(0)); // Sub none
+                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Browser.Navigation.back / forward move through history; headless has
+            // no history, so they are an inert Cmd (matching elm run headless).
+            ("Browser.Navigation", "back") | ("Browser.Navigation", "forward") => {
+                f.instruction(&Instruction::I32Const(0)); // Cmd none
                 f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
