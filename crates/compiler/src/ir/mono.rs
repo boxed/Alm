@@ -2030,10 +2030,23 @@ fn alpha_normalize(tipe: &can::Type) -> can::Type {
                 Box::new(go(b, map)),
                 c.as_ref().map(|x| Box::new(go(x, map))),
             ),
-            Record(fields, ext) => Record(
-                fields.iter().map(|(n, t)| (n.clone(), go(t, map))).collect(),
-                ext.clone(),
-            ),
+            Record(fields, ext) => {
+                // Number type variables in the SAME field order `mangle_type`
+                // renders (sorted by name). Node types and row-variable
+                // expansion can present a record's fields in different orders;
+                // numbering vars by the raw traversal order then makes two
+                // alpha-EQUAL record types number their vars differently, so
+                // they mangle to distinct strings — and a use resolves to a
+                // specialization created under the other name (the elm-charts
+                // `stack$…vp0…vp1…` vs `…vp1…vp0…` unbound-local bug). Sorting
+                // here keeps the var numbering canonical with the render order.
+                let mut sorted: Vec<&(Name, can::Type)> = fields.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                Record(
+                    sorted.iter().map(|(n, t)| (n.clone(), go(t, map))).collect(),
+                    ext.clone(),
+                )
+            }
             Unit => Unit,
         }
     }
