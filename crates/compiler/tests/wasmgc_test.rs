@@ -3489,6 +3489,8 @@ mul : m -> m -> m
 mul = Elm.Kernel.MJS.m4x4mul
 transform : m -> v -> v
 transform = Elm.Kernel.MJS.v3mul4x4
+setY : Float -> v -> v
+setY = Elm.Kernel.MJS.v3setY
 
 f : Float -> String
 f x = String.fromFloat x
@@ -3507,6 +3509,7 @@ main =
         , (let c = cross a b in f (getX c) ++ ";" ++ f (getY c) ++ ";" ++ f (getZ c))
         , (let n = norm a in f (getX n))
         , (let t = transform (mul r r) a in f (getX t) ++ ";" ++ f (getZ t))
+        , f (getY (setY 9 a))
         ]
 "#;
     assert_str_prog_js_wasm("mjs_linalg", src);
@@ -3608,4 +3611,46 @@ main =
             "ERR"
 "#;
     assert_str_prog("json_dict", src);
+}
+
+#[test]
+fn first_class_arithmetic_and_result_mapn() {
+    // (+)/(-)/(*) are number-polymorphic; a first-class use over floats must pick
+    // the Float instance (an Int-only wrapper would unbox_int a boxed Float and
+    // illegal-cast). Also covers first-class (//)/(/) and Result.map4/map5.
+    let src = r#"module Test exposing (main)
+
+fadd : List Float
+fadd = List.map2 (+) [ 10.0, 21.0 ] [ 4.0, 6.0 ]
+
+fmul : List Float
+fmul = List.map2 (*) [ 3.0, 5.0 ] [ 4.0, 6.0 ]
+
+iadd : List Int
+iadd = List.map2 (+) [ 10, 21 ] [ 4, 6 ]
+
+idiv : List Int
+idiv = List.map2 (//) [ 100, 20 ] [ 3, 6 ]
+
+fdiv : List Float
+fdiv = List.map2 (/) [ 10.0, 21.0 ] [ 4.0, 6.0 ]
+
+r4 : Int
+r4 = Result.withDefault 0 (Result.map4 (\a b c d -> a + b + c + d) (Ok 1) (Ok 2) (Ok 3) (Ok 4))
+
+r5 : Int
+r5 = Result.withDefault 0 (Result.map5 (\a b c d e -> a + b + c + d + e) (Ok 1) (Ok 2) (Ok 3) (Ok 4) (Ok 5))
+
+main : String
+main =
+    String.join "|"
+        [ String.join "," (List.map String.fromFloat fadd)
+        , String.join "," (List.map String.fromFloat fmul)
+        , String.join "," (List.map String.fromInt iadd)
+        , String.join "," (List.map String.fromInt idiv)
+        , String.join "," (List.map String.fromFloat fdiv)
+        , String.fromInt r4 ++ "," ++ String.fromInt r5
+        ]
+"#;
+    assert_str_prog("fc_arith_result_mapn", src);
 }

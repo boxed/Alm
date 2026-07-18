@@ -1203,6 +1203,8 @@ fn html_attr_name(a: &str) -> Option<&'static str> {
         "datetime" => "datetime",
         "accesskey" => "accesskey",
         "scope" => "scope",
+        "align" => "align",
+        "draggable" => "draggable",
         _ => return None,
     })
 }
@@ -1667,6 +1669,8 @@ struct Codegen<'a> {
     maybe_map5_idx: u32,
     result_map2_idx: u32,
     result_map3_idx: u32,
+    result_map4_idx: u32,
+    result_map5_idx: u32,
     str_join_idx: u32,
     str_repeat_idx: u32,
     str_starts_with_idx: u32,
@@ -1933,6 +1937,8 @@ impl<'a> Codegen<'a> {
             maybe_map5_idx: 0,
             result_map2_idx: 0,
             result_map3_idx: 0,
+            result_map4_idx: 0,
+            result_map5_idx: 0,
             str_join_idx: 0,
             str_repeat_idx: 0,
             str_starts_with_idx: 0,
@@ -2262,6 +2268,8 @@ impl<'a> Codegen<'a> {
         self.result_from_maybe_idx = next();
         self.result_map2_idx = next();
         self.result_map3_idx = next();
+        self.result_map4_idx = next();
+        self.result_map5_idx = next();
         self.str_split_idx = next();
         self.str_words_idx = next();
         self.str_lines_idx = next();
@@ -2593,6 +2601,8 @@ impl<'a> Codegen<'a> {
         let result_from_maybe = self.emit_result_from_maybe();
         let result_map2 = self.emit_result_mapn(2);
         let result_map3 = self.emit_result_mapn(3);
+        let result_map4 = self.emit_result_mapn(4);
+        let result_map5 = self.emit_result_mapn(5);
         let str_split = self.emit_str_split();
         let str_words = self.emit_str_words();
         let str_lines = self.emit_str_lines();
@@ -2942,6 +2952,8 @@ impl<'a> Codegen<'a> {
         funcs.function(ft2); // result_from_maybe
         funcs.function(ft3); // result_map2
         funcs.function(ft4); // result_map3
+        funcs.function(ft5); // result_map4
+        funcs.function(ft6); // result_map5
         funcs.function(ft2); // str_split
         funcs.function(ft1); // str_words
         funcs.function(ft1); // str_lines
@@ -3174,6 +3186,8 @@ impl<'a> Codegen<'a> {
         code.function(&result_from_maybe);
         code.function(&result_map2);
         code.function(&result_map3);
+        code.function(&result_map4);
+        code.function(&result_map5);
         code.function(&str_split);
         code.function(&str_words);
         code.function(&str_lines);
@@ -4502,6 +4516,25 @@ impl<'a> Codegen<'a> {
         let lidx = self.lifted_base + self.lifted.len() as u32;
         let mut lf = Function::new([]);
         match (module, name) {
+            // `(+)`/`(-)`/`(*)` are `number`-polymorphic; a first-class use is
+            // monomorphized, so pick Int vs Float from the instance type — an
+            // Int-only wrapper would `unbox_int` a boxed Float (illegal cast) when
+            // e.g. `List.map2 (+)` runs over a `List Float`.
+            ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul")
+                if matches!(tipe, can::Type::Lambda(a, _) if is_float(a)) =>
+            {
+                for i in 0..2 {
+                    lf.instruction(&Instruction::LocalGet(i));
+                    lf.instruction(&cast_to(T_FLOAT));
+                    lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+                }
+                lf.instruction(&match name {
+                    "add" => Instruction::F64Add,
+                    "sub" => Instruction::F64Sub,
+                    _ => Instruction::F64Mul,
+                });
+                lf.instruction(&Instruction::StructNew(T_FLOAT));
+            }
             ("Basics", "add") | ("Basics", "sub") | ("Basics", "mul") | ("Basics", "idiv") => {
                 lf.instruction(&Instruction::LocalGet(0));
                 lf.instruction(&Instruction::Call(self.unbox_int_idx));
@@ -23770,14 +23803,16 @@ impl<'a> Codegen<'a> {
             "v2" => 2,
             "v3" => 3,
             "v4" => 4,
-            "v2setX" | "v2setY" | "v2add" | "v2sub" | "v2direction" | "v2distance"
+            // Setters are `Float -> Vec -> Vec` (arity 2), not 3.
+            "v2setX" | "v2setY" | "v3setX" | "v3setY" | "v3setZ" | "v4setX" | "v4setY"
+            | "v4setZ" | "v4setW" | "v2add" | "v2sub" | "v2direction" | "v2distance"
             | "v2distanceSquared" | "v2scale" | "v2dot" | "v3add" | "v3sub" | "v3direction"
             | "v3distance" | "v3distanceSquared" | "v3scale" | "v3dot" | "v3cross" | "v3mul4x4"
             | "v4add" | "v4sub" | "v4direction" | "v4distance" | "v4distanceSquared" | "v4scale"
             | "v4dot" | "m4x4mul" | "m4x4mulAffine" | "m4x4makeRotate" | "m4x4scale"
             | "m4x4translate" => 2,
-            "v3setX" | "v3setY" | "v3setZ" | "v4setX" | "v4setY" | "v4setZ" | "m4x4rotate"
-            | "m4x4makeScale3" | "m4x4makeTranslate3" | "m4x4makeLookAt" | "m4x4makeBasis" => 3,
+            "m4x4rotate" | "m4x4makeScale3" | "m4x4makeTranslate3" | "m4x4makeLookAt"
+            | "m4x4makeBasis" => 3,
             "m4x4makePerspective" | "m4x4makeOrtho2D" | "m4x4scale3" | "m4x4translate3" => 4,
             "m4x4makeFrustum" | "m4x4makeOrtho" => 6,
             _ => return None,
@@ -24420,11 +24455,16 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.result_map_error_idx));
             }
-            ("Result", "map2") | ("Result", "map3") => {
+            ("Result", "map2") | ("Result", "map3") | ("Result", "map4") | ("Result", "map5") => {
                 for a in args {
                     self.emit_expr(a, ctx, f)?;
                 }
-                let idx = if name == "map2" { self.result_map2_idx } else { self.result_map3_idx };
+                let idx = match name {
+                    "map2" => self.result_map2_idx,
+                    "map3" => self.result_map3_idx,
+                    "map4" => self.result_map4_idx,
+                    _ => self.result_map5_idx,
+                };
                 f.instruction(&Instruction::Call(idx));
             }
             // Random: reify each generator as a tagged ctor; random_step runs it.
@@ -25341,6 +25381,10 @@ impl<'a> Codegen<'a> {
             ("Basics", "le") => self.emit_binop("<=", &args[0], &args[1], ctx, f)?,
             ("Basics", "gt") => self.emit_binop(">", &args[0], &args[1], ctx, f)?,
             ("Basics", "ge") => self.emit_binop(">=", &args[0], &args[1], ctx, f)?,
+            // (//) / (/) reachable as saturated kernels (e.g. `(//)` applied via
+            // a curried/first-class use). The binop lowering handles Int vs Float.
+            ("Basics", "idiv") => self.emit_binop("//", &args[0], &args[1], ctx, f)?,
+            ("Basics", "fdiv") => self.emit_binop("/", &args[0], &args[1], ctx, f)?,
             // Debug.todo aborts (uninhabited result); Debug.log msg v = v.
             ("Debug", "todo") => {
                 f.instruction(&Instruction::Unreachable);
