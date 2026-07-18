@@ -26832,18 +26832,32 @@ impl<'a> Codegen<'a> {
                 let _ = (ctor, args);
             }
             Ctor(home, union, ctor, args) => {
-                // The constructor's declared argument types (if known) give a
-                // record sub-pattern its field set, so `{ x }` inside `Foo { x }`
-                // resolves. Field names — not their instantiation — drive the sort.
-                // User unions come from the registry; builtin parametric ctors
-                // (Just/Ok/Err) derive their arg from the matched value's type
-                // (`tipe`, threaded from the case scrutinee) — e.g. `Just { x }`
-                // on a `Maybe { x : … }` gives the record type from the Maybe arg.
-                let arg_tys: Option<Vec<can::Type>> = self
-                    .ctor_arg_types
-                    .get(&(home.to_string(), union.to_string(), ctor.index))
-                    .cloned()
-                    .or_else(|| builtin_ctor_arg_types(ctor.name.as_str(), tipe));
+                // The constructor's argument types give a record sub-pattern its
+                // field set, so `{ x }` inside `Foo { x }` resolves. When the
+                // scrutinee type is concrete (`Type(home, union, targs)`),
+                // instantiate the declared arg types at those type arguments —
+                // otherwise a ctor whose arg is a bare type parameter (e.g.
+                // `Single status` matched as `Single { result }` where the
+                // scrutinee is `SKind { result : … }`) would leave the record
+                // sub-pattern typed as the un-substituted variable. Fall back to
+                // the raw declared types (field names, not instantiation, drive
+                // the sort) and then to the builtin parametric ctors (Just/Ok/Err).
+                let arg_tys: Option<Vec<can::Type>> = match tipe {
+                    Some(can::Type::Type(h, u, targs))
+                        if h.as_str() == home.as_str() && u.as_str() == union.as_str() =>
+                    {
+                        self.union_ctors(home, union, targs).and_then(|cs| {
+                            cs.into_iter().find(|(_, tag, _)| *tag == ctor.index).map(|(_, _, a)| a)
+                        })
+                    }
+                    _ => None,
+                }
+                .or_else(|| {
+                    self.ctor_arg_types
+                        .get(&(home.to_string(), union.to_string(), ctor.index))
+                        .cloned()
+                })
+                .or_else(|| builtin_ctor_arg_types(ctor.name.as_str(), tipe));
                 for (i, ap) in args.iter().enumerate() {
                     let sub = ctx.bind("$ba");
                     self.load_ctor_arg(s, i as u32, f);

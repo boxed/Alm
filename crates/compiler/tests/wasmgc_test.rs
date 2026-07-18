@@ -3511,3 +3511,44 @@ main =
 "#;
     assert_str_prog_js_wasm("mjs_linalg", src);
 }
+
+#[test]
+fn ctor_record_subpattern_instantiates_type_args() {
+    // A ctor whose argument is a bare type parameter (`Single status`), matched
+    // with a record sub-pattern (`Single { result }`) where the scrutinee's
+    // concrete type instantiates that parameter to a record. The WasmGC backend
+    // must instantiate the ctor's declared arg type at the scrutinee's type args
+    // to give the record sub-pattern (and a first-class `.result` accessor over
+    // the extended-record `Series` element) its field set — otherwise the field
+    // sub-pattern types resolve to the un-substituted variable. (Regression:
+    // Janiczek/elm-benchmark-cli-runner, "field access on non-record for result".)
+    let src = r#"module Test exposing (main)
+
+type SKind status
+    = Single status
+    | Series (List { status | name : String })
+
+type alias Struct status =
+    { name : String, structureKind : SKind status }
+
+results : Struct { result : Int } -> List Int
+results finished =
+    case finished.structureKind of
+        Single { result } ->
+            [ result ]
+
+        Series series ->
+            series |> List.map .result
+
+single : Struct { result : Int }
+single = { name = "s", structureKind = Single { result = 42 } }
+
+seriesV : Struct { result : Int }
+seriesV = { name = "g", structureKind = Series [ { name = "a", result = 5 }, { name = "b", result = 7 } ] }
+
+main : String
+main =
+    String.join "," (List.map String.fromInt (results single ++ results seriesV))
+"#;
+    assert_str_prog("ctor_record_subpat", src);
+}
