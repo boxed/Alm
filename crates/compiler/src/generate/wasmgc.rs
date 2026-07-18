@@ -21765,11 +21765,84 @@ impl<'a> Codegen<'a> {
         f: &mut Function,
     ) -> Result<(), String> {
         let mark = ctx.scope.len();
-        for d in decls {
-            self.emit_let_decl(d, ctx, f)?;
-        }
+        self.emit_decls_in_dep_order(decls, ctx, f)?;
         self.emit_expr(body, ctx, f)?;
         ctx.scope.truncate(mark);
+        Ok(())
+    }
+
+    /// Emit a set of `let` declarations in dependency order. elm's `let` bindings
+    /// are mutually visible (order-independent), so a binding may reference one
+    /// declared later — emitting in source order would hit a forward reference and
+    /// report `unbound local`. Emit a declaration once every group name its body
+    /// references is already bound; whatever remains is a genuine cycle (mutually
+    /// recursive functions), emitted as one group sharing a capture set.
+    fn emit_decls_in_dep_order(
+        &mut self,
+        ds: &[TypedLetDecl],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        use std::collections::HashSet;
+        if ds.len() == 1 {
+            return self.emit_let_decl(&ds[0], ctx, f);
+        }
+        let member_names = |d: &TypedLetDecl| -> Vec<String> {
+            match d {
+                TypedLetDecl::Def { name, .. } => vec![name.to_string()],
+                TypedLetDecl::Destruct(p, _) => pat_names(p),
+                TypedLetDecl::Recursive(inner) => {
+                    inner.iter().flat_map(|d| match d {
+                        TypedLetDecl::Def { name, .. } => vec![name.to_string()],
+                        TypedLetDecl::Destruct(p, _) => pat_names(p),
+                        _ => Vec::new(),
+                    }).collect()
+                }
+            }
+        };
+        let names: Vec<Vec<String>> = ds.iter().map(&member_names).collect();
+        let all: HashSet<String> = names.iter().flatten().cloned().collect();
+        let deps: Vec<HashSet<String>> = ds
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut fv = Vec::new();
+                free_locals_let(d, &HashSet::new(), &mut fv);
+                let own: HashSet<&String> = names[i].iter().collect();
+                fv.into_iter().filter(|n| all.contains(n) && !own.contains(n)).collect()
+            })
+            .collect();
+        let mut done = vec![false; ds.len()];
+        let mut emitted: HashSet<String> = HashSet::new();
+        loop {
+            let mut progress = false;
+            for i in 0..ds.len() {
+                if done[i] || !deps[i].iter().all(|n| emitted.contains(n)) {
+                    continue;
+                }
+                self.emit_let_decl(&ds[i], ctx, f)?;
+                emitted.extend(names[i].iter().cloned());
+                done[i] = true;
+                progress = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+        let remaining: Vec<TypedLetDecl> =
+            ds.iter().enumerate().filter(|(i, _)| !done[*i]).map(|(_, d)| d.clone()).collect();
+        if !remaining.is_empty() {
+            let all_fns = remaining.iter().all(
+                |d| matches!(d, TypedLetDecl::Def { params, .. } if !params.is_empty()),
+            );
+            if all_fns && remaining.len() >= 2 {
+                self.emit_recursive_group(&remaining, ctx, f)?;
+            } else {
+                for d2 in &remaining {
+                    self.emit_let_decl(d2, ctx, f)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -21818,31 +21891,17 @@ impl<'a> Codegen<'a> {
                 let slot = ctx.bind(name.as_str());
                 f.instruction(&Instruction::LocalSet(slot));
             }
-            // A single-binding non-recursive group is common; flatten it.
+            // A `let` group whose members may reference each other. Emit in
+            // dependency order: a member is emitted once every group name its body
+            // references is already bound. This handles function→value references
+            // (the value must exist first — e.g. a parser's `done`/`step` helpers)
+            // AND value→function ones (a `[validateA, validateB]` list beside the
+            // functions) without a forward-reference `unbound local`. Whatever is
+            // left after no more can be emitted is a genuine cycle — mutually
+            // recursive functions (isEven/isOdd) — emitted as one group that shares
+            // a capture set so any member can (tail-)call any other.
             TypedLetDecl::Recursive(ds) => {
-                // A group of mutually-recursive local functions needs all names
-                // in scope for each body (isEven/isOdd). Emit them as one group
-                // sharing a capture set so any member can (tail-)call any other.
-                // Function members are emitted FIRST so their names/closures are
-                // bound before the group's value members (which commonly reference
-                // them — e.g. a `[validateA, validateB, …]` list alongside the
-                // function definitions); a plain sequential pass would hit a
-                // forward reference and report `unbound local`.
-                let is_fn =
-                    |d: &TypedLetDecl| matches!(d, TypedLetDecl::Def { params, .. } if !params.is_empty());
-                let fns: Vec<&TypedLetDecl> = ds.iter().filter(|d| is_fn(d)).collect();
-                let vals: Vec<&TypedLetDecl> = ds.iter().filter(|d| !is_fn(d)).collect();
-                if fns.len() >= 2 {
-                    let owned: Vec<TypedLetDecl> = fns.iter().map(|d| (*d).clone()).collect();
-                    self.emit_recursive_group(&owned, ctx, f)?;
-                } else {
-                    for d2 in &fns {
-                        self.emit_let_decl(d2, ctx, f)?;
-                    }
-                }
-                for d2 in &vals {
-                    self.emit_let_decl(d2, ctx, f)?;
-                }
+                self.emit_decls_in_dep_order(ds, ctx, f)?;
             }
         }
         Ok(())
