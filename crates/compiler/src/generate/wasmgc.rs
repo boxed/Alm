@@ -609,6 +609,20 @@ fn builtin_ctor_arg_types(ctor_name: &str, tipe: Option<&can::Type>) -> Option<V
         );
         return Some(vec![metadata]);
     }
+    // Browser.UrlRequest.Internal carries a `Url` record, so `Internal { path }`
+    // (elm-router) can resolve its field order. Field SET (sorted by name) is what
+    // matters; the types are Unit placeholders.
+    if ctor_name == "Internal" {
+        let field = |n: &str| (crate::data::Name::from(n), can::Type::Unit);
+        let url = can::Type::Record(
+            vec![
+                field("fragment"), field("host"), field("path"),
+                field("port_"), field("protocol"), field("query"),
+            ],
+            None,
+        );
+        return Some(vec![url]);
+    }
     let args = match tipe {
         Some(can::Type::Type(_, _, args)) => args,
         _ => return None,
