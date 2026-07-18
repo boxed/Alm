@@ -3569,11 +3569,17 @@ dl = Elm.Kernel.File.download
 md : attrs -> String -> html
 md = Elm.Kernel.Markdown.toHtml
 
+wg : opts -> attrs -> entities -> html
+wg = Elm.Kernel.WebGL.toHtml
+
+tx : url -> task
+tx = Elm.Kernel.Texture.load
+
 refs : List ()
-refs = [ always () dl, always () md ]
+refs = [ always () dl, always () md, always () wg, always () tx ]
 
 main : String
 main = String.fromInt (List.length refs)
 "#;
-    assert_str_prog_wasm_only("unimpl_effect_traps", src, "2");
+    assert_str_prog_wasm_only("unimpl_effect_traps", src, "4");
 }

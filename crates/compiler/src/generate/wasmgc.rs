@@ -26577,7 +26577,14 @@ impl<'a> Codegen<'a> {
             //   - File.Download.{string,url,bytes}: needs a browser download.
             //   - Markdown.toHtml{,With}: needs a CommonMark parser.
             ("Elm.Kernel.File", "download" | "downloadUrl" | "downloadBytes")
-            | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith") => {
+            | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith")
+            // elm-explorations/webgl: real rendering needs a GPU/DOM `gl` context,
+            // absent headless. The JS backend keeps data-only stand-ins purely so
+            // WebGL-referencing modules compile; we compile the whole WebGL/Texture
+            // kernel surface to a trap for the same conformance, failing honestly
+            // if a scene/texture is ever built and run.
+            | ("Elm.Kernel.WebGL", _)
+            | ("Elm.Kernel.Texture", _) => {
                 f.instruction(&Instruction::Unreachable);
             }
             _ => return Err(format!("wasmgc: unsupported kernel `{module}.{name}`")),
