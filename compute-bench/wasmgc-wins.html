@@ -1,4 +1,4 @@
-<title>alm wasm-gc — new wins</title>
+<title>alm-wasm — new wins</title>
 <style>
   :root {
     --bg: #f7f8f7;
@@ -154,12 +154,12 @@
   <header>
     <div class="eyebrow">alm · WebAssembly-GC backend</div>
     <h1>Test.Html, linear algebra,<br>and the <span class="hl">last conformance gaps</span></h1>
-    <p class="deck">A run of wins on alm's WebAssembly-GC target: two new introspection surfaces, an 85-function math kernel, two soundness fixes, and honest parity for the effects that can't run headless. Every one validated against the JavaScript backend — often against real elm-explorations packages.</p>
+    <p class="deck">A run of wins on alm's WebAssembly-GC target: two new introspection surfaces, an 85-function math kernel, two soundness fixes, and honest parity for the effects that can't run headless. Every one validated against alm-js — often against real elm-explorations packages.</p>
 
     <div class="stats">
       <div class="stat"><div class="n">7</div><div class="l">headline wins shipped &amp; validated</div></div>
       <div class="stat"><div class="n">152 <small>green</small></div><div class="l">wasm-gc backend tests passing</div></div>
-      <div class="stat"><div class="n">85</div><div class="l">linear-algebra kernels, byte-identical to JS</div></div>
+      <div class="stat"><div class="n">85</div><div class="l">linear-algebra kernels, byte-identical to alm-js</div></div>
       <div class="stat"><div class="n">Query<small> + </small>Event</div><div class="l">Test.Html now fully introspectable</div></div>
     </div>
   </header>
@@ -171,7 +171,7 @@
         <div class="tag">HtmlAsJson · Query</div>
         <h3>Reflect the vdom into Test.Html's JSON</h3>
         <p>The <code>toJson</code> / <code>attributeToJson</code> kernels now render alm's typed virtual DOM into the exact elm/virtual-dom shape <code>Query</code> &amp; <code>Selector</code> walk — element / text / keyed nodes, merged <code>className</code>, style &amp; attribute buckets, boolean props.</p>
-        <div class="foot"><span class="chip">decode-equivalent to JS</span></div>
+        <div class="foot"><span class="chip">decode-equivalent to alm-js</span></div>
       </div>
       <div class="card" style="--tag: var(--green)">
         <div class="tag">HtmlAsJson · Event.simulate</div>
@@ -201,13 +201,13 @@
         <div class="tag">Type instantiation</div>
         <h3>Record sub-patterns over a type parameter</h3>
         <p>Matching <code>Single { result }</code> where the constructor's argument is a bare type variable bound to a record by the scrutinee now resolves the field set (instantiated at the case's concrete type args) instead of failing on the unsubstituted variable.</p>
-        <div class="foot"><span class="chip parity">JS = WasmGC = native</span></div>
+        <div class="foot"><span class="chip parity">alm-js = alm-wasm = alm-native</span></div>
       </div>
       <div class="card" style="--tag: var(--green)">
         <div class="tag">Json.Decode.dict</div>
         <h3>Decoded dicts stopped crashing</h3>
         <p><code>dict</code> was building its result with the stale sorted-vector helper while <code>Dict</code> is now a treap — every operation on a decoded dict illegal-cast. It now builds the treap like <code>Dict.fromList</code>. Fixes decoding <em>any</em> JSON object into a <code>Dict</code>.</p>
-        <div class="foot"><span class="chip parity">JS = WasmGC = native</span></div>
+        <div class="foot"><span class="chip parity">alm-js = alm-wasm = alm-native</span></div>
       </div>
     </div>
   </section>
@@ -235,10 +235,10 @@
     <div class="perf">
       <p class="cap"><b>Sum of a 1,000,000-element <code>List Float</code></b> — the new <code>T_LISTF</code> representation drops the per-element box. Lower is better (milliseconds).</p>
       <div class="bar-row"><span class="name">elm (JS)</span><div class="track"><div class="fill elm" style="width: 100%"></div></div><span class="val">177 ms</span></div>
-      <div class="bar-row"><span class="name">alm (JS)</span><div class="track"><div class="fill js" style="width: 27.1%"></div></div><span class="val">48 ms</span></div>
-      <div class="bar-row"><span class="name win">alm wasm-gc</span><div class="track"><div class="fill wg" style="width: 2.3%"></div></div><span class="val">4.0 ms</span></div>
-      <div class="bar-row"><span class="name win">alm native</span><div class="track"><div class="fill na" style="width: 1.2%"></div></div><span class="val">2.1 ms</span></div>
-      <p class="cap" style="margin: 18px 0 0; font-size:13px;">wasm-gc is ~12× its own boxed JS output and ~44× elm's boxed linked list. Amortized-O(1) <code>f64</code> cons brought float-list <code>::</code> from 3.54 → 1.89 ms / 200k. Validated by a 503-package differential sweep — <b>0 regressions</b>.</p>
+      <div class="bar-row"><span class="name">alm-js</span><div class="track"><div class="fill js" style="width: 27.1%"></div></div><span class="val">48 ms</span></div>
+      <div class="bar-row"><span class="name win">alm-wasm</span><div class="track"><div class="fill wg" style="width: 2.3%"></div></div><span class="val">4.0 ms</span></div>
+      <div class="bar-row"><span class="name win">alm-native</span><div class="track"><div class="fill na" style="width: 1.2%"></div></div><span class="val">2.1 ms</span></div>
+      <p class="cap" style="margin: 18px 0 0; font-size:13px;">alm-wasm is ~12× alm-js and ~44× elm's boxed linked list. Amortized-O(1) <code>f64</code> cons brought float-list <code>::</code> from 3.54 → 1.89 ms / 200k. Validated by a 503-package differential sweep — <b>0 regressions</b>.</p>
     </div>
   </section>
 
@@ -260,7 +260,7 @@
     <div class="row">
       <span>alm — an Elm compiler in Rust · WebAssembly-GC backend</span>
       <span>·</span>
-      <span>every win diffed <code>JS == WasmGC</code> (and <code>native</code> where it applies)</span>
+      <span>every win diffed <code>alm-js == alm-wasm</code> (and <code>alm-native</code> where it applies)</span>
     </div>
   </footer>
 </div>
