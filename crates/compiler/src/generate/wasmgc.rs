@@ -5144,6 +5144,21 @@ impl<'a> Codegen<'a> {
                     ("Failure".into(), 3, vec![string, value]),
                 ])
             }
+            // Http.Error (elm/http): BadUrl String | Timeout | NetworkError
+            // | BadStatus Int | BadBody String. Not in the registry; register its
+            // ctors so Debug.toString of an Http.Error renders.
+            "Error" if home == "Http" => {
+                use crate::data::Name;
+                let string = can::Type::Type(Name::from("String"), Name::from("String"), vec![]);
+                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), vec![]);
+                Some(vec![
+                    ("BadUrl".into(), 0, vec![string.clone()]),
+                    ("Timeout".into(), 1, vec![]),
+                    ("NetworkError".into(), 2, vec![]),
+                    ("BadStatus".into(), 3, vec![int]),
+                    ("BadBody".into(), 4, vec![string]),
+                ])
+            }
             _ => None,
         }
     }
