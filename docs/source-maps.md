@@ -127,9 +127,18 @@ Output: `<out>.js.map` + a trailing `//# sourceMappingURL=<name>.map` comment.
   guard removes the harmful (out-of-range) cases.
 
 ## Open risks / known limitations
-- **Cross-module inlined regions (wasm)** — guarded against out-of-range, but an
-  inlined region whose line happens to be in-range for the wrong module maps to a
-  plausible-but-wrong file. Needs per-`TypedExpr` module attribution to fully fix.
+- **Cross-module attribution (wasm) — VERIFIED A NON-ISSUE (2026-07-19).** Every
+  region in a `TypedFn` body comes from that function's module, so attributing
+  expressions to `TypedFn.module` is correct by construction. Confirmed: mono has
+  no cross-module inlining — `spec.expr` resolves foreign references to `Global`
+  *calls* (never inlined bodies), and the `Reducer` inlines only local
+  zero-param let-bindings within one function. The out-of-range guard dropped 0
+  mappings across ~20 multi-module packages, and spot-checked mappings resolve to
+  the correct files. A per-`TypedExpr` `module` field (threaded through all ~51
+  `TypedExpr` construction sites) would therefore be redundant today; it is worth
+  adding only if cross-module *inlining* is ever introduced to mono, at which
+  point the guard would catch out-of-range cases but a plausible-but-wrong
+  in-range file could slip through. The guard stays as cheap defense.
 - **Columns are char counts, not UTF-16 units** — differs only on astral-plane
   characters in string literals; a minor position skew on such lines.
 - **`file` field** left empty — optional in v3 and unused when the map is
