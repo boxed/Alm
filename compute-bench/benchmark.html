@@ -183,13 +183,13 @@
   // no DOM. native = --target=native-typed (custom Immix-lite GC, default);
   // elm = official 0.19.1 compiler, driven headless through a Platform.worker.
   const COMPUTE = [
-    { op: "fib 35",                  elm: 46.0,  "alm-js": 47.0, "alm-wasm": 23.5, "alm-native": 14.4 },
-    { op: "binary-trees d14×60",     elm: 8.7,   "alm-js": 8.7,  "alm-wasm": 8.3,  "alm-native": 8.1 },
-    { op: "list map/filter/fold 1M", elm: 135.0, "alm-js": 32.1, "alm-wasm": 9.1,  "alm-native": 2.6 },
-    { op: "Dict 100k build+get",     elm: 43.7,  "alm-js": 31.4, "alm-wasm": 20.1, "alm-native": 31.4 },
-    { op: "mandelbrot 400²",         elm: 5.85,  "alm-js": 5.78, "alm-wasm": 5.31, "alm-native": 6.5 },
-    { op: "sort 100k ints",          elm: 24.2,  "alm-js": 23.8, "alm-wasm": 13.7, "alm-native": 10.6 },
-    { op: "float-list sum 1M",       elm: 177.0, "alm-js": 48.0, "alm-wasm": 4.0,  "alm-native": 2.1 },
+    { op: "fib 35",                  elm: 45.7,  "alm-js": 46.1, "alm-wasm": 23.5, "alm-native": 14.4 },
+    { op: "binary-trees d14×60",     elm: 9.1,   "alm-js": 8.9,  "alm-wasm": 9.1,  "alm-native": 8.0 },
+    { op: "list map/filter/fold 1M", elm: 130.1, "alm-js": 24.0, "alm-wasm": 9.9,  "alm-native": 2.8 },
+    { op: "Dict 100k build+get",     elm: 34.5,  "alm-js": 31.1, "alm-wasm": 21.5, "alm-native": 32.6 },
+    { op: "mandelbrot 400²",         elm: 5.9,   "alm-js": 5.6,  "alm-wasm": 5.2,  "alm-native": 6.3 },
+    { op: "sort 100k ints",          elm: 24.1,  "alm-js": 23.9, "alm-wasm": 14.4, "alm-native": 10.7 },
+    { op: "float-list sum 1M",       elm: 174.7, "alm-js": 46.3, "alm-wasm": 4.1,  "alm-native": 2.3 },
   ];
   const COMPUTE_COLS = ["elm", "alm-js", "alm-wasm", "alm-native"];
 
