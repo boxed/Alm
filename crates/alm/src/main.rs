@@ -99,7 +99,8 @@ fn make(args: &[String]) -> ExitCode {
         }
         Backend::WasmGc => {
             let output = output.unwrap_or_else(|| input.with_extension("wasm"));
-            alm_compiler::project::compile_project_wasmgc(&input, &output).map(|()| output)
+            alm_compiler::project::compile_project_wasmgc(&input, &output, source_maps)
+                .map(|()| output)
         }
         Backend::Js if source_maps => {
             alm_compiler::project::compile_project_source_maps(&input).and_then(

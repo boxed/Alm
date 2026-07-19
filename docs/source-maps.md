@@ -89,14 +89,25 @@ SourceNode-style builder) and flatten to absolute positions when written to
 touches every emission point. Decide during implementation.
 Output: `<out>.js.map` + a trailing `//# sourceMappingURL=<name>.map` comment.
 
-### Phase 2 — wasm-gc (`generate/wasmgc.rs`)
-- Track the byte offset of each emitted instruction relative to the chosen base.
-  `wasm_encoder::Function` does not expose offsets, so either wrap instruction
-  emission to measure encoded length incrementally, or compute offsets during a
-  post-pass over the encoded function bodies. **Spike this first** — it is the
-  main technical risk.
-- Build the map (generated line 0, column = offset) via the Phase 0 builder;
-  attach a `sourceMappingURL` custom section and write the `.map` file.
+### Phase 2 — wasm-gc (`generate/wasmgc.rs`) — DONE
+- **Offsets**: `emit_fn`/`emit_expr` record `(code-section entry index,
+  `Function::byte_len()` at emit, region, module)`. After the module is built,
+  `build_source_map` re-parses it (wasmparser) for each function body's absolute
+  range and computes `column = body_range.start + offset_in_body`. Wasm mappings
+  are all on generated line 0; the column is the byte offset.
+- **Tree-shaking**: the map resolves against the TREE-SHAKEN binary. The
+  un-shaken kernel is not always valid wasm (dead helpers carry latent type
+  errors that stubbing removes), and shaking keeps live bodies verbatim, so their
+  offsets stay valid at new positions. `tree_shake` now also returns the set of
+  kept (non-stubbed) entry indices; mappings for stubbed dead functions are
+  dropped.
+- **Section + file**: a `sourceMappingURL` custom section (appended after all
+  sections, so code offsets don't shift) points at the `<out>.wasm.map` written
+  beside the binary. Enabled by `--source-maps` on the `wasm-gc` target.
+- Verified: mapped wasm validates (node `WebAssembly.validate`), byte offsets
+  are in-range, and expressions resolve to exact source line:col (distinct
+  offsets → distinct columns on one source line). Durable test in
+  `tests/sourcemap_test.rs::wasm_source_map_has_section_and_resolves`.
 
 ### Phase 3 — CLI + tests
 - A flag to enable source-map emission (and write the `.map` beside the output).

@@ -222,7 +222,11 @@ pub fn compile_project_typed(
 /// Compile a project with the experimental WasmGC backend (see
 /// `generate::wasmgc`). Shares the front end and monomorphizer with the typed
 /// backend; only code generation differs.
-pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<BuildError>> {
+pub fn compile_project_wasmgc(
+    entry: &Path,
+    output: &Path,
+    source_maps: bool,
+) -> Result<(), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
@@ -297,7 +301,24 @@ pub fn compile_project_wasmgc(entry: &Path, output: &Path) -> Result<(), Vec<Bui
             );
         }
     }
-    generate::wasmgc::build(&program, output, &ports, &ctor_arg_types, &unions).map_err(|message| {
+    let sources: Option<HashMap<String, (String, String)>> = source_maps.then(|| {
+        checked
+            .sources
+            .iter()
+            .map(|(name, (path, src))| {
+                (name.to_string(), (path.display().to_string(), src.clone()))
+            })
+            .collect()
+    });
+    generate::wasmgc::build(
+        &program,
+        output,
+        &ports,
+        &ctor_arg_types,
+        &unions,
+        sources.as_ref(),
+    )
+    .map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

@@ -32,7 +32,10 @@ use crate::reporting::annotation::Region;
 /// segments) and replaces every unreachable function body with a 3-byte
 /// `unreachable` stub. Function *indices* are left untouched — only the Code
 /// section changes — so no call site, export, or element entry needs rewriting.
-fn tree_shake(bytes: &[u8]) -> Vec<u8> {
+/// Returns the shaken module and the set of code-section ENTRY indices kept
+/// verbatim (not stubbed) — the live functions, whose bodies (and thus recorded
+/// source-map offsets) survive unchanged at their new positions.
+fn tree_shake(bytes: &[u8]) -> (Vec<u8>, std::collections::HashSet<usize>) {
     use wasmparser::{ElementKind, Operator, Parser, Payload};
 
     // The `ref.func` targets reachable from a const-expr (global init / element
@@ -58,7 +61,8 @@ fn tree_shake(bytes: &[u8]) -> Vec<u8> {
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = match payload {
             Ok(p) => p,
-            Err(_) => return bytes.to_vec(), // parse failure: leave the module as-is
+            // parse failure: leave the module as-is (nothing kept-verbatim known)
+            Err(_) => return (bytes.to_vec(), std::collections::HashSet::new()),
         };
         match payload {
             Payload::ExportSection(reader) => {
@@ -170,7 +174,10 @@ fn tree_shake(bytes: &[u8]) -> Vec<u8> {
             out.section(&RawSection { id, data: &bytes[range] });
         }
     }
-    out.finish()
+    let kept: std::collections::HashSet<usize> = (0..bodies.len())
+        .filter(|&i| reachable.contains(&(num_imported_funcs + i as u32)))
+        .collect();
+    (out.finish(), kept)
 }
 
 const T_INT: u32 = 0; // struct { i64 }
@@ -1586,13 +1593,55 @@ pub fn build(
     ports: &HashMap<String, bool>,
     ctor_arg_types: &HashMap<(String, String, u32), Vec<can::Type>>,
     unions: &HashMap<(String, String), UnionInfo>,
+    sources: Option<&HashMap<String, (String, String)>>,
 ) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     cg.ports = ports.clone();
     cg.ctor_arg_types = ctor_arg_types.clone();
     cg.unions = unions.clone();
-    let bytes = cg.build()?;
-    std::fs::write(output, bytes).map_err(|e| e.to_string())
+    let map_path = output.with_extension("wasm.map");
+    if let Some(srcs) = sources {
+        cg.maps_on = true;
+        cg.srcmap_sources = srcs.clone();
+        cg.map_url = map_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    let (bytes, map) = cg.build()?;
+    std::fs::write(output, bytes).map_err(|e| e.to_string())?;
+    if let Some(map) = map {
+        std::fs::write(&map_path, map).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Append a `sourceMappingURL` custom section (section id 0) carrying `url`.
+/// Placed after every other section, so it does not shift code byte offsets.
+fn append_source_mapping_url(mut bytes: Vec<u8>, url: &str) -> Vec<u8> {
+    fn leb(mut n: usize, out: &mut Vec<u8>) {
+        loop {
+            let mut b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if n == 0 {
+                break;
+            }
+        }
+    }
+    let name = "sourceMappingURL";
+    let mut payload = Vec::new();
+    leb(name.len(), &mut payload);
+    payload.extend_from_slice(name.as_bytes());
+    leb(url.len(), &mut payload);
+    payload.extend_from_slice(url.as_bytes());
+    bytes.push(0x00); // custom section id
+    leb(payload.len(), &mut bytes);
+    bytes.extend_from_slice(&payload);
+    bytes
 }
 
 struct Codegen<'a> {
@@ -1895,6 +1944,20 @@ struct Codegen<'a> {
     /// Their wasm function indices are `lifted_base + i`.
     lifted: Vec<(u32, Function)>,
     lifted_base: u32,
+    // --- source maps (inactive unless `maps_on`) ---
+    maps_on: bool,
+    /// The URL written into the `sourceMappingURL` custom section (the .map
+    /// filename beside the .wasm).
+    map_url: String,
+    /// Module name -> (file path, source text), for `sources`/`sourcesContent`.
+    srcmap_sources: HashMap<String, (String, String)>,
+    /// Recorded mapping points: (code-section entry index, byte offset within
+    /// the function body, source region, module name). Resolved to absolute
+    /// module offsets after the binary is assembled.
+    sm_entries: Vec<(usize, usize, Region, crate::data::Name)>,
+    /// The function currently being emitted: (code-section entry index, module).
+    /// Set by `emit_fn`; read by `emit_expr` to attribute each expression.
+    cur_fn: Option<(usize, crate::data::Name)>,
 }
 
 impl<'a> Codegen<'a> {
@@ -2153,6 +2216,11 @@ impl<'a> Codegen<'a> {
             const_float: HashMap::new(),
             lifted: Vec::new(),
             lifted_base: 0,
+            maps_on: false,
+            map_url: String::new(),
+            srcmap_sources: HashMap::new(),
+            sm_entries: Vec::new(),
+            cur_fn: None,
         }
     }
 
@@ -2199,7 +2267,7 @@ impl<'a> Codegen<'a> {
         t
     }
 
-    fn build(&mut self) -> Result<Vec<u8>, String> {
+    fn build(&mut self) -> Result<(Vec<u8>, Option<String>), String> {
         for (i, f) in self.mono.functions.iter().enumerate() {
             self.func_index.insert(f.mangled.to_string(), N_IMPORTS + i as u32);
             self.func_arity.insert(f.mangled.to_string(), f.params.len() as u32);
@@ -2467,8 +2535,8 @@ impl<'a> Codegen<'a> {
         // Emit user bodies (discovers fn-types via calls; interns string
         // literals). The string helpers need fn-types for arity 1 and 2.
         let mut bodies: Vec<Function> = Vec::new();
-        for f in &self.mono.functions {
-            bodies.push(self.emit_fn(f)?);
+        for (i, f) in self.mono.functions.iter().enumerate() {
+            bodies.push(self.emit_fn(i, f)?);
         }
         let mut func_type_idx: Vec<u32> =
             self.mono.functions.iter().map(|f| self.fn_type(f.params.len() as u32)).collect();
@@ -3648,14 +3716,72 @@ impl<'a> Codegen<'a> {
         module.section(&data);
         let _ = ConstExpr::i32_const(0);
         let bytes = module.finish();
+        // Source maps: resolve offsets against the TREE-SHAKEN binary. The
+        // un-shaken kernel is not always valid wasm (dead helpers with latent
+        // type errors that stubbing removes), and shaking keeps live functions'
+        // bodies verbatim — so their recorded offsets stay valid, just at new
+        // positions. Dead (stubbed) functions carry no user source; drop them.
+        // The `sourceMappingURL` custom section goes after all sections, so it
+        // does not shift code offsets.
+        if self.maps_on {
+            let (shaken, kept) = tree_shake(&bytes);
+            let map = self.build_source_map(&shaken, &kept);
+            let shaken = append_source_mapping_url(shaken, &self.map_url);
+            return Ok((shaken, Some(map)));
+        }
         // Tree-shake: the kernel emits every runtime helper unconditionally, so a
         // program that never touches Dict/Json/Html still carries them. Stub the
         // bodies unreachable from the exports (`ALM_NO_DCE=1` keeps them all).
         if std::env::var_os("ALM_NO_DCE").is_some() {
-            Ok(bytes)
+            Ok((bytes, None))
         } else {
-            Ok(tree_shake(&bytes))
+            Ok((tree_shake(&bytes).0, None))
         }
+    }
+
+    /// Resolve recorded mapping points to absolute module byte offsets (by
+    /// re-parsing the shaken binary for each function body's range) and build the
+    /// Source Map v3 JSON. Wasm source maps put every mapping on generated line 0
+    /// with the generated column set to the instruction's byte offset. Mappings
+    /// for functions that were stubbed out (`!kept`) are dropped.
+    fn build_source_map(
+        &self,
+        bytes: &[u8],
+        kept: &std::collections::HashSet<usize>,
+    ) -> String {
+        use wasmparser::{Parser, Payload};
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        for payload in Parser::new(0).parse_all(bytes).flatten() {
+            if let Payload::CodeSectionEntry(body) = payload {
+                ranges.push(body.range());
+            }
+        }
+        let mut sm = crate::generate::sourcemap::SourceMap::new("");
+        // Intern sources deterministically (by module name) so indices are stable.
+        let mut src_idx: HashMap<String, u32> = HashMap::new();
+        let mut modules: Vec<&String> = self.srcmap_sources.keys().collect();
+        modules.sort();
+        for m in modules {
+            let (path, content) = &self.srcmap_sources[m];
+            src_idx.insert(m.clone(), sm.add_source(path, content));
+        }
+        for (fn_index, off, region, module) in &self.sm_entries {
+            if !kept.contains(fn_index) {
+                continue; // stubbed dead function — its body (and offset) is gone
+            }
+            let Some(range) = ranges.get(*fn_index) else {
+                continue;
+            };
+            let Some(&src) = src_idx.get(module.as_str()) else {
+                continue;
+            };
+            let Some((src_line, src_col)) = crate::generate::sourcemap::region_start(region) else {
+                continue;
+            };
+            let col = (range.start + off) as u32;
+            sm.add(0, col, src, src_line, src_col);
+        }
+        sm.to_json()
     }
 
     /// str_append(a, b) : (eqref, eqref) -> eqref — concatenate two strings.
@@ -20915,7 +21041,7 @@ impl<'a> Codegen<'a> {
         }
     }
 
-    fn emit_fn(&mut self, f: &crate::ir::mono::TypedFn) -> Result<Function, String> {
+    fn emit_fn(&mut self, fn_index: usize, f: &crate::ir::mono::TypedFn) -> Result<Function, String> {
         let nparams = f.params.len() as u32;
         // Extra eqref locals for `let`/`case`/destructure bindings, plus any
         // temporaries needed to destructure non-trivial parameter patterns.
@@ -20942,6 +21068,14 @@ impl<'a> Codegen<'a> {
         } else {
             Function::new([(extra + 1, eqref()), (1, ValType::I64)])
         };
+        // Source map: record the function's first-instruction offset (right after
+        // the locals prefix) → its definition region. `byte_len()` here is the
+        // body offset of the first emitted instruction.
+        if self.maps_on {
+            self.sm_entries
+                .push((fn_index, wf.byte_len(), f.region, f.module.clone()));
+            self.cur_fn = Some((fn_index, f.module.clone()));
+        }
         let mut ctx = FnCtx::new();
         ctx.next_local = nparams;
         ctx.scratch_eqref = nparams + extra;
@@ -21133,6 +21267,13 @@ impl<'a> Codegen<'a> {
 
     /// Emit an expression, leaving one `eqref` on the stack.
     fn emit_expr(&mut self, e: &TypedExpr, ctx: &mut FnCtx, f: &mut Function) -> Result<(), String> {
+        // Source map: record this expression's start (current body byte offset)
+        // → its source region. Duplicates at one offset collapse in the builder.
+        if self.maps_on {
+            if let Some((idx, module)) = self.cur_fn.clone() {
+                self.sm_entries.push((idx, f.byte_len(), e.region, module));
+            }
+        }
         match &e.kind {
             TypedKind::Int(n) => {
                 f.instruction(&Instruction::I64Const(*n));

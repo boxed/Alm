@@ -1,6 +1,9 @@
-//! End-to-end source-map tests for the JS backend: compile a module with a
-//! Source Map v3 and assert that generated definition positions decode back to
-//! the correct Elm source line.
+//! End-to-end source-map tests: compile a module with a Source Map v3 and
+//! assert that generated positions decode back to the correct Elm source line.
+//! Covers both the JS backend (character positions) and the wasm-gc backend
+//! (byte offsets + a `sourceMappingURL` custom section).
+
+mod common;
 
 const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -181,5 +184,79 @@ main =
         "a sub-expression of `add 1 2` maps to its source line {}; got {:?}",
         add_call_line + 1,
         on_number.iter().map(|s| s.src_line + 1).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn wasm_source_map_has_section_and_resolves() {
+    use alm_compiler::project;
+
+    let source = "\
+module Test exposing (main)
+
+
+label : String
+label =
+    \"hi\"
+
+
+main : String
+main =
+    label
+";
+    let dir = common::test_dir("alm-srcmap-wasm", "t");
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let wasm_path = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm_path, true).unwrap_or_else(|e| {
+        panic!(
+            "wasmgc build failed:\n{}",
+            e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+        )
+    });
+
+    let wasm = std::fs::read(&wasm_path).expect("read wasm");
+    let map_path = dir.join("app.wasm.map");
+    let map = std::fs::read_to_string(&map_path).expect("read .wasm.map beside the wasm");
+
+    // Valid wasm header + a `sourceMappingURL` custom section pointing at the map.
+    assert_eq!(&wasm[..4], b"\0asm", "wasm magic");
+    let url_pos = wasm
+        .windows("sourceMappingURL".len())
+        .position(|w| w == b"sourceMappingURL")
+        .expect("sourceMappingURL custom section present");
+    assert!(
+        wasm[url_pos..].windows(b"app.wasm.map".len()).any(|w| w == b"app.wasm.map"),
+        "custom section carries the .map filename"
+    );
+
+    // v3 map with the source registered and its text embedded.
+    assert!(map.contains("\"version\":3"));
+    assert!(map.contains("Test.elm"), "source path: {map}");
+
+    let segs = decode_mappings(json_string_field(&map, "mappings"));
+    assert!(!segs.is_empty(), "some mappings recorded");
+    // Wasm mappings are all on generated line 0; the column is a byte offset,
+    // which must land inside the module.
+    for s in &segs {
+        assert_eq!(s.gen_line, 0, "wasm maps are single-line (byte offsets)");
+        assert!(
+            (s.gen_col as usize) < wasm.len(),
+            "byte offset {} within the {}-byte module",
+            s.gen_col,
+            wasm.len()
+        );
+        assert_eq!(s.src, 0, "single source");
+    }
+    // `main` is defined on source line 11 (1-based); some mapping resolves there.
+    let main_line = source
+        .lines()
+        .position(|l| l.starts_with("main ="))
+        .expect("`main =` in source") as i64;
+    assert!(
+        segs.iter().any(|s| s.src_line == main_line),
+        "a mapping resolves to `main =` (line {}); got {:?}",
+        main_line + 1,
+        segs.iter().map(|s| s.src_line + 1).collect::<Vec<_>>()
     );
 }
