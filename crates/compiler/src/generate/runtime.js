@@ -59,18 +59,53 @@ function A7(f, a, b, c, d, e, g, h) { return f.a === 7 ? f.f(a, b, c, d, e, g, h
 
 var _Utils_Tuple0 = { $: '#0' };
 
-// LISTS
+// LISTS — an unrolled linked list: a spine of chunks, each a dense array of up
+// to `_List_LIMIT` elements. `cons` prepends a singleton chunk (O(1), immutable,
+// no cons-after-tail copy), while bulk builders (fromArray/map/filter/range/...)
+// pack dense chunks so iteration runs contiguously through memory — most of a
+// vector's speed without a vector's O(n) cons. Chunk boundaries are NOT part of a
+// list's identity: equality, ordering and pattern matching compare the logical
+// element sequence, so `[1,2,3]` built by cons and by fromArray are equal.
+// A chunk node is `{ $: '::', d: <Array>, o: <first live index>, b: <tail> }`
+// with the invariant `o < d.length` (no empty chunks); `d` is never mutated once
+// the node is observable. Nil is `{ $: '[]' }`.
 
+var _List_LIMIT = 8192;
 var _List_Nil = { $: '[]' };
-function _List_Cons(hd, tl) { return { $: '::', a: hd, b: tl }; }
-function _List_fromArray(arr) {
-    var out = _List_Nil;
-    for (var i = arr.length; i--;) { out = _List_Cons(arr[i], out); }
+function _List_Cons(hd, tl) { return { $: '::', d: [hd], o: 0, b: tl }; }
+function _List_head(xs) { return xs.d[xs.o]; }
+function _List_tail(xs) {
+    var o = xs.o + 1;
+    return o < xs.d.length ? { $: '::', d: xs.d, o: o, b: xs.b } : xs.b;
+}
+// Build a list from `arr`, ending in `tail`. Packs into <=_List_LIMIT dense
+// chunks (back-to-front so element order is preserved). When the whole array
+// fits one chunk and there is no prefix to graft onto, `arr` is reused directly
+// — safe because `_List_toArray` always hands back a copy.
+function _List_fromArrayOnto(arr, tail) {
+    var end = arr.length;
+    if (end === 0) { return tail; }
+    if (end <= _List_LIMIT && tail.$ === '[]') { return { $: '::', d: arr, o: 0, b: tail }; }
+    var out = tail;
+    while (end > 0) {
+        var start = end - _List_LIMIT;
+        if (start < 0) { start = 0; }
+        out = { $: '::', d: arr.slice(start, end), o: 0, b: out };
+        end = start;
+    }
     return out;
 }
+function _List_fromArray(arr) { return _List_fromArrayOnto(arr, _List_Nil); }
 function _List_toArray(xs) {
+    if (xs.$ !== '::') { return []; }
+    // Single dense chunk: copy it out directly. Callers such as `List.sort`
+    // mutate the result in place, so never return the shared backing.
+    if (xs.b.$ === '[]') { return xs.o === 0 ? xs.d.slice() : xs.d.slice(xs.o); }
     var out = [];
-    for (; xs.$ === '::'; xs = xs.b) { out.push(xs.a); }
+    for (; xs.$ === '::'; xs = xs.b) {
+        var d = xs.d;
+        for (var i = xs.o, n = d.length; i < n; i++) { out.push(d[i]); }
+    }
     return out;
 }
 
@@ -108,6 +143,19 @@ function _Utils_eqHelp(x, y, depth, stack) {
         if (!y || x.$ !== 'Decoder' || y.$ !== 'Decoder') { return false; }
         if (x.succeed && y.succeed) { return _Utils_eqHelp(x.value, y.value, depth + 1, stack); }
         return x.run === y.run;
+    }
+    // Lists compare by logical element sequence — chunk boundaries are not part
+    // of a list's identity, so two equal lists may be chunked differently.
+    if (x.$ === '::' || x.$ === '[]') {
+        if (y.$ !== '::' && y.$ !== '[]') { return false; }
+        var exi = x.$ === '::' ? x.o : 0;
+        var eyi = y.$ === '::' ? y.o : 0;
+        while (x.$ === '::' && y.$ === '::') {
+            if (!_Utils_eqHelp(x.d[exi], y.d[eyi], depth + 1, stack)) { return false; }
+            if (++exi >= x.d.length) { x = x.b; exi = x.$ === '::' ? x.o : 0; }
+            if (++eyi >= y.d.length) { y = y.b; eyi = y.$ === '::' ? y.o : 0; }
+        }
+        return x.$ === '[]' && y.$ === '[]';
     }
     if (depth > 100) {
         stack.push({ $: '#2', a: x, b: y });
@@ -148,10 +196,14 @@ function _Utils_cmp(x, y) {
         if (n !== 0) { return n; }
         return x.$ === '#3' ? _Utils_cmp(x.c, y.c) : 0;
     }
-    // lists
-    for (; x.$ === '::' && y.$ === '::'; x = x.b, y = y.b) {
-        var m = _Utils_cmp(x.a, y.a);
+    // lists — compare by logical element sequence (chunk boundaries ignored)
+    var cxi = x.$ === '::' ? x.o : 0;
+    var cyi = y.$ === '::' ? y.o : 0;
+    while (x.$ === '::' && y.$ === '::') {
+        var m = _Utils_cmp(x.d[cxi], y.d[cyi]);
         if (m !== 0) { return m; }
+        if (++cxi >= x.d.length) { x = x.b; cxi = x.$ === '::' ? x.o : 0; }
+        if (++cyi >= y.d.length) { y = y.b; cyi = y.$ === '::' ? y.o : 0; }
     }
     return x.$ === '[]' ? (y.$ === '[]' ? 0 : -1) : 1;
 }
@@ -161,10 +213,9 @@ function _Utils_cmp(x, y) {
 function _Utils_ap(x, y) {
     if (typeof x === 'string') { return x + y; }
     if (x.$ === '[]') { return y; }
-    var arr = _List_toArray(x);
-    var out = y;
-    for (var i = arr.length; i--;) { out = _List_Cons(arr[i], out); }
-    return out;
+    // Prepend x's elements onto y as dense chunks; the copy is bounded by |x|,
+    // and y's spine is shared (not copied).
+    return _List_fromArrayOnto(_List_toArray(x), y);
 }
 
 // RECORD UPDATE
@@ -280,29 +331,29 @@ var $Result$fromMaybe = F2(function (err, maybe) {
 // LIST
 
 var $List$cons = F2(_List_Cons);
-var $List$singleton = function (x) { return _List_Cons(x, _List_Nil); };
+var $List$singleton = function (x) { return { $: '::', d: [x], o: 0, b: _List_Nil }; };
 var $List$repeat = F2(function (n, x) {
-    var out = _List_Nil;
-    for (; n > 0; n--) { out = _List_Cons(x, out); }
-    return out;
+    var out = [];
+    for (; n > 0; n--) { out.push(x); }
+    return _List_fromArray(out);
 });
 var $List$range = F2(function (lo, hi) {
-    var out = _List_Nil;
-    for (; lo <= hi; hi--) { out = _List_Cons(hi, out); }
-    return out;
+    var out = [];
+    for (; lo <= hi; lo++) { out.push(lo); }
+    return _List_fromArray(out);
 });
 var $List$map = F2(function (f, xs) {
     var out = [];
-    for (; xs.$ === '::'; xs = xs.b) { out.push(f(xs.a)); }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { out.push(f(d[i])); } }
     return _List_fromArray(out);
 });
 var $List$indexedMap = F2(function (f, xs) {
-    var out = [], i = 0;
-    for (; xs.$ === '::'; xs = xs.b) { out.push(A2(f, i++, xs.a)); }
+    var out = [], k = 0;
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { out.push(A2(f, k++, d[i])); } }
     return _List_fromArray(out);
 });
 var $List$foldl = F3(function (f, acc, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { acc = A2(f, xs.a, acc); }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { acc = A2(f, d[i], acc); } }
     return acc;
 });
 var $List$foldr = F3(function (f, acc, xs) {
@@ -312,67 +363,65 @@ var $List$foldr = F3(function (f, acc, xs) {
 });
 var $List$filter = F2(function (isGood, xs) {
     var out = [];
-    for (; xs.$ === '::'; xs = xs.b) { if (isGood(xs.a)) { out.push(xs.a); } }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (isGood(d[i])) { out.push(d[i]); } } }
     return _List_fromArray(out);
 });
 var $List$filterMap = F2(function (f, xs) {
     var out = [];
     for (; xs.$ === '::'; xs = xs.b) {
-        var m = f(xs.a);
-        if (m.$ === 'Just') { out.push(m.a); }
+        var d = xs.d;
+        for (var i = xs.o, n = d.length; i < n; i++) { var m = f(d[i]); if (m.$ === 'Just') { out.push(m.a); } }
     }
     return _List_fromArray(out);
 });
 var $List$length = function (xs) {
     var n = 0;
-    for (; xs.$ === '::'; xs = xs.b) { n++; }
+    for (; xs.$ === '::'; xs = xs.b) { n += xs.d.length - xs.o; }
     return n;
 };
 var $List$reverse = function (xs) {
-    var out = _List_Nil;
-    for (; xs.$ === '::'; xs = xs.b) { out = _List_Cons(xs.a, out); }
-    return out;
+    var out = _List_toArray(xs);
+    out.reverse();
+    return _List_fromArray(out);
 };
 var $List$member = F2(function (x, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (_Utils_eq(x, xs.a)) { return true; } }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (_Utils_eq(x, d[i])) { return true; } } }
     return false;
 });
 var $List$all = F2(function (isGood, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (!isGood(xs.a)) { return false; } }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (!isGood(d[i])) { return false; } } }
     return true;
 });
 var $List$any = F2(function (isGood, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (isGood(xs.a)) { return true; } }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (isGood(d[i])) { return true; } } }
     return false;
 });
 var $List$maximum = function (xs) {
     if (xs.$ !== '::') { return $Maybe$Nothing; }
-    var best = xs.a;
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { if (_Utils_cmp(xs.a, best) > 0) { best = xs.a; } }
+    var best = xs.d[xs.o];
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (_Utils_cmp(d[i], best) > 0) { best = d[i]; } } }
     return $Maybe$Just(best);
 };
 var $List$minimum = function (xs) {
     if (xs.$ !== '::') { return $Maybe$Nothing; }
-    var best = xs.a;
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { if (_Utils_cmp(xs.a, best) < 0) { best = xs.a; } }
+    var best = xs.d[xs.o];
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { if (_Utils_cmp(d[i], best) < 0) { best = d[i]; } } }
     return $Maybe$Just(best);
 };
 var $List$sum = function (xs) {
-    var n = 0;
-    for (; xs.$ === '::'; xs = xs.b) { n += xs.a; }
-    return n;
+    var t = 0;
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { t += d[i]; } }
+    return t;
 };
 var $List$product = function (xs) {
-    var n = 1;
-    for (; xs.$ === '::'; xs = xs.b) { n *= xs.a; }
-    return n;
+    var t = 1;
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { t *= d[i]; } }
+    return t;
 };
 var $List$append = F2(_Utils_ap);
 var $List$concat = function (xss) {
     var out = [];
-    for (; xss.$ === '::'; xss = xss.b) {
-        out.push.apply(out, _List_toArray(xss.a));
-    }
+    for (; xss.$ === '::'; xss = xss.b) { var d = xss.d; for (var i = xss.o, n = d.length; i < n; i++) { out.push.apply(out, _List_toArray(d[i])); } }
     return _List_fromArray(out);
 };
 var $List$concatMap = F2(function (f, xs) {
@@ -380,15 +429,16 @@ var $List$concatMap = F2(function (f, xs) {
 });
 var $List$intersperse = F2(function (sep, xs) {
     if (xs.$ !== '::') { return xs; }
-    var out = [xs.a];
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { out.push(sep, xs.a); }
+    var arr = _List_toArray(xs);
+    var out = [arr[0]];
+    for (var i = 1; i < arr.length; i++) { out.push(sep, arr[i]); }
     return _List_fromArray(out);
 });
 var $List$map2 = F3(function (f, xs, ys) {
-    var out = [];
-    for (; xs.$ === '::' && ys.$ === '::'; xs = xs.b, ys = ys.b) {
-        out.push(A2(f, xs.a, ys.a));
-    }
+    var ax = _List_toArray(xs), ay = _List_toArray(ys);
+    var n = ax.length < ay.length ? ax.length : ay.length;
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) { out[i] = A2(f, ax[i], ay[i]); }
     return _List_fromArray(out);
 });
 var $List$sort = function (xs) {
@@ -401,28 +451,36 @@ var $List$sortBy = F2(function (toComparable, xs) {
 });
 var $List$isEmpty = function (xs) { return xs.$ === '[]'; };
 var $List$head = function (xs) {
-    return xs.$ === '::' ? $Maybe$Just(xs.a) : $Maybe$Nothing;
+    return xs.$ === '::' ? $Maybe$Just(_List_head(xs)) : $Maybe$Nothing;
 };
 var $List$tail = function (xs) {
-    return xs.$ === '::' ? $Maybe$Just(xs.b) : $Maybe$Nothing;
+    return xs.$ === '::' ? $Maybe$Just(_List_tail(xs)) : $Maybe$Nothing;
 };
 var $List$take = F2(function (n, xs) {
     var out = [];
-    for (; n > 0 && xs.$ === '::'; n--, xs = xs.b) { out.push(xs.a); }
+    for (; n > 0 && xs.$ === '::'; xs = xs.b) {
+        var d = xs.d;
+        for (var i = xs.o, m = d.length; i < m && n > 0; i++, n--) { out.push(d[i]); }
+    }
     return _List_fromArray(out);
 });
 var $List$drop = F2(function (n, xs) {
-    for (; n > 0 && xs.$ === '::'; n--) { xs = xs.b; }
+    while (n > 0 && xs.$ === '::') {
+        var avail = xs.d.length - xs.o;
+        if (n < avail) { return { $: '::', d: xs.d, o: xs.o + n, b: xs.b }; }
+        n -= avail;
+        xs = xs.b;
+    }
     return xs;
 });
 var $List$partition = F2(function (isGood, xs) {
     var yes = [], no = [];
-    for (; xs.$ === '::'; xs = xs.b) { (isGood(xs.a) ? yes : no).push(xs.a); }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { (isGood(d[i]) ? yes : no).push(d[i]); } }
     return { $: '#2', a: _List_fromArray(yes), b: _List_fromArray(no) };
 });
 var $List$unzip = function (pairs) {
     var xs = [], ys = [];
-    for (; pairs.$ === '::'; pairs = pairs.b) { xs.push(pairs.a.a); ys.push(pairs.a.b); }
+    for (; pairs.$ === '::'; pairs = pairs.b) { var d = pairs.d; for (var i = pairs.o, n = d.length; i < n; i++) { xs.push(d[i].a); ys.push(d[i].b); } }
     return { $: '#2', a: _List_fromArray(xs), b: _List_fromArray(ys) };
 };
 
@@ -1093,26 +1151,24 @@ var $List$sortWith = F2(function (compare, xs) {
     }));
 });
 var $List$map3 = F4(function (f, xs, ys, zs) {
-    var out = [];
-    for (; xs.$ === '::' && ys.$ === '::' && zs.$ === '::'; xs = xs.b, ys = ys.b, zs = zs.b) {
-        out.push(A3(f, xs.a, ys.a, zs.a));
-    }
+    var ax = _List_toArray(xs), ay = _List_toArray(ys), az = _List_toArray(zs);
+    var n = Math.min(ax.length, ay.length, az.length);
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) { out[i] = A3(f, ax[i], ay[i], az[i]); }
     return _List_fromArray(out);
 });
 var $List$map4 = F5(function (f, ws, xs, ys, zs) {
-    var out = [];
-    for (; ws.$ === '::' && xs.$ === '::' && ys.$ === '::' && zs.$ === '::';
-        ws = ws.b, xs = xs.b, ys = ys.b, zs = zs.b) {
-        out.push(A4(f, ws.a, xs.a, ys.a, zs.a));
-    }
+    var aw = _List_toArray(ws), ax = _List_toArray(xs), ay = _List_toArray(ys), az = _List_toArray(zs);
+    var n = Math.min(aw.length, ax.length, ay.length, az.length);
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) { out[i] = A4(f, aw[i], ax[i], ay[i], az[i]); }
     return _List_fromArray(out);
 });
 var $List$map5 = F6(function (f, vs, ws, xs, ys, zs) {
-    var out = [];
-    for (; vs.$ === '::' && ws.$ === '::' && xs.$ === '::' && ys.$ === '::' && zs.$ === '::';
-        vs = vs.b, ws = ws.b, xs = xs.b, ys = ys.b, zs = zs.b) {
-        out.push(A5(f, vs.a, ws.a, xs.a, ys.a, zs.a));
-    }
+    var av = _List_toArray(vs), aw = _List_toArray(ws), ax = _List_toArray(xs), ay = _List_toArray(ys), az = _List_toArray(zs);
+    var n = Math.min(av.length, aw.length, ax.length, ay.length, az.length);
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) { out[i] = A5(f, av[i], aw[i], ax[i], ay[i], az[i]); }
     return _List_fromArray(out);
 });
 
@@ -1418,7 +1474,8 @@ var $Dict$toList = function (dict) {
 var $Dict$fromList = function (assocs) {
     var dict = $Dict$empty;
     for (; assocs.$ === '::'; assocs = assocs.b) {
-        dict = A3($Dict$insert, assocs.a.a, assocs.a.b, dict);
+        var d = assocs.d;
+        for (var i = assocs.o, n = d.length; i < n; i++) { dict = A3($Dict$insert, d[i].a, d[i].b, dict); }
     }
     return dict;
 };
@@ -1471,23 +1528,26 @@ var $Dict$merge = F6(function (leftStep, bothStep, rightStep, leftDict, rightDic
     var stepState = F3(function (rKey, rValue, acc) {
         var list = acc.a;
         var result = acc.b;
-        while (list.$ === '::' && _Utils_cmp(list.a.a, rKey) < 0) {
-            result = A3(leftStep, list.a.a, list.a.b, result);
-            list = list.b;
+        while (list.$ === '::' && _Utils_cmp(_List_head(list).a, rKey) < 0) {
+            var lh = _List_head(list);
+            result = A3(leftStep, lh.a, lh.b, result);
+            list = _List_tail(list);
         }
         if (list.$ !== '::') {
             return { $: '#2', a: list, b: A3(rightStep, rKey, rValue, result) };
         }
-        if (_Utils_cmp(list.a.a, rKey) > 0) {
+        if (_Utils_cmp(_List_head(list).a, rKey) > 0) {
             return { $: '#2', a: list, b: A3(rightStep, rKey, rValue, result) };
         }
-        return { $: '#2', a: list.b, b: A4(bothStep, list.a.a, list.a.b, rValue, result) };
+        var lh2 = _List_head(list);
+        return { $: '#2', a: _List_tail(list), b: A4(bothStep, lh2.a, lh2.b, rValue, result) };
     });
     var acc = _Dict_foldl(stepState, { $: '#2', a: $Dict$toList(leftDict), b: initialResult }, rightDict);
     var leftovers = acc.a;
     var result = acc.b;
     for (; leftovers.$ === '::'; leftovers = leftovers.b) {
-        result = A3(leftStep, leftovers.a.a, leftovers.a.b, result);
+        var d = leftovers.d;
+        for (var i = leftovers.o, n = d.length; i < n; i++) { result = A3(leftStep, d[i].a, d[i].b, result); }
     }
     return result;
 });
@@ -1504,7 +1564,7 @@ var $Set$size = function (set) { return $Dict$size(set.d); };
 var $Set$toList = function (set) { return $Dict$keys(set.d); };
 var $Set$fromList = function (xs) {
     var set = $Set$empty;
-    for (; xs.$ === '::'; xs = xs.b) { set = A2($Set$insert, xs.a, set); }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { set = A2($Set$insert, d[i], set); } }
     return set;
 };
 var $Set$map = F2(function (f, set) {
@@ -1696,8 +1756,9 @@ var $Array$repeat = F2(function (n, e) {
     return array;
 });
 var $Array$fromList = function (list) {
+    var arr = _List_toArray(list);
     var array = $Array$empty;
-    for (var xs = list; xs.$ === '::'; xs = xs.b) { array = A2($Array$push, xs.a, array); }
+    for (var i = 0; i < arr.length; i++) { array = A2($Array$push, arr[i], array); }
     return array;
 };
 var $Array$toList = function (array) {
@@ -1705,9 +1766,9 @@ var $Array$toList = function (array) {
 };
 var $Array$toIndexedList = function (array) {
     var items = _Array_toJsArray(array);
-    var list = _List_Nil;
-    for (var i = items.length - 1; i >= 0; i--) { list = _List_Cons({ $: '#2', a: i, b: items[i] }, list); }
-    return list;
+    var out = new Array(items.length);
+    for (var i = 0; i < items.length; i++) { out[i] = { $: '#2', a: i, b: items[i] }; }
+    return _List_fromArray(out);
 };
 var $Array$map = F2(function (func, array) {
     function goNode(node) {
@@ -3551,7 +3612,7 @@ var $Json$Encode$set = F2(function (encodeItem, set) {
 });
 var $Json$Encode$object = function (pairs) {
     var out = {};
-    for (var xs = pairs; xs.$ === '::'; xs = xs.b) { out[xs.a.a] = xs.a.b; }
+    for (var xs = pairs; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { out[d[i].a] = d[i].b; } }
     return out;
 };
 var $Json$Encode$dict = F3(function (toKey, toValue, dict) {

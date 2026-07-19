@@ -234,7 +234,7 @@ fn gen_bundle(
     }
     writeln!(
         gen.out,
-        "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ if (xs.a.b) {{ names.push(xs.a.a); }} }} return {{ $: 'AProp', key: 'className', val: names.join(' ') }}; }};"
+        "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) {{ if (d[i].b) {{ names.push(d[i].a); }} }} }} return {{ $: 'AProp', key: 'className', val: names.join(' ') }}; }};"
     )
     .unwrap();
     writeln!(
@@ -1475,19 +1475,23 @@ fn pattern_tests(
                 pattern_tests(arg, &format!("{}.{}", path, field_name(i)), tests, bindings);
             }
         }
+        // Lists are unrolled (chunked), so head/tail are `_List_head`/`_List_tail`
+        // calls rather than `.a`/`.b` field accesses. Each is guarded by the
+        // preceding `.$ === '::'` test (via `&&` short-circuiting), so the helper
+        // is only invoked on a non-empty node.
         List(items) => {
             let mut current = path.to_string();
             for item in items {
                 tests.push(format!("{}.$ === '::'", current));
-                pattern_tests(item, &format!("{}.a", current), tests, bindings);
-                current = format!("{}.b", current);
+                pattern_tests(item, &format!("_List_head({})", current), tests, bindings);
+                current = format!("_List_tail({})", current);
             }
             tests.push(format!("{}.$ === '[]'", current));
         }
         Cons(head, tail) => {
             tests.push(format!("{}.$ === '::'", path));
-            pattern_tests(head, &format!("{}.a", path), tests, bindings);
-            pattern_tests(tail, &format!("{}.b", path), tests, bindings);
+            pattern_tests(head, &format!("_List_head({})", path), tests, bindings);
+            pattern_tests(tail, &format!("_List_tail({})", path), tests, bindings);
         }
     }
 }
