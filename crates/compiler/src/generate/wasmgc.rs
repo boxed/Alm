@@ -257,6 +257,11 @@ const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
 const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
 const N_IMPORTS: u32 = 46;
 
+/// Max size of a chunk grown by `cons` (front-slack fill); bulk builders make
+/// single chunks of any size, so this only bounds cons-grown chunks so a run of
+/// conses shares one backing (amortized O(1) allocation).
+const CONS_CHUNK_CAP: i32 = 8192;
+
 // Globals: 0=jstr,1=jpos,2=jerr (JSON parser); 3=model,4=update,5=view (the
 // running program); 6=handlers array,7=next handler id; 8=mem bump pointer.
 const G_MODEL: u32 = 3;
@@ -285,6 +290,8 @@ const G_HTTP_RESP: u32 = 25; // the Http.Response for the task being resumed (TH
 const G_STRLITS: u32 = 26; // interned string-literal pool (ref T_ARR of ref T_STR), built once at instantiation
 const G_CLOSPOOL: u32 = 27; // interned capture-free function closures (ref T_ARR of ref T_CLOS), built once
 const G_RSEED: u32 = 28; // Random.generate's persistent Seed (eqref, null until first use → seeded from host time)
+const G_EMPTY_LIST: u32 = 29; // the shared empty list {0,null,null}; the spine terminator every chunk's `next` points to
+const G_EMPTY_LISTF: u32 = 30; // the shared empty `List Float` (T_LISTF) terminator
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -1354,12 +1361,21 @@ fn list_head(f: &mut Function, l: u32) {
 
 /// Push the tail as a fresh `T_LIST` view sharing the backing (`{len-1, bk}`).
 fn list_tail(f: &mut Function, l: u32) {
+    // len > 1: stay within the head chunk ({len-1, bk, next}); len == 1: advance
+    // to `next` (always a valid list — a chunk or the empty-list global).
+    list_len(f, l);
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32GtS);
+    f.instruction(&Instruction::If(BlockType::Result(eqref())));
     list_len(f, l);
     f.instruction(&Instruction::I32Const(1));
     f.instruction(&Instruction::I32Sub);
     list_bk(f, l);
     list_next(f, l);
     f.instruction(&Instruction::StructNew(T_LIST));
+    f.instruction(&Instruction::Else);
+    list_next(f, l);
+    f.instruction(&Instruction::End);
 }
 
 /// `T_LISTF` head, boxed as a `Float` (`T_FLOAT`) — for pattern binds where the
@@ -1375,10 +1391,17 @@ fn list_head_f(f: &mut Function, l: u32) {
 fn list_tail_f(f: &mut Function, l: u32) {
     list_len_f(f, l);
     f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32GtS);
+    f.instruction(&Instruction::If(BlockType::Result(eqref())));
+    list_len_f(f, l);
+    f.instruction(&Instruction::I32Const(1));
     f.instruction(&Instruction::I32Sub);
     list_bk_f(f, l);
     list_next_f(f, l);
     f.instruction(&Instruction::StructNew(T_LISTF));
+    f.instruction(&Instruction::Else);
+    list_next_f(f, l);
+    f.instruction(&Instruction::End);
 }
 
 /// Push element at head-offset held in local `iloc` (`data[start+i]`).
@@ -1431,10 +1454,7 @@ fn push_str_const(f: &mut Function, s: &str) {
 
 /// Push the empty list value (`{0, null, null}`).
 fn push_empty_list(f: &mut Function) {
-    f.instruction(&Instruction::I32Const(0));
-    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_BACK)));
-    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
-    f.instruction(&Instruction::StructNew(T_LIST));
+    f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
 }
 
 /// If `slot` holds an unboxed `T_LISTF`, widen it in place to a boxed `T_LIST`
@@ -1456,10 +1476,7 @@ fn widen_listf_local(widen_idx: Option<u32>, slot: u32, f: &mut Function) {
 
 /// Empty unboxed `List Float` (`T_LISTF{0, null}`).
 fn push_empty_listf(f: &mut Function) {
-    f.instruction(&Instruction::I32Const(0));
-    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_BACKF)));
-    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LISTF)));
-    f.instruction(&Instruction::StructNew(T_LISTF));
+    f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
 }
 
 /// A canonical dedup key for a type, used to share `Debug.toString` renderers.
@@ -3663,6 +3680,28 @@ impl<'a> Codegen<'a> {
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
         );
+        // 29=G_EMPTY_LIST: the shared empty list `{0, null, null}` — the spine
+        // terminator every chunk's `next` points to, so there is no null in the
+        // spine (a real empty-list value, like `_List_Nil` on the JS backend).
+        globals.global(
+            GlobalType { val_type: ref_to(T_LIST), mutable: false, shared: false },
+            &ConstExpr::extended(vec![
+                Instruction::I32Const(0),
+                Instruction::RefNull(HeapType::Concrete(T_BACK)),
+                Instruction::RefNull(HeapType::Concrete(T_LIST)),
+                Instruction::StructNew(T_LIST),
+            ]),
+        );
+        // 30=G_EMPTY_LISTF: the shared empty `List Float` terminator.
+        globals.global(
+            GlobalType { val_type: ref_to(T_LISTF), mutable: false, shared: false },
+            &ConstExpr::extended(vec![
+                Instruction::I32Const(0),
+                Instruction::RefNull(HeapType::Concrete(T_BACKF)),
+                Instruction::RefNull(HeapType::Concrete(T_LISTF)),
+                Instruction::StructNew(T_LISTF),
+            ]),
+        );
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
         for (name, ty) in [
@@ -4268,11 +4307,23 @@ impl<'a> Codegen<'a> {
             (1, ref_null_to(t_arr)),
             (2, ValType::I32),
         ]);
-        // Fast path: single chunk (next == null) → return l unchanged.
+        // Fast path: the empty list, or a single chunk (its `next` is the empty
+        // list, len 0) → return l unchanged. Check l.len first so we never deref
+        // the empty list's own null `next`.
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(t_list));
         f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 2 });
-        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Return);
@@ -4358,12 +4409,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // return {total, {head:0, data:ndata}, null}
+        // return {total, {head:0, data:ndata}, empty} — a single dense chunk.
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(t_back));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(t_list)));
+        f.instruction(&Instruction::GlobalGet(if f64_list { G_EMPTY_LISTF } else { G_EMPTY_LIST }));
         f.instruction(&Instruction::StructNew(t_list));
         f.instruction(&Instruction::End);
         f
@@ -4442,80 +4493,58 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::StructSet { struct_type_index: T_BACK, field_index: 0 });
-        // return {len+1, bk}
+        // return {len+1, bk, next} — extended tip in place, next preserved.
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        list_next(&mut f, 1);
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // grow path: newcap = 2*(len+1)
+        // New-chunk path (empty list, or cons-after-tail / full chunk): a fresh
+        // chunk with front slack, linking the whole old list as `next`. NO copy
+        // — this makes cons amortized O(1) allocation; subsequent conses fill
+        // this chunk's slack in place via the fast path above.
+        // newcap = clamp(2*len, 4, CONS_CHUNK_CAP); element at newcap-1.
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Mul);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
-        f.instruction(&Instruction::LocalSet(9)); // ndata
-        // nstart = newcap - (len+1)
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::LocalSet(6));
-        // ndata[nstart] = x
+        f.instruction(&Instruction::I32Const(CONS_CHUNK_CAP));
+        f.instruction(&Instruction::I32GtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::I32Const(CONS_CHUNK_CAP));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::End);
+        // ndata = new T_ARR[newcap]; ndata[newcap-1] = x
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(9));
         f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        // copy old elements when bk != null
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::I32Eqz);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalSet(7)); // k
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
-        // ndata[nstart+1+k] = odata[start+k]
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::LocalGet(6));
+        // return {1, {head:newcap-1, data:ndata}, oldlist}
         f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalGet(10));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::ArraySet(T_ARR));
-        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Br(0));
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        // return {len+1, {head:nstart, data:ndata}}
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&cast_to(T_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -4566,7 +4595,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -5295,6 +5324,7 @@ impl<'a> Codegen<'a> {
         let app = self.str_append_idx;
         // locals: acc(1):eqref, i(2):i32, n(3):i32
         let mut f = Function::new([(1, eqref()), (2, ValType::I32)]);
+        self.flatten_local(&mut f, 0, false);
         push_str_const(&mut f, "[");
         f.instruction(&Instruction::LocalSet(1));
         list_len(&mut f, 0);
@@ -6293,7 +6323,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -6345,7 +6375,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -6554,7 +6584,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -6669,7 +6699,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -6705,7 +6735,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Sub);
         list_bk(&mut f, 1);
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -6785,7 +6815,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -7254,7 +7284,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
@@ -8005,7 +8035,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
@@ -8021,6 +8051,7 @@ impl<'a> Codegen<'a> {
         // params sep(0), list(1). locals: len(2),total(3),i(4),off(5),seplen(6),
         //   start(7),itemlen(8):i32; data(9):ref T_ARR; out(10),item(11):ref T_STR
         let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (2, ref_to(T_STR))]);
+        self.flatten_local(&mut f, 1, false);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_STR));
         f.instruction(&Instruction::ArrayLen);
@@ -8298,6 +8329,7 @@ impl<'a> Codegen<'a> {
     fn emit_class_list(&self) -> Function {
         // param pairs(0). locals: len(1),i(2):i32; acc(3),pair(4),s(5):eqref
         let mut f = Function::new([(2, ValType::I32), (3, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(3)); // acc
         list_len(&mut f, 0);
@@ -8806,10 +8838,12 @@ impl<'a> Codegen<'a> {
         // lengths
         sign_i(&mut f, 3, 4, false);
         f.instruction(&Instruction::End);
-        // T_LIST: lexicographic over elements, then by length
+        // T_LIST: lexicographic over elements, then by length. Flatten both.
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST)));
         f.instruction(&Instruction::If(BlockType::Empty));
+        self.flatten_local(&mut f, 0, false);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(3)); // la
         list_len(&mut f, 1);
@@ -8968,7 +9002,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -9020,7 +9054,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -9193,7 +9227,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -9353,7 +9387,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -9910,7 +9944,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -9922,6 +9956,7 @@ impl<'a> Codegen<'a> {
         // params chars(0). locals: len(1),total(2),off(3),cp(4),bl(5),i(6),
         //   start(7):i32, xdata(8):ref T_ARR, out(9):str
         let mut f = Function::new([(7, ValType::I32), (1, ref_to(T_ARR)), (1, ref_to(T_STR))]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::I32Const(0));
@@ -10630,7 +10665,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11098,7 +11133,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11109,6 +11144,7 @@ impl<'a> Codegen<'a> {
         // params k(0),d(1). locals: len(2),found(3),rlen(4),i(5),di(6):i32,
         //   ndata(7):ref T_ARR, pair(8):eqref
         let mut f = Function::new([(5, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         // found?
@@ -11176,7 +11212,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11187,6 +11223,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_from_list(&self) -> Function {
         // params pairs(0), acc(1). locals: a(2),cur(3),pair(4):eqref
         let mut f = Function::new([(3, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(0));
@@ -11216,6 +11253,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_fold(&self, rev: bool) -> Function {
         // params f(0),acc(1),d(2). locals: len(3),i(4):i32, a(5),pair(6):eqref
         let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        self.flatten_local(&mut f, 2, false);
         list_len(&mut f, 2);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(1));
@@ -11271,6 +11309,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_map(&self) -> Function {
         // params f(0),d(1). locals: len(2),i(3):i32, ndata(4):ref T_ARR, pair(5):eqref
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -11304,7 +11343,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11315,6 +11354,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_filter(&self) -> Function {
         // params pred(0),d(1). locals: len(2),i(3):i32, acc(4),pair(5):eqref
         let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         push_empty_list(&mut f);
@@ -11382,6 +11422,8 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::Call(self.apply1_idx));
             f.instruction(&Instruction::LocalSet(5));
         };
+        self.flatten_local(&mut f, 3, false);
+        self.flatten_local(&mut f, 4, false);
         list_len(&mut f, 3);
         f.instruction(&Instruction::LocalSet(8));
         list_len(&mut f, 4);
@@ -11511,6 +11553,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_partition(&self) -> Function {
         // params pred(0), pairs(1). locals: len(2),i(3):i32, yes(4),no(5),pair(6):eqref
         let mut f = Function::new([(2, ValType::I32), (3, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         push_empty_list(&mut f);
@@ -11571,6 +11614,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_project(&self, field: u32) -> Function {
         // params d(0). locals: len(1),i(2):i32, ndata(3):ref T_ARR, pair(4):eqref
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
@@ -11598,7 +11642,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11608,6 +11652,7 @@ impl<'a> Codegen<'a> {
     fn emit_dict_intersect(&self) -> Function {
         // params t1(0),t2(1). locals: len(2),i(3):i32, acc(4),pair(5):eqref
         let mut f = Function::new([(2, ValType::I32), (2, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(2));
         push_empty_list(&mut f);
@@ -11794,7 +11839,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11851,7 +11896,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -11891,7 +11936,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11934,7 +11979,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -11971,7 +12016,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12035,7 +12080,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12118,7 +12163,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12158,7 +12203,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12267,7 +12312,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12382,7 +12427,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -12392,6 +12437,7 @@ impl<'a> Codegen<'a> {
     fn emit_set_from_list(&self) -> Function {
         // params xs(0), acc(1). locals: a(2),cur(3):eqref
         let mut f = Function::new([(2, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(0));
@@ -13395,6 +13441,7 @@ impl<'a> Codegen<'a> {
         // sub = items/pairs; len = list_len(sub)
         ctor_arg0(&mut f, 1);
         f.instruction(&Instruction::LocalSet(9));
+        self.flatten_local(&mut f, 9, false);
         list_len(&mut f, 9);
         f.instruction(&Instruction::LocalSet(7));
         // array?
@@ -13899,6 +13946,7 @@ impl<'a> Codegen<'a> {
         // params toKey(0), toVal(1), d(2). locals: len(3),i(4):i32,
         //   ndata(5):ref T_ARR, pair(6):eqref
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 2, false);
         list_len(&mut f, 2);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
@@ -13933,7 +13981,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -16767,7 +16815,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         // --- mapped kids (node.arg2), recursively ---
         ctor_argn(&mut f, 1, 2);
@@ -16821,7 +16869,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         // <tag>[tagName, attrs, kids]
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
@@ -17845,7 +17893,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -17958,7 +18006,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
         f.instruction(&Instruction::ArraySet(T_ARR));
@@ -17970,7 +18018,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -18093,7 +18141,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -18956,7 +19004,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -20161,7 +20209,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
@@ -21048,9 +21096,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // T_LIST: equal length, then elementwise
+        // T_LIST: equal length, then elementwise. Flatten both so chunk
+        // boundaries don't affect equality (a cons-built list equals a dense one).
         test(&mut f, 0, T_LIST);
         f.instruction(&Instruction::If(BlockType::Empty));
+        self.flatten_local(&mut f, 0, false);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 1);
@@ -21630,7 +21681,11 @@ impl<'a> Codegen<'a> {
                     };
                     f.instruction(&Instruction::ArrayNewFixed { array_type_index: arr, array_size: n });
                     f.instruction(&Instruction::StructNew(back));
-                    f.instruction(&Instruction::RefNull(HeapType::Concrete(list)));
+                    f.instruction(&Instruction::GlobalGet(if f64_list {
+                        G_EMPTY_LISTF
+                    } else {
+                        G_EMPTY_LIST
+                    }));
                     f.instruction(&Instruction::StructNew(list));
                 }
             }
@@ -23031,6 +23086,7 @@ impl<'a> Codegen<'a> {
             lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
             lf.instruction(&Instruction::LocalSet(af));
         }
+        self.flatten_local(&mut lf, xs, src_f64);
         if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
@@ -23186,6 +23242,7 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        self.flatten_local(&mut lf, xs, src_f64);
         if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::ArrayNewDefault(res_arr));
@@ -23238,7 +23295,7 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalGet(l_ndata));
         lf.instruction(&Instruction::StructNew(if res_f64 { T_BACKF } else { T_BACK }));
-        lf.instruction(&Instruction::RefNull(HeapType::Concrete(if res_f64 { T_LISTF } else { T_LIST })));
+        lf.instruction(&Instruction::GlobalGet(if res_f64 { G_EMPTY_LISTF } else { G_EMPTY_LIST }));
         lf.instruction(&Instruction::StructNew(if res_f64 { T_LISTF } else { T_LIST }));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
@@ -23321,6 +23378,7 @@ impl<'a> Codegen<'a> {
             }
         }
 
+        self.flatten_local(&mut lf, xs, true);
         list_len_f(&mut lf, xs);
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::ArrayNewDefault(T_ARRF)); // ndata = f64[len]
@@ -23391,7 +23449,7 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalGet(l_tight));
         lf.instruction(&Instruction::StructNew(T_BACKF));
-        lf.instruction(&Instruction::RefNull(HeapType::Concrete(T_LISTF)));
+        lf.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
         lf.instruction(&Instruction::StructNew(T_LISTF));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
@@ -23437,6 +23495,7 @@ impl<'a> Codegen<'a> {
 
         push_empty_list(&mut lf);
         lf.instruction(&Instruction::LocalSet(acc)); // acc = []
+        self.flatten_local(&mut lf, xs, false);
         list_len(&mut lf, xs);
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
@@ -23555,7 +23614,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(l_ndata));
         f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LIST)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
         f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
@@ -23626,7 +23685,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(l_ndata));
         f.instruction(&Instruction::StructNew(T_BACKF));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LISTF)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
         f.instruction(&Instruction::StructNew(T_LISTF));
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
@@ -23717,7 +23776,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LISTF)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
         f.instruction(&Instruction::StructNew(T_LISTF));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -23785,7 +23844,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::StructNew(T_BACKF));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_LISTF)));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
         f.instruction(&Instruction::StructNew(T_LISTF));
         f.instruction(&Instruction::End);
         let slot = (lidx - self.lifted_base) as usize;
@@ -23837,6 +23896,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(classes));
         ctor_argn(&mut f, 0, 1); // attrs = node.attrs
         f.instruction(&Instruction::LocalSet(attrs));
+        self.flatten_local(&mut f, attrs, false);
         list_len(&mut f, attrs);
         f.instruction(&Instruction::LocalSet(len));
         f.instruction(&Instruction::I32Const(0));
@@ -24072,6 +24132,7 @@ impl<'a> Codegen<'a> {
         // e = JArray of translated kids (reverse-iterate + cons → source order).
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalSet(kids));
+        self.flatten_local(&mut f, kids, false);
         list_len(&mut f, kids);
         f.instruction(&Instruction::LocalSet(klen));
         push_empty_list(&mut f);
