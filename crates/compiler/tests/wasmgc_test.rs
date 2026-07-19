@@ -70,7 +70,7 @@ fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
     )));
 
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let runner = dir.join("run_str.cjs");
@@ -93,7 +93,7 @@ fn assert_str_prog_wasm_only(test_name: &str, source: &str, expected: &str) {
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, source).expect("write fixture");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let runner = dir.join("run_str.cjs");
@@ -178,7 +178,7 @@ fn assert_int_prog(test_name: &str, source: &str) {
 
     // WasmGC backend.
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!(
             "wasmgc build failed:\n{}",
             e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
@@ -1710,7 +1710,7 @@ fn assert_sandbox_html(test_name: &str, source: &str) {
 
     // WasmGC: call render_html and read the string out of linear memory.
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let runner = dir.join("run_html.cjs");
@@ -1965,7 +1965,7 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
 
@@ -2027,7 +2027,7 @@ fn events_custom() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m_cu.cjs");
@@ -2085,7 +2085,7 @@ fn events_prevent_default() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m_pd.cjs");
@@ -2142,7 +2142,7 @@ fn events_on_check() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m_chk.cjs");
@@ -2314,7 +2314,7 @@ fn element_incoming_port() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m7.cjs");
@@ -2369,7 +2369,7 @@ fn document_title_and_body() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m6.cjs");
@@ -2474,7 +2474,7 @@ fn element_animation_frame() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m14.cjs");
@@ -2536,7 +2536,7 @@ fn sandbox_keyed_and_lazy() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m13.cjs");
@@ -2602,7 +2602,7 @@ fn application_nav() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m12.cjs");
@@ -2662,7 +2662,7 @@ fn element_browser_events_keydown() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m11.cjs");
@@ -2719,7 +2719,7 @@ fn element_time_every() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m10.cjs");
@@ -2774,7 +2774,7 @@ fn task_time_now() {
     });
     let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m_now.cjs");
@@ -2830,7 +2830,7 @@ fn task_sleep_async() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     // WasmGC-only: assert the correct elm semantics directly. (alm's JS backend
@@ -2885,7 +2885,7 @@ fn element_http_get() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m9.cjs");
@@ -2953,7 +2953,7 @@ fn element_http_task() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m9t.cjs");
@@ -3016,7 +3016,7 @@ fn cmd_map_task() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("mcm.cjs");
@@ -3072,7 +3072,7 @@ fn attributes_map_event() {
     });
     let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("mam.cjs");
@@ -3129,7 +3129,7 @@ fn sandbox_html_map() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m8.cjs");
@@ -3184,7 +3184,7 @@ fn sandbox_on_input() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m5.cjs");
@@ -3244,7 +3244,7 @@ fn element_outgoing_port() {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m4.cjs");
@@ -3297,7 +3297,7 @@ fn sandbox_diff_preserves_identity() {
     });
     let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let script = dir.join("m3.cjs");
@@ -3380,7 +3380,7 @@ fn bench_wasmgc_vs_js() {
             let bundle = dir.join("b.js");
             std::fs::write(&bundle, generate::generate_project(&checked.modules)).unwrap();
             let wasm = dir.join("a.wasm");
-            project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|_| panic!("wasm build failed: {name}"));
+            project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|_| panic!("wasm build failed: {name}"));
             let runner = dir.join("r.cjs");
             std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).unwrap();
             let best = |mk: &dyn Fn() -> Command| {
@@ -3423,7 +3423,7 @@ fn htmljson_wasm(test_name: &str, view_body: &str) -> String {
     let entry = dir.join("Test.elm");
     std::fs::write(&entry, &source).expect("write fixture");
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&entry, &wasm).unwrap_or_else(|e| {
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
         panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
     });
     let runner = dir.join("run_str.cjs");

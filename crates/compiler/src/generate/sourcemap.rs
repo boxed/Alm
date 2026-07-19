@@ -135,8 +135,16 @@ impl SourceMap {
         let mut prev_src_col: i64 = 0;
         let mut cur_line: u32 = 0;
         let mut first_in_line = true;
+        let mut last_gen: Option<(u32, u32)> = None;
 
         for m in &ms {
+            // At most one mapping per generated position — a consumer resolves a
+            // position to a single source, and stable sort keeps the outermost
+            // (first-recorded) expression at a shared position.
+            if last_gen == Some((m.gen_line, m.gen_col)) {
+                continue;
+            }
+            last_gen = Some((m.gen_line, m.gen_col));
             while cur_line < m.gen_line {
                 out.push(';');
                 cur_line += 1;
