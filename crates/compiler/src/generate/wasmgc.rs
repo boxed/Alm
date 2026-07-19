@@ -1945,6 +1945,10 @@ struct Codegen<'a> {
     dict_sorted_build_idx: u32,
     set_sorted_build_idx: u32,
     alm_event_idx: u32,
+    /// Flatten a (possibly chunked) list into a single dense chunk; identity for
+    /// an already-single-chunk list. `_f` is the unboxed `List Float` twin.
+    list_flatten_idx: u32,
+    list_flatten_f_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Top-level functions specialized to an unboxed scalar ABI: name ->
@@ -2227,6 +2231,8 @@ impl<'a> Codegen<'a> {
             dict_sorted_build_idx: 0,
             set_sorted_build_idx: 0,
             alm_event_idx: 0,
+            list_flatten_idx: 0,
+            list_flatten_f_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
             spec_fns: HashMap::new(),
@@ -2524,6 +2530,8 @@ impl<'a> Codegen<'a> {
         let render_idx = next();
         let render_html_idx = next();
         let alm_browser_start_idx = next();
+        self.list_flatten_idx = next();
+        self.list_flatten_f_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
@@ -2854,6 +2862,8 @@ impl<'a> Codegen<'a> {
         let parser_is_sub_string = self.emit_parser_is_sub_string();
         let parser_find_sub_string = self.emit_parser_find_sub_string();
         let alm_event = self.emit_alm_event();
+        let list_flatten = self.emit_list_flatten(false);
+        let list_flatten_f = self.emit_list_flatten(true);
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
@@ -3223,6 +3233,8 @@ impl<'a> Codegen<'a> {
         funcs.function(render_ty); // render
         funcs.function(render_ty); // render_html
         funcs.function(json_void_ty); // alm_browser_start
+        funcs.function(ft1); // list_flatten
+        funcs.function(ft1); // list_flatten_f
         let lifted_types: Vec<u32> =
             self.lifted.iter().map(|(a, _)| self.fn_types[a]).collect();
         for &t in &lifted_types {
@@ -3457,6 +3469,8 @@ impl<'a> Codegen<'a> {
         code.function(&render);
         code.function(&render_html);
         code.function(&alm_browser_start);
+        code.function(&list_flatten);
+        code.function(&list_flatten_f);
         for (_, body) in &self.lifted {
             code.function(body);
         }
@@ -4236,6 +4250,137 @@ impl<'a> Codegen<'a> {
     }
 
     /// list_cons(x, xs) : prepend `x`. Amortized O(1) — writes into the
+    /// Flatten a (possibly chunked) list to a single dense chunk. Identity for
+    /// an already-single-chunk list (the common case); otherwise pack every
+    /// chunk's live elements head-first into one fresh backing. `f64_list`
+    /// selects the unboxed `List Float` types.
+    fn emit_list_flatten(&self, f64_list: bool) -> Function {
+        let (t_list, t_back, t_arr) = if f64_list {
+            (T_LISTF, T_BACKF, T_ARRF)
+        } else {
+            (T_LIST, T_BACK, T_ARR)
+        };
+        // param l(0). locals: total(1) i32, cur(2) eqref, ndata(3) ref null t_arr,
+        // pos(4) i32, clen(5) i32.
+        let mut f = Function::new([
+            (1, ValType::I32),
+            (1, eqref()),
+            (1, ref_null_to(t_arr)),
+            (2, ValType::I32),
+        ]);
+        // Fast path: single chunk (next == null) → return l unchanged.
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 2 });
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // total = sum of chunk lengths (walk the spine).
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 0 });
+        f.instruction(&Instruction::LocalTee(5)); // clen
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(1)); // total += clen
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 2 });
+        f.instruction(&Instruction::LocalSet(2)); // cur = cur.next
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // ndata = new t_arr[total]
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::ArrayNewDefault(t_arr));
+        f.instruction(&Instruction::LocalSet(3));
+        // Copy each chunk head-first into ndata[pos..].
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4)); // pos
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::LocalSet(2)); // cur = l
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 0 });
+        f.instruction(&Instruction::LocalTee(5)); // clen
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        // array.copy ndata, pos, cdata, (cdata.len - clen), clen
+        f.instruction(&Instruction::LocalGet(3)); // dst = ndata
+        f.instruction(&Instruction::LocalGet(4)); // dst_off = pos
+        // src = cur.bk.data
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 1 });
+        f.instruction(&cast_to(t_back));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_back, field_index: 1 });
+        // src_off = data.len - clen
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 1 });
+        f.instruction(&cast_to(t_back));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_back, field_index: 1 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(5)); // len = clen
+        f.instruction(&Instruction::ArrayCopy {
+            array_type_index_dst: t_arr,
+            array_type_index_src: t_arr,
+        });
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(4)); // pos += clen
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&cast_to(t_list));
+        f.instruction(&Instruction::StructGet { struct_type_index: t_list, field_index: 2 });
+        f.instruction(&Instruction::LocalSet(2)); // cur = cur.next
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        // return {total, {head:0, data:ndata}, null}
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::StructNew(t_back));
+        f.instruction(&Instruction::RefNull(HeapType::Concrete(t_list)));
+        f.instruction(&Instruction::StructNew(t_list));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Flatten the list in local `local` in place (`local = flatten(local)`),
+    /// so an element-reading op sees one dense chunk.
+    fn flatten_local(&self, f: &mut Function, local: u32, f64_list: bool) {
+        f.instruction(&Instruction::LocalGet(local));
+        f.instruction(&Instruction::Call(if f64_list {
+            self.list_flatten_f_idx
+        } else {
+            self.list_flatten_idx
+        }));
+        f.instruction(&Instruction::LocalSet(local));
+    }
+
     /// backing's front slack when this view owns it, else grows with fresh
     /// front space (new capacity `2*(len+1)`).
     fn emit_list_cons(&self) -> Function {
@@ -4381,6 +4526,7 @@ impl<'a> Codegen<'a> {
         // params f(0), xs(1). locals: len(2), start(3), i(4):i32,
         //   xdata(5), ndata(6):ref T_ARR
         let mut f = Function::new([(3, ValType::I32), (2, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -4432,6 +4578,7 @@ impl<'a> Codegen<'a> {
         //   xdata(6):ref T_ARR, a(7):eqref
         let mut f =
             Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+            self.flatten_local(&mut f, 2, false);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalSet(7)); // a = acc
         list_len(&mut f, 2);
@@ -4474,6 +4621,9 @@ impl<'a> Codegen<'a> {
     /// list_length(xs) : number of elements, boxed as Int.
     fn emit_list_length(&self) -> Function {
         let mut f = Function::new([]);
+        // Flatten so `list_len` sees the whole list (single-chunk fast path is a
+        // no-op; multi-chunk packs first).
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::Call(self.box_int_idx));
@@ -6153,6 +6303,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_reverse(&self) -> Function {
         // params xs(0). locals: len(1), start(2), i(3):i32, xdata(4), ndata(5):ref T_ARR
         let mut f = Function::new([(3, ValType::I32), (2, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
@@ -6207,6 +6358,7 @@ impl<'a> Codegen<'a> {
         //   xdata(5):ref T_ARR, acc(6):eqref, elem(7):eqref
         let mut f =
             Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (2, eqref())]);
+            self.flatten_local(&mut f, 1, false);
         push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(6)); // acc = []
         list_len(&mut f, 1);
@@ -6266,6 +6418,7 @@ impl<'a> Codegen<'a> {
         //   xdata(6):ref T_ARR, a(7):eqref
         let mut f =
             Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+            self.flatten_local(&mut f, 2, false);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalSet(7));
         list_len(&mut f, 2);
@@ -6411,6 +6564,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_member(&self) -> Function {
         // params x(0), xs(1). locals: len(2), start(3), i(4):i32, data(5):ref T_ARR
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -6457,6 +6611,7 @@ impl<'a> Codegen<'a> {
         // params n(0), xs(1). locals: n2(2), len(3), start(4), i(5):i32,
         //   xdata(6), ndata(7):ref T_ARR
         let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         // n2 = clamp(unbox n, 0, len)
@@ -6524,6 +6679,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_drop(&self) -> Function {
         // params n(0), xs(1). locals: n2(2), len(3):i32
         let mut f = Function::new([(2, ValType::I32)]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(0));
@@ -6561,6 +6717,7 @@ impl<'a> Codegen<'a> {
         //   off(5),ci(6),css(7),clen(8):i32, data(9), csd(10):ref T_ARR, inner(11):eqref
         let mut f =
             Function::new([(8, ValType::I32), (2, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 0, false); // flatten the outer list-of-lists
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(2));
         // pass 1: total
@@ -6584,6 +6741,7 @@ impl<'a> Codegen<'a> {
         // An inner `List Float` (nested list) arrives unboxed; widen it so the
         // eqref length/copy below work.
         widen_listf_local(self.listf_widen_idx, 11, &mut f);
+        self.flatten_local(&mut f, 11, false); // inner list may be chunked
         f.instruction(&Instruction::LocalGet(3));
         list_len(&mut f, 11);
         f.instruction(&Instruction::I32Add);
@@ -6613,6 +6771,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(11));
         widen_listf_local(self.listf_widen_idx, 11, &mut f);
+        self.flatten_local(&mut f, 11, false); // inner list may be chunked
         copy_into(&mut f, 11, 9, 5, 6, 10, 7, 8);
         f.instruction(&Instruction::LocalGet(5));
         list_len(&mut f, 11);
@@ -8778,6 +8937,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_sort(&self) -> Function {
         // param list(0). locals: n(1),start(2):i32; arr(3),buf(4),data(5):ref T_ARR
         let mut f = Function::new([(2, ValType::I32), (3, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         list_data(&mut f, 0);
@@ -8821,6 +8981,7 @@ impl<'a> Codegen<'a> {
         // params cmp(0), list(1). locals: n(2),start(3):i32;
         //   arr(4),buf(5),data(6):ref T_ARR; oldcmp(7):eqref
         let mut f = Function::new([(2, ValType::I32), (3, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         // save + install the comparator
         f.instruction(&Instruction::GlobalGet(G_SORT_CMP));
         f.instruction(&Instruction::LocalSet(7));
@@ -8869,6 +9030,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_all_any(&self, all: bool) -> Function {
         // params pred(0), xs(1). locals: len(2), start(3), i(4):i32, data(5):ref T_ARR
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
@@ -8918,6 +9080,7 @@ impl<'a> Codegen<'a> {
         // params xs(0). locals: len(1), start(2), i(3):i32, data(4):ref T_ARR,
         //   best(5):eqref
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
@@ -8980,6 +9143,7 @@ impl<'a> Codegen<'a> {
         // params f(0), base(1), xs(2). locals: len(3), start(4), i(5), base_i(6):i32,
         //   xdata(7), ndata(8):ref T_ARR
         let mut f = Function::new([(4, ValType::I32), (2, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 2, false);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
@@ -9047,6 +9211,7 @@ impl<'a> Codegen<'a> {
             (1, ValType::I64),
             (1, ValType::F64),
         ]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         // empty -> box Int identity
@@ -9130,6 +9295,8 @@ impl<'a> Codegen<'a> {
         // params f(0), xs(1), ys(2). locals: n(3),xs0(4),ys0(5),i(6):i32,
         //   xd(7),yd(8),nd(9):ref T_ARR
         let mut f = Function::new([(4, ValType::I32), (3, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 1, false);
+        self.flatten_local(&mut f, 2, false);
         // n = min(len xs, len ys)
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
@@ -10743,6 +10910,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_unzip(&self) -> Function {
         // param xs(0). locals rest(1), pair(2):eqref
         let mut f = Function::new([(2, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         list_is_empty(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         push_empty_list(&mut f);
@@ -11777,6 +11945,7 @@ impl<'a> Codegen<'a> {
     fn emit_list_to_array(&self) -> Function {
         // param list(0). locals: len(1),start(2):i32, ndata(3):ref T_ARR
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
@@ -19881,6 +20050,7 @@ impl<'a> Codegen<'a> {
         // param list(0). locals: n(1),i(2),oi(3),start(4):i32;
         //   arr(5),buf(6),data(7),out(8):ref T_ARR
         let mut f = Function::new([(4, ValType::I32), (4, ref_to(T_ARR))]);
+        self.flatten_local(&mut f, 0, false);
         let sort_idx = if by_key { self.msort_key_idx } else { self.msort_idx };
         // push the compare-key of arr[i] (+1 for the next element)
         let key = |f: &mut Function, plus1: bool| {
