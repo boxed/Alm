@@ -504,6 +504,47 @@ fn sanitize(name: &str) -> String {
     }
 }
 
+/// Generated code plus the source mappings inside it, as byte offsets into
+/// `text` (rebased to absolute output positions when flushed). This lets the
+/// expression emitters build strings compositionally while carrying each
+/// (sub-)expression's source region along — turned into real mappings only when
+/// a top-level definition's value is written to the output.
+#[derive(Default)]
+struct Mapped {
+    text: String,
+    maps: Vec<(usize, Region)>,
+}
+
+impl Mapped {
+    fn raw(s: impl Into<String>) -> Mapped {
+        Mapped {
+            text: s.into(),
+            maps: Vec::new(),
+        }
+    }
+    fn push_str(&mut self, s: &str) {
+        self.text.push_str(s);
+    }
+    /// Append `child`, rebasing its maps by the current text length.
+    fn push(&mut self, child: Mapped) {
+        let base = self.text.len();
+        self.text.push_str(&child.text);
+        self.maps
+            .extend(child.maps.into_iter().map(|(o, r)| (base + o, r)));
+    }
+    /// Record that this whole piece starts at `region` (offset 0).
+    fn mark(&mut self, region: Region) {
+        self.maps.push((0, region));
+    }
+    /// Like [`mark`], but takes priority at offset 0 over any inner mapping
+    /// already there (stable sort + dedup keep the first-inserted). Used so a
+    /// generated definition's start maps to the definition, not to its body's
+    /// first sub-expression.
+    fn lead(&mut self, region: Region) {
+        self.maps.insert(0, (0, region));
+    }
+}
+
 struct Generator {
     out: String,
     /// The module whose declarations are being emitted; set before any
@@ -574,19 +615,38 @@ impl Generator {
         self.scanned = self.out.len();
     }
 
-    /// Record a mapping from the current output position to `region`'s start.
-    /// No-op when maps are off, the module has no source, or the region is
-    /// synthetic.
-    fn map_here(&mut self, region: Region) {
+    /// Append a [`Mapped`] to the output, recording each of its offset→region
+    /// entries as an absolute mapping. A single left-to-right scan of the text
+    /// advances the position, so this is O(text). No-op recording when maps are
+    /// off or the module has no source (the text is still emitted).
+    fn flush(&mut self, m: Mapped) {
         if !self.maps_on {
+            self.out.push_str(&m.text);
             return;
         }
-        let Some(src) = self.src_idx else { return };
-        let Some((src_line, src_col)) = region_start(&region) else {
+        let Some(src) = self.src_idx else {
+            self.out.push_str(&m.text);
             return;
         };
         self.sync_cursor();
-        self.sm.add(self.cur_line, self.cur_col, src, src_line, src_col);
+        let mut maps = m.maps;
+        maps.sort_by_key(|(off, _)| *off);
+        let (mut line, mut col, mut pos) = (self.cur_line, self.cur_col, 0usize);
+        for (off, region) in maps {
+            for ch in m.text[pos..off].chars() {
+                if ch == '\n' {
+                    line += 1;
+                    col = 0;
+                } else {
+                    col += 1;
+                }
+            }
+            pos = off;
+            if let Some((src_line, src_col)) = region_start(&region) {
+                self.sm.add(line, col, src, src_line, src_col);
+            }
+        }
+        self.out.push_str(&m.text);
     }
 
     // UNIONS
@@ -649,12 +709,13 @@ impl Generator {
 
     fn top_level_def(&mut self, def: &can::Def) {
         let var = self.global(&def.name.value);
-        let value = self.def_value(def, SelfRef::TopLevel);
-        // Split the write so a mapping lands at the value's output position
-        // (identical bytes to `writeln!("var {} = {};")`).
+        let mut value = self.def_value(def, SelfRef::TopLevel);
+        // The value's start maps to the definition; flush records that plus
+        // every sub-expression mapping the body carries. Bytes are identical to
+        // `writeln!("var {} = {};")`.
+        value.lead(def.name.region);
         write!(self.out, "var {} = ", var).unwrap();
-        self.map_here(def.name.region);
-        self.out.push_str(&value);
+        self.flush(value);
         self.out.push_str(";\n");
     }
 
@@ -694,8 +755,11 @@ impl Generator {
         // Lazy thunks for the value members.
         for def in &values {
             let thunk = self.cyclic_global(&def.name.value);
-            let body = self.expr(&def.body);
-            writeln!(self.out, "function {}() {{ return {}; }}", thunk, body).unwrap();
+            let mut body = self.expr(&def.body);
+            body.lead(def.name.region);
+            write!(self.out, "function {}() {{ return ", thunk).unwrap();
+            self.flush(body);
+            self.out.push_str("; }\n");
         }
         // Force the values in order, memoizing each thunk once computed.
         self.out.push_str("try {\n");
@@ -724,7 +788,7 @@ impl Generator {
 
     /// The JS expression for a definition: a function wrapper when it has
     /// arguments, otherwise its body.
-    fn def_value(&mut self, def: &can::Def, self_ref: SelfRef) -> String {
+    fn def_value(&mut self, def: &can::Def, self_ref: SelfRef) -> Mapped {
         if !def.args.is_empty() {
             return self.function_named(Some((&def.name.value, self_ref)), &def.args, &def.body);
         }
@@ -735,7 +799,7 @@ impl Generator {
         self.expr(&def.body)
     }
 
-    fn function(&mut self, args: &[can::Pattern], body: &can::Expr) -> String {
+    fn function(&mut self, args: &[can::Pattern], body: &can::Expr) -> Mapped {
         self.function_named(None, args, body)
     }
 
@@ -747,7 +811,7 @@ impl Generator {
         self_ref: Option<(&Name, SelfRef)>,
         args: &[can::Pattern],
         body: &can::Expr,
-    ) -> String {
+    ) -> Mapped {
         let mut params = Vec::new();
         let mut prelude = String::new();
         for arg in args {
@@ -772,24 +836,34 @@ impl Generator {
                 has_self_tail_call(name, *self_ref, arity, body)
             });
 
-        let body_js = if is_tail_recursive {
+        // Build the body as a Mapped so sub-expression positions survive.
+        let mut body_js = Mapped::default();
+        if is_tail_recursive {
             let (name, self_kind) = self_ref.unwrap();
             let tail = Tail::Loop {
                 name: name.clone(),
                 self_kind,
                 params: params.clone(),
             };
-            let inner = self.stmts(body, &tail);
-            format!("while (true) {{ {}{} }}", prelude, inner)
+            body_js.push_str("while (true) { ");
+            body_js.push_str(&prelude);
+            body_js.push(self.stmts(body, &tail));
+            body_js.push_str(" }");
         } else {
-            format!("{}{}", prelude, self.stmts(body, &Tail::Return))
-        };
+            body_js.push_str(&prelude);
+            body_js.push(self.stmts(body, &Tail::Return));
+        }
 
-        let inner = format!("function ({}) {{ {} }}", params.join(", "), body_js);
+        let mut inner = Mapped::raw(format!("function ({}) {{ ", params.join(", ")));
+        inner.push(body_js);
+        inner.push_str(" }");
         if arity == 1 {
             inner
         } else {
-            format!("F{}({})", arity, inner)
+            let mut wrapped = Mapped::raw(format!("F{}(", arity));
+            wrapped.push(inner);
+            wrapped.push_str(")");
+            wrapped
         }
     }
 
@@ -797,48 +871,52 @@ impl Generator {
     // and `let` in tail position produce plain returns (and tail recursion
     // can `continue` the surrounding loop).
 
-    fn stmts(&mut self, expr: &can::Expr, tail: &Tail) -> String {
+    fn stmts(&mut self, expr: &can::Expr, tail: &Tail) -> Mapped {
         use can::Expr_::*;
         match &expr.value {
             If(branches, otherwise) => {
-                let mut out = String::new();
+                let mut out = Mapped::default();
                 for (condition, branch) in branches {
-                    write!(
-                        out,
-                        "if ({}) {{ {} }} else ",
-                        self.expr(condition),
-                        self.stmts(branch, tail)
-                    )
-                    .unwrap();
+                    out.push_str("if (");
+                    out.push(self.expr(condition));
+                    out.push_str(") { ");
+                    out.push(self.stmts(branch, tail));
+                    out.push_str(" } else ");
                 }
-                write!(out, "{{ {} }}", self.stmts(otherwise, tail)).unwrap();
+                out.push_str("{ ");
+                out.push(self.stmts(otherwise, tail));
+                out.push_str(" }");
                 out
             }
             Let(decls, body) => {
-                let mut out = String::new();
+                let mut out = Mapped::default();
                 for decl in decls {
                     self.let_decl_stmts(decl, &mut out);
                 }
-                out.push_str(&self.stmts(body, tail));
+                out.push(self.stmts(body, tail));
                 out
             }
             Case(scrutinee, branches) => {
                 let temp = self.fresh_temp();
-                let mut out = format!("var {} = {}; ", temp, self.expr(scrutinee));
+                let mut out = Mapped::raw(format!("var {} = ", temp));
+                out.push(self.expr(scrutinee));
+                out.push_str("; ");
                 for (pattern, branch) in branches {
                     let mut tests = Vec::new();
                     let mut bindings = Vec::new();
                     pattern_tests(pattern, &temp, &mut tests, &mut bindings);
-                    let mut body = String::new();
+                    let mut body = Mapped::default();
                     for (name, path) in bindings {
-                        write!(body, "var {} = {}; ", sanitize(&name), path).unwrap();
+                        body.push_str(&format!("var {} = {}; ", sanitize(&name), path));
                     }
-                    body.push_str(&self.stmts(branch, tail));
+                    body.push(self.stmts(branch, tail));
                     if tests.is_empty() {
-                        out.push_str(&body);
+                        out.push(body);
                         return out;
                     }
-                    write!(out, "if ({}) {{ {} }} ", tests.join(" && "), body).unwrap();
+                    out.push_str(&format!("if ({}) {{ ", tests.join(" && ")));
+                    out.push(body);
+                    out.push_str(" } ");
                 }
                 out.push_str(
                     "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
@@ -854,47 +932,61 @@ impl Generator {
                 {
                     if is_self_ref(func, name, *self_kind) && call_args.len() == params.len() {
                         // Compute all new arguments before reassigning.
-                        let mut out = String::new();
-                        let temps: Vec<String> = call_args
-                            .iter()
-                            .map(|arg| {
-                                let temp = self.fresh_temp();
-                                write!(out, "var {} = {}; ", temp, self.expr(arg)).unwrap();
-                                temp
-                            })
-                            .collect();
+                        let mut out = Mapped::default();
+                        let mut temps: Vec<String> = Vec::new();
+                        for arg in call_args {
+                            let temp = self.fresh_temp();
+                            out.push_str(&format!("var {} = ", temp));
+                            out.push(self.expr(arg));
+                            out.push_str("; ");
+                            temps.push(temp);
+                        }
                         for (param, temp) in params.iter().zip(temps) {
-                            write!(out, "{} = {}; ", param, temp).unwrap();
+                            out.push_str(&format!("{} = {}; ", param, temp));
                         }
                         out.push_str("continue;");
                         return out;
                     }
                 }
-                format!("return {};", self.expr(expr))
+                let mut out = Mapped::raw("return ");
+                out.push(self.expr(expr));
+                out.push_str(";");
+                out
             }
-            _ => format!("return {};", self.expr(expr)),
+            _ => {
+                let mut out = Mapped::raw("return ");
+                out.push(self.expr(expr));
+                out.push_str(";");
+                out
+            }
         }
     }
 
-    fn let_decl_stmts(&mut self, decl: &can::LetDecl, out: &mut String) {
+    fn let_decl_stmts(&mut self, decl: &can::LetDecl, out: &mut Mapped) {
         match decl {
             can::LetDecl::Def(def) => {
                 let value = self.def_value(def, SelfRef::Local);
-                write!(out, "var {} = {}; ", sanitize(&def.name.value), value).unwrap();
+                out.push_str(&format!("var {} = ", sanitize(&def.name.value)));
+                out.push(value);
+                out.push_str("; ");
             }
             can::LetDecl::Recursive(defs) => {
                 for def in defs {
                     let value = self.def_value(def, SelfRef::Local);
-                    write!(out, "var {} = {}; ", sanitize(&def.name.value), value).unwrap();
+                    out.push_str(&format!("var {} = ", sanitize(&def.name.value)));
+                    out.push(value);
+                    out.push_str("; ");
                 }
             }
             can::LetDecl::Destruct(pattern, value) => {
                 let temp = self.fresh_temp();
-                write!(out, "var {} = {}; ", temp, self.expr(value)).unwrap();
+                out.push_str(&format!("var {} = ", temp));
+                out.push(self.expr(value));
+                out.push_str("; ");
                 let mut bindings = Vec::new();
                 destructure(pattern, &temp, &mut bindings);
                 for (name, path) in bindings {
-                    write!(out, "var {} = {}; ", sanitize(&name), path).unwrap();
+                    out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
                 }
             }
         }
@@ -902,97 +994,137 @@ impl Generator {
 
     // EXPRESSIONS
 
-    fn expr(&mut self, expr: &can::Expr) -> String {
+    fn expr(&mut self, expr: &can::Expr) -> Mapped {
         use can::Expr_::*;
-        match &expr.value {
-            Chr(c) => format!("_Utils_chr({})", js_string(&c.to_string())),
-            Str(s) => js_string(s),
-            Int(n) => n.to_string(),
+        let mut m = match &expr.value {
+            Chr(c) => Mapped::raw(format!("_Utils_chr({})", js_string(&c.to_string()))),
+            Str(s) => Mapped::raw(js_string(s)),
+            Int(n) => Mapped::raw(n.to_string()),
             Float(f) => {
                 let s = f.to_string();
-                if s.contains('.') || s.contains('e') || s.contains("Infinity") {
-                    s
-                } else {
-                    format!("{}.0", s)
-                }
+                Mapped::raw(
+                    if s.contains('.') || s.contains('e') || s.contains("Infinity") {
+                        s
+                    } else {
+                        format!("{}.0", s)
+                    },
+                )
             }
-            VarLocal(name) => sanitize(name),
+            VarLocal(name) => Mapped::raw(sanitize(name)),
             VarTopLevel(name) => {
                 // Inside a value cycle, a reference to another value member is
                 // a call to its lazy thunk so it is forced on demand.
                 if self.cyclic_values.contains(name) {
-                    format!("{}()", self.cyclic_global(name))
+                    Mapped::raw(format!("{}()", self.cyclic_global(name)))
                 } else {
-                    self.global(name)
+                    Mapped::raw(self.global(name))
                 }
             }
-            VarForeign(module, name) => foreign(module, name),
-            VarCtor(home, _union, ctor) => self.ctor_ref(home, ctor),
+            VarForeign(module, name) => Mapped::raw(foreign(module, name)),
+            VarCtor(home, _union, ctor) => Mapped::raw(self.ctor_ref(home, ctor)),
             List(items) => {
                 if items.is_empty() {
-                    "_List_Nil".to_string()
+                    Mapped::raw("_List_Nil")
                 } else {
-                    let rendered: Vec<String> = items.iter().map(|e| self.expr(e)).collect();
-                    format!("_List_fromArray([{}])", rendered.join(", "))
+                    let mut out = Mapped::raw("_List_fromArray([");
+                    for (i, e) in items.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push(self.expr(e));
+                    }
+                    out.push_str("])");
+                    out
                 }
             }
-            Negate(inner) => format!("-({})", self.expr(inner)),
+            Negate(inner) => {
+                let mut out = Mapped::raw("-(");
+                out.push(self.expr(inner));
+                out.push_str(")");
+                out
+            }
             Binop(op, home, function, left, right) => {
                 self.binop(op, home, function, left, right)
             }
             Lambda(args, body) => match record_ctor_fields(args, body) {
                 // A record type-alias constructor used as a value: emit a shared,
                 // memoized constructor so `(==)` matches elm (see _Record_ctor).
-                Some(fields) => format!("_Record_ctor('{}')", fields),
+                Some(fields) => Mapped::raw(format!("_Record_ctor('{}')", fields)),
                 None => self.function(args, body),
             },
             Call(func, args) => {
                 let func_js = self.expr(func);
-                let arg_js: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
-                match arg_js.len() {
-                    1 => format!("{}({})", callable(func_js), arg_js[0]),
-                    n => format!("A{}({}, {})", n, func_js, arg_js.join(", ")),
+                let arg_js: Vec<Mapped> = args.iter().map(|a| self.expr(a)).collect();
+                let mut out = Mapped::default();
+                if arg_js.len() == 1 {
+                    let mut arg_iter = arg_js.into_iter();
+                    out.push(callable(func_js));
+                    out.push_str("(");
+                    out.push(arg_iter.next().unwrap());
+                    out.push_str(")");
+                } else {
+                    out.push_str(&format!("A{}(", arg_js.len()));
+                    out.push(func_js);
+                    for a in arg_js {
+                        out.push_str(", ");
+                        out.push(a);
+                    }
+                    out.push_str(")");
                 }
+                out
             }
             If(branches, otherwise) => {
-                let mut out = String::new();
+                let mut out = Mapped::default();
                 for (condition, branch) in branches {
-                    write!(
-                        out,
-                        "({} ? {} : ",
-                        self.expr(condition),
-                        self.expr(branch)
-                    )
-                    .unwrap();
+                    out.push_str("(");
+                    out.push(self.expr(condition));
+                    out.push_str(" ? ");
+                    out.push(self.expr(branch));
+                    out.push_str(" : ");
                 }
-                write!(out, "{}{}", self.expr(otherwise), ")".repeat(branches.len()))
-                    .unwrap();
+                out.push(self.expr(otherwise));
+                out.push_str(&")".repeat(branches.len()));
                 out
             }
             Let(..) | Case(..) => {
-                format!("(function () {{ {} }})()", self.stmts(expr, &Tail::Return))
+                let mut out = Mapped::raw("(function () { ");
+                out.push(self.stmts(expr, &Tail::Return));
+                out.push_str(" })()");
+                out
             }
-            Accessor(field) => format!("function ($) {{ return $.{}; }}", field),
-            Access(record, field) => format!("{}.{}", self.expr(record), field.value),
+            Accessor(field) => Mapped::raw(format!("function ($) {{ return $.{}; }}", field)),
+            Access(record, field) => {
+                let mut out = self.expr(record);
+                out.push_str(&format!(".{}", field.value));
+                out
+            }
             Update(record, fields) => {
-                let rendered: Vec<String> = fields
-                    .iter()
-                    .map(|(field, value)| format!("{}: {}", field.value, self.expr(value)))
-                    .collect();
-                format!(
-                    "_Utils_update({}, {{ {} }})",
-                    self.expr(record),
-                    rendered.join(", ")
-                )
+                let mut out = Mapped::raw("_Utils_update(");
+                out.push(self.expr(record));
+                out.push_str(", { ");
+                for (i, (field, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!("{}: ", field.value));
+                    out.push(self.expr(value));
+                }
+                out.push_str(" })");
+                out
             }
             Record(fields) => {
-                let rendered: Vec<String> = fields
-                    .iter()
-                    .map(|(field, value)| format!("{}: {}", field.value, self.expr(value)))
-                    .collect();
-                format!("{{ {} }}", rendered.join(", "))
+                let mut out = Mapped::raw("{ ");
+                for (i, (field, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!("{}: ", field.value));
+                    out.push(self.expr(value));
+                }
+                out.push_str(" }");
+                out
             }
-            Unit => "_Utils_Tuple0".to_string(),
+            Unit => Mapped::raw("_Utils_Tuple0"),
             Shader(shader) => {
                 // Same object shape Elm's kernel expects: the GLSL source plus
                 // a name->name map for each attribute and uniform.
@@ -1003,27 +1135,32 @@ impl Generator {
                         .collect();
                     format!("{{{}}}", entries.join(", "))
                 };
-                format!(
+                Mapped::raw(format!(
                     "{{ src: {}, attributes: {}, uniforms: {} }}",
                     js_string(&shader.src),
                     obj(&shader.attributes),
                     obj(&shader.uniforms)
-                )
+                ))
             }
-            Tuple(a, b, rest) => match rest.first() {
-                None => format!(
-                    "{{ $: '#2', a: {}, b: {} }}",
-                    self.expr(a),
-                    self.expr(b)
-                ),
-                Some(c) => format!(
-                    "{{ $: '#3', a: {}, b: {}, c: {} }}",
-                    self.expr(a),
-                    self.expr(b),
-                    self.expr(c)
-                ),
-            },
-        }
+            Tuple(a, b, rest) => {
+                let mut out = match rest.first() {
+                    None => Mapped::raw("{ $: '#2', a: "),
+                    Some(_) => Mapped::raw("{ $: '#3', a: "),
+                };
+                out.push(self.expr(a));
+                out.push_str(", b: ");
+                out.push(self.expr(b));
+                if let Some(c) = rest.first() {
+                    out.push_str(", c: ");
+                    out.push(self.expr(c));
+                }
+                out.push_str(" }");
+                out
+            }
+        };
+        // Every expression records a mapping at its generated start.
+        m.mark(expr.region);
+        m
     }
 
     fn ctor_ref(&mut self, home: &Name, ctor: &can::Ctor) -> String {
@@ -1064,41 +1201,68 @@ impl Generator {
         function: &Name,
         left: &can::Expr,
         right: &can::Expr,
-    ) -> String {
+    ) -> Mapped {
         let l = self.expr(left);
         let r = self.expr(right);
+        // `pre l mid r suf` — the shape almost every operator takes.
+        let bin = |pre: &str, mid: &str, suf: &str, l: Mapped, r: Mapped| {
+            let mut m = Mapped::raw(pre);
+            m.push(l);
+            m.push_str(mid);
+            m.push(r);
+            m.push_str(suf);
+            m
+        };
         // Inline `<`, `<=`, `>`, `>=` to native JS operators when the operands
         // are scalar comparables (Int/Float/Char/String) — the hot case. For
         // lists/tuples (or unknown types) fall back to `_Utils_cmp`, which is
         // the only correct choice there. Matches Elm's --optimize codegen.
         let scalar = self.is_scalar_comparison(left);
         match op.as_str() {
-            "+" => format!("({} + {})", l, r),
-            "-" => format!("({} - {})", l, r),
-            "*" => format!("({} * {})", l, r),
-            "/" => format!("({} / {})", l, r),
-            "//" => format!("(({} / {}) | 0)", l, r),
-            "^" => format!("Math.pow({}, {})", l, r),
-            "==" => format!("_Utils_eq({}, {})", l, r),
-            "/=" => format!("(!_Utils_eq({}, {}))", l, r),
-            "<" if scalar => format!("({} < {})", l, r),
-            ">" if scalar => format!("({} > {})", l, r),
-            "<=" if scalar => format!("({} <= {})", l, r),
-            ">=" if scalar => format!("({} >= {})", l, r),
-            "<" => format!("(_Utils_cmp({}, {}) < 0)", l, r),
-            ">" => format!("(_Utils_cmp({}, {}) > 0)", l, r),
-            "<=" => format!("(_Utils_cmp({}, {}) < 1)", l, r),
-            ">=" => format!("(_Utils_cmp({}, {}) > -1)", l, r),
-            "&&" => format!("({} && {})", l, r),
-            "||" => format!("({} || {})", l, r),
-            "++" => format!("_Utils_ap({}, {})", l, r),
-            "::" => format!("_List_Cons({}, {})", l, r),
-            "|>" => format!("{}({})", callable(r), l),
-            "<|" => format!("{}({})", callable(l), r),
-            _ => format!("A2({}, {}, {})", foreign(home, function), l, r),
+            "+" => bin("(", " + ", ")", l, r),
+            "-" => bin("(", " - ", ")", l, r),
+            "*" => bin("(", " * ", ")", l, r),
+            "/" => bin("(", " / ", ")", l, r),
+            "//" => bin("((", " / ", ") | 0)", l, r),
+            "^" => bin("Math.pow(", ", ", ")", l, r),
+            "==" => bin("_Utils_eq(", ", ", ")", l, r),
+            "/=" => bin("(!_Utils_eq(", ", ", "))", l, r),
+            "<" if scalar => bin("(", " < ", ")", l, r),
+            ">" if scalar => bin("(", " > ", ")", l, r),
+            "<=" if scalar => bin("(", " <= ", ")", l, r),
+            ">=" if scalar => bin("(", " >= ", ")", l, r),
+            "<" => bin("(_Utils_cmp(", ", ", ") < 0)", l, r),
+            ">" => bin("(_Utils_cmp(", ", ", ") > 0)", l, r),
+            "<=" => bin("(_Utils_cmp(", ", ", ") < 1)", l, r),
+            ">=" => bin("(_Utils_cmp(", ", ", ") > -1)", l, r),
+            "&&" => bin("(", " && ", ")", l, r),
+            "||" => bin("(", " || ", ")", l, r),
+            "++" => bin("_Utils_ap(", ", ", ")", l, r),
+            "::" => bin("_List_Cons(", ", ", ")", l, r),
+            "|>" => {
+                let mut m = callable(r);
+                m.push_str("(");
+                m.push(l);
+                m.push_str(")");
+                m
+            }
+            "<|" => {
+                let mut m = callable(l);
+                m.push_str("(");
+                m.push(r);
+                m.push_str(")");
+                m
+            }
+            _ => {
+                let mut m = Mapped::raw(format!("A2({}, ", foreign(home, function)));
+                m.push(l);
+                m.push_str(", ");
+                m.push(r);
+                m.push_str(")");
+                m
+            }
         }
     }
-
 }
 
 /// How a definition refers to itself in its own body.
@@ -1154,9 +1318,12 @@ fn has_self_tail_call(name: &Name, self_kind: SelfRef, arity: usize, body: &can:
 
 /// Wrap a generated function expression in parens when required so it can
 /// be called directly.
-fn callable(js: String) -> String {
-    if js.starts_with("function") {
-        format!("({})", js)
+fn callable(js: Mapped) -> Mapped {
+    if js.text.starts_with("function") {
+        let mut m = Mapped::raw("(");
+        m.push(js);
+        m.push_str(")");
+        m
     } else {
         js
     }

@@ -89,19 +89,19 @@ fn js_source_map_resolves_definitions() {
 module Main exposing (main)
 
 
-greeting : String
-greeting =
-    \"hello\"
+add : Int -> Int -> Int
+add a b =
+    a + b
 
 
 number : Int
 number =
-    42
+    add 1 2
 
 
-main : String
+main : Int
 main =
-    greeting
+    number
 ";
     let (js, map) = alm_compiler::compile_with_source_map(source).expect("compile");
 
@@ -109,7 +109,7 @@ main =
     assert!(map.contains("\"version\":3"), "v3");
     assert!(map.contains("\"sources\":[\"Main.elm\"]"), "source path: {map}");
     assert!(
-        map.contains("greeting"),
+        map.contains("add a b"),
         "sourcesContent embedded (should contain the source text)"
     );
 
@@ -127,8 +127,8 @@ main =
         );
     }
 
-    // Find the generated line that defines `main` (`var $...$main = ...`) and
-    // check its mapping points at `main =` (line 15, 1-based) in the source.
+    // A generated definition's start maps to the definition. `main`'s value
+    // (`var $Main$main = $Main$number;`) maps to `main =`.
     let gen_lines: Vec<&str> = js.lines().collect();
     let main_gen_line = gen_lines
         .iter()
@@ -136,14 +136,50 @@ main =
         .expect("generated `main` definition") as u32;
     let main_seg = segs
         .iter()
-        .find(|s| s.gen_line == main_gen_line)
+        .filter(|s| s.gen_line == main_gen_line)
+        .min_by_key(|s| s.gen_col)
         .unwrap_or_else(|| panic!("a mapping on the `main` line {main_gen_line}"));
-    // `main =` is the 15th line (0-based 14) in `source`.
-    let mapped = src_lines[main_seg.src_line as usize];
     assert!(
-        mapped.starts_with("main"),
+        src_lines[main_seg.src_line as usize].starts_with("main"),
         "generated `main` maps to its definition, got line {}: {:?}",
         main_seg.src_line + 1,
-        mapped
+        src_lines[main_seg.src_line as usize]
+    );
+
+    // Sub-expression granularity: more mappings than top-level definitions, and
+    // at least one mapping lands mid-value (a sub-expression, not a def start).
+    let def_lines = gen_lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("var $Main$"))
+        .count();
+    assert!(
+        segs.len() > def_lines,
+        "expected sub-expression mappings ({} mappings vs {} defs)",
+        segs.len(),
+        def_lines
+    );
+
+    // `number = add 1 2` compiles to `A2($Main$add, 1, 2)`; the literal `2` is a
+    // sub-expression that must map to the `add 1 2` line (source line 12).
+    let number_gen_line = gen_lines
+        .iter()
+        .position(|l| l.contains("$number = ") && l.trim_start().starts_with("var "))
+        .expect("generated `number` definition") as u32;
+    let on_number: Vec<&Seg> = segs.iter().filter(|s| s.gen_line == number_gen_line).collect();
+    assert!(
+        on_number.len() >= 3,
+        "the `add 1 2` line carries mappings for its sub-expressions, got {}",
+        on_number.len()
+    );
+    // Sub-expressions of `number` map into the `add 1 2` source line.
+    let add_call_line = src_lines
+        .iter()
+        .position(|l| l.trim() == "add 1 2")
+        .expect("`add 1 2` in source") as i64;
+    assert!(
+        on_number.iter().any(|s| s.src_line == add_call_line),
+        "a sub-expression of `add 1 2` maps to its source line {}; got {:?}",
+        add_call_line + 1,
+        on_number.iter().map(|s| s.src_line + 1).collect::<Vec<_>>()
     );
 }

@@ -66,11 +66,16 @@ working, differentially-tested string builder; the bytes must stay identical):
   flag writes `<out>.js.map` + a `//# sourceMappingURL` comment (DCE forced off
   so positions match). Default (no-flag) JS output is byte-identical. Round-trip
   test in `tests/sourcemap_test.rs`.
-- **1b — sub-expression granularity (NEXT).** Convert the body pipeline
-  (`def_value`→`function_named`→`stmts`→`expr`+`binop`+`let_decl_stmts`) from
-  returning `String` to a `Mapped` (text + byte-offset→region), rebased on
-  concatenation and flushed through the same cursor. Verified byte-identical
-  against a corpus.
+- **1b — sub-expression granularity (DONE).** The body pipeline
+  (`def_value`/`function_named`/`stmts`/`expr`/`binop`/`let_decl_stmts`) now
+  returns a `Mapped` (text + byte-offset→region), rebased on concatenation and
+  flushed through the cursor in one O(text) scan. Every expression records a
+  mapping at its generated start (`Mapped::mark`); a definition's start takes
+  priority over its body's first sub-expression (`Mapped::lead`). Verified
+  byte-identical across a corpus (elm-charts, elm-visualization, chart-builder,
+  one-true-path, yaml, iridescence); mappings jump from ~940 (per-def) to ~18k
+  (sub-expression) on elm-charts, resolving mid-line expressions to their exact
+  source positions. Test extended to assert sub-expression resolution.
 
 ### Phase 1 — JS (`generate/mod.rs`)
 For expression-level granularity, the return-`String` emitter is reworked into a
