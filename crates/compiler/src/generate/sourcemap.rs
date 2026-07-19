@@ -97,6 +97,22 @@ impl SourceMap {
         self.mappings.is_empty()
     }
 
+    /// Rewrite each mapping's generated LINE through `old_to_new` (indexed by
+    /// current generated line), dropping mappings whose line maps to `None`.
+    /// Used after a line-based post-pass (JS tree-shaking) relocates the output;
+    /// generated columns are unchanged.
+    pub fn remap_generated_lines(&mut self, old_to_new: &[Option<u32>]) {
+        self.mappings.retain_mut(|m| {
+            match old_to_new.get(m.gen_line as usize).copied().flatten() {
+                Some(new_line) => {
+                    m.gen_line = new_line;
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+
     /// Serialize to Source Map v3 JSON.
     pub fn to_json(&self) -> String {
         let mut out = String::from("{\"version\":3,\"file\":");

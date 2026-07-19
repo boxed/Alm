@@ -39,15 +39,17 @@ pub fn generate_project(modules: &[can::Module]) -> String {
     generate_project_typed(modules, HashMap::new(), true)
 }
 
-/// Like [`generate_project_typed`] but also builds a Source Map v3. DCE is
-/// forced off (it rewrites the bundle, invalidating recorded positions), so the
-/// returned JS is a debug bundle. Returns `(javascript, source_map_json)`.
+/// Like [`generate_project_typed`] but also builds a Source Map v3. Tree-shaking
+/// runs (honoring `ALM_NO_DCE`) and the map is remapped onto the shaken bundle,
+/// so mapped JS is the same size as an ordinary build. Returns
+/// `(javascript, source_map_json)`.
 pub fn generate_project_typed_mapped(
     modules: &[can::Module],
     node_types: HashMap<Name, HashMap<Region, can::Type>>,
     sources: &HashMap<Name, (String, String)>,
 ) -> (String, String) {
-    let (js, map) = gen_bundle(modules, node_types, false, Some(sources));
+    let dce = std::env::var_os("ALM_NO_DCE").is_none();
+    let (js, map) = gen_bundle(modules, node_types, dce, Some(sources));
     (js, map.unwrap_or_default())
 }
 
@@ -332,18 +334,20 @@ fn gen_bundle(
     )
     .unwrap();
 
-    let map = if maps_on {
-        Some(gen.sm.to_json())
+    if dce {
+        // Tree-shake, then remap the source map onto the shaken bundle: live
+        // units keep their columns and only shift lines, and dead units' bodies
+        // (with their mappings) are dropped.
+        let (js, line_map) = tree_shake(&gen.out);
+        let map = maps_on.then(|| {
+            gen.sm.remap_generated_lines(&line_map);
+            gen.sm.to_json()
+        });
+        (js, map)
     } else {
-        None
-    };
-    let js = if dce {
-        // (source maps force dce=false, so recorded positions match `out`)
-        tree_shake(&gen.out)
-    } else {
-        gen.out
-    };
-    (js, map)
+        let map = maps_on.then(|| gen.sm.to_json());
+        (gen.out, map)
+    }
 }
 
 /// Dead-code elimination over the fully-assembled bundle.
@@ -375,7 +379,12 @@ fn gen_bundle(
 /// over-approximation: over-matching a name inside a comment or string only
 /// keeps extra code, it never drops something live. Set `ALM_NO_DCE=1` to emit
 /// the whole kernel.
-fn tree_shake(bundle: &str) -> String {
+/// Returns the shaken bundle and an old-line → new-line map (indexed by
+/// pre-shake 0-based line number; `None` for a line in a dropped unit). Live
+/// units are re-emitted verbatim, so columns are unchanged and only line numbers
+/// shift — which lets a source map built against the pre-shake bundle be
+/// remapped onto the shaken one.
+fn tree_shake(bundle: &str) -> (String, Vec<Option<u32>>) {
     // The name bound by a column-0 `var NAME`/`function NAME`, if any.
     fn def_name(line: &str) -> Option<&str> {
         let rest = line
@@ -396,7 +405,8 @@ fn tree_shake(bundle: &str) -> String {
         .filter_map(|(i, l)| (def_name(l).is_some() || *l == "try {").then_some(i))
         .collect();
     if starts.is_empty() {
-        return bundle.to_string();
+        let identity = (0..lines.len() as u32).map(Some).collect();
+        return (bundle.to_string(), identity);
     }
     let span = |k: usize| (starts[k], starts.get(k + 1).copied().unwrap_or(lines.len()));
 
@@ -461,23 +471,30 @@ fn tree_shake(bundle: &str) -> String {
         }
     }
 
-    // Re-emit prologue (before the first unit) + live units, in source order.
+    // Re-emit prologue (before the first unit) + live units, in source order,
+    // recording where each surviving old line lands.
     let mut out = String::with_capacity(bundle.len());
-    for line in &lines[..starts[0]] {
-        out.push_str(line);
+    let mut old_to_new: Vec<Option<u32>> = vec![None; lines.len()];
+    let mut new_line: u32 = 0;
+    for i in 0..starts[0] {
+        old_to_new[i] = Some(new_line);
+        out.push_str(lines[i]);
         out.push('\n');
+        new_line += 1;
     }
     for k in 0..starts.len() {
         if !live[k] {
             continue;
         }
         let (s, e) = span(k);
-        for line in &lines[s..e] {
-            out.push_str(line);
+        for i in s..e {
+            old_to_new[i] = Some(new_line);
+            out.push_str(lines[i]);
             out.push('\n');
+            new_line += 1;
         }
     }
-    out
+    (out, old_to_new)
 }
 
 fn mangle_module(name: &Name) -> String {

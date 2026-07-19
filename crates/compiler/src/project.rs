@@ -100,9 +100,9 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
 }
 
 /// Compile to JS with a Source Map v3. Returns `(javascript, source_map_json)`.
-/// DCE is disabled (it rewrites the bundle, which would invalidate positions),
-/// so this is a debug build: larger output, accurate mappings. The caller writes
-/// the `.map` file and appends the `//# sourceMappingURL` comment.
+/// Tree-shaking runs as usual and the map is remapped onto the shaken bundle, so
+/// the JS is the same size as an ordinary build. The caller writes the `.map`
+/// file and appends the `//# sourceMappingURL` comment.
 pub fn compile_project_source_maps(
     entry: &Path,
 ) -> Result<(String, String), Vec<BuildError>> {

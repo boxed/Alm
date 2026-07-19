@@ -63,9 +63,11 @@ working, differentially-tested string builder; the bytes must stay identical):
   path+source through `CheckedProject`; `compile_project_source_maps` /
   `compile_with_source_map` build the map; a lazy output cursor records a
   mapping at each top-level definition's value position; the CLI `--source-maps`
-  flag writes `<out>.js.map` + a `//# sourceMappingURL` comment (DCE forced off
-  so positions match). Default (no-flag) JS output is byte-identical. Round-trip
-  test in `tests/sourcemap_test.rs`.
+  flag writes `<out>.js.map` + a `//# sourceMappingURL` comment. Default (no-flag)
+  JS output is byte-identical. Round-trip test in `tests/sourcemap_test.rs`.
+  (Initially DCE was forced off; later `tree_shake` was made to return an
+  old→new line map so the source map is remapped onto the shaken bundle — mapped
+  JS is now tree-shaken, the same size as an ordinary build.)
 - **1b — sub-expression granularity (DONE).** The body pipeline
   (`def_value`/`function_named`/`stmts`/`expr`/`binop`/`let_decl_stmts`) now
   returns a `Mapped` (text + byte-offset→region), rebased on concatenation and

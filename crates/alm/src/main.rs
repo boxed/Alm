@@ -27,8 +27,8 @@ fn print_help() {
          extension. `--target=native` compiles to a binary instead (the\n\
          output defaults to the input file name without an extension).\n\
          `--source-maps` (js and wasm-gc targets) writes a .map beside the\n\
-         output so browser devtools show Elm source; on js it disables\n\
-         dead-code elimination so positions stay accurate."
+         output so browser devtools show Elm source; tree-shaking still runs,\n\
+         so the output is the same size as an ordinary build."
     );
 }
 
