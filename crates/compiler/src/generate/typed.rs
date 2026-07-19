@@ -31,6 +31,7 @@ use super::native::{self, Target};
 use crate::ir::layout::{Layout, LayoutCtx};
 use crate::ir::mono::{MonoProgram, TypedExpr, TypedFn, TypedKind, TypedLetDecl};
 use crate::reporting::Region;
+use std::rc::Rc;
 
 /// Compile a monomorphized program to a native/wasm binary at `output`.
 pub fn build(
@@ -2013,7 +2014,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                             region: expr.region,
                         });
                         params.push((mk_pat(pname), (*a).clone()));
-                        remaining = *b;
+                        remaining = (*b).clone();
                         idx += 1;
                     }
                     body = TypedExpr {
@@ -2075,7 +2076,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let mut mid_ty = func.tipe.clone();
                 for _ in 0..arity {
                     match mid_ty {
-                        crate::ast::canonical::Type::Lambda(_, r) => mid_ty = *r,
+                        crate::ast::canonical::Type::Lambda(_, r) => mid_ty = (*r).clone(),
                         _ => break,
                     }
                 }
@@ -2140,7 +2141,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             let mut closure_ty = func.tipe.clone();
             for _ in 0..np {
                 match closure_ty {
-                    crate::ast::canonical::Type::Lambda(_, r) => closure_ty = *r,
+                    crate::ast::canonical::Type::Lambda(_, r) => closure_ty = (*r).clone(),
                     _ => break,
                 }
             }
@@ -3037,15 +3038,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let list_ty = Type::Type(
                     crate::data::Name::from("List"),
                     crate::data::Name::from("List"),
-                    vec![elem_ty],
+                    Rc::new(vec![elem_ty]),
                 );
                 let to_list = TypedExpr {
                     tipe: list_ty.clone(),
                     kind: TypedKind::Call(
                         Box::new(TypedExpr {
                             tipe: Type::Lambda(
-                                Box::new(args[2].tipe.clone()),
-                                Box::new(list_ty),
+                                Rc::new(args[2].tipe.clone()),
+                                Rc::new(list_ty),
                             ),
                             kind: TypedKind::Foreign(
                                 crate::data::Name::from(module),
@@ -3407,7 +3408,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let mut closure_ty = func.tipe.clone();
                 for _ in 0..np {
                     match closure_ty {
-                        crate::ast::canonical::Type::Lambda(_, r) => closure_ty = *r,
+                        crate::ast::canonical::Type::Lambda(_, r) => closure_ty = (*r).clone(),
                         _ => break,
                     }
                 }
@@ -3456,7 +3457,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     let mut t = func.tipe.clone();
                     for _ in 0..params.len() {
                         match t {
-                            crate::ast::canonical::Type::Lambda(_, r) => t = *r,
+                            crate::ast::canonical::Type::Lambda(_, r) => t = (*r).clone(),
                             _ => break,
                         }
                     }
@@ -4554,7 +4555,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 kind: TypedKind::Call(Box::new(outer), vec![plocal]),
                 region: whole.region,
             };
-            ret = *rest;
+            ret = (*rest).clone();
             i += 1;
         }
         let result_layout = self.layouts.layout_of(&ret);
@@ -6311,8 +6312,8 @@ fn peel_lambda(
     let mut args = Vec::new();
     let mut t = tipe.clone();
     while let Type::Lambda(a, b) = t {
-        args.push(*a);
-        t = *b;
+        args.push((*a).clone());
+        t = (*b).clone();
     }
     (args, t)
 }

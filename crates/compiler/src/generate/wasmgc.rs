@@ -21,6 +21,7 @@ use wasm_encoder::{
 
 use crate::ast::canonical as can;
 use crate::ir::mono::{MonoProgram, TypedExpr, TypedKind, TypedLetDecl};
+use std::rc::Rc;
 use crate::reporting::annotation::Region;
 
 /// Dead-code-eliminate a finished WasmGC module. The code generator emits every
@@ -604,7 +605,7 @@ fn builtin_ctor_arg_types(ctor_name: &str, tipe: Option<&can::Type>) -> Option<V
     if ctor_name == "BadStatus_" || ctor_name == "GoodStatus_" {
         let field = |n: &str| (crate::data::Name::from(n), can::Type::Unit);
         let metadata = can::Type::Record(
-            vec![field("headers"), field("statusCode"), field("statusText"), field("url")],
+            Rc::new(vec![field("headers"), field("statusCode"), field("statusText"), field("url")]),
             None,
         );
         return Some(vec![metadata]);
@@ -615,10 +616,10 @@ fn builtin_ctor_arg_types(ctor_name: &str, tipe: Option<&can::Type>) -> Option<V
     if ctor_name == "Internal" {
         let field = |n: &str| (crate::data::Name::from(n), can::Type::Unit);
         let url = can::Type::Record(
-            vec![
+            Rc::new(vec![
                 field("fragment"), field("host"), field("path"),
                 field("port_"), field("protocol"), field("query"),
-            ],
+            ]),
             None,
         );
         return Some(vec![url]);
@@ -1470,21 +1471,21 @@ fn subst_type(subst: &HashMap<String, can::Type>, ty: &can::Type) -> can::Type {
     match ty {
         can::Type::Var(n) => subst.get(&n.to_string()).cloned().unwrap_or_else(|| ty.clone()),
         can::Type::Lambda(a, b) => can::Type::Lambda(
-            Box::new(subst_type(subst, a)),
-            Box::new(subst_type(subst, b)),
+            Rc::new(subst_type(subst, a)),
+            Rc::new(subst_type(subst, b)),
         ),
         can::Type::Type(h, n, args) => can::Type::Type(
             h.clone(),
             n.clone(),
-            args.iter().map(|a| subst_type(subst, a)).collect(),
+            Rc::new(args.iter().map(|a| subst_type(subst, a)).collect()),
         ),
         can::Type::Tuple(a, b, c) => can::Type::Tuple(
-            Box::new(subst_type(subst, a)),
-            Box::new(subst_type(subst, b)),
-            c.as_ref().map(|t| Box::new(subst_type(subst, t))),
+            Rc::new(subst_type(subst, a)),
+            Rc::new(subst_type(subst, b)),
+            c.as_ref().map(|t| Rc::new(subst_type(subst, t))),
         ),
         can::Type::Record(fields, ext) => can::Type::Record(
-            fields.iter().map(|(n, t)| (n.clone(), subst_type(subst, t))).collect(),
+            Rc::new(fields.iter().map(|(n, t)| (n.clone(), subst_type(subst, t))).collect()),
             ext.clone(),
         ),
         can::Type::Unit => can::Type::Unit,
@@ -4838,7 +4839,7 @@ impl<'a> Codegen<'a> {
                         let list_kv = can::Type::Type(
                             crate::data::Name::from("List"),
                             crate::data::Name::from("List"),
-                            vec![can::Type::Tuple(Box::new(k), Box::new(v), None)],
+                            Rc::new(vec![can::Type::Tuple(Rc::new(k), Rc::new(v), None)]),
                         );
                         let lr = self.debug_renderer(&list_kv)?;
                         let mut f = Function::new([]);
@@ -4856,7 +4857,7 @@ impl<'a> Codegen<'a> {
                         let list_k = can::Type::Type(
                             crate::data::Name::from("List"),
                             crate::data::Name::from("List"),
-                            vec![elem],
+                            Rc::new(vec![elem]),
                         );
                         let lr = self.debug_renderer(&list_k)?;
                         let mut f = Function::new([]);
@@ -4875,7 +4876,7 @@ impl<'a> Codegen<'a> {
                         let list_a = can::Type::Type(
                             crate::data::Name::from("List"),
                             crate::data::Name::from("List"),
-                            vec![elem],
+                            Rc::new(vec![elem]),
                         );
                         let lr = self.debug_renderer(&list_a)?;
                         let mut f = Function::new([]);
@@ -5141,12 +5142,12 @@ impl<'a> Codegen<'a> {
             // (matches ctor.index). Failure carries a Json Value (→ <internals>).
             "Error" if home == "Json.Decode" => {
                 use crate::data::Name;
-                let err = can::Type::Type(Name::from("Json.Decode"), Name::from("Error"), vec![]);
-                let string = can::Type::Type(Name::from("String"), Name::from("String"), vec![]);
-                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), vec![]);
-                let value = can::Type::Type(Name::from("Json.Encode"), Name::from("Value"), vec![]);
+                let err = can::Type::Type(Name::from("Json.Decode"), Name::from("Error"), Rc::new(vec![]));
+                let string = can::Type::Type(Name::from("String"), Name::from("String"), Rc::new(vec![]));
+                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), Rc::new(vec![]));
+                let value = can::Type::Type(Name::from("Json.Encode"), Name::from("Value"), Rc::new(vec![]));
                 let list_err =
-                    can::Type::Type(Name::from("List"), Name::from("List"), vec![err.clone()]);
+                    can::Type::Type(Name::from("List"), Name::from("List"), Rc::new(vec![err.clone()]));
                 Some(vec![
                     ("Field".into(), 0, vec![string.clone(), err.clone()]),
                     ("Index".into(), 1, vec![int, err]),
@@ -5159,8 +5160,8 @@ impl<'a> Codegen<'a> {
             // ctors so Debug.toString of an Http.Error renders.
             "Error" if home == "Http" => {
                 use crate::data::Name;
-                let string = can::Type::Type(Name::from("String"), Name::from("String"), vec![]);
-                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), vec![]);
+                let string = can::Type::Type(Name::from("String"), Name::from("String"), Rc::new(vec![]));
+                let int = can::Type::Type(Name::from("Basics"), Name::from("Int"), Rc::new(vec![]));
                 Some(vec![
                     ("BadUrl".into(), 0, vec![string.clone()]),
                     ("Timeout".into(), 1, vec![]),

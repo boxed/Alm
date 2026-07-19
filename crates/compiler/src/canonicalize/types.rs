@@ -2,6 +2,7 @@
 //! aliases (local, foreign, and builtin), and union declarations.
 
 use super::*;
+use std::rc::Rc;
 
 pub(super) fn canonicalize_union(env: &Env, union: &src::Union) -> CResult<can::Union> {
     let vars: Vec<Name> = union.vars.iter().map(|v| v.value.clone()).collect();
@@ -43,8 +44,8 @@ fn canonicalize_type_help(
     }
     match &tipe.value {
         src::Type_::Lambda(arg, result) => Ok(can::Type::Lambda(
-            Box::new(canonicalize_type_help(env, arg, substitutions, depth)?),
-            Box::new(canonicalize_type_help(env, result, substitutions, depth)?),
+            Rc::new(canonicalize_type_help(env, arg, substitutions, depth)?),
+            Rc::new(canonicalize_type_help(env, result, substitutions, depth)?),
         )),
         src::Type_::Var(name) => Ok(substitutions
             .get(name)
@@ -82,10 +83,10 @@ fn canonicalize_type_help(
                 Some(can::Type::Record(more_fields, ext2)) => {
                     let mut merged = fields;
                     merged.extend(more_fields.iter().cloned());
-                    Ok(can::Type::Record(merged, ext2.clone()))
+                    Ok(can::Type::Record(Rc::new(merged), ext2.clone()))
                 }
-                Some(can::Type::Var(n)) => Ok(can::Type::Record(fields, Some(n.clone()))),
-                _ => Ok(can::Type::Record(fields, ext_name)),
+                Some(can::Type::Var(n)) => Ok(can::Type::Record(Rc::new(fields), Some(n.clone()))),
+                _ => Ok(can::Type::Record(Rc::new(fields), ext_name)),
             }
         }
         src::Type_::Unit => Ok(can::Type::Unit),
@@ -97,10 +98,10 @@ fn canonicalize_type_help(
                 ));
             }
             Ok(can::Type::Tuple(
-                Box::new(canonicalize_type_help(env, a, substitutions, depth)?),
-                Box::new(canonicalize_type_help(env, b, substitutions, depth)?),
+                Rc::new(canonicalize_type_help(env, a, substitutions, depth)?),
+                Rc::new(canonicalize_type_help(env, b, substitutions, depth)?),
                 match rest.first() {
-                    Some(t) => Some(Box::new(canonicalize_type_help(env, t, substitutions, depth)?)),
+                    Some(t) => Some(Rc::new(canonicalize_type_help(env, t, substitutions, depth)?)),
                     None => None,
                 },
             ))
@@ -119,7 +120,7 @@ fn resolve_type(
     match qualifier {
         None => {
             if env.local_types.contains(name) {
-                return Ok(can::Type::Type(env.module_name.clone(), name.clone(), args));
+                return Ok(can::Type::Type(env.module_name.clone(), name.clone(), Rc::new(args)));
             }
             if let Some((vars, body)) = env.aliases.get(name) {
                 return expand_alias(env, region, name, vars, body, args, depth);
@@ -128,7 +129,7 @@ fn resolve_type(
                 return resolve_foreign_type(env, region, module, name, args);
             }
             if let Some(home) = builtins::lookup_type_home(name.as_str()) {
-                return Ok(can::Type::Type(Name::from(home), name.clone(), args));
+                return Ok(can::Type::Type(Name::from(home), name.clone(), Rc::new(args)));
             }
             Err(Error::new(
                 format!("I cannot find a type named `{}`.", name),
@@ -155,7 +156,7 @@ fn resolve_type(
                     }
                 }
                 if builtins::lookup_type_home(name.as_str()) == Some(module.as_str()) {
-                    return Ok(can::Type::Type(module.clone(), name.clone(), args));
+                    return Ok(can::Type::Type(module.clone(), name.clone(), Rc::new(args)));
                 }
                 match resolve_foreign_type(env, region, module, name, args.clone()) {
                     Ok(t) => return Ok(t),
@@ -196,7 +197,7 @@ fn resolve_foreign_type(
     }
     // Builtin types addressed by module, e.g. `Http.Error` or `Html.Html`.
     if builtins::is_builtin_type(module.as_str(), name.as_str()) {
-        return Ok(can::Type::Type(module.clone(), name.clone(), args));
+        return Ok(can::Type::Type(module.clone(), name.clone(), Rc::new(args)));
     }
     let interface = env.interfaces.get(module).ok_or_else(|| {
         Error::new(
@@ -217,7 +218,7 @@ fn resolve_foreign_type(
                 region,
             ));
         }
-        return Ok(can::Type::Type(module.clone(), name.clone(), args));
+        return Ok(can::Type::Type(module.clone(), name.clone(), Rc::new(args)));
     }
     if let Some((vars, body)) = interface.aliases.get(name) {
         if vars.len() != args.len() {
@@ -247,13 +248,13 @@ pub(crate) fn subst_can_type(tipe: &can::Type, map: &HashMap<Name, can::Type>) -
     match tipe {
         can::Type::Var(name) => map.get(name).cloned().unwrap_or_else(|| tipe.clone()),
         can::Type::Lambda(arg, result) => can::Type::Lambda(
-            Box::new(subst_can_type(arg, map)),
-            Box::new(subst_can_type(result, map)),
+            Rc::new(subst_can_type(arg, map)),
+            Rc::new(subst_can_type(result, map)),
         ),
         can::Type::Type(home, name, args) => can::Type::Type(
             home.clone(),
             name.clone(),
-            args.iter().map(|a| subst_can_type(a, map)).collect(),
+            Rc::new(args.iter().map(|a| subst_can_type(a, map)).collect()),
         ),
         can::Type::Record(fields, ext) => {
             let new_fields: Vec<(Name, can::Type)> = fields
@@ -261,21 +262,21 @@ pub(crate) fn subst_can_type(tipe: &can::Type, map: &HashMap<Name, can::Type>) -
                 .map(|(n, t)| (n.clone(), subst_can_type(t, map)))
                 .collect();
             match ext.as_ref().and_then(|e| map.get(e)) {
-                None => can::Type::Record(new_fields, ext.clone()),
-                Some(can::Type::Var(n)) => can::Type::Record(new_fields, Some(n.clone())),
+                None => can::Type::Record(Rc::new(new_fields), ext.clone()),
+                Some(can::Type::Var(n)) => can::Type::Record(Rc::new(new_fields), Some(n.clone())),
                 Some(can::Type::Record(more_fields, ext2)) => {
                     let mut merged = new_fields;
                     merged.extend(more_fields.iter().cloned());
-                    can::Type::Record(merged, ext2.clone())
+                    can::Type::Record(Rc::new(merged), ext2.clone())
                 }
-                Some(_) => can::Type::Record(new_fields, ext.clone()),
+                Some(_) => can::Type::Record(Rc::new(new_fields), ext.clone()),
             }
         }
         can::Type::Unit => can::Type::Unit,
         can::Type::Tuple(a, b, c) => can::Type::Tuple(
-            Box::new(subst_can_type(a, map)),
-            Box::new(subst_can_type(b, map)),
-            c.as_ref().map(|c| Box::new(subst_can_type(c, map))),
+            Rc::new(subst_can_type(a, map)),
+            Rc::new(subst_can_type(b, map)),
+            c.as_ref().map(|c| Rc::new(subst_can_type(c, map))),
         ),
     }
 }

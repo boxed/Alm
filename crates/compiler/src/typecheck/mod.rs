@@ -8,6 +8,7 @@
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast::canonical as can;
 use crate::builtins;
@@ -694,6 +695,7 @@ impl Checker<'_> {
         let mut state = GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
+            memo: HashMap::new(),
             counter: self.zonk_name_counter,
             reserved,
         };
@@ -758,6 +760,7 @@ impl Checker<'_> {
         let mut state = GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
+            memo: HashMap::new(),
             counter: self.zonk_name_counter,
             reserved,
         };
@@ -839,6 +842,7 @@ impl Checker<'_> {
         GeneralizeState {
             names: HashMap::new(),
             free: HashMap::new(),
+            memo: HashMap::new(),
             counter: 0,
             reserved,
         }
@@ -864,12 +868,12 @@ impl Checker<'_> {
                 }
             }
             Type(_, _, args) => {
-                for a in args {
+                for a in args.iter() {
                     Self::collect_tyvar_names(a, out);
                 }
             }
             Record(fields, ext) => {
-                for (_, t) in fields {
+                for (_, t) in fields.iter() {
                     Self::collect_tyvar_names(t, out);
                 }
                 if let Some(n) = ext {
@@ -890,20 +894,31 @@ impl Checker<'_> {
         if let Some(name) = state.names.get(&root) {
             return can::Type::Var(name.clone());
         }
-        match self.pool.content(root) {
+        // A structural type already resolved in this scheme is shared, not
+        // rebuilt (see `GeneralizeState::memo`). Variable arms are not memoized
+        // here — they pin their name in `state.names` and so hit the early
+        // return above on re-visit.
+        if let Some(t) = state.memo.get(&root) {
+            return t.clone();
+        }
+        let content = self.pool.content(root);
+        let structural = matches!(content, Content::Structure(_));
+        let result = match content {
             Content::Structure(flat) => match flat {
                 FlatType::App(home, name, args) => can::Type::Type(
                     home,
                     name,
-                    args.iter()
-                        .map(|&a| self.variable_to_type(a, env_free, state))
-                        .collect(),
+                    Rc::new(
+                        args.iter()
+                            .map(|&a| self.variable_to_type(a, env_free, state))
+                            .collect(),
+                    ),
                 ),
                 FlatType::Fun(arg, result) => can::Type::Lambda(
-                    Box::new(self.variable_to_type(arg, env_free, state)),
-                    Box::new(self.variable_to_type(result, env_free, state)),
+                    Rc::new(self.variable_to_type(arg, env_free, state)),
+                    Rc::new(self.variable_to_type(result, env_free, state)),
                 ),
-                FlatType::EmptyRecord => can::Type::Record(vec![], None),
+                FlatType::EmptyRecord => can::Type::Record(Rc::new(vec![]), None),
                 FlatType::Record(..) => {
                     let (fields, ext) = self.pool.gather_fields(root);
                     let fields = fields
@@ -917,13 +932,13 @@ impl Checker<'_> {
                             _ => None,
                         },
                     };
-                    can::Type::Record(fields, ext)
+                    can::Type::Record(Rc::new(fields), ext)
                 }
                 FlatType::Unit => can::Type::Unit,
                 FlatType::Tuple(a, b, c) => can::Type::Tuple(
-                    Box::new(self.variable_to_type(a, env_free, state)),
-                    Box::new(self.variable_to_type(b, env_free, state)),
-                    c.map(|c| Box::new(self.variable_to_type(c, env_free, state))),
+                    Rc::new(self.variable_to_type(a, env_free, state)),
+                    Rc::new(self.variable_to_type(b, env_free, state)),
+                    c.map(|c| Rc::new(self.variable_to_type(c, env_free, state))),
                 ),
             },
             content => {
@@ -951,7 +966,11 @@ impl Checker<'_> {
                 state.names.insert(root, name.clone());
                 can::Type::Var(name)
             }
+        };
+        if structural {
+            state.memo.insert(root, result.clone());
         }
+        result
     }
 
     // UNIFICATION WRAPPER
@@ -1463,6 +1482,15 @@ fn var_super(name: &Name) -> Option<Super> {
 struct GeneralizeState {
     names: HashMap<Variable, Name>,
     free: HashMap<Name, Variable>,
+    /// Zonk memo: a pool variable resolved to a `can::Type` once, reused (as an
+    /// O(1) `Rc` clone) everywhere it recurs in this scheme. The pool is a DAG —
+    /// a variable can appear in many positions — but `variable_to_type` would
+    /// otherwise expand it to a TREE, duplicating shared subtrees. Deeply-nested
+    /// alias types (elm-athlete's style records) blow up to hundreds of
+    /// thousands of nodes that way; sharing keeps the physical size at the
+    /// distinct-node count. Keyed by the union-find ROOT, valid only within this
+    /// state (names are per-state).
+    memo: HashMap<Variable, can::Type>,
     counter: usize,
     /// Type-variable names that belong to an enclosing annotated definition's
     /// rigid scheme. A freshly-generated (anonymous or suggested) name must

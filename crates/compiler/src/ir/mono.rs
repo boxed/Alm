@@ -20,6 +20,7 @@
 //! — that is [`crate::ir::layout`]'s job, consulted later by the backend.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 
 use crate::ast::canonical as can;
@@ -223,29 +224,31 @@ pub fn default_numbers(tipe: &can::Type) -> can::Type {
     use can::Type::*;
     match tipe {
         Var(n) if n.as_str().starts_with("number") => {
-            Type(Name::from("Basics"), Name::from("Int"), Vec::new())
+            Type(Name::from("Basics"), Name::from("Int"), Rc::new(Vec::new()))
         }
         Var(_) | Unit => tipe.clone(),
         Lambda(a, b) => Lambda(
-            Box::new(default_numbers(a)),
-            Box::new(default_numbers(b)),
+            Rc::new(default_numbers(a)),
+            Rc::new(default_numbers(b)),
         ),
         Type(home, name, args) => Type(
             home.clone(),
             name.clone(),
-            args.iter().map(default_numbers).collect(),
+            Rc::new(args.iter().map(default_numbers).collect()),
         ),
         Record(fields, ext) => Record(
-            fields
-                .iter()
-                .map(|(n, t)| (n.clone(), default_numbers(t)))
-                .collect(),
+            Rc::new(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), default_numbers(t)))
+                    .collect(),
+            ),
             ext.clone(),
         ),
         Tuple(a, b, c) => Tuple(
-            Box::new(default_numbers(a)),
-            Box::new(default_numbers(b)),
-            c.as_ref().map(|c| Box::new(default_numbers(c))),
+            Rc::new(default_numbers(a)),
+            Rc::new(default_numbers(b)),
+            c.as_ref().map(|c| Rc::new(default_numbers(c))),
         ),
     }
 }
@@ -308,9 +311,14 @@ fn type_too_large_error(module: &Name, name: &Name, limit: usize) -> String {
     )
 }
 
-/// Whether `tipe` has more than `limit` nodes. Stops counting at the limit, so
-/// this is O(limit), not O(size) — cheap for the common small type, bounded for
-/// a pathological one.
+/// Whether `tipe` has more than `limit` nodes counted LOGICALLY (each occurrence
+/// of a shared subtree counts, no dedup). Interning shares storage, but many
+/// operations — above all `mangle`, which spells the type out in full — still
+/// cost O(logical size), so the logical count is the metric that actually bounds
+/// compile cost. A type that is structurally small yet logically enormous
+/// (deeply-nested aliases duplicated at every occurrence) still trips this and
+/// is reported as an error rather than exhausting time/memory. Stops at the
+/// limit, so it is O(min(logical, limit)).
 fn type_exceeds_nodes(tipe: &can::Type, limit: usize) -> bool {
     fn go(t: &can::Type, n: &mut usize, limit: usize) -> bool {
         *n += 1;
@@ -323,9 +331,7 @@ fn type_exceeds_nodes(tipe: &can::Type, limit: usize) -> bool {
             Lambda(a, b) => go(a, n, limit) || go(b, n, limit),
             Type(_, _, args) => args.iter().any(|a| go(a, n, limit)),
             Tuple(a, b, c) => {
-                go(a, n, limit)
-                    || go(b, n, limit)
-                    || c.as_ref().map_or(false, |c| go(c, n, limit))
+                go(a, n, limit) || go(b, n, limit) || c.as_ref().map_or(false, |c| go(c, n, limit))
             }
             Record(fields, _) => fields.iter().any(|(_, t)| go(t, n, limit)),
         }
@@ -462,7 +468,7 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
             match_type(b1, b2, subst);
         }
         (Type(_, _, args1), Type(_, _, args2)) if args1.len() == args2.len() => {
-            for (a, b) in args1.iter().zip(args2) {
+            for (a, b) in args1.iter().zip(args2.iter()) {
                 match_type(a, b, subst);
             }
         }
@@ -474,7 +480,7 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
             }
         }
         (Record(f1, ext1), Record(f2, _)) => {
-            for (name, t1) in f1 {
+            for (name, t1) in f1.iter() {
                 if let Some((_, t2)) = f2.iter().find(|(n, _)| n == name) {
                     match_type(t1, t2, subst);
                 }
@@ -494,7 +500,7 @@ fn match_type(generic: &can::Type, concrete: &can::Type, subst: &mut HashMap<Nam
                     .collect();
                 subst
                     .entry(ext.clone())
-                    .or_insert_with(|| Record(extra, None));
+                    .or_insert_with(|| Record(Rc::new(extra), None));
             }
         }
         _ => {}
@@ -682,8 +688,8 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         for arg in &def.args {
             match remaining {
                 can::Type::Lambda(a, b) => {
-                    params.push((arg.clone(), *a));
-                    remaining = *b;
+                    params.push((arg.clone(), (*a).clone()));
+                    remaining = (*b).clone();
                 }
                 other => {
                     params.push((arg.clone(), other.clone()));
@@ -727,7 +733,7 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
                 ),
                 region: def.name.region,
             };
-            remaining = *b;
+            remaining = (*b).clone();
             idx += 1;
         }
         functions.push(TypedFn {
@@ -1173,10 +1179,10 @@ impl Specializer<'_> {
                     // call — which also lets the specializer discover the
                     // operator's function like any other reference.
                     let func_ty = can::Type::Lambda(
-                        Box::new(lt.tipe.clone()),
-                        Box::new(can::Type::Lambda(
-                            Box::new(rt.tipe.clone()),
-                            Box::new(tipe.clone()),
+                        Rc::new(lt.tipe.clone()),
+                        Rc::new(can::Type::Lambda(
+                            Rc::new(rt.tipe.clone()),
+                            Rc::new(tipe.clone()),
                         )),
                     );
                     let callee_kind = if self.project.contains_key(home) {
@@ -1205,8 +1211,8 @@ impl Specializer<'_> {
                 for arg in args {
                     match remaining {
                         can::Type::Lambda(a, b) => {
-                            params.push((arg.clone(), *a));
-                            remaining = *b;
+                            params.push((arg.clone(), (*a).clone()));
+                            remaining = (*b).clone();
                         }
                         other => {
                             params.push((arg.clone(), other.clone()));
@@ -1235,7 +1241,7 @@ impl Specializer<'_> {
                 let mut covered = tipe.clone();
                 for _ in 0..params.len() {
                     match covered {
-                        can::Type::Lambda(_, b) => covered = *b,
+                        can::Type::Lambda(_, b) => covered = (*b).clone(),
                         other => {
                             covered = other;
                             break;
@@ -1259,7 +1265,7 @@ impl Specializer<'_> {
                         kind: TypedKind::Local(pname),
                         region: expr.region,
                     });
-                    covered = *b;
+                    covered = (*b).clone();
                     idx += 1;
                 }
                 if !eta_args.is_empty() {
@@ -1617,8 +1623,8 @@ impl Specializer<'_> {
         for arg in &def.args {
             let ty = match remaining.take() {
                 Some(can::Type::Lambda(a, b)) => {
-                    remaining = Some(*b);
-                    *a
+                    remaining = Some((*b).clone());
+                    (*a).clone()
                 }
                 other => {
                     remaining = other;
@@ -1648,7 +1654,7 @@ impl Specializer<'_> {
                 ),
                 region: def.name.region,
             };
-            remaining = Some(*b);
+            remaining = Some((*b).clone());
             idx += 1;
         }
         (params, body)
@@ -2098,12 +2104,12 @@ fn alpha_normalize(tipe: &can::Type) -> can::Type {
                 map.push((n.clone(), to.clone()));
                 Var(to)
             }
-            Lambda(a, b) => Lambda(Box::new(go(a, map)), Box::new(go(b, map))),
-            Type(h, n, args) => Type(h.clone(), n.clone(), args.iter().map(|a| go(a, map)).collect()),
+            Lambda(a, b) => Lambda(Rc::new(go(a, map)), Rc::new(go(b, map))),
+            Type(h, n, args) => Type(h.clone(), n.clone(), Rc::new(args.iter().map(|a| go(a, map)).collect())),
             Tuple(a, b, c) => Tuple(
-                Box::new(go(a, map)),
-                Box::new(go(b, map)),
-                c.as_ref().map(|x| Box::new(go(x, map))),
+                Rc::new(go(a, map)),
+                Rc::new(go(b, map)),
+                c.as_ref().map(|x| Rc::new(go(x, map))),
             ),
             Record(fields, ext) => {
                 // Number type variables in the SAME field order `mangle_type`
@@ -2118,7 +2124,7 @@ fn alpha_normalize(tipe: &can::Type) -> can::Type {
                 let mut sorted: Vec<&(Name, can::Type)> = fields.iter().collect();
                 sorted.sort_by(|a, b| a.0.cmp(&b.0));
                 Record(
-                    sorted.iter().map(|(n, t)| (n.clone(), go(t, map))).collect(),
+                    Rc::new(sorted.iter().map(|(n, t)| (n.clone(), go(t, map))).collect()),
                     ext.clone(),
                 )
             }
@@ -2193,23 +2199,73 @@ fn mangle_type(tipe: &can::Type) -> String {
 }
 
 /// Apply a substitution to a type, replacing bound variables.
+///
+/// Sharing-preserving: a subtree that no substitution touches is returned
+/// UNCHANGED (an O(1) `Rc` clone), not rebuilt. This is essential after
+/// interning — `spec.expr` calls this per body node, and a naive rebuild would
+/// re-materialize a large shared type (elm-athlete's style records) on every
+/// call, re-inflating the very duplication interning removes. `subst_shared`
+/// returns `None` for "unchanged" so callers can reuse the original `Rc`.
 fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type {
+    subst_shared(subst, tipe).unwrap_or_else(|| tipe.clone())
+}
+
+/// The substitution workhorse. Returns `None` when `tipe` is unchanged (nothing
+/// in it was substituted), letting the caller keep the shared original.
+fn subst_shared(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> Option<can::Type> {
     use can::Type::*;
+    // An unchanged child: reuse the shared `Rc` (O(1)); a changed one: box the
+    // new type. `changed` tracks whether any child actually differed.
+    fn child(subst: &HashMap<Name, can::Type>, rc: &Rc<can::Type>, changed: &mut bool) -> Rc<can::Type> {
+        match subst_shared(subst, rc) {
+            Some(t) => {
+                *changed = true;
+                Rc::new(t)
+            }
+            None => rc.clone(),
+        }
+    }
     match tipe {
-        Var(name) => subst.get(name).cloned().unwrap_or_else(|| tipe.clone()),
-        Lambda(a, b) => Lambda(
-            Box::new(apply_subst(subst, a)),
-            Box::new(apply_subst(subst, b)),
-        ),
-        Type(home, name, args) => Type(
-            home.clone(),
-            name.clone(),
-            args.iter().map(|a| apply_subst(subst, a)).collect(),
-        ),
+        Var(name) => subst.get(name).cloned(),
+        Unit => None,
+        Lambda(a, b) => {
+            let mut changed = false;
+            let na = child(subst, a, &mut changed);
+            let nb = child(subst, b, &mut changed);
+            changed.then(|| Lambda(na, nb))
+        }
+        Tuple(a, b, c) => {
+            let mut changed = false;
+            let na = child(subst, a, &mut changed);
+            let nb = child(subst, b, &mut changed);
+            let nc = c.as_ref().map(|c| child(subst, c, &mut changed));
+            changed.then(|| Tuple(na, nb, nc))
+        }
+        Type(home, name, args) => {
+            let mut changed = false;
+            let new: Vec<can::Type> = args
+                .iter()
+                .map(|a| match subst_shared(subst, a) {
+                    Some(t) => {
+                        changed = true;
+                        t
+                    }
+                    None => a.clone(),
+                })
+                .collect();
+            changed.then(|| Type(home.clone(), name.clone(), Rc::new(new)))
+        }
         Record(fields, ext) => {
+            let mut changed = false;
             let mut new_fields: Vec<(Name, can::Type)> = fields
                 .iter()
-                .map(|(n, t)| (n.clone(), apply_subst(subst, t)))
+                .map(|(n, t)| match subst_shared(subst, t) {
+                    Some(t) => {
+                        changed = true;
+                        (n.clone(), t)
+                    }
+                    None => (n.clone(), t.clone()),
+                })
                 .collect();
             // Expand a bound row variable into the record's remaining fields, so
             // a specialized open record becomes the full closed record its
@@ -2217,6 +2273,7 @@ fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type 
             let mut new_ext = ext.clone();
             if let Some(x) = ext {
                 if let Some(Record(extra, extra_ext)) = subst.get(x) {
+                    changed = true;
                     let present: std::collections::HashSet<&Name> =
                         new_fields.iter().map(|(n, _)| n).collect();
                     let extra: Vec<(Name, can::Type)> = extra
@@ -2228,14 +2285,8 @@ fn apply_subst(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type 
                     new_ext = extra_ext.clone();
                 }
             }
-            Record(new_fields, new_ext)
+            changed.then(|| Record(Rc::new(new_fields), new_ext))
         }
-        Tuple(a, b, c) => Tuple(
-            Box::new(apply_subst(subst, a)),
-            Box::new(apply_subst(subst, b)),
-            c.as_ref().map(|c| Box::new(apply_subst(subst, c))),
-        ),
-        Unit => Unit,
     }
 }
 

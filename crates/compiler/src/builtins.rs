@@ -8,6 +8,7 @@
 
 use crate::ast::canonical::Type;
 use crate::ast::source::{self, Associativity};
+use std::rc::Rc;
 use crate::data::Name;
 use crate::parse::Parser;
 
@@ -1199,14 +1200,14 @@ pub fn parse_signature(signature: &str) -> Type {
 fn canonicalize_signature_type(tipe: &source::Type) -> Type {
     match &tipe.value {
         source::Type_::Lambda(arg, result) => Type::Lambda(
-            Box::new(canonicalize_signature_type(arg)),
-            Box::new(canonicalize_signature_type(result)),
+            Rc::new(canonicalize_signature_type(arg)),
+            Rc::new(canonicalize_signature_type(result)),
         ),
         source::Type_::Var(name) => Type::Var(name.clone()),
         source::Type_::Type(_, name, args) => {
             let args: Vec<Type> = args.iter().map(canonicalize_signature_type).collect();
             if let Some(home) = lookup_type_home(name.as_str()) {
-                return Type::Type(Name::from(home), name.clone(), args);
+                return Type::Type(Name::from(home), name.clone(), Rc::new(args));
             }
             // Unambiguous builtin alias referenced without qualification.
             if let Some((_, _, vars, body)) =
@@ -1221,20 +1222,22 @@ fn canonicalize_signature_type(tipe: &source::Type) -> Type {
             if let Some((vars, body)) = lookup_alias(qualifier.as_str(), name.as_str()) {
                 return expand_signature_alias(vars, body, args);
             }
-            Type::Type(qualifier.clone(), name.clone(), args)
+            Type::Type(qualifier.clone(), name.clone(), Rc::new(args))
         }
         source::Type_::Record(fields, ext) => Type::Record(
-            fields
-                .iter()
-                .map(|(name, t)| (name.value.clone(), canonicalize_signature_type(t)))
-                .collect(),
+            Rc::new(
+                fields
+                    .iter()
+                    .map(|(name, t)| (name.value.clone(), canonicalize_signature_type(t)))
+                    .collect(),
+            ),
             ext.as_ref().map(|n| n.value.clone()),
         ),
         source::Type_::Unit => Type::Unit,
         source::Type_::Tuple(a, b, rest) => Type::Tuple(
-            Box::new(canonicalize_signature_type(a)),
-            Box::new(canonicalize_signature_type(b)),
-            rest.first().map(|t| Box::new(canonicalize_signature_type(t))),
+            Rc::new(canonicalize_signature_type(a)),
+            Rc::new(canonicalize_signature_type(b)),
+            rest.first().map(|t| Rc::new(canonicalize_signature_type(t))),
         ),
     }
 }

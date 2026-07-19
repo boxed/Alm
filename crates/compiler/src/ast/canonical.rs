@@ -6,6 +6,7 @@
 
 use crate::data::Name;
 use crate::reporting::{Located, Region};
+use std::rc::Rc;
 
 pub type Expr = Located<Expr_>;
 
@@ -91,15 +92,23 @@ pub enum Pattern_ {
 
 // TYPES
 
+/// The recursive positions are `Rc`-shared so that cloning a `Type` is O(1)
+/// (a refcount bump) and structurally-identical subtrees are physically shared
+/// rather than duplicated. Deeply-nested type aliases (records within records)
+/// otherwise expand into a fully-duplicated tree — a small type with a few
+/// hundred distinct subtrees can balloon into hundreds of thousands of nodes
+/// (elm-athlete's `computeBlock`), exhausting memory during specialization.
+/// `Rc` keeps the DAG shared. Structural `PartialEq`/`Eq`/`Hash` are preserved
+/// (they delegate through the `Rc`), so types remain usable as map keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Var(Name),
-    Lambda(Box<Type>, Box<Type>),
+    Lambda(Rc<Type>, Rc<Type>),
     /// home module, type name, arguments. Aliases are already expanded.
-    Type(Name, Name, Vec<Type>),
-    Record(Vec<(Name, Type)>, Option<Name>),
+    Type(Name, Name, Rc<Vec<Type>>),
+    Record(Rc<Vec<(Name, Type)>>, Option<Name>),
     Unit,
-    Tuple(Box<Type>, Box<Type>, Option<Box<Type>>),
+    Tuple(Rc<Type>, Rc<Type>, Option<Rc<Type>>),
 }
 
 // MODULE

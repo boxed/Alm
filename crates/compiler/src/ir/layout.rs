@@ -12,6 +12,7 @@
 //! tag.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::canonical as can;
 use crate::builtins;
@@ -267,25 +268,27 @@ fn substitute(subst: &HashMap<Name, can::Type>, tipe: &can::Type) -> can::Type {
     match tipe {
         Var(name) => subst.get(name).cloned().unwrap_or_else(|| tipe.clone()),
         Lambda(a, b) => Lambda(
-            Box::new(substitute(subst, a)),
-            Box::new(substitute(subst, b)),
+            Rc::new(substitute(subst, a)),
+            Rc::new(substitute(subst, b)),
         ),
         Type(home, name, args) => Type(
             home.clone(),
             name.clone(),
-            args.iter().map(|a| substitute(subst, a)).collect(),
+            Rc::new(args.iter().map(|a| substitute(subst, a)).collect()),
         ),
         Record(fields, ext) => Record(
-            fields
-                .iter()
-                .map(|(n, t)| (n.clone(), substitute(subst, t)))
-                .collect(),
+            Rc::new(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute(subst, t)))
+                    .collect(),
+            ),
             ext.clone(),
         ),
         Tuple(a, b, c) => Tuple(
-            Box::new(substitute(subst, a)),
-            Box::new(substitute(subst, b)),
-            c.as_ref().map(|c| Box::new(substitute(subst, c))),
+            Rc::new(substitute(subst, a)),
+            Rc::new(substitute(subst, b)),
+            c.as_ref().map(|c| Rc::new(substitute(subst, c))),
         ),
         Unit => Unit,
     }
