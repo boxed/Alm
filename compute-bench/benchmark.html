@@ -208,13 +208,13 @@
   // no DOM. native = --target=native-typed (custom Immix-lite GC, default);
   // elm = official 0.19.1 compiler, driven headless through a Platform.worker.
   const COMPUTE = [
-    { op: "fib 35",                  elm: 45.7,  "alm-js": 46.1, "alm-wasm": 23.5, "alm-native": 14.4 },
-    { op: "binary-trees d14×60",     elm: 9.1,   "alm-js": 8.9,  "alm-wasm": 9.1,  "alm-native": 8.0 },
-    { op: "list map/filter/fold 1M", elm: 130.1, "alm-js": 24.0, "alm-wasm": 9.9,  "alm-native": 2.8 },
-    { op: "Dict 100k build+get",     elm: 34.5,  "alm-js": 31.1, "alm-wasm": 21.5, "alm-native": 32.6 },
-    { op: "mandelbrot 400²",         elm: 5.9,   "alm-js": 5.6,  "alm-wasm": 5.2,  "alm-native": 6.3 },
-    { op: "sort 100k ints",          elm: 24.1,  "alm-js": 23.9, "alm-wasm": 14.4, "alm-native": 10.7 },
-    { op: "float-list sum 1M",       elm: 174.7, "alm-js": 46.3, "alm-wasm": 4.1,  "alm-native": 2.3 },
+    { op: "fib 35",                  elm: 47.1,  "alm-js": 45.7, "alm-wasm": 23.4, "alm-native": 14.0 },
+    { op: "binary-trees d14×60",     elm: 8.6,   "alm-js": 8.4,  "alm-wasm": 8.2,  "alm-native": 8.3 },
+    { op: "list map/filter/fold 1M", elm: 127.9, "alm-js": 24.7, "alm-wasm": 10.0, "alm-native": 3.1 },
+    { op: "Dict 100k build+get",     elm: 43.3,  "alm-js": 31.3, "alm-wasm": 21.4, "alm-native": 33.4 },
+    { op: "mandelbrot 400²",         elm: 5.9,   "alm-js": 5.6,  "alm-wasm": 5.2,  "alm-native": 6.0 },
+    { op: "sort 100k ints",          elm: 24.2,  "alm-js": 23.8, "alm-wasm": 14.6, "alm-native": 10.3 },
+    { op: "float-list sum 1M",       elm: 176.1, "alm-js": 46.3, "alm-wasm": 4.0,  "alm-native": 2.5 },
   ];
   const COMPUTE_COLS = ["elm", "alm-js", "alm-wasm", "alm-native"];
 
@@ -222,11 +222,11 @@
   // everything each run (no cache); "elm (full)" clears elm-stuff each run;
   // "elm (incr.)" keeps elm's dependency cache (its fast rebuild path).
   const COMPILE = [
-    { op: "elm-chart-builder",  "alm-js": 110, "alm-wasm": 123, "alm-native": 247, "elm (full)": 685, "elm (incr.)": 115 },
-    { op: "one-true-path",      "alm-js": 62,  "alm-wasm": 76,  "alm-native": 195, "elm (full)": 675, "elm (incr.)": 116 },
-    { op: "elm-charts",         "alm-js": 66,  "alm-wasm": 109, "alm-native": 523, "elm (full)": 667, "elm (incr.)": 105 },
-    { op: "elm-visualization",  "alm-js": 106, "alm-wasm": 127, "alm-native": 277, "elm (full)": 685, "elm (incr.)": 117 },
-    { op: "elm-geometry",       "alm-js": 127, "alm-wasm": 172, "alm-native": 321, "elm (full)": 688, "elm (incr.)": 117 },
+    { op: "elm-chart-builder",  "alm-js": 116, "alm-wasm": 127, "alm-native": 257, "elm (full)": 717, "elm (incr.)": 123 },
+    { op: "one-true-path",      "alm-js": 64,  "alm-wasm": 77,  "alm-native": 205, "elm (full)": 704, "elm (incr.)": 124 },
+    { op: "elm-charts",         "alm-js": 70,  "alm-wasm": 112, "alm-native": 544, "elm (full)": 671, "elm (incr.)": 120 },
+    { op: "elm-visualization",  "alm-js": 112, "alm-wasm": 131, "alm-native": 288, "elm (full)": 708, "elm (incr.)": 127 },
+    { op: "elm-geometry",       "alm-js": 132, "alm-wasm": 178, "alm-native": 329, "elm (full)": 682, "elm (incr.)": 126 },
   ];
   const COMPILE_COLS = ["alm-js", "alm-wasm", "alm-native", "elm (full)", "elm (incr.)"];
 
