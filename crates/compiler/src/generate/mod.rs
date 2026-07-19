@@ -14,6 +14,7 @@ use std::fmt::Write;
 
 use crate::ast::canonical as can;
 use crate::data::Name;
+use crate::generate::sourcemap::{region_start, SourceMap};
 use crate::reporting::Region;
 
 pub const RUNTIME: &str = include_str!("runtime.js");
@@ -38,6 +39,18 @@ pub fn generate_project(modules: &[can::Module]) -> String {
     generate_project_typed(modules, HashMap::new(), true)
 }
 
+/// Like [`generate_project_typed`] but also builds a Source Map v3. DCE is
+/// forced off (it rewrites the bundle, invalidating recorded positions), so the
+/// returned JS is a debug bundle. Returns `(javascript, source_map_json)`.
+pub fn generate_project_typed_mapped(
+    modules: &[can::Module],
+    node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    sources: &HashMap<Name, (String, String)>,
+) -> (String, String) {
+    let (js, map) = gen_bundle(modules, node_types, false, Some(sources));
+    (js, map.unwrap_or_default())
+}
+
 /// Generate a bundle with dead-code elimination disabled — the whole runtime
 /// kernel is emitted verbatim. Used by tests that reach into kernel internals
 /// the app itself never references (e.g. `Elm.Kernel.HtmlAsJson`).
@@ -50,15 +63,34 @@ pub fn generate_no_dce(module: &can::Module) -> String {
 /// tree-shakes unreachable definitions out of the bundle (see `tree_shake`).
 pub fn generate_project_typed(
     modules: &[can::Module],
-    mut node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    node_types: HashMap<Name, HashMap<Region, can::Type>>,
     dce: bool,
 ) -> String {
+    gen_bundle(modules, node_types, dce, None).0
+}
+
+/// The bundle generator. With `sources` present, builds a source map alongside
+/// the JS (and the caller forces `dce` off, since tree-shaking would move the
+/// positions the map records). Returns `(javascript, Option<source_map_json>)`.
+fn gen_bundle(
+    modules: &[can::Module],
+    mut node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    dce: bool,
+    sources: Option<&HashMap<Name, (String, String)>>,
+) -> (String, Option<String>) {
+    let maps_on = sources.is_some();
     let mut gen = Generator {
         out: String::new(),
         module_name: None,
         temp_counter: 0,
         node_types: HashMap::new(),
         cyclic_values: HashSet::new(),
+        maps_on,
+        sm: SourceMap::new(""),
+        cur_line: 0,
+        cur_col: 0,
+        scanned: 0,
+        src_idx: None,
     };
 
     gen.out.push_str("(function () {\n'use strict';\n\n");
@@ -232,6 +264,9 @@ pub fn generate_project_typed(
     for module in modules {
         gen.module_name = Some(module.name.clone());
         gen.node_types = node_types.remove(&module.name).unwrap_or_default();
+        gen.src_idx = sources
+            .and_then(|s| s.get(&module.name))
+            .map(|(path, content)| gen.sm.add_source(path, content));
         gen.out.push_str("\n// MODULE ");
         gen.out.push_str(module.name.as_str());
         gen.out.push_str("\n\n");
@@ -297,11 +332,18 @@ pub fn generate_project_typed(
     )
     .unwrap();
 
-    if dce {
+    let map = if maps_on {
+        Some(gen.sm.to_json())
+    } else {
+        None
+    };
+    let js = if dce {
+        // (source maps force dce=false, so recorded positions match `out`)
         tree_shake(&gen.out)
     } else {
         gen.out
-    }
+    };
+    (js, map)
 }
 
 /// Dead-code elimination over the fully-assembled bundle.
@@ -478,6 +520,18 @@ struct Generator {
     /// (`$Module$cyclic$x()`) because the value may not be initialized yet.
     /// Empty except while emitting the bodies of such a group.
     cyclic_values: HashSet<Name>,
+    // --- source maps (inactive unless `maps_on`) ---
+    maps_on: bool,
+    sm: SourceMap,
+    /// Lazy cursor over `out`: `(line, col)` reached and how far `out` has been
+    /// scanned. Advanced on demand at each `map_here`, so ordinary emission
+    /// stays untouched.
+    cur_line: u32,
+    cur_col: u32,
+    scanned: usize,
+    /// Source index of the module currently being emitted; `None` for a module
+    /// with no retained source (mappings for its defs are skipped).
+    src_idx: Option<u32>,
 }
 
 impl Generator {
@@ -503,6 +557,36 @@ impl Generator {
     fn fresh_temp(&mut self) -> String {
         self.temp_counter += 1;
         format!("_v{}", self.temp_counter)
+    }
+
+    /// Advance the lazy `(line, col)` cursor over any output appended since the
+    /// last sync. Counts chars (≈ UTF-16 units for the BMP, which the source-map
+    /// format wants) — an approximation on astral chars in string literals.
+    fn sync_cursor(&mut self) {
+        for ch in self.out[self.scanned..].chars() {
+            if ch == '\n' {
+                self.cur_line += 1;
+                self.cur_col = 0;
+            } else {
+                self.cur_col += 1;
+            }
+        }
+        self.scanned = self.out.len();
+    }
+
+    /// Record a mapping from the current output position to `region`'s start.
+    /// No-op when maps are off, the module has no source, or the region is
+    /// synthetic.
+    fn map_here(&mut self, region: Region) {
+        if !self.maps_on {
+            return;
+        }
+        let Some(src) = self.src_idx else { return };
+        let Some((src_line, src_col)) = region_start(&region) else {
+            return;
+        };
+        self.sync_cursor();
+        self.sm.add(self.cur_line, self.cur_col, src, src_line, src_col);
     }
 
     // UNIONS
@@ -566,7 +650,12 @@ impl Generator {
     fn top_level_def(&mut self, def: &can::Def) {
         let var = self.global(&def.name.value);
         let value = self.def_value(def, SelfRef::TopLevel);
-        writeln!(self.out, "var {} = {};", var, value).unwrap();
+        // Split the write so a mapping lands at the value's output position
+        // (identical bytes to `writeln!("var {} = {};")`).
+        write!(self.out, "var {} = ", var).unwrap();
+        self.map_here(def.name.region);
+        self.out.push_str(&value);
+        self.out.push_str(";\n");
     }
 
     /// Emit a group of mutually recursive top-level definitions.

@@ -21,11 +21,13 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed] [--source-maps]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
-         output defaults to the input file name without an extension)."
+         output defaults to the input file name without an extension).\n\
+         `--source-maps` (JS target) writes a .js.map beside the output and\n\
+         disables dead-code elimination so positions stay accurate."
     );
 }
 
@@ -43,9 +45,12 @@ fn make(args: &[String]) -> ExitCode {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut backend = Backend::Js;
+    let mut source_maps = false;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
+        } else if arg == "--source-maps" {
+            source_maps = true;
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
@@ -95,6 +100,28 @@ fn make(args: &[String]) -> ExitCode {
         Backend::WasmGc => {
             let output = output.unwrap_or_else(|| input.with_extension("wasm"));
             alm_compiler::project::compile_project_wasmgc(&input, &output).map(|()| output)
+        }
+        Backend::Js if source_maps => {
+            alm_compiler::project::compile_project_source_maps(&input).and_then(
+                |(mut javascript, map)| {
+                    let output = output.unwrap_or_else(|| input.with_extension("js"));
+                    let map_path = output.with_extension("js.map");
+                    let map_name = map_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    javascript.push_str(&format!("\n//# sourceMappingURL={}\n", map_name));
+                    let write = |p: &PathBuf, data: &str| {
+                        std::fs::write(p, data).map_err(|err| {
+                            eprintln!("I could not write {}: {}", p.display(), err);
+                            Vec::new()
+                        })
+                    };
+                    write(&output, &javascript)?;
+                    write(&map_path, &map)?;
+                    Ok(output)
+                },
+            )
         }
         Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));

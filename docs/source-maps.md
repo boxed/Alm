@@ -57,6 +57,21 @@ down in Phase 2 against real Chrome devtools.
   expected string and decodes (via a JS `source-map` consumer in a node test, or
   a pure-Rust decode check).
 
+Phase 1 is being landed in two verifiable increments (the JS backend is a
+working, differentially-tested string builder; the bytes must stay identical):
+- **1a — plumbing + per-definition mapping (DONE).** Retain each module's
+  path+source through `CheckedProject`; `compile_project_source_maps` /
+  `compile_with_source_map` build the map; a lazy output cursor records a
+  mapping at each top-level definition's value position; the CLI `--source-maps`
+  flag writes `<out>.js.map` + a `//# sourceMappingURL` comment (DCE forced off
+  so positions match). Default (no-flag) JS output is byte-identical. Round-trip
+  test in `tests/sourcemap_test.rs`.
+- **1b — sub-expression granularity (NEXT).** Convert the body pipeline
+  (`def_value`→`function_named`→`stmts`→`expr`+`binop`+`let_decl_stmts`) from
+  returning `String` to a `Mapped` (text + byte-offset→region), rebased on
+  concatenation and flushed through the same cursor. Verified byte-identical
+  against a corpus.
+
 ### Phase 1 — JS (`generate/mod.rs`)
 For expression-level granularity, the return-`String` emitter is reworked into a
 **position-tracking emitter**: a buffer with a running `(line, col)` cursor and a

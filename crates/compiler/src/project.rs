@@ -80,6 +80,9 @@ pub struct CheckedProject {
     pub node_types: HashMap<Name, HashMap<Region, can::Type>>,
     /// Per-module, the inferred type of every top-level definition.
     pub types: HashMap<Name, HashMap<Name, can::Type>>,
+    /// Per-module, its source file path and text — retained for source maps
+    /// (`sources`/`sourcesContent`). Keyed by the module's resolved name.
+    pub sources: HashMap<Name, (PathBuf, String)>,
     /// The entry module's name.
     pub entry: Name,
 }
@@ -93,6 +96,28 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
         &checked.modules,
         checked.node_types,
         dce,
+    ))
+}
+
+/// Compile to JS with a Source Map v3. Returns `(javascript, source_map_json)`.
+/// DCE is disabled (it rewrites the bundle, which would invalidate positions),
+/// so this is a debug build: larger output, accurate mappings. The caller writes
+/// the `.map` file and appends the `//# sourceMappingURL` comment.
+pub fn compile_project_source_maps(
+    entry: &Path,
+) -> Result<(String, String), Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    let sources: HashMap<Name, (String, String)> = checked
+        .sources
+        .iter()
+        .map(|(name, (path, src))| {
+            (name.clone(), (path.display().to_string(), src.clone()))
+        })
+        .collect();
+    Ok(generate::generate_project_typed_mapped(
+        &checked.modules,
+        checked.node_types,
+        &sources,
     ))
 }
 
@@ -321,9 +346,14 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     let mut canonical_modules = Vec::new();
     let mut all_node_types: HashMap<Name, HashMap<Region, can::Type>> = HashMap::new();
     let mut all_types: HashMap<Name, HashMap<Name, can::Type>> = HashMap::new();
+    let mut all_sources: HashMap<Name, (PathBuf, String)> = HashMap::new();
     for path in &order {
         let source_module = &modules[path];
         let name = unique_names[path].clone();
+        all_sources.insert(
+            name.clone(),
+            (source_module.path.clone(), source_module.source.clone()),
+        );
         // Rewrite the parsed module so its declared name and its imports point
         // at the resolved, unique names. Downstream code is unchanged.
         let rewritten = rewrite_module(source_module, &unique_names);
@@ -394,6 +424,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         interfaces,
         node_types: all_node_types,
         types: all_types,
+        sources: all_sources,
         entry: unique_names[&entry_key].clone(),
     })
 }
