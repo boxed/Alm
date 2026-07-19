@@ -68,6 +68,17 @@ fn decode_mappings(mappings: &str) -> Vec<Seg> {
     out
 }
 
+/// The `sources` string array from a map (no escaping in our file paths).
+fn json_sources(json: &str) -> Vec<String> {
+    let start = json.find("\"sources\":[").expect("sources array") + "\"sources\":[".len();
+    let end = json[start..].find(']').expect("sources close") + start;
+    json[start..end]
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .collect()
+}
+
 /// Minimal JSON field pluck for the flat maps we emit (no nested objects in the
 /// values we read). Good enough for tests without a JSON dependency.
 fn json_string_field<'a>(json: &'a str, key: &str) -> &'a str {
@@ -258,5 +269,83 @@ main =
         "a mapping resolves to `main =` (line {}); got {:?}",
         main_line + 1,
         segs.iter().map(|s| s.src_line + 1).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn multi_module_source_map_attributes_each_module() {
+    use alm_compiler::project;
+
+    // Two modules: `main` (in Main.elm) calls `twice` (in Helper.elm). After
+    // monomorphization both are live functions; each must map to its OWN file.
+    // A regression that attributed every expression to the entry module would
+    // leave nothing resolving to Helper.elm.
+    let helper = "\
+module Helper exposing (twice)
+
+
+twice : Int -> Int
+twice n =
+    n + n
+";
+    let main = "\
+module Main exposing (main)
+
+import Helper
+
+
+main : String
+main =
+    String.fromInt (Helper.twice 21)
+";
+    let dir = common::test_dir("alm-srcmap-multi", "t");
+    std::fs::write(dir.join("Helper.elm"), helper).expect("write Helper");
+    let entry = dir.join("Main.elm");
+    std::fs::write(&entry, main).expect("write Main");
+
+    let wasm_path = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm_path, true).unwrap_or_else(|e| {
+        panic!(
+            "wasmgc build failed:\n{}",
+            e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+        )
+    });
+    let map = std::fs::read_to_string(dir.join("app.wasm.map")).expect("read .wasm.map");
+
+    let sources = json_sources(&map);
+    let src_of = |suffix: &str| -> i64 {
+        sources
+            .iter()
+            .position(|s| s.ends_with(suffix))
+            .unwrap_or_else(|| panic!("{suffix} in sources {sources:?}")) as i64
+    };
+    let helper_src = src_of("Helper.elm");
+    let main_src = src_of("Main.elm");
+
+    let segs = decode_mappings(json_string_field(&map, "mappings"));
+    assert!(
+        segs.iter().any(|s| s.src == helper_src),
+        "a mapping resolves into Helper.elm (its own module), not just the entry"
+    );
+    assert!(
+        segs.iter().any(|s| s.src == main_src),
+        "a mapping resolves into Main.elm"
+    );
+
+    // The Helper mappings land inside Helper.elm — `twice`/`n + n` (lines 4-6).
+    let helper_lines: Vec<i64> = segs
+        .iter()
+        .filter(|s| s.src == helper_src)
+        .map(|s| s.src_line)
+        .collect();
+    let helper_content = "module Helper exposing (twice)\n\n\ntwice : Int -> Int\ntwice n =\n    n + n\n";
+    let line_count = helper_content.lines().count() as i64;
+    assert!(
+        helper_lines.iter().all(|&l| l >= 0 && l < line_count),
+        "Helper mappings are in-range for Helper.elm ({line_count} lines); got {helper_lines:?}"
+    );
+    assert!(
+        helper_lines.iter().any(|&l| l >= 3),
+        "a Helper mapping lands on the `twice` definition (line >= 4); got {helper_lines:?}"
     );
 }
