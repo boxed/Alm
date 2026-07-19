@@ -72,7 +72,29 @@ var _Utils_Tuple0 = { $: '#0' };
 
 var _List_LIMIT = 8192;
 var _List_Nil = { $: '[]' };
-function _List_Cons(hd, tl) { return { $: '::', d: [hd], o: 0, b: tl }; }
+// cons prepends into the head chunk's front slack IN PLACE when this list owns
+// the frontmost slot (`d.hd` tracks it), so a run of conses shares one backing
+// — amortized O(1) allocation, one chunk per up-to-_List_LIMIT elements, rather
+// than an allocation per element. A cons onto a tail view (or a full/foreign
+// chunk) can't reuse the slack (it would clobber another list's element), so it
+// starts a fresh chunk — no O(n) copy either. Chunks grow geometrically.
+function _List_Cons(hd, tl) {
+    if (tl.$ === '::') {
+        var d = tl.d, o = tl.o;
+        if (o > 0 && d.hd === o) {
+            d[o - 1] = hd;
+            d.hd = o - 1;
+            return { $: '::', d: d, o: o - 1, b: tl.b };
+        }
+    }
+    var prev = tl.$ === '::' ? tl.d.length - tl.o : 0;
+    var cap = prev < 4 ? 8 : prev * 2;
+    if (cap > _List_LIMIT) { cap = _List_LIMIT; }
+    var nd = new Array(cap);
+    nd[cap - 1] = hd;
+    nd.hd = cap - 1;
+    return { $: '::', d: nd, o: cap - 1, b: tl };
+}
 function _List_head(xs) { return xs.d[xs.o]; }
 function _List_tail(xs) {
     var o = xs.o + 1;
