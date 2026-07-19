@@ -5,6 +5,7 @@
 //! types, cons cells for lists, and plain objects for records.
 
 pub mod native;
+pub mod sourcemap;
 pub mod typed;
 pub mod wasmgc;
 

@@ -2297,7 +2297,7 @@ mod tests {
     use crate::data::Name;
 
     fn user_type(module: &str, name: &str) -> can::Type {
-        can::Type::Type(Name::from(module), Name::from(name), Vec::new())
+        can::Type::Type(Name::from(module), Name::from(name), std::rc::Rc::new(Vec::new()))
     }
 
     #[test]
@@ -2328,7 +2328,7 @@ mod tests {
         let concrete = mangle(
             &Name::from("M"),
             &Name::from("f"),
-            &can::Type::Type(Name::from("Basics"), Name::from("Int"), Vec::new()),
+            &can::Type::Type(Name::from("Basics"), Name::from("Int"), std::rc::Rc::new(Vec::new())),
         );
         let defaulted = mangle(
             &Name::from("M"),
