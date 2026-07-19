@@ -109,15 +109,28 @@ Output: `<out>.js.map` + a trailing `//# sourceMappingURL=<name>.map` comment.
   offsets → distinct columns on one source line). Durable test in
   `tests/sourcemap_test.rs::wasm_source_map_has_section_and_resolves`.
 
-### Phase 3 — CLI + tests
-- A flag to enable source-map emission (and write the `.map` beside the output).
-- Round-trip tests: compile a small program, load the map, assert that chosen
-  generated positions map back to the expected Elm `(line, col)`.
+### Phase 3 — CLI + tests + polish — DONE
+- `--source-maps` flag on the `js` and `wasm-gc` targets writes the `.map`
+  beside the output.
+- Round-trip tests for both backends (`tests/sourcemap_test.rs`): decode the VLQ
+  mappings and assert generated positions map back to the expected Elm
+  `(line, col)`, including sub-expression resolution.
+- Robustness-swept across real packages (elm-charts, elm-visualization,
+  one-true-path, yaml): every mapping resolves to an in-range source line; every
+  `--source-maps` wasm validates.
+- **Cross-module-inlining guard**: mono's beta-reduction can inline an
+  expression from another module into a function body; its region is attributed
+  to the function's module, so `build_source_map` drops any mapping whose line
+  exceeds that module's file length (rather than emit a bad one). The JS backend
+  emits per-module canonical ASTs with no inlining, so it needs no guard. The
+  *proper* fix (thread the owning module onto each `TypedExpr`) is deferred; the
+  guard removes the harmful (out-of-range) cases.
 
-## Open risks
-- **Wasm offset base** (Phase 2) — must match what Chrome expects; verify against
-  live devtools.
-- **Expression-level position tracking in JS** — the return-`String` emitter
-  needs reworking; keep it mechanical and well-tested to avoid changing emitted
-  code (the JS output bytes must stay identical; only a trailing comment + a
-  side `.map` file are added).
+## Open risks / known limitations
+- **Cross-module inlined regions (wasm)** — guarded against out-of-range, but an
+  inlined region whose line happens to be in-range for the wrong module maps to a
+  plausible-but-wrong file. Needs per-`TypedExpr` module attribution to fully fix.
+- **Columns are char counts, not UTF-16 units** — differs only on astral-plane
+  characters in string literals; a minor position skew on such lines.
+- **`file` field** left empty — optional in v3 and unused when the map is
+  referenced via `sourceMappingURL`.

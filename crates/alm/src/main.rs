@@ -26,8 +26,9 @@ fn print_help() {
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
          output defaults to the input file name without an extension).\n\
-         `--source-maps` (JS target) writes a .js.map beside the output and\n\
-         disables dead-code elimination so positions stay accurate."
+         `--source-maps` (js and wasm-gc targets) writes a .map beside the\n\
+         output so browser devtools show Elm source; on js it disables\n\
+         dead-code elimination so positions stay accurate."
     );
 }
 

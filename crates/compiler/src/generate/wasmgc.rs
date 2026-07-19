@@ -3761,9 +3761,11 @@ impl<'a> Codegen<'a> {
         let mut src_idx: HashMap<String, u32> = HashMap::new();
         let mut modules: Vec<&String> = self.srcmap_sources.keys().collect();
         modules.sort();
+        let mut line_count: HashMap<String, u32> = HashMap::new();
         for m in modules {
             let (path, content) = &self.srcmap_sources[m];
             src_idx.insert(m.clone(), sm.add_source(path, content));
+            line_count.insert(m.clone(), content.lines().count() as u32);
         }
         for (fn_index, off, region, module) in &self.sm_entries {
             if !kept.contains(fn_index) {
@@ -3778,6 +3780,13 @@ impl<'a> Codegen<'a> {
             let Some((src_line, src_col)) = crate::generate::sourcemap::region_start(region) else {
                 continue;
             };
+            // Guard against an expression inlined (via mono's beta-reduction)
+            // from a DIFFERENT module: its region is attributed to this
+            // function's module, so a line past that file's end would reference
+            // nonexistent source. Drop those rather than emit a bad mapping.
+            if line_count.get(module.as_str()).is_some_and(|&n| src_line >= n) {
+                continue;
+            }
             let col = (range.start + off) as u32;
             sm.add(0, col, src, src_line, src_col);
         }
