@@ -298,6 +298,22 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             ptr_t.fn_type(&[ptr_t.into(), i64_t.into(), ptr_t.into(), i64_t.into()], false),
             Some(Linkage::External),
         );
+        // Unrolled (chunked) list spine helpers (see native_runtime.rs).
+        self.module.add_function(
+            "alm_list_total_len",
+            i64_t.fn_type(&[ptr_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "alm_list_flatten",
+            ptr_t.fn_type(&[ptr_t.into(), i64_t.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "alm_list_cons_chunked",
+            ptr_t.fn_type(&[ptr_t.into(), ptr_t.into(), i64_t.into(), i64_t.into()], false),
+            Some(Linkage::External),
+        );
         // String helpers — strings stay boxed as the uniform word (i64) and
         // interoperate with the runtime.
         self.module.add_function(
@@ -580,19 +596,34 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
     }
 
-    // ARRAY-BACKED LISTS
+    // UNROLLED (CHUNKED) LISTS
     //
-    // A `List a` value is a pointer to a `{ i64 len, ptr backing }` header
-    // (never null; the empty list is a shared constant header). The backing,
-    // managed by the runtime, is `[cap][used][elements...]` with elements
-    // stored REVERSED — the head is the last element — so `tail` is O(1) and
-    // `cons` appends at the back (O(1) amortized). Element `k` counting from
-    // the head is at data index `len - 1 - k`.
+    // A `List a` value is a pointer to a `{ i64 len, ptr backing, ptr next }`
+    // chunk header (never null; the empty list is a shared constant header with
+    // `len == 0`). `len` is the number of live elements in THIS chunk's backing;
+    // `next` is the following chunk (or the empty list at the spine's end). The
+    // backing, managed by the runtime, is `[cap][used][elements...]` with
+    // elements stored REVERSED — the head is the last element — so within-chunk
+    // `tail` is O(1) and `cons` appends at the back (O(1) amortized). Element `k`
+    // counting from the chunk's head is at data index `len - 1 - k`.
+    //
+    // A single-chunk list (`next` = empty) is byte-identical to the previous
+    // flat-vector representation, so lists up to the chunk cap behave exactly as
+    // before. cons prepends a fresh chunk when it can't extend the tip in place
+    // (no cons-after-tail copy), and consuming kernels flatten via `list_dense`
+    // (zero-copy for the single-chunk case). Chunk boundaries never affect
+    // element order or equality — see runtime `alm_list_flatten`.
 
-    /// The list header type `{ i64 len, ptr backing }`.
+    /// The chunk cap: an in-place tip append past this many elements starts a
+    /// fresh chunk instead. Bounds any one chunk's backing and keeps a
+    /// cons-heavy list from growing one giant backing.
+    const LIST_CHUNK_CAP: u64 = 8192;
+
+    /// The list header type `{ i64 len, ptr backing, ptr next }`.
     fn list_hdr(&self) -> inkwell::types::StructType<'ctx> {
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        self.ctx.struct_type(&[self.ctx.i64_type().into(), ptr_t.into()], false)
+        self.ctx
+            .struct_type(&[self.ctx.i64_type().into(), ptr_t.into(), ptr_t.into()], false)
     }
 
     /// The size in bytes of a list element's layout.
@@ -600,11 +631,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.llvm_type(elem).size_of().unwrap()
     }
 
-    /// Allocate a list header holding `len` and `backing`, returning it.
+    /// Allocate a single-chunk list header `{len, backing, empty}`.
     fn make_list(
         &self,
         len: inkwell::values::IntValue<'ctx>,
         backing: inkwell::values::PointerValue<'ctx>,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let end = self.empty_list();
+        self.make_chunk(len, backing, end)
+    }
+
+    /// Allocate a chunk header `{len, backing, next}`. `next` is another chunk
+    /// or the empty list — never null (only the empty list carries a null
+    /// backing).
+    fn make_chunk(
+        &self,
+        len: inkwell::values::IntValue<'ctx>,
+        backing: inkwell::values::PointerValue<'ctx>,
+        next: inkwell::values::PointerValue<'ctx>,
     ) -> inkwell::values::PointerValue<'ctx> {
         let hdr = self.list_hdr();
         let alloc = self.module.get_function("alm_alloc").unwrap();
@@ -620,11 +664,13 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.build_store(lp, len).unwrap();
         let bp = self.builder.build_struct_gep(hdr, raw, 1, "bkp").unwrap();
         self.builder.build_store(bp, backing).unwrap();
+        let np = self.builder.build_struct_gep(hdr, raw, 2, "nxtp").unwrap();
+        self.builder.build_store(np, next).unwrap();
         raw
     }
 
-    /// The shared empty-list header `{0, null}`.
-    fn empty_list(&mut self) -> inkwell::values::PointerValue<'ctx> {
+    /// The shared empty-list header `{0, null, null}`.
+    fn empty_list(&self) -> inkwell::values::PointerValue<'ctx> {
         let name = "alm.empty_list";
         if let Some(g) = self.module.get_global(name) {
             return g.as_pointer_value();
@@ -634,12 +680,112 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let init = hdr.const_named_struct(&[
             self.ctx.i64_type().const_zero().into(),
             ptr_t.const_null().into(),
+            ptr_t.const_null().into(),
         ]);
         let g = self.module.add_global(hdr, None, name);
         g.set_initializer(&init);
         g.set_constant(true);
         g.set_linkage(Linkage::Private);
         g.as_pointer_value()
+    }
+
+    /// Load the `next` chunk pointer of a list header.
+    fn list_next(
+        &self,
+        list: inkwell::values::PointerValue<'ctx>,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let hdr = self.list_hdr();
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let np = self.builder.build_struct_gep(hdr, list, 2, "nxtp").unwrap();
+        self.builder.build_load(ptr_t, np, "nxt").unwrap().into_pointer_value()
+    }
+
+    /// Total logical length of a (possibly chunked) list.
+    fn list_total_len(
+        &self,
+        list: inkwell::values::PointerValue<'ctx>,
+    ) -> inkwell::values::IntValue<'ctx> {
+        let total = self.module.get_function("alm_list_total_len").unwrap();
+        self.builder
+            .build_call(total, &[list.into()], "tlen")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_int_value()
+    }
+
+    /// Flatten a list to `(dense_backing, total_len)` for element iteration.
+    /// Zero-copy for a single-chunk list (the common case); otherwise the
+    /// runtime packs a fresh reversed backing. The returned `len` respects tail
+    /// views (it is the logical length, not the backing's `used`).
+    fn list_dense(
+        &self,
+        list: inkwell::values::PointerValue<'ctx>,
+        elem: &Layout,
+    ) -> (inkwell::values::PointerValue<'ctx>, inkwell::values::IntValue<'ctx>) {
+        let esize = self.elem_size(elem);
+        let flatten = self.module.get_function("alm_list_flatten").unwrap();
+        let backing = self
+            .builder
+            .build_call(flatten, &[list.into(), esize.into()], "dense")
+            .unwrap()
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+        let len = self.list_total_len(list);
+        (backing, len)
+    }
+
+    /// Load the head element of a non-empty list (the head chunk's last stored
+    /// element). Caller must have already established the list is non-empty.
+    fn list_head(
+        &self,
+        list: inkwell::values::PointerValue<'ctx>,
+        elem: &Layout,
+    ) -> BasicValueEnum<'ctx> {
+        let len = self.list_len(list);
+        let backing = self.list_backing(list);
+        let one = self.ctx.i64_type().const_int(1, false);
+        let last = self.builder.build_int_sub(len, one, "last").unwrap();
+        self.list_load(backing, elem, last)
+    }
+
+    /// The tail of a non-empty list: within the head chunk when it holds more
+    /// than one element (O(1), sharing the backing), otherwise the next chunk.
+    fn list_tail(
+        &self,
+        list: inkwell::values::PointerValue<'ctx>,
+    ) -> inkwell::values::PointerValue<'ctx> {
+        let len = self.list_len(list);
+        let backing = self.list_backing(list);
+        let next = self.list_next(list);
+        let one = self.ctx.i64_type().const_int(1, false);
+        let gt1 = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, len, one, "tailgt1")
+            .unwrap();
+        let func = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+        let within_bb = self.ctx.append_basic_block(func, "tail.within");
+        let advance_bb = self.ctx.append_basic_block(func, "tail.advance");
+        let merge_bb = self.ctx.append_basic_block(func, "tail.merge");
+        self.builder.build_conditional_branch(gt1, within_bb, advance_bb).unwrap();
+
+        self.builder.position_at_end(within_bb);
+        let sub = self.builder.build_int_sub(len, one, "tsub").unwrap();
+        let within = self.make_chunk(sub, backing, next);
+        let within_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        self.builder.position_at_end(advance_bb);
+        self.builder.build_unconditional_branch(merge_bb).unwrap();
+
+        self.builder.position_at_end(merge_bb);
+        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let phi = self.builder.build_phi(ptr_t, "tail").unwrap();
+        phi.add_incoming(&[(&within, within_end), (&next, advance_bb)]);
+        phi.as_basic_value().into_pointer_value()
     }
 
     /// Load the length field of a list header.
@@ -1673,8 +1819,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         };
         let elem_layout = self.elem_layout(tipe)?;
         let list = val.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem_layout);
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
         let nil = self.call_named(
@@ -3563,8 +3708,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         head_first: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let i64_t = self.ctx.i64_type();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, elem);
         let acc_slot = self.entry_alloca(acc_ty, "acc");
         self.builder.build_store(acc_slot, init).unwrap();
         let elem = elem.clone();
@@ -3597,8 +3741,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let src_elem = self.elem_layout(&args[1].tipe)?;
         let dst_elem = self.elem_layout(&whole.tipe)?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &src_elem);
         let out = self.list_alloc(&dst_elem, len);
         let f = args[0].clone();
         self.for_count(len, |s, i| {
@@ -3691,8 +3834,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let sep = self.gen(&args[0])?;
         let list = self.gen(&args[1])?.into_pointer_value();
         let i64_t = self.ctx.i64_type();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &Layout::Str);
         let rt_append = self.module.get_function("rt_append").unwrap();
         let empty = self.gen_string("")?;
         let result = self.entry_alloca(i64_t.into(), "res");
@@ -3962,8 +4104,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let list = self.gen(&args[0])?.into_pointer_value();
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        // field0 is 0 only for the empty list (chunks are non-empty).
         let len = self.list_len(list);
-        let backing = self.list_backing(list);
         let is_empty = self
             .builder
             .build_int_compare(IntPredicate::EQ, len, i64_t.const_zero(), "empty")
@@ -3974,23 +4116,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.build_conditional_branch(is_empty, nothing_bb, just_bb).unwrap();
 
         self.builder.position_at_end(just_bb);
-        let last = self.builder.build_int_sub(len, i64_t.const_int(1, false), "last").unwrap();
         let field: BasicValueEnum = if is_head {
-            self.list_load(backing, &elem, last)
+            self.list_head(list, &elem)
         } else {
-            // tail = same backing, length len-1.
-            self.make_list(last, backing).into()
+            self.list_tail(list).into()
         };
         let just: BasicValueEnum = self.alloc_tagged(&variants[0], 0, &[field]).into();
+        // `list_tail` may have added blocks, so record the true predecessor.
+        let just_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(merge).unwrap();
 
         self.builder.position_at_end(nothing_bb);
         let nothing: BasicValueEnum = self.alloc_tagged(&variants[1], 1, &[]).into();
+        let nothing_end = self.builder.get_insert_block().unwrap();
         self.builder.build_unconditional_branch(merge).unwrap();
 
         self.builder.position_at_end(merge);
         let phi = self.builder.build_phi(ptr_t, "maybe").unwrap();
-        phi.add_incoming(&[(&just as &dyn BasicValue, just_bb), (&nothing as &dyn BasicValue, nothing_bb)]);
+        phi.add_incoming(&[(&just as &dyn BasicValue, just_end), (&nothing as &dyn BasicValue, nothing_end)]);
         Ok(phi.as_basic_value())
     }
 
@@ -3999,8 +4142,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     fn kernel_list_drop(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let n = self.gen(&args[0])?.into_int_value();
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let elem = self.elem_layout(&args[1].tipe)?;
+        let (backing, len) = self.list_dense(list, &elem);
         let nclamp = self.clamp_count(n, len);
         let m = self.builder.build_int_sub(len, nclamp, "m").unwrap();
         Ok(self.make_list(m, backing).into())
@@ -4015,8 +4158,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let elem = self.elem_layout(&whole.tipe)?;
         let n = self.gen(&args[0])?.into_int_value();
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem);
         let nclamp = self.clamp_count(n, len);
         let out = self.list_alloc(&elem, nclamp);
         // result.data[k] = input.data[len - nclamp + k] (top n' slots).
@@ -4051,8 +4193,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let elem = self.elem_layout(&args[1].tipe)?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem);
         let i64_t = self.ctx.i64_type();
         let i1_t = self.ctx.bool_type();
         let entry = self.builder.get_insert_block().unwrap();
@@ -4114,8 +4255,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let elem_ty = list_elem_type(&args[1].tipe);
         let target = self.gen(&args[0])?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem);
         let i64_t = self.ctx.i64_type();
         let entry = self.builder.get_insert_block().unwrap();
         let loop_bb = self.new_block("mem.loop");
@@ -4173,10 +4313,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let c_elem = self.elem_layout(&whole.tipe)?;
         let xs = self.gen(&args[1])?.into_pointer_value();
         let ys = self.gen(&args[2])?.into_pointer_value();
-        let xlen = self.list_len(xs);
-        let ylen = self.list_len(ys);
-        let xb = self.list_backing(xs);
-        let yb = self.list_backing(ys);
+        let (xb, xlen) = self.list_dense(xs, &a_elem);
+        let (yb, ylen) = self.list_dense(ys, &b_elem);
         // Pair by distance from the head; result length is the shorter.
         let x_lt = self.builder.build_int_compare(IntPredicate::SLT, xlen, ylen, "xlt").unwrap();
         let minlen = self.builder.build_select(x_lt, xlen, ylen, "min").unwrap().into_int_value();
@@ -4206,8 +4344,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let a_elem = self.elem_layout(&args[1].tipe)?;
         let b_elem = self.elem_layout(&whole.tipe)?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &a_elem);
         let out = self.list_alloc(&b_elem, len);
         let i64_t = self.ctx.i64_type();
         let f = args[0].clone();
@@ -4242,8 +4379,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         elem: &Layout,
     ) -> inkwell::values::PointerValue<'ctx> {
         let i64_t = self.ctx.i64_type();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, elem);
         let out = self.list_alloc(elem, len);
         let elem = elem.clone();
         // The loop body is infallible (only loads/stores), so the `Result` from
@@ -4267,8 +4403,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let elem = self.elem_layout(&whole.tipe)?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem);
         let i64_t = self.ctx.i64_type();
         // Scan tail-to-head appending kept elements at increasing output
         // index; the reversed layout makes the result head-first order come
@@ -4301,8 +4436,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         let elem = self.elem_layout(&args[0].tipe)?;
         let is_float = matches!(elem, Layout::Float);
         let list = self.gen(&args[0])?.into_pointer_value();
-        let len = self.list_len(list);
-        let backing = self.list_backing(list);
+        let (backing, len) = self.list_dense(list, &elem);
         let acc_ty = self.llvm_type(&elem);
         let acc_slot = self.entry_alloca(acc_ty, "acc");
         let zero: BasicValueEnum = if is_float {
@@ -4326,10 +4460,10 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         Ok(self.builder.build_load(acc_ty, acc_slot, "sum").unwrap())
     }
 
-    /// `List.length : List a -> Int` — just the header's length field.
+    /// `List.length : List a -> Int` — the total across all chunks.
     fn kernel_list_length(&mut self, args: &[TypedExpr]) -> Result<BasicValueEnum<'ctx>, String> {
         let list = self.gen(&args[0])?.into_pointer_value();
-        Ok(self.list_len(list).into())
+        Ok(self.list_total_len(list).into())
     }
 
     /// `List.range lo hi` — build `[lo..hi]`. With reversed storage the head
@@ -4366,24 +4500,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         tail: inkwell::values::PointerValue<'ctx>,
     ) -> inkwell::values::PointerValue<'ctx> {
         let esize = self.elem_size(elem);
-        let tlen = self.list_len(tail);
-        let tbacking = self.list_backing(tail);
         let tmp = self.entry_alloca(self.llvm_type(elem), "consh");
         self.builder.build_store(tmp, head).unwrap();
-        let cons = self.module.get_function("alm_list_cons").unwrap();
-        let nb = self
-            .builder
-            .build_call(cons, &[tbacking.into(), tlen.into(), tmp.into(), esize.into()], "nb")
+        let cons = self.module.get_function("alm_list_cons_chunked").unwrap();
+        let kcap = self.ctx.i64_type().const_int(Self::LIST_CHUNK_CAP, false);
+        self.builder
+            .build_call(cons, &[tail.into(), tmp.into(), esize.into(), kcap.into()], "cons")
             .unwrap()
             .try_as_basic_value()
             .left()
             .unwrap()
-            .into_pointer_value();
-        let nlen = self
-            .builder
-            .build_int_add(tlen, self.ctx.i64_type().const_int(1, false), "nlen")
-            .unwrap();
-        self.make_list(nlen, nb)
+            .into_pointer_value()
     }
 
     /// A string literal: an interned byte constant handed to `rt_str`, which
@@ -4454,10 +4581,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let left = self.gen(l)?.into_pointer_value();
         let right = self.gen(r)?.into_pointer_value();
-        let xlen = self.list_len(left);
-        let ylen = self.list_len(right);
-        let xb = self.list_backing(left);
-        let yb = self.list_backing(right);
+        let (xb, xlen) = self.list_dense(left, elem);
+        let (yb, ylen) = self.list_dense(right, elem);
         let rlen = self.builder.build_int_add(xlen, ylen, "rlen").unwrap();
         let out = self.list_alloc(elem, rlen);
         // Reversed layout: out.data[0..ylen] = right's data; out.data[ylen..]
@@ -4788,10 +4913,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         elem: &Layout,
     ) -> Result<inkwell::values::IntValue<'ctx>, String> {
         let i1_t = self.ctx.bool_type();
-        let lena = self.list_len(a.into_pointer_value());
-        let lenb = self.list_len(b.into_pointer_value());
-        let ba = self.list_backing(a.into_pointer_value());
-        let bb = self.list_backing(b.into_pointer_value());
+        let (ba, lena) = self.list_dense(a.into_pointer_value(), elem);
+        let (bb, lenb) = self.list_dense(b.into_pointer_value(), elem);
         let len_eq = self.builder.build_int_compare(IntPredicate::EQ, lena, lenb, "leneq").unwrap();
         // Equal length is necessary; if so, all elements must match.
         let res = self.entry_alloca(i1_t.into(), "eqres");
@@ -4910,10 +5033,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     ) -> Result<inkwell::values::IntValue<'ctx>, String> {
         let i1_t = self.ctx.bool_type();
         let elem_layout = self.layouts.layout_of(elem);
-        let lena = self.list_len(a.into_pointer_value());
-        let lenb = self.list_len(b.into_pointer_value());
-        let ba = self.list_backing(a.into_pointer_value());
-        let bb = self.list_backing(b.into_pointer_value());
+        let (ba, lena) = self.list_dense(a.into_pointer_value(), &elem_layout);
+        let (bb, lenb) = self.list_dense(b.into_pointer_value(), &elem_layout);
         let len_eq = self.builder.build_int_compare(IntPredicate::EQ, lena, lenb, "leneq").unwrap();
         let res = self.entry_alloca(i1_t.into(), "eqres");
         self.builder.build_store(res, len_eq).unwrap();
@@ -6036,20 +6157,24 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     "typed backend: list pattern on a list type without an element".to_string()
                 })?;
                 let list = value.into_pointer_value();
-                let len = self.list_len(list);
+                // A fixed-length list pattern matches a list of exactly this
+                // total length; walk head/tail so it works across chunks (e.g. a
+                // cons-built 3-list is three singleton chunks).
+                let total = self.list_total_len(list);
                 let want = self.ctx.i64_type().const_int(elems.len() as u64, false);
                 let cond = self
                     .builder
-                    .build_int_compare(IntPredicate::EQ, len, want, "listlen")
+                    .build_int_compare(IntPredicate::EQ, total, want, "listlen")
                     .unwrap();
                 self.branch_or_fail(cond, fail);
-                // Elements are stored reversed: element k is data[len - 1 - k].
-                let backing = self.list_backing(list);
+                let mut cur = list;
                 let n = elems.len();
                 for (k, p) in elems.iter().enumerate() {
-                    let idx = self.ctx.i64_type().const_int((n - 1 - k) as u64, false);
-                    let elem = self.list_load(backing, &elem_layout, idx);
-                    self.match_pattern(p, elem, &elem_type, fail)?;
+                    let head_val = self.list_head(cur, &elem_layout);
+                    self.match_pattern(p, head_val, &elem_type, fail)?;
+                    if k + 1 < n {
+                        cur = self.list_tail(cur);
+                    }
                 }
                 Ok(true)
             }
@@ -6074,13 +6199,11 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     )
                     .unwrap();
                 self.branch_or_fail(cond, fail);
-                // Head is data[len - 1]; tail shares the backing with length len - 1.
-                let backing = self.list_backing(list);
-                let one = self.ctx.i64_type().const_int(1, false);
-                let last = self.builder.build_int_sub(len, one, "last").unwrap();
-                let head_val = self.list_load(backing, &elem_layout, last);
+                // Head is the head chunk's last element; tail stays within the
+                // head chunk (len > 1) or advances to the next chunk.
+                let head_val = self.list_head(list, &elem_layout);
                 self.match_pattern(head, head_val, &elem_type, fail)?;
-                let tail_val = self.make_list(last, backing);
+                let tail_val = self.list_tail(list);
                 self.match_pattern(tail, tail_val.into(), tipe, fail)?;
                 Ok(true)
             }

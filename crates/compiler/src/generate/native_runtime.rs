@@ -727,6 +727,158 @@ pub unsafe extern "C" fn alm_list_cons(
     np
 }
 
+// ---------------------------------------------------------------------------
+// Unrolled (chunked) list spine for the typed backend. A list value is a
+// header `{ i64 len, ptr backing, ptr next }`: `len` is the number of live
+// elements in THIS chunk's `backing` (reversed as above — head at
+// `data[len-1]`), and `next` is the following chunk (or the shared empty list,
+// whose `len` is 0). This matches the JS backend's unrolled representation:
+// cons prepends a fresh chunk (no cons-after-tail copy), bulk builders pack one
+// dense chunk, and chunk boundaries are invisible to element order. `alm_list_*`
+// above operate on a single chunk's backing; the helpers below walk the spine.
+
+#[repr(C)]
+pub struct TList {
+    len: i64,
+    backing: *mut u8,
+    next: *mut TList,
+}
+
+/// Total logical length of a chunked list (sum of live elements per chunk).
+/// O(number of chunks). The empty list has `len == 0` and terminates the walk.
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_total_len(list: *const TList) -> i64 {
+    let mut n = 0i64;
+    let mut cur = list;
+    while !cur.is_null() && (*cur).len != 0 {
+        n += (*cur).len;
+        cur = (*cur).next;
+    }
+    n
+}
+
+/// Return a single dense backing holding the list's live elements in the
+/// reversed storage order (head at `data[total-1]`). A single-chunk list
+/// returns its existing backing (zero-copy — the common case); a multi-chunk
+/// list is flattened into a fresh backing. `esize` is the element size in bytes.
+/// Callers pair this with `alm_list_total_len` for the element count (a
+/// single-chunk tail view has `len < backing.used`, so the backing's own `used`
+/// field must not be trusted).
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_flatten(list: *const TList, esize: i64) -> *mut u8 {
+    if list.is_null() || (*list).len == 0 {
+        return alm_list_alloc(0, esize);
+    }
+    let next = (*list).next;
+    if next.is_null() || (*next).len == 0 {
+        return (*list).backing; // single chunk: reuse it, caller uses `len`
+    }
+    let esize_u = esize.max(1) as usize;
+    let total = alm_list_total_len(list) as usize;
+    let np = alm_list_alloc(total as i64, esize);
+    let ndata = np.add(16);
+    // Place the head chunk at the top so global order stays reversed
+    // (head at data[total-1]); each chunk's own [0..len) segment is already
+    // reversed, so a raw block copy preserves within-chunk order.
+    let mut top = total;
+    let mut cur = list;
+    while !cur.is_null() && (*cur).len != 0 {
+        let clen = (*cur).len as usize;
+        let cdata = (*cur).backing.add(16);
+        std::ptr::copy_nonoverlapping(cdata, ndata.add((top - clen) * esize_u), clen * esize_u);
+        top -= clen;
+        cur = (*cur).next;
+    }
+    np
+}
+
+/// Append `elem` to the tip of a chunk's `backing` in place, iff this list owns
+/// the tip (`len == used`), there is spare capacity, and the chunk is still
+/// under the `kcap` element limit. Returns the backing on success, or null to
+/// tell the caller to start a fresh chunk instead (cons-after-tail, a full
+/// chunk, or a chunk that has reached `kcap`). Never copies — the fresh-chunk
+/// path is what bounds cons to O(1).
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_cons_inplace(
+    backing: *mut u8,
+    len: i64,
+    elem: *const u8,
+    esize: i64,
+    kcap: i64,
+) -> *mut u8 {
+    if backing.is_null() {
+        return std::ptr::null_mut();
+    }
+    let esize = esize.max(1) as usize;
+    let len = len.max(0) as usize;
+    let hdr = backing as *mut i64;
+    let cap = *hdr as usize;
+    let used = *hdr.add(1) as usize;
+    let kcap = kcap.max(1) as usize;
+    if len == used && used < cap && used < kcap {
+        let data = backing.add(16);
+        std::ptr::copy_nonoverlapping(elem, data.add(used * esize), esize);
+        *hdr.add(1) = (used + 1) as i64;
+        return backing;
+    }
+    std::ptr::null_mut()
+}
+
+/// Allocate a fresh chunk backing with capacity `cap` and one live element
+/// (`used = 1`); the caller stores the new head at `data[0]`. Sizing the cap
+/// above 1 lets a run of conses fill the chunk in place (amortized O(1)) rather
+/// than allocating a chunk per element.
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_chunk_backing(cap: i64, esize: i64) -> *mut u8 {
+    let cap = cap.max(1) as usize;
+    let esize = esize.max(1) as usize;
+    let p = alm_alloc((16 + cap * esize) as u64);
+    let hdr = p as *mut i64;
+    *hdr = cap as i64;
+    *hdr.add(1) = 1;
+    p
+}
+
+/// Prepend `elem` to `tail`, returning the new list header. Extends the head
+/// chunk's tip in place when this list owns it (O(1)); otherwise starts a fresh
+/// chunk whose `next` is the whole `tail` (also O(1) — no cons-after-tail copy).
+/// A fresh chunk's backing is sized geometrically (up to `kcap`) so a run of
+/// conses packs densely. `esize` is the element size in bytes.
+#[no_mangle]
+pub unsafe extern "C" fn alm_list_cons_chunked(
+    tail: *mut TList,
+    elem: *const u8,
+    esize: i64,
+    kcap: i64,
+) -> *mut TList {
+    let esize_u = esize.max(1) as usize;
+    // In-place tip extension when we own the head chunk's tip.
+    if !tail.is_null() && (*tail).len != 0 {
+        let grown = alm_list_cons_inplace((*tail).backing, (*tail).len, elem, esize, kcap);
+        if !grown.is_null() {
+            let nh = alm_alloc(std::mem::size_of::<TList>() as u64) as *mut TList;
+            (*nh).len = (*tail).len + 1;
+            (*nh).backing = grown;
+            (*nh).next = (*tail).next;
+            return nh;
+        }
+    }
+    // Fresh chunk holding just `elem`, linked in front of the whole tail.
+    let tlen = if tail.is_null() { 0 } else { (*tail).len };
+    let mut cap = (2 * tlen).max(4);
+    let kcap = kcap.max(1);
+    if cap > kcap {
+        cap = kcap;
+    }
+    let nb = alm_list_chunk_backing(cap, esize);
+    std::ptr::copy_nonoverlapping(elem, nb.add(16), esize_u);
+    let nh = alm_alloc(std::mem::size_of::<TList>() as u64) as *mut TList;
+    (*nh).len = 1;
+    (*nh).backing = nb;
+    (*nh).next = tail;
+    nh
+}
+
 /// Unbox a uniform int/float value word into a raw machine value — the
 /// typed backend's boundary conversion when a uniform runtime kernel
 /// returns a value it wants unboxed. The inverses of `rt_int`/`rt_float`.
