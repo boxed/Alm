@@ -447,15 +447,25 @@ pub enum Value {
     /// `uncons` — matching V8's sliced strings, which is what makes
     /// char-by-char string recursion linear on the JS backend.
     StrSlice { base: u64, off: usize, len: usize },
-    /// A non-empty list: a cons cell, exactly like the JS backend. `tail`
-    /// is another `List` cell or `Nil`. Cells make `::`, `head` and `tail`
-    /// all O(1) with no copying — the previous contiguous-backing scheme
-    /// copied O(n) on every `cons` onto a non-tip view (e.g. after `tail`),
-    /// which made lazy-list traversal (elm-test fuzzers, byte decoding)
-    /// quadratic, and allocated a fresh header per `tail`.
+    /// A non-empty list: an UNROLLED (chunked) list — a view `[off, off+len)`
+    /// into a shared dense backing (`LBack`), plus `next` (another `List` chunk
+    /// or `Nil`). No cons cells: bulk builders pack one dense chunk (iterated by
+    /// the kernels below), and `cons` fills the backing's front slack in place
+    /// when it owns the frontmost slot (`LBack.hd`), so a run of conses shares
+    /// one backing — amortized O(1) allocation — and cons-after-tail starts a
+    /// fresh chunk (no O(n) copy). Same structure as the JS/typed/wasmgc targets.
     List {
-        head: u64,
-        tail: u64,
+        data: u64,
+        off: u32,
+        len: u32,
+        next: u64,
+    },
+    /// A list chunk's backing: `hd` is the frontmost index any list owns (the
+    /// in-place-cons guard); `buf` holds the elements, a chunk's live window
+    /// being `buf[off .. off+len)` head-first.
+    LBack {
+        hd: u32,
+        buf: Vec<u64>,
     },
     /// The empty list. A single shared instance lives in `NIL`.
     Nil,
@@ -946,6 +956,7 @@ unsafe fn variant_name(w: u64) -> &'static str {
         Value::Char(_) => "Char",
         Value::Bool(_) => "Bool",
         Value::Unit => "Unit",
+        Value::LBack { .. } => "List (backing)",
         Value::Str(_) | Value::StrCat { .. } | Value::StrSlice { .. } => "Str",
         Value::List { .. } | Value::Nil => "List",
         Value::Ctor { name, .. } => {
@@ -1207,40 +1218,67 @@ fn mkstr(bytes: Vec<u8>) -> u64 {
     alloc(Value::Str(bytes))
 }
 
+/// Max size of a chunk grown by `cons`; bulk builders make single chunks of any
+/// size, so this only bounds cons-grown chunks (amortized O(1) allocation).
+const LIST_CHUNK_CAP: usize = 8192;
+
 #[inline]
 unsafe fn list_len(v: u64) -> usize {
     let mut n = 0;
     let mut cur = v;
-    while let Value::List { tail, .. } = deref(cur) {
-        n += 1;
-        cur = *tail;
+    while let Value::List { len, next, .. } = deref(cur) {
+        n += *len as usize;
+        cur = *next;
     }
     n
 }
 
+/// Prepend `head`: fill the head chunk's front slack in place when this list
+/// owns the frontmost slot (`hd == off`), else start a fresh geometrically-sized
+/// chunk linking the whole tail. A run of conses shares one backing.
 #[inline]
 unsafe fn cons(head: u64, tail: u64) -> u64 {
-    alloc(Value::List { head, tail })
+    if let Value::List { data, off, len, next } = deref(tail) {
+        let (data, off, len, next) = (*data, *off, *len, *next);
+        if off > 0 {
+            if let Value::LBack { hd, buf } = deref_mut(data) {
+                if *hd == off {
+                    buf[(off - 1) as usize] = head;
+                    *hd = off - 1;
+                    return alloc(Value::List { data, off: off - 1, len: len + 1, next });
+                }
+            }
+        }
+    }
+    let prev = if let Value::List { len, .. } = deref(tail) { *len as usize } else { 0 };
+    let cap = (prev * 2).max(8).min(LIST_CHUNK_CAP);
+    let mut buf = vec![0u64; cap];
+    buf[cap - 1] = head;
+    let data = alloc(Value::LBack { hd: (cap - 1) as u32, buf });
+    alloc(Value::List { data, off: (cap - 1) as u32, len: 1, next: tail })
 }
 
 /// Elm-order elements (head first).
 unsafe fn to_vec(xs: u64) -> Vec<u64> {
     let mut out = Vec::new();
     let mut cur = xs;
-    while let Value::List { head, tail } = deref(cur) {
-        out.push(*head);
-        cur = *tail;
+    while let Value::List { data, off, len, next } = deref(cur) {
+        if let Value::LBack { buf, .. } = deref(*data) {
+            out.extend_from_slice(&buf[*off as usize..(*off + *len) as usize]);
+        }
+        cur = *next;
     }
     out
 }
 
-/// Build a list from elements in Elm order (head first).
+/// Build a list from elements in Elm order (head first) as one dense chunk.
 unsafe fn list_from_slice(items: &[u64]) -> u64 {
-    let mut out = nil();
-    for &x in items.iter().rev() {
-        out = cons(x, out);
+    if items.is_empty() {
+        return nil();
     }
-    out
+    let len = items.len() as u32;
+    let data = alloc(Value::LBack { hd: 0, buf: items.to_vec() });
+    alloc(Value::List { data, off: 0, len, next: nil() })
 }
 
 unsafe fn collect(args: *const u64, n: i32) -> Vec<u64> {
@@ -1576,7 +1614,10 @@ pub unsafe extern "C" fn rt_tuple_item(v: u64, i: i32) -> u64 {
 #[inline]
 pub unsafe extern "C" fn rt_list_head(v: u64) -> u64 {
     match deref(v) {
-        Value::List { head, .. } => *head,
+        Value::List { data, off, .. } => match deref(*data) {
+            Value::LBack { buf, .. } => buf[*off as usize],
+            _ => crash!("head of an empty list"),
+        },
         _ => crash!("head of an empty list"),
     }
 }
@@ -1590,7 +1631,16 @@ pub unsafe extern "C" fn rt_mod_by_zero() -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn rt_list_tail(v: u64) -> u64 {
     match deref(v) {
-        Value::List { tail, .. } => *tail,
+        // Within the chunk while it holds more than one element; else advance to
+        // the next chunk. (A per-step view alloc here is why the bulk kernels
+        // iterate the backing directly instead of via tail recursion.)
+        Value::List { data, off, len, next } => {
+            if *len > 1 {
+                alloc(Value::List { data: *data, off: *off + 1, len: *len - 1, next: *next })
+            } else {
+                *next
+            }
+        }
         _ => crash!("tail of an empty list"),
     }
 }
@@ -2082,21 +2132,11 @@ unsafe fn value_eq(a: u64, b: u64) -> bool {
         // by name regardless of order — matching JS `_Utils_eq`).
         (Value::Json(x), Value::Json(y)) => json_eq(x, y),
         (Value::Nil, Value::Nil) => true,
+        // Chunk boundaries are not part of a list's identity, so compare the
+        // logical element sequences (a cons-built list equals a dense one).
         (Value::List { .. }, Value::List { .. }) => {
-            let (mut x, mut y) = (a, b);
-            loop {
-                match (deref(x), deref(y)) {
-                    (Value::List { head: h1, tail: t1 }, Value::List { head: h2, tail: t2 }) => {
-                        if !value_eq(*h1, *h2) {
-                            return false;
-                        }
-                        x = *t1;
-                        y = *t2;
-                    }
-                    (Value::Nil, Value::Nil) => return true,
-                    _ => return false,
-                }
-            }
+            let (xs, ys) = (to_vec(a), to_vec(b));
+            xs.len() == ys.len() && xs.iter().zip(&ys).all(|(&p, &q)| value_eq(p, q))
         }
         (Value::Ctor { index: i1, argc: n1, .. }, Value::Ctor { index: i2, argc: n2, .. }) => {
             i1 == i2 && n1 == n2 && (0..*n1 as usize).all(|i| value_eq(ctor_get(a, i), ctor_get(b, i)))
@@ -2197,23 +2237,15 @@ unsafe fn value_cmp(a: u64, b: u64) -> i32 {
         (Value::Nil, Value::List { .. }) => -1,
         (Value::List { .. }, Value::Nil) => 1,
         (Value::List { .. }, Value::List { .. }) => {
-            // Lexicographic in Elm order (head first).
-            let (mut x, mut y) = (a, b);
-            loop {
-                match (deref(x), deref(y)) {
-                    (Value::List { head: h1, tail: t1 }, Value::List { head: h2, tail: t2 }) => {
-                        let c = value_cmp(*h1, *h2);
-                        if c != 0 {
-                            return c;
-                        }
-                        x = *t1;
-                        y = *t2;
-                    }
-                    (Value::Nil, Value::Nil) => return 0,
-                    (Value::Nil, _) => return -1,
-                    _ => return 1,
+            // Lexicographic in Elm order (head first); chunk-agnostic.
+            let (xs, ys) = (to_vec(a), to_vec(b));
+            for (&p, &q) in xs.iter().zip(&ys) {
+                let c = value_cmp(p, q);
+                if c != 0 {
+                    return c;
                 }
             }
+            (xs.len() as i32 - ys.len() as i32).signum()
         }
         (Value::Tuple(x), Value::Tuple(y)) => {
             for (&p, &q) in x.iter().zip(y) {
@@ -2558,11 +2590,8 @@ unsafe extern "C" fn list_indexed_map(f: u64, xs: u64) -> u64 {
 }
 #[export_name = "rtb$List$foldl"]
 unsafe extern "C" fn list_foldl(f: u64, mut acc: u64, xs: u64) -> u64 {
-    let mut cur = xs;
-    while let Value::List { head, tail } = deref(cur) {
-        let (h, t) = (*head, *tail);
-        acc = ap2(f, h, acc);
-        cur = t;
+    for x in to_vec(xs) {
+        acc = ap2(f, x, acc);
     }
     acc
 }
@@ -2599,13 +2628,9 @@ unsafe extern "C" fn list_length(xs: u64) -> u64 {
 }
 #[export_name = "rtb$List$reverse"]
 unsafe extern "C" fn list_reverse(xs: u64) -> u64 {
-    let mut out = nil();
-    let mut cur = xs;
-    while let Value::List { head, tail } = deref(cur) {
-        out = cons(*head, out);
-        cur = *tail;
-    }
-    out
+    let mut v = to_vec(xs);
+    v.reverse();
+    list_from_slice(&v)
 }
 #[export_name = "rtb$List$member"]
 unsafe extern "C" fn list_member(y: u64, xs: u64) -> u64 {
@@ -2704,48 +2729,29 @@ unsafe extern "C" fn list_is_empty(xs: u64) -> u64 {
 #[export_name = "rtb$List$head"]
 unsafe extern "C" fn list_head(xs: u64) -> u64 {
     match deref(xs) {
-        Value::List { head, .. } => just(*head),
+        Value::List { .. } => just(rt_list_head(xs)),
         _ => nothing(),
     }
 }
 #[export_name = "rtb$List$tail"]
 unsafe extern "C" fn list_tail(xs: u64) -> u64 {
     match deref(xs) {
-        Value::List { tail, .. } => just(*tail),
+        Value::List { .. } => just(rt_list_tail(xs)),
         _ => nothing(),
     }
 }
 #[export_name = "rtb$List$take"]
 unsafe extern "C" fn list_take(n: u64, xs: u64) -> u64 {
-    let mut count = as_int(n).max(0) as usize;
-    let mut taken = Vec::with_capacity(count.min(64));
-    let mut cur = xs;
-    while count > 0 {
-        match deref(cur) {
-            Value::List { head, tail } => {
-                taken.push(*head);
-                cur = *tail;
-                count -= 1;
-            }
-            _ => break,
-        }
-    }
-    list_from_slice(&taken)
+    let count = (as_int(n).max(0) as usize).min(list_len(xs));
+    let mut v = to_vec(xs);
+    v.truncate(count);
+    list_from_slice(&v)
 }
 #[export_name = "rtb$List$drop"]
 unsafe extern "C" fn list_drop(n: u64, xs: u64) -> u64 {
-    let mut count = as_int(n).max(0);
-    let mut cur = xs;
-    while count > 0 {
-        match deref(cur) {
-            Value::List { tail, .. } => {
-                cur = *tail;
-                count -= 1;
-            }
-            _ => break,
-        }
-    }
-    cur
+    let v = to_vec(xs);
+    let start = (as_int(n).max(0) as usize).min(v.len());
+    list_from_slice(&v[start..])
 }
 unsafe extern "C" fn list_partition(is_good: u64, xs: u64) -> u64 {
     let (mut yes, mut no) = (Vec::new(), Vec::new());
@@ -3410,6 +3416,8 @@ unsafe fn debug_fmt(out: &mut String, v: u64) {
             }
             out.push(']');
         }
+        // A list-chunk backing is never itself a user value.
+        Value::LBack { .. } => {}
         Value::Tuple(items) => {
             out.push('(');
             for (i, &x) in items.iter().enumerate() {
