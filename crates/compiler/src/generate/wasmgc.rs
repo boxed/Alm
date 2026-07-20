@@ -5202,7 +5202,7 @@ impl<'a> Codegen<'a> {
         self.lifted.push((arity, Function::new([])));
         // Reserve slots for `emit_kernel`'s float-list arg widening (see there).
         let widen_count = if unbox_floatlist() {
-            args.iter().filter(|a| is_float_list(&a.tipe)).count() as u32
+            args.iter().filter(|a| list_scalar(&a.tipe).is_some()).count() as u32
         } else {
             0
         };
@@ -21861,37 +21861,32 @@ impl<'a> Codegen<'a> {
             TypedKind::List(items) => {
                 // Build a tight vector: push len and head-index (constants),
                 // then the elements head-first, then fold into T_ARR/T_BACK/T_LIST.
-                // A `List Float` builds the unboxed `T_LISTF` backing directly.
-                let f64_list = is_float_list(&e.tipe);
+                // A scalar list (List Int/Float/Char) builds its unboxed backing
+                // directly; Char (I32) not yet wired so it stays boxed.
+                let sc = list_scalar(&e.tipe).filter(|s| !matches!(s, Scalar::I32));
                 if items.is_empty() {
-                    if f64_list {
-                        push_empty_listf(f);
-                    } else {
-                        push_empty_list(f);
+                    match sc {
+                        Some(s) => push_empty_scalar(s, f),
+                        None => push_empty_list(f),
                     }
                 } else {
                     let n = items.len() as u32;
                     f.instruction(&Instruction::I32Const(n as i32)); // len
                     f.instruction(&Instruction::I32Const(0)); // head index
                     for item in items {
-                        if f64_list {
-                            self.emit_f64(item, ctx, f)?;
-                        } else {
-                            self.emit_expr(item, ctx, f)?;
+                        match sc {
+                            Some(Scalar::F64) => self.emit_f64(item, ctx, f)?,
+                            Some(Scalar::I64) => self.emit_i64(item, ctx, f)?,
+                            _ => self.emit_expr(item, ctx, f)?,
                         }
                     }
-                    let (arr, back, list) = if f64_list {
-                        (T_ARRF, T_BACKF, T_LISTF)
-                    } else {
-                        (T_ARR, T_BACK, T_LIST)
+                    let (arr, back, list, empty) = match sc {
+                        Some(s) => (s.arr(), s.back(), s.list(), s.empty()),
+                        None => (T_ARR, T_BACK, T_LIST, G_EMPTY_LIST),
                     };
                     f.instruction(&Instruction::ArrayNewFixed { array_type_index: arr, array_size: n });
                     f.instruction(&Instruction::StructNew(back));
-                    f.instruction(&Instruction::GlobalGet(if f64_list {
-                        G_EMPTY_LISTF
-                    } else {
-                        G_EMPTY_LIST
-                    }));
+                    f.instruction(&Instruction::GlobalGet(empty));
                     f.instruction(&Instruction::StructNew(list));
                 }
             }
@@ -22492,11 +22487,12 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.list_append_idx));
             }
             "::" => {
-                if is_float_list(&r.tipe) {
-                    // Native amortized-O(1) f64 cons into the T_LISTF front-slack.
-                    let c = self.listf_cons();
-                    self.emit_expr(l, ctx, f)?; // boxed Float element
-                    self.emit_expr(r, ctx, f)?; // T_LISTF tail
+                if let Some(sc) = list_scalar(&r.tipe).filter(|s| !matches!(s, Scalar::I32)) {
+                    // Native amortized-O(1) cons into the unboxed front-slack;
+                    // scalar_cons unboxes the boxed element internally.
+                    let c = self.scalar_cons(sc);
+                    self.emit_expr(l, ctx, f)?; // boxed element
+                    self.emit_expr(r, ctx, f)?; // T_LIST{sc} tail
                     f.instruction(&Instruction::Call(c));
                 } else {
                     self.emit_expr(l, ctx, f)?;
@@ -22999,10 +22995,10 @@ impl<'a> Codegen<'a> {
                 }
             }
             self.emit_kernel(module.as_str(), name.as_str(), args, ctx, f)?;
-            // The eqref kernels build a boxed `T_LIST`; canonicalize a
-            // float-list result to the unboxed `T_LISTF` rep.
-            if is_float_list(peel_arrows(&func.tipe, args.len())) {
-                let narrow = self.listf_narrow();
+            // The eqref kernels build a boxed `T_LIST`; canonicalize a scalar-list
+            // result back to its unboxed rep.
+            if let Some(sc) = list_scalar(peel_arrows(&func.tipe, args.len())) {
+                let narrow = self.scalar_narrow(sc);
                 f.instruction(&Instruction::Call(narrow));
             }
             return Ok(());
@@ -25186,11 +25182,11 @@ impl<'a> Codegen<'a> {
         // (the slots are reserved by `count_bindings`). No-op with the flag off.
         let widened: Vec<TypedExpr>;
         let args: &[TypedExpr] =
-            if unbox_floatlist() && args.iter().any(|a| is_float_list(&a.tipe)) {
+            if args.iter().any(|a| list_scalar(&a.tipe).is_some()) {
                 let mut v: Vec<TypedExpr> = Vec::with_capacity(args.len());
                 for (k, a) in args.iter().enumerate() {
-                    if is_float_list(&a.tipe) {
-                        let w = self.listf_widen();
+                    if let Some(sc) = list_scalar(&a.tipe) {
+                        let w = self.scalar_widen(sc);
                         self.emit_expr(a, ctx, f)?;
                         f.instruction(&Instruction::Call(w));
                         let nm = format!("$wfl{k}");
@@ -28162,7 +28158,7 @@ fn count_bindings(e: &TypedExpr) -> u32 {
             // slot per float-list arg so `emit_kernel` can `bind` them. Only when
             // unboxing is enabled (else zero — no waste).
             let widen = if matches!(g.kind, TypedKind::Foreign(_, _)) {
-                args.iter().filter(|a| is_float_list(&a.tipe)).count() as u32
+                args.iter().filter(|a| list_scalar(&a.tipe).is_some()).count() as u32
             } else {
                 0
             };
