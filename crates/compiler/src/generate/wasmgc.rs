@@ -1340,11 +1340,7 @@ fn list_next(f: &mut Function, l: u32) {
 }
 
 /// Push the `T_LISTF` next chunk (`ref null T_LISTF`).
-fn list_next_f(f: &mut Function, l: u32) {
-    f.instruction(&Instruction::LocalGet(l));
-    f.instruction(&cast_to(T_LISTF));
-    f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 2 });
-}
+fn list_next_f(f: &mut Function, l: u32) { list_next_s(Scalar::F64, f, l) }
 
 /// Push the backing data array (`ref T_ARR`). Traps on the empty list.
 fn list_data(f: &mut Function, l: u32) {
@@ -1423,29 +1419,77 @@ fn list_elem(f: &mut Function, l: u32, iloc: u32) {
     f.instruction(&Instruction::ArrayGet(T_ARR));
 }
 
-// f64-backed (`T_LISTF`) twins of the accessors above, for an unboxed
-// `List Float`. `len` is field 0 in both list structs, but the cast differs.
-fn list_len_f(f: &mut Function, l: u32) {
+/// The unboxed backing rep of a scalar-element collection: `List Int` (I64),
+/// `List Float` (F64), `List Char` (I32 = code points). One rep-parametric
+/// layer drives all three, replacing per-type twins. Boxed (`eqref`) lists have
+/// no `Scalar`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scalar {
+    I32,
+    I64,
+    F64,
+}
+
+impl Scalar {
+    fn arr(self) -> u32 {
+        match self { Scalar::I32 => T_ARRC, Scalar::I64 => T_ARRI, Scalar::F64 => T_ARRF }
+    }
+    fn back(self) -> u32 {
+        match self { Scalar::I32 => T_BACKC, Scalar::I64 => T_BACKI, Scalar::F64 => T_BACKF }
+    }
+    fn list(self) -> u32 {
+        match self { Scalar::I32 => T_LISTC, Scalar::I64 => T_LISTI, Scalar::F64 => T_LISTF }
+    }
+    fn empty(self) -> u32 {
+        match self { Scalar::I32 => G_EMPTY_LISTC, Scalar::I64 => G_EMPTY_LISTI, Scalar::F64 => G_EMPTY_LISTF }
+    }
+    fn val(self) -> ValType {
+        match self { Scalar::I32 => ValType::I32, Scalar::I64 => ValType::I64, Scalar::F64 => ValType::F64 }
+    }
+}
+
+// Scalar-backed accessors, parametric over `Scalar` (I32/I64/F64) — `len` is
+// field 0, `bk` field 1, `next` field 2 in every list struct; only the cast
+// target differs. The `_f` names below are thin `Scalar::F64` wrappers kept so
+// the existing float call sites are untouched.
+fn list_len_s(s: Scalar, f: &mut Function, l: u32) {
     f.instruction(&Instruction::LocalGet(l));
-    f.instruction(&cast_to(T_LISTF));
-    f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 0 });
+    f.instruction(&cast_to(s.list()));
+    f.instruction(&Instruction::StructGet { struct_type_index: s.list(), field_index: 0 });
 }
-fn list_bk_f(f: &mut Function, l: u32) {
+fn list_bk_s(s: Scalar, f: &mut Function, l: u32) {
     f.instruction(&Instruction::LocalGet(l));
-    f.instruction(&cast_to(T_LISTF));
-    f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 1 });
+    f.instruction(&cast_to(s.list()));
+    f.instruction(&Instruction::StructGet { struct_type_index: s.list(), field_index: 1 });
 }
-fn list_data_f(f: &mut Function, l: u32) {
-    list_bk_f(f, l);
-    f.instruction(&cast_to(T_BACKF));
-    f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 1 });
+fn list_next_s(s: Scalar, f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(s.list()));
+    f.instruction(&Instruction::StructGet { struct_type_index: s.list(), field_index: 2 });
 }
-fn list_start_f(f: &mut Function, l: u32) {
-    list_data_f(f, l);
+fn list_data_s(s: Scalar, f: &mut Function, l: u32) {
+    list_bk_s(s, f, l);
+    f.instruction(&cast_to(s.back()));
+    f.instruction(&Instruction::StructGet { struct_type_index: s.back(), field_index: 1 });
+}
+fn list_start_s(s: Scalar, f: &mut Function, l: u32) {
+    list_data_s(s, f, l);
     f.instruction(&Instruction::ArrayLen);
-    list_len_f(f, l);
+    list_len_s(s, f, l);
     f.instruction(&Instruction::I32Sub);
 }
+fn list_elem_s(s: Scalar, f: &mut Function, l: u32, iloc: u32) {
+    list_data_s(s, f, l);
+    list_start_s(s, f, l);
+    f.instruction(&Instruction::LocalGet(iloc));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::ArrayGet(s.arr()));
+}
+
+fn list_len_f(f: &mut Function, l: u32) { list_len_s(Scalar::F64, f, l) }
+fn list_bk_f(f: &mut Function, l: u32) { list_bk_s(Scalar::F64, f, l) }
+fn list_data_f(f: &mut Function, l: u32) { list_data_s(Scalar::F64, f, l) }
+fn list_start_f(f: &mut Function, l: u32) { list_start_s(Scalar::F64, f, l) }
 
 /// Push i32 1 iff the list is empty.
 fn list_is_empty(f: &mut Function, l: u32) {
