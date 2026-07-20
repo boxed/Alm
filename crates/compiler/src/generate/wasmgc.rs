@@ -203,7 +203,15 @@ const T_SB: u32 = 9; // struct { mut buf: (ref T_STR), mut len: i32 }
 const T_ARRF: u32 = 10; // array (mut f64) — unboxed `List Float` backing
 const T_BACKF: u32 = 11; // struct { mut i32 head, (ref T_ARRF) data }
 const T_LISTF: u32 = 12; // struct { i32 len, (ref null T_BACKF) bk } — a `List Float`
-const N_FIXED: u32 = 13;
+// Unboxed scalar-list twins — the siblings of the f64 twin above, all driven by
+// one rep-parametric layer keyed on `Scalar` (I32=Char, I64=Int, F64=Float).
+const T_ARRI: u32 = 13; // array (mut i64) — unboxed `List Int` backing
+const T_BACKI: u32 = 14; // struct { mut i32 head, (ref T_ARRI) data }
+const T_LISTI: u32 = 15; // struct { i32 len, (ref null T_BACKI) bk, (ref null T_LISTI) next }
+const T_ARRC: u32 = 16; // array (mut i32) — unboxed `List Char` backing (code points)
+const T_BACKC: u32 = 17; // struct { mut i32 head, (ref T_ARRC) data }
+const T_LISTC: u32 = 18; // struct { i32 len, (ref null T_BACKC) bk, (ref null T_LISTC) next }
+const N_FIXED: u32 = 19;
 
 // Imported DOM host functions occupy the first function indices; defined
 // functions are therefore offset by N_IMPORTS (see build()).
@@ -292,6 +300,8 @@ const G_CLOSPOOL: u32 = 27; // interned capture-free function closures (ref T_AR
 const G_RSEED: u32 = 28; // Random.generate's persistent Seed (eqref, null until first use → seeded from host time)
 const G_EMPTY_LIST: u32 = 29; // the shared empty list {0,null,null}; the spine terminator every chunk's `next` points to
 const G_EMPTY_LISTF: u32 = 30; // the shared empty `List Float` (T_LISTF) terminator
+const G_EMPTY_LISTI: u32 = 31; // the shared empty `List Int` (T_LISTI) terminator
+const G_EMPTY_LISTC: u32 = 32; // the shared empty `List Char` (T_LISTC) terminator
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -2959,6 +2969,28 @@ impl<'a> Codegen<'a> {
                 mutable: false,
             },
         ]); // T_LISTF { i32 len, (ref null T_BACKF) bk, (ref null T_LISTF) next }
+        // Unboxed `List Int` (i64) and `List Char` (i32) twins — same shape as
+        // the f64 twin, one rep-parametric layer drives all three.
+        types.ty().array(&StorageType::Val(ValType::I64), true); // T_ARRI (mut i64)
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ref_to(T_ARRI)), mutable: false },
+        ]); // T_BACKI { mut i32 head, (ref T_ARRI) data }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_BACKI)), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_LISTI)), mutable: false },
+        ]); // T_LISTI { i32 len, (ref null T_BACKI) bk, (ref null T_LISTI) next }
+        types.ty().array(&StorageType::Val(ValType::I32), true); // T_ARRC (mut i32)
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ref_to(T_ARRC)), mutable: false },
+        ]); // T_BACKC { mut i32 head, (ref T_ARRC) data }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_BACKC)), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_LISTC)), mutable: false },
+        ]); // T_LISTC { i32 len, (ref null T_BACKC) bk, (ref null T_LISTC) next }
         for &arity in &self.fn_type_order {
             types.ty().function(vec![eqref(); arity as usize], vec![eqref()]);
         }
@@ -3700,6 +3732,26 @@ impl<'a> Codegen<'a> {
                 Instruction::RefNull(HeapType::Concrete(T_BACKF)),
                 Instruction::RefNull(HeapType::Concrete(T_LISTF)),
                 Instruction::StructNew(T_LISTF),
+            ]),
+        );
+        // 31=G_EMPTY_LISTI: the shared empty `List Int` terminator.
+        globals.global(
+            GlobalType { val_type: ref_to(T_LISTI), mutable: false, shared: false },
+            &ConstExpr::extended(vec![
+                Instruction::I32Const(0),
+                Instruction::RefNull(HeapType::Concrete(T_BACKI)),
+                Instruction::RefNull(HeapType::Concrete(T_LISTI)),
+                Instruction::StructNew(T_LISTI),
+            ]),
+        );
+        // 32=G_EMPTY_LISTC: the shared empty `List Char` terminator.
+        globals.global(
+            GlobalType { val_type: ref_to(T_LISTC), mutable: false, shared: false },
+            &ConstExpr::extended(vec![
+                Instruction::I32Const(0),
+                Instruction::RefNull(HeapType::Concrete(T_BACKC)),
+                Instruction::RefNull(HeapType::Concrete(T_LISTC)),
+                Instruction::StructNew(T_LISTC),
             ]),
         );
         // DOM host imports (function indices 0..N_IMPORTS).
