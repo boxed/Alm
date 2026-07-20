@@ -1314,7 +1314,7 @@ fn soa_list_of_flat_tuples() {
          headStr xs =\n    case xs of\n        ( n, x ) :: _ ->\n            showP ( n, x )\n\n        [] ->\n            \"empty\"\n\n\
          main : String\n\
          main =\n    \
-            String.join \",\" (List.map showP pairs)\n        ++ \"|\" ++ String.fromInt (List.foldl (\\( n, _ ) acc -> acc + n) 0 pairs)\n        ++ \"|\" ++ String.fromFloat (List.foldl (\\( _, x ) acc -> acc + x) 0 pairs)\n        ++ \"|\" ++ headStr pairs\n        ++ \"|\" ++ String.join \",\" (List.map (\\( n, x ) -> String.fromInt (n * 2) ++ \"/\" ++ String.fromFloat (x + 1)) pairs)\n        ++ \"|\" ++ String.fromInt (List.length pairs)\n        ++ \"|\" ++ String.join \",\" (List.map showP (List.map (\\( n, x ) -> ( n + 10, x )) pairs))\n",
+            String.join \",\" (List.map showP pairs)\n        ++ \"|\" ++ String.fromInt (List.foldl (\\( n, _ ) acc -> acc + n) 0 pairs)\n        ++ \"|\" ++ String.fromFloat (List.foldl (\\( _, x ) acc -> acc + x) 0 pairs)\n        ++ \"|\" ++ headStr pairs\n        ++ \"|\" ++ String.join \",\" (List.map (\\( n, x ) -> String.fromInt (n * 2) ++ \"/\" ++ String.fromFloat (x + 1)) pairs)\n        ++ \"|\" ++ String.fromInt (List.length pairs)\n        ++ \"|\" ++ String.join \",\" (List.map showP (List.map (\\( n, x ) -> ( n + 10, x )) pairs))\n        ++ \"|\" ++ String.join \",\" (List.map showP (( 0, 0.5 ) :: pairs))\n        ++ \"|\" ++ String.join \",\" (List.map showP (pairs ++ [ ( 9, 9.5 ) ]))\n        ++ \"|\" ++ headStr []\n",
     );
 }
 

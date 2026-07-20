@@ -22801,6 +22801,15 @@ impl<'a> Codegen<'a> {
                     self.emit_expr(l, ctx, f)?; // boxed element
                     self.emit_expr(r, ctx, f)?; // T_LIST{sc} tail
                     f.instruction(&Instruction::Call(c));
+                } else if list_soa(&r.tipe).is_some() {
+                    // A SoA tail has no cons cells; widen it to a boxed list
+                    // (idempotent) then cons the boxed element. The result is a
+                    // boxed list — consumers of a SoA-typed value widen anyway.
+                    let widen = self.soa_widen();
+                    self.emit_expr(l, ctx, f)?; // boxed tuple element
+                    self.emit_expr(r, ctx, f)?; // SoA (or already-boxed) tail
+                    f.instruction(&Instruction::Call(widen));
+                    f.instruction(&Instruction::Call(self.list_cons_idx));
                 } else {
                     self.emit_expr(l, ctx, f)?;
                     self.emit_expr(r, ctx, f)?;
