@@ -6,6 +6,7 @@
 use alm_compiler::ast::canonical as can;
 use alm_compiler::interface::Interfaces;
 use alm_compiler::reporting::Region;
+use std::rc::Rc;
 use alm_compiler::{canonicalize, parse, typecheck};
 
 fn check(src: &str) -> (can::Module, std::collections::HashMap<Region, can::Type>) {
@@ -85,13 +86,13 @@ fn walk<'a>(expr: &'a can::Expr, out: &mut Vec<&'a can::Expr>) {
 }
 
 fn int() -> can::Type {
-    can::Type::Type("Basics".into(), "Int".into(), vec![])
+    can::Type::Type("Basics".into(), "Int".into(), Rc::new(vec![]))
 }
 fn string() -> can::Type {
-    can::Type::Type("String".into(), "String".into(), vec![])
+    can::Type::Type("String".into(), "String".into(), Rc::new(vec![]))
 }
 fn lambda(a: can::Type, b: can::Type) -> can::Type {
-    can::Type::Lambda(Box::new(a), Box::new(b))
+    can::Type::Lambda(Rc::new(a), Rc::new(b))
 }
 
 /// A polymorphic top-level function's use sites are captured at their
@@ -155,9 +156,9 @@ fn body_node_names_align_with_scheme() {
         .find(|e| matches!(&e.value, can::Expr_::VarLocal(n) if n.as_str() == "f"))
         .expect("f reference");
     match types[&f_ref.region].clone() {
-        can::Type::Lambda(_, result) => match *result {
+        can::Type::Lambda(_, result) => match result.as_ref() {
             can::Type::Var(name) => assert_eq!(
-                name, result_name,
+                name, &result_name,
                 "the `f` node's result var must match the call's result var"
             ),
             other => panic!("expected f's result to be a variable, got {:?}", other),

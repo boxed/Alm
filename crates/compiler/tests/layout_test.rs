@@ -3,6 +3,7 @@
 use alm_compiler::ast::canonical as can;
 use alm_compiler::ir::layout::{Layout, LayoutCtx};
 use alm_compiler::{canonicalize, parse};
+use std::rc::Rc;
 
 fn ctx(src: &str) -> LayoutCtx {
     let module = parse::parse_module(src).expect("parse");
@@ -11,22 +12,22 @@ fn ctx(src: &str) -> LayoutCtx {
 }
 
 fn int() -> can::Type {
-    can::Type::Type("Basics".into(), "Int".into(), vec![])
+    can::Type::Type("Basics".into(), "Int".into(), Rc::new(vec![]))
 }
 fn float() -> can::Type {
-    can::Type::Type("Basics".into(), "Float".into(), vec![])
+    can::Type::Type("Basics".into(), "Float".into(), Rc::new(vec![]))
 }
 fn string() -> can::Type {
-    can::Type::Type("String".into(), "String".into(), vec![])
+    can::Type::Type("String".into(), "String".into(), Rc::new(vec![]))
 }
 fn custom(name: &str, args: Vec<can::Type>) -> can::Type {
-    can::Type::Type("Test".into(), name.into(), args)
+    can::Type::Type("Test".into(), name.into(), Rc::new(args))
 }
 fn maybe(inner: can::Type) -> can::Type {
-    can::Type::Type("Maybe".into(), "Maybe".into(), vec![inner])
+    can::Type::Type("Maybe".into(), "Maybe".into(), Rc::new(vec![inner]))
 }
 fn list(inner: can::Type) -> can::Type {
-    can::Type::Type("List".into(), "List".into(), vec![inner])
+    can::Type::Type("List".into(), "List".into(), Rc::new(vec![inner]))
 }
 
 const EMPTY: &str = "module Test exposing (..)\n\nx = 1\n";
@@ -38,12 +39,12 @@ fn scalars() {
     assert_eq!(c.layout_of(&float()), Layout::Float);
     assert_eq!(c.layout_of(&string()), Layout::Str);
     assert_eq!(
-        c.layout_of(&can::Type::Type("Basics".into(), "Bool".into(), vec![])),
+        c.layout_of(&can::Type::Type("Basics".into(), "Bool".into(), Rc::new(vec![]))),
         Layout::Bool
     );
     assert_eq!(c.layout_of(&can::Type::Unit), Layout::Unit);
     assert_eq!(
-        c.layout_of(&can::Type::Lambda(Box::new(int()), Box::new(int()))),
+        c.layout_of(&can::Type::Lambda(Rc::new(int()), Rc::new(int()))),
         Layout::Closure
     );
 }
@@ -62,13 +63,13 @@ fn lists_carry_element_layout() {
 fn tuples_and_records_are_flat_structs() {
     let c = ctx(EMPTY);
     assert_eq!(
-        c.layout_of(&can::Type::Tuple(Box::new(int()), Box::new(string()), None)),
+        c.layout_of(&can::Type::Tuple(Rc::new(int()), Rc::new(string()), None)),
         Layout::Tuple(vec![Layout::Int, Layout::Str])
     );
 
     // Record fields are sorted by name for a canonical struct order.
     let record = can::Type::Record(
-        vec![("y".into(), float()), ("x".into(), int())],
+        Rc::new(vec![("y".into(), float()), ("x".into(), int())]),
         None,
     );
     assert_eq!(
@@ -85,7 +86,7 @@ fn nullary_unions_are_enums() {
     // Built-in Order has three nullary constructors.
     let c = ctx(EMPTY);
     assert_eq!(
-        c.layout_of(&can::Type::Type("Basics".into(), "Order".into(), vec![])),
+        c.layout_of(&can::Type::Type("Basics".into(), "Order".into(), Rc::new(vec![]))),
         Layout::Enum(3)
     );
 
