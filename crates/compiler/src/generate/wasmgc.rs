@@ -696,7 +696,7 @@ fn unbox_intlist() -> bool {
     std::env::var_os("ALM_BOX_INTLIST").is_none()
 }
 fn unbox_charlist() -> bool {
-    std::env::var_os("ALM_UNBOX_CHARLIST").is_some()
+    std::env::var_os("ALM_BOX_CHARLIST").is_none()
 }
 
 /// Whether the unboxed backing for a given `Scalar` rep is enabled.
@@ -21933,8 +21933,8 @@ impl<'a> Codegen<'a> {
                 // Build a tight vector: push len and head-index (constants),
                 // then the elements head-first, then fold into T_ARR/T_BACK/T_LIST.
                 // A scalar list (List Int/Float/Char) builds its unboxed backing
-                // directly; Char (I32) not yet wired so it stays boxed.
-                let sc = list_scalar(&e.tipe).filter(|s| !matches!(s, Scalar::I32));
+                // directly (Char stores raw i32 code points).
+                let sc = list_scalar(&e.tipe);
                 if items.is_empty() {
                     match sc {
                         Some(s) => push_empty_scalar(s, f),
@@ -21948,7 +21948,8 @@ impl<'a> Codegen<'a> {
                         match sc {
                             Some(Scalar::F64) => self.emit_f64(item, ctx, f)?,
                             Some(Scalar::I64) => self.emit_i64(item, ctx, f)?,
-                            _ => self.emit_expr(item, ctx, f)?,
+                            Some(Scalar::I32) => self.emit_char_code(item, ctx, f)?,
+                            None => self.emit_expr(item, ctx, f)?,
                         }
                     }
                     let (arr, back, list, empty) = match sc {
@@ -22565,7 +22566,7 @@ impl<'a> Codegen<'a> {
                 }
             }
             "::" => {
-                if let Some(sc) = list_scalar(&r.tipe).filter(|s| !matches!(s, Scalar::I32)) {
+                if let Some(sc) = list_scalar(&r.tipe) {
                     // Native amortized-O(1) cons into the unboxed front-slack;
                     // scalar_cons unboxes the boxed element internally.
                     let c = self.scalar_cons(sc);
@@ -23402,8 +23403,13 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
-        // Unboxed source element (List Int/Float — Char excluded here) and/or
-        // f64 accumulator. Only Inline lambdas take the unboxed source path.
+        // Char (I32) source not fused yet (element needs an i31 box/unbox) —
+        // fall back to the kernel path (which widens the T_LISTC arg).
+        if list_scalar(&args[2].tipe) == Some(Scalar::I32) {
+            return Ok(false);
+        }
+        // Unboxed source element (List Int/Float) and/or f64 accumulator. Only
+        // Inline lambdas take the unboxed source path.
         let src_scalar = list_scalar(&args[2].tipe).filter(|s| !matches!(s, Scalar::I32));
         let src_f64 = src_scalar == Some(Scalar::F64);
         let acc_f64 = f64_elem(&args[1].tipe);
@@ -23617,6 +23623,12 @@ impl<'a> Codegen<'a> {
         // `res_f64` when the result is. Only Inline lambdas do the f64 path
         // (Direct callees stay on the eqref path); if the source is f64 but the
         // callee is Direct, fall back rather than mis-read the backing.
+        // Char (I32) source or result not fused yet — kernel path handles it.
+        if list_scalar(&args[1].tipe) == Some(Scalar::I32)
+            || matches!(&callee, Callee::Inline { body, .. } if scalar_of(&body.tipe) == Some(Scalar::I32))
+        {
+            return Ok(false);
+        }
         let src_scalar = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
         let res_scalar = match &callee {
             Callee::Inline { body, .. } => scalar_of(&body.tipe).filter(|s| !matches!(s, Scalar::I32)),
@@ -23766,7 +23778,11 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
-        // filter preserves the element type (Char excluded here for now).
+        // Char (I32) not fused yet — kernel path handles it.
+        if list_scalar(&args[1].tipe) == Some(Scalar::I32) {
+            return Ok(false);
+        }
+        // filter preserves the element type.
         let sc = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
         if matches!(callee, Callee::Direct(_)) && sc.is_some() {
             return Ok(false);
