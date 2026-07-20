@@ -768,13 +768,13 @@ fn is_float_list(tipe: &can::Type) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 enum ListRep {
     Boxed,
-    F64,
+    Scalar(Scalar),
     Unknown,
 }
 
 fn list_rep_hint(tipe: Option<&can::Type>) -> ListRep {
     match tipe {
-        Some(t) if is_float_list(t) => ListRep::F64,
+        Some(t) if list_scalar(t).is_some() => ListRep::Scalar(list_scalar(t).unwrap()),
         Some(can::Type::Type(_, n, _)) if n.as_str() == "List" => ListRep::Boxed,
         _ => ListRep::Unknown,
     }
@@ -1432,22 +1432,24 @@ fn list_head_f(f: &mut Function, l: u32) {
     f.instruction(&Instruction::StructNew(T_FLOAT));
 }
 
-/// `T_LISTF` tail as a fresh view sharing the backing (`{len-1, bk}`).
-fn list_tail_f(f: &mut Function, l: u32) {
-    list_len_f(f, l);
+/// Unboxed scalar-list tail as a fresh view sharing the backing
+/// (`{len-1, bk, next}`), else the next chunk when this chunk is exhausted.
+fn list_tail_s(sc: Scalar, f: &mut Function, l: u32) {
+    list_len_s(sc, f, l);
     f.instruction(&Instruction::I32Const(1));
     f.instruction(&Instruction::I32GtS);
     f.instruction(&Instruction::If(BlockType::Result(eqref())));
-    list_len_f(f, l);
+    list_len_s(sc, f, l);
     f.instruction(&Instruction::I32Const(1));
     f.instruction(&Instruction::I32Sub);
-    list_bk_f(f, l);
-    list_next_f(f, l);
-    f.instruction(&Instruction::StructNew(T_LISTF));
+    list_bk_s(sc, f, l);
+    list_next_s(sc, f, l);
+    f.instruction(&Instruction::StructNew(sc.list()));
     f.instruction(&Instruction::Else);
-    list_next_f(f, l);
+    list_next_s(sc, f, l);
     f.instruction(&Instruction::End);
 }
+fn list_tail_f(f: &mut Function, l: u32) { list_tail_s(Scalar::F64, f, l) }
 
 /// Push element at head-offset held in local `iloc` (`data[start+i]`).
 fn list_elem(f: &mut Function, l: u32, iloc: u32) {
@@ -27967,42 +27969,58 @@ impl<'a> Codegen<'a> {
     }
     /// Load a list's head (field 0) or tail (field 1) for pattern matching.
     fn load_cons(&self, s: u32, field: u32, rep: ListRep, f: &mut Function) {
-        // `head` (field 0) yields an eqref element (a `T_LISTF` head is boxed);
-        // `tail` (field 1) preserves the backing rep. Use the static rep when
-        // known; only `Unknown` needs a runtime `ref.test` dispatch.
-        let head = |f: &mut Function, f64: bool| {
-            if f64 {
-                list_head_f(f, s)
-            } else {
-                list_head(f, s)
+        // `head` (field 0) yields a boxed eqref element (a scalar head is boxed
+        // via box_scalar); `tail` (field 1) preserves the backing rep. Use the
+        // static rep when known; only `Unknown` needs runtime `ref.test`es.
+        let go = |cg: &Self, f: &mut Function, rep: ListRep| match rep {
+            ListRep::Boxed => {
+                if field == 0 { list_head(f, s) } else { list_tail(f, s) }
             }
-        };
-        let tail = |f: &mut Function, f64: bool| {
-            if f64 {
-                list_tail_f(f, s)
-            } else {
-                list_tail(f, s)
+            ListRep::Scalar(sc) => {
+                if field == 0 {
+                    list_data_s(sc, f, s);
+                    list_start_s(sc, f, s);
+                    f.instruction(&Instruction::ArrayGet(sc.arr()));
+                    cg.box_scalar(sc, f);
+                } else {
+                    list_tail_s(sc, f, s);
+                }
             }
-        };
-        let go = |f: &mut Function, f64: bool| {
-            if field == 0 {
-                head(f, f64)
-            } else {
-                tail(f, f64)
-            }
+            ListRep::Unknown => unreachable!(),
         };
         match rep {
-            ListRep::Boxed => go(f, false),
-            ListRep::F64 => go(f, true),
             ListRep::Unknown => {
-                f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
-                f.instruction(&Instruction::If(BlockType::Result(eqref())));
-                go(f, true);
-                f.instruction(&Instruction::Else);
-                go(f, false);
-                f.instruction(&Instruction::End);
+                // Try each enabled scalar rep by ref.test, else the boxed path.
+                self.scalar_dispatch(s, eqref(), f, |cg, f, r| go(cg, f, r));
             }
+            r => go(self, f, r),
+        }
+    }
+
+    /// Emit an `if`-chain that runs `body(rep)` for whichever concrete list rep
+    /// the value in local `s` is (`ref.test` per enabled scalar, else Boxed).
+    /// `res` is the block result type. Used by the `Unknown` (type-erased) path.
+    fn scalar_dispatch(
+        &self,
+        s: u32,
+        res: ValType,
+        f: &mut Function,
+        body: impl Fn(&Self, &mut Function, ListRep),
+    ) {
+        let enabled: Vec<Scalar> = [Scalar::F64, Scalar::I64, Scalar::I32]
+            .into_iter()
+            .filter(|&sc| scalar_enabled(sc))
+            .collect();
+        for &sc in &enabled {
+            f.instruction(&Instruction::LocalGet(s));
+            f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(sc.list())));
+            f.instruction(&Instruction::If(BlockType::Result(res)));
+            body(self, f, ListRep::Scalar(sc));
+            f.instruction(&Instruction::Else);
+        }
+        body(self, f, ListRep::Boxed);
+        for _ in &enabled {
+            f.instruction(&Instruction::End);
         }
     }
 
@@ -28011,19 +28029,18 @@ impl<'a> Codegen<'a> {
     fn list_empty_test(&self, s: u32, rep: ListRep, f: &mut Function) {
         match rep {
             ListRep::Boxed => list_is_empty(f, s),
-            ListRep::F64 => {
-                list_len_f(f, s);
+            ListRep::Scalar(sc) => {
+                list_len_s(sc, f, s);
                 f.instruction(&Instruction::I32Eqz);
             }
             ListRep::Unknown => {
-                f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
-                f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
-                list_len_f(f, s);
-                f.instruction(&Instruction::I32Eqz);
-                f.instruction(&Instruction::Else);
-                list_is_empty(f, s);
-                f.instruction(&Instruction::End);
+                self.scalar_dispatch(s, ValType::I32, f, |_cg, f, r| match r {
+                    ListRep::Scalar(sc) => {
+                        list_len_s(sc, f, s);
+                        f.instruction(&Instruction::I32Eqz);
+                    }
+                    _ => list_is_empty(f, s),
+                });
             }
         }
     }
