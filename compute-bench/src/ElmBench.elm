@@ -11,7 +11,9 @@ import BinaryTrees
 import DictOps
 import Fib
 import FloatSum
-import ListPipeline
+import ListFilter
+import ListFold
+import ListMap
 import Mandelbrot
 import Platform
 import Sort
@@ -32,8 +34,14 @@ run name size =
         "BinaryTrees" ->
             BinaryTrees.bench size
 
-        "ListPipeline" ->
-            ListPipeline.bench size
+        "ListMap" ->
+            ListMap.bench size
+
+        "ListFilter" ->
+            ListFilter.bench size
+
+        "ListFold" ->
+            ListFold.bench size
 
         "DictOps" ->
             DictOps.bench size

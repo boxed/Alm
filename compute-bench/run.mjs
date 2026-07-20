@@ -24,7 +24,9 @@ const build = path.join(dir, "build");
 const WORKLOADS = [
   { name: "fib 35",              module: "Fib",          size: 35 },
   { name: "binary-trees d14×60", module: "BinaryTrees",  size: 60 },
-  { name: "list map/filter/fold 1M", module: "ListPipeline", size: 1000000 },
+  { name: "list map 1M",         module: "ListMap",      size: 1000000 },
+  { name: "list filter 1M",      module: "ListFilter",   size: 1000000 },
+  { name: "list fold 1M",        module: "ListFold",     size: 1000000 },
   { name: "Dict 100k build+get", module: "DictOps",      size: 100000 },
   { name: "mandelbrot 400²",     module: "Mandelbrot",   size: 400 },
   { name: "sort 100k ints",      module: "Sort",         size: 100000 },
