@@ -578,7 +578,8 @@ fn bytes_roundtrip_wasm() {
             "const {{WASI}}=require('node:wasi');const fs=require('fs');(async()=>{{\
              const wasi=new WASI({{version:'preview1',args:['p'],env:{{}},returnOnExit:true}});\
              const m=await WebAssembly.compile(fs.readFileSync({:?}));\
-             const i=await WebAssembly.instantiate(m,wasi.getImportObject());\
+             const imports=Object.assign({{env:new Proxy({{}},{{get:()=>()=>0}})}},wasi.getImportObject());\
+             const i=await WebAssembly.instantiate(m,imports);\
              wasi.start(i);}})();",
             wasm.display()
         ),

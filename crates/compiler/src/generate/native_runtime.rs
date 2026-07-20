@@ -5521,11 +5521,16 @@ unsafe fn typed_encoder_width(e: *const u8) -> usize {
         2 | 5 | 6 => 4,
         7 => 8,
         8 => {
-            let list = tenc_i64(e, 16) as *const u8;
-            let len = *(list as *const i64) as usize;
-            let backing = *(list.add(8) as *const *const u8);
+            // `Bytes.Encode.sequence` over a `List Encoder`. The list may span
+            // several chunks; flatten the whole spine to one dense backing (a
+            // single-chunk list is returned as-is) and sum every element. The
+            // elements are encoder pointers, so the chunk stride is a pointer
+            // (4 bytes on wasm32, 8 on native) — NOT a fixed 8.
+            let list = tenc_i64(e, 16) as *const TList;
+            let total = alm_list_total_len(list) as usize;
+            let backing = alm_list_flatten(list, std::mem::size_of::<*const u8>() as i64);
             let mut w = 0;
-            for i in 0..len {
+            for i in 0..total {
                 let child = *(backing.add(16) as *const *const u8).add(i);
                 w += typed_encoder_width(child);
             }
@@ -5573,11 +5578,14 @@ unsafe fn write_typed_encoder(buf: &mut Vec<u8>, e: *const u8) {
             }
         }
         8 => {
-            let list = tenc_i64(e, 16) as *const u8;
-            let len = *(list as *const i64) as usize;
-            let backing = *(list.add(8) as *const *const u8);
-            // Reversed storage: Elm order is index len-1 down to 0.
-            for i in (0..len).rev() {
+            // `Bytes.Encode.sequence`: flatten the (possibly chunked) encoder
+            // list to one dense backing, then write head-first. Reversed
+            // storage means Elm order is index total-1 down to 0. Elements are
+            // encoder pointers → pointer stride (4 on wasm32, 8 on native).
+            let list = tenc_i64(e, 16) as *const TList;
+            let total = alm_list_total_len(list) as usize;
+            let backing = alm_list_flatten(list, std::mem::size_of::<*const u8>() as i64);
+            for i in (0..total).rev() {
                 let child = *(backing.add(16) as *const *const u8).add(i);
                 write_typed_encoder(buf, child);
             }
