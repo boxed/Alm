@@ -23326,9 +23326,10 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
-        // f64 element (source is a `List Float`) and/or f64 accumulator (the
-        // fold result is a Float). Only Inline lambdas take the f64 path.
-        let src_f64 = list_elem_type(Some(&args[2].tipe)).map_or(false, f64_elem);
+        // Unboxed source element (List Int/Float — Char excluded here) and/or
+        // f64 accumulator. Only Inline lambdas take the unboxed source path.
+        let src_scalar = list_scalar(&args[2].tipe).filter(|s| !matches!(s, Scalar::I32));
+        let src_f64 = src_scalar == Some(Scalar::F64);
         let acc_f64 = f64_elem(&args[1].tipe);
         // Keep an Int accumulator unboxed in an i64 local too (only for an inline
         // lambda, whose body we can emit through the scalar `emit_i64` path — a
@@ -23341,11 +23342,11 @@ impl<'a> Codegen<'a> {
             }
             Callee::Direct(_) => false,
         };
-        if matches!(callee, Callee::Direct(_)) && (src_f64 || acc_f64) {
+        if matches!(callee, Callee::Direct(_)) && (src_scalar.is_some() || acc_f64) {
             return Ok(false);
         }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = self.build_fused_fold(&callee, rev, src_f64, acc_f64, acc_i64)?;
+        let lidx = self.build_fused_fold(&callee, rev, src_scalar, acc_f64, acc_i64)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -23366,7 +23367,7 @@ impl<'a> Codegen<'a> {
         &mut self,
         callee: &Callee,
         rev: bool,
-        src_f64: bool,
+        src_scalar: Option<Scalar>,
         acc_f64: bool,
         acc_i64: bool,
     ) -> Result<u32, String> {
@@ -23376,8 +23377,16 @@ impl<'a> Codegen<'a> {
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([]))); // reserve slot
 
-        let src_arr = if src_f64 { T_ARRF } else { T_ARR };
-        let elem_ty = if src_f64 { ValType::F64 } else { eqref() };
+        // Source element rep: F64/I64 keep the element raw in `elem` (its local
+        // rep lets the body's emit_i64/emit_f64 read it unboxed); a boxed source
+        // uses eqref. (Only F64/I64 reach here — the caller excludes Char.)
+        let src_arr = src_scalar.map(|s| s.arr()).unwrap_or(T_ARR);
+        let elem_ty = src_scalar.map(|s| s.val()).unwrap_or_else(eqref);
+        let elem_rep = match src_scalar {
+            Some(Scalar::F64) => Some(Rep::F64),
+            Some(Scalar::I64) => Some(Rep::I64),
+            _ => None,
+        };
         let mut lf = Function::new([
             (eb + 1, eqref()),    // body-binding pool + scratch_eqref
             (1, ValType::I64),    // scratch_i64
@@ -23403,8 +23412,8 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
-        if src_f64 {
-            lctx.local_rep.insert(elem, Rep::F64);
+        if let Some(r) = elem_rep {
+            lctx.local_rep.insert(elem, r);
         }
         if acc_f64 {
             lctx.local_rep.insert(af, Rep::F64);
@@ -23436,13 +23445,13 @@ impl<'a> Codegen<'a> {
             lf.instruction(&Instruction::Call(self.unbox_int_idx));
             lf.instruction(&Instruction::LocalSet(ai));
         }
-        self.flatten_local(&mut lf, xs, src_f64);
-        if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
+        self.flatten_local_scalar(&mut lf, xs, src_scalar);
+        match src_scalar { Some(s) => list_len_s(s, &mut lf, xs), None => list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
-        if src_f64 { list_data_f(&mut lf, xs) } else { list_data(&mut lf, xs) }
+        match src_scalar { Some(s) => list_data_s(s, &mut lf, xs), None => list_data(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_data));
-        if src_f64 { list_start_f(&mut lf, xs) } else { list_start(&mut lf, xs) }
+        match src_scalar { Some(s) => list_start_s(s, &mut lf, xs), None => list_start(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_start));
         if rev {
             // foldr: walk tail-first, i = len-1 downto 0.
