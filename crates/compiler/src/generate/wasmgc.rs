@@ -2067,6 +2067,7 @@ struct Codegen<'a> {
     /// an already-single-chunk list. `_f` is the unboxed `List Float` twin.
     list_flatten_idx: u32,
     list_flatten_f_idx: u32,
+    list_flatten_i_idx: u32,
     /// mangled function name -> arity (parameter count).
     func_arity: HashMap<String, u32>,
     /// Top-level functions specialized to an unboxed scalar ABI: name ->
@@ -2351,6 +2352,7 @@ impl<'a> Codegen<'a> {
             alm_event_idx: 0,
             list_flatten_idx: 0,
             list_flatten_f_idx: 0,
+            list_flatten_i_idx: 0,
             ports: HashMap::new(),
             func_arity: HashMap::new(),
             spec_fns: HashMap::new(),
@@ -2650,6 +2652,7 @@ impl<'a> Codegen<'a> {
         let alm_browser_start_idx = next();
         self.list_flatten_idx = next();
         self.list_flatten_f_idx = next();
+        self.list_flatten_i_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
@@ -2982,8 +2985,9 @@ impl<'a> Codegen<'a> {
         let parser_is_sub_string = self.emit_parser_is_sub_string();
         let parser_find_sub_string = self.emit_parser_find_sub_string();
         let alm_event = self.emit_alm_event();
-        let list_flatten = self.emit_list_flatten(false);
-        let list_flatten_f = self.emit_list_flatten(true);
+        let list_flatten = self.emit_list_flatten(None);
+        let list_flatten_f = self.emit_list_flatten(Some(Scalar::F64));
+        let list_flatten_i = self.emit_list_flatten(Some(Scalar::I64));
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
@@ -3377,6 +3381,7 @@ impl<'a> Codegen<'a> {
         funcs.function(json_void_ty); // alm_browser_start
         funcs.function(ft1); // list_flatten
         funcs.function(ft1); // list_flatten_f
+        funcs.function(ft1); // list_flatten_i
         let lifted_types: Vec<u32> =
             self.lifted.iter().map(|(a, _)| self.fn_types[a]).collect();
         for &t in &lifted_types {
@@ -3613,6 +3618,7 @@ impl<'a> Codegen<'a> {
         code.function(&alm_browser_start);
         code.function(&list_flatten);
         code.function(&list_flatten_f);
+        code.function(&list_flatten_i);
         for (_, body) in &self.lifted {
             code.function(body);
         }
@@ -4438,11 +4444,10 @@ impl<'a> Codegen<'a> {
     /// an already-single-chunk list (the common case); otherwise pack every
     /// chunk's live elements head-first into one fresh backing. `f64_list`
     /// selects the unboxed `List Float` types.
-    fn emit_list_flatten(&self, f64_list: bool) -> Function {
-        let (t_list, t_back, t_arr) = if f64_list {
-            (T_LISTF, T_BACKF, T_ARRF)
-        } else {
-            (T_LIST, T_BACK, T_ARR)
+    fn emit_list_flatten(&self, sc: Option<Scalar>) -> Function {
+        let (t_list, t_back, t_arr, empty) = match sc {
+            Some(s) => (s.list(), s.back(), s.arr(), s.empty()),
+            None => (T_LIST, T_BACK, T_ARR, G_EMPTY_LIST),
         };
         // param l(0). locals: total(1) i32, cur(2) eqref, ndata(3) ref null t_arr,
         // pos(4) i32, clen(5) i32.
@@ -4559,7 +4564,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::StructNew(t_back));
-        f.instruction(&Instruction::GlobalGet(if f64_list { G_EMPTY_LISTF } else { G_EMPTY_LIST }));
+        f.instruction(&Instruction::GlobalGet(empty));
         f.instruction(&Instruction::StructNew(t_list));
         f.instruction(&Instruction::End);
         f
@@ -4574,6 +4579,20 @@ impl<'a> Codegen<'a> {
         } else {
             self.list_flatten_idx
         }));
+        f.instruction(&Instruction::LocalSet(local));
+    }
+
+    /// Flatten a list local in place, choosing the flatten fn by scalar rep
+    /// (`None` = the boxed backing). Char (I32) not yet wired — falls back to
+    /// boxed, which is correct since charlist stays gated off.
+    fn flatten_local_scalar(&self, f: &mut Function, local: u32, sc: Option<Scalar>) {
+        let idx = match sc {
+            Some(Scalar::F64) => self.list_flatten_f_idx,
+            Some(Scalar::I64) => self.list_flatten_i_idx,
+            _ => self.list_flatten_idx,
+        };
+        f.instruction(&Instruction::LocalGet(local));
+        f.instruction(&Instruction::Call(idx));
         f.instruction(&Instruction::LocalSet(local));
     }
 
