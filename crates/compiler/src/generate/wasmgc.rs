@@ -1558,9 +1558,13 @@ fn widen_listf_local(widen_idx: Option<u32>, slot: u32, f: &mut Function) {
     }
 }
 
-/// Empty unboxed `List Float` (`T_LISTF{0, null}`).
+/// Empty unboxed scalar list (`{0, null, null}` of the right rep).
+fn push_empty_scalar(s: Scalar, f: &mut Function) {
+    f.instruction(&Instruction::GlobalGet(s.empty()));
+}
+/// Empty unboxed `List Float` (`T_LISTF{0, null, null}`).
 fn push_empty_listf(f: &mut Function) {
-    f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
+    push_empty_scalar(Scalar::F64, f)
 }
 
 /// A canonical dedup key for a type, used to share `Debug.toString` renderers.
@@ -22175,6 +22179,38 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(s));
         f.instruction(&Instruction::StructNew(T_INT));
         f.instruction(&Instruction::End);
+    }
+
+    /// Box a raw scalar on the stack into a generic `eqref` value: Char (i32
+    /// code point) → i31ref, Int (i64) → box_int (i31 / T_INT), Float (f64) →
+    /// T_FLOAT. Used at generic boundaries and when binding a list head to a var.
+    fn box_scalar(&self, s: Scalar, f: &mut Function) {
+        match s {
+            Scalar::I32 => f.instruction(&Instruction::RefI31),
+            Scalar::I64 => f.instruction(&Instruction::Call(self.box_int_idx)),
+            Scalar::F64 => f.instruction(&Instruction::StructNew(T_FLOAT)),
+        };
+    }
+
+    /// Unbox a generic `eqref` value on the stack into its raw scalar: the
+    /// inverse of `box_scalar`. Char code points are non-negative (`I31GetU`).
+    fn unbox_scalar(&self, s: Scalar, f: &mut Function) {
+        match s {
+            Scalar::I32 => {
+                f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
+                    shared: false,
+                    ty: AbstractHeapType::I31,
+                }));
+                f.instruction(&Instruction::I31GetU);
+            }
+            Scalar::I64 => {
+                f.instruction(&Instruction::Call(self.unbox_int_idx));
+            }
+            Scalar::F64 => {
+                f.instruction(&cast_to(T_FLOAT));
+                f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+            }
+        }
     }
 
     /// Emit a `Char`-typed expression, leaving its unboxed code point (`i32`).
