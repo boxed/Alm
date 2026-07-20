@@ -693,7 +693,7 @@ fn list_kind(tipe: &can::Type) -> Rep {
 /// paths are wired up incrementally; flipped on once the full path (accessors,
 /// cons, fused ops, widen/narrow, dispatch) is validated end-to-end.
 fn unbox_intlist() -> bool {
-    std::env::var_os("ALM_UNBOX_INTLIST").is_some()
+    std::env::var_os("ALM_BOX_INTLIST").is_none()
 }
 fn unbox_charlist() -> bool {
     std::env::var_os("ALM_UNBOX_CHARLIST").is_some()
@@ -6719,11 +6719,18 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// list_range(lo, hi) : `[lo, lo+1, .., hi]`.
+    /// list_range(lo, hi) : `[lo, lo+1, .., hi]`. Produces the unboxed `T_LISTI`
+    /// backing directly (raw i64 per element, no boxing) when Int-unboxing is on.
     fn emit_list_range(&self) -> Function {
+        let ints = unbox_intlist();
+        let (arr, back, list, empty) = if ints {
+            (T_ARRI, T_BACKI, T_LISTI, G_EMPTY_LISTI)
+        } else {
+            (T_ARR, T_BACK, T_LIST, G_EMPTY_LIST)
+        };
         // params lo(0), hi(1). locals: loi(2):i64, cnt(3):i64, n(4), i(5):i32,
-        //   data(6):ref T_ARR
-        let mut f = Function::new([(2, ValType::I64), (2, ValType::I32), (1, ref_to(T_ARR))]);
+        //   data(6):ref arr
+        let mut f = Function::new([(2, ValType::I64), (2, ValType::I32), (1, ref_to(arr))]);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::LocalSet(2)); // loi
@@ -6748,7 +6755,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::ArrayNewDefault(arr));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
@@ -6758,15 +6765,17 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
-        // data[i] = box(loi + i)
+        // data[i] = loi + i   (raw i64 unboxed, or boxed Int)
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::I64Add);
-        f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::ArraySet(T_ARR));
+        if !ints {
+            f.instruction(&Instruction::Call(self.box_int_idx));
+        }
+        f.instruction(&Instruction::ArraySet(arr));
         bump(&mut f, 5, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
@@ -6774,9 +6783,9 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::StructNew(back));
+        f.instruction(&Instruction::GlobalGet(empty));
+        f.instruction(&Instruction::StructNew(list));
         f.instruction(&Instruction::End);
         f
     }
@@ -9431,11 +9440,73 @@ impl<'a> Codegen<'a> {
         // params xs(0). locals: len(1),start(2),i(3):i32, data(4):ref T_ARR,
         //   iacc(5):i64, facc(6):f64
         let mut f = Function::new([
-            (3, ValType::I32),
-            (1, ref_to(T_ARR)),
-            (1, ValType::I64),
-            (1, ValType::F64),
+            (3, ValType::I32),   // len, start, i
+            (1, ref_to(T_ARR)),  // data (boxed path)
+            (1, ValType::I64),   // iacc
+            (1, ValType::F64),   // facc
+            (1, ref_to(T_ARRI)), // dataI (unboxed int path)
+            (1, ref_to(T_ARRF)), // dataF (unboxed float path)
         ]);
+        // Unboxed scalar lists: read the raw i64/f64 backing directly (these
+        // kernels are `scalar_transparent`, so the arg is NOT pre-widened).
+        for (sc, boxed_res) in [(Scalar::I64, false), (Scalar::F64, true)] {
+            if !scalar_enabled(sc) {
+                continue;
+            }
+            let (dat, mul, add) = match sc {
+                Scalar::I64 => (7u32, Instruction::I64Mul, Instruction::I64Add),
+                _ => (8u32, Instruction::F64Mul, Instruction::F64Add),
+            };
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(sc.list())));
+            f.instruction(&Instruction::If(BlockType::Empty));
+            self.flatten_local_scalar(&mut f, 0, Some(sc));
+            list_len_s(sc, &mut f, 0);
+            f.instruction(&Instruction::LocalSet(1));
+            if boxed_res {
+                f.instruction(&Instruction::F64Const((ident as f64).into()));
+                f.instruction(&Instruction::LocalSet(6));
+            } else {
+                f.instruction(&Instruction::I64Const(ident));
+                f.instruction(&Instruction::LocalSet(5));
+            }
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::If(BlockType::Empty));
+            list_data_s(sc, &mut f, 0);
+            f.instruction(&Instruction::LocalSet(dat));
+            list_start_s(sc, &mut f, 0);
+            f.instruction(&Instruction::LocalSet(2));
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::LocalSet(3));
+            f.instruction(&Instruction::Block(BlockType::Empty));
+            f.instruction(&Instruction::Loop(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I32GeS);
+            f.instruction(&Instruction::BrIf(1));
+            f.instruction(&Instruction::LocalGet(if boxed_res { 6 } else { 5 }));
+            f.instruction(&Instruction::LocalGet(dat));
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::ArrayGet(sc.arr()));
+            f.instruction(if product { &mul } else { &add });
+            f.instruction(&Instruction::LocalSet(if boxed_res { 6 } else { 5 }));
+            bump(&mut f, 3, 1);
+            f.instruction(&Instruction::Br(0));
+            f.instruction(&Instruction::End); // loop
+            f.instruction(&Instruction::End); // block
+            f.instruction(&Instruction::End); // if len
+            if boxed_res {
+                f.instruction(&Instruction::LocalGet(6));
+                f.instruction(&Instruction::StructNew(T_FLOAT));
+            } else {
+                f.instruction(&Instruction::LocalGet(5));
+                f.instruction(&Instruction::Call(self.box_int_idx));
+            }
+            f.instruction(&Instruction::Return);
+            f.instruction(&Instruction::End); // if T_LIST{sc}
+        }
         self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
@@ -22485,6 +22556,13 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(l, ctx, f)?;
                 self.emit_expr(r, ctx, f)?;
                 f.instruction(&Instruction::Call(self.list_append_idx));
+                // list_append widens its scalar args and returns a boxed T_LIST;
+                // canonicalize back to the unboxed rep so downstream scalar
+                // consumers see the expected type.
+                if let Some(sc) = list_scalar(&l.tipe) {
+                    let narrow = self.scalar_narrow(sc);
+                    f.instruction(&Instruction::Call(narrow));
+                }
             }
             "::" => {
                 if let Some(sc) = list_scalar(&r.tipe).filter(|s| !matches!(s, Scalar::I32)) {
@@ -25180,9 +25258,12 @@ impl<'a> Codegen<'a> {
         // below cast to `T_LIST`. Pre-widen each float-list arg into a boxed
         // local and substitute a `Local` ref so the kernel bodies are unchanged
         // (the slots are reserved by `count_bindings`). No-op with the flag off.
+        // Scalar-transparent kernels read the unboxed backing directly, so their
+        // args must NOT be pre-widened (that would box the whole list back).
+        let scalar_transparent = matches!((module, name), ("List", "sum") | ("List", "product"));
         let widened: Vec<TypedExpr>;
         let args: &[TypedExpr] =
-            if args.iter().any(|a| list_scalar(&a.tipe).is_some()) {
+            if !scalar_transparent && args.iter().any(|a| list_scalar(&a.tipe).is_some()) {
                 let mut v: Vec<TypedExpr> = Vec::with_capacity(args.len());
                 for (k, a) in args.iter().enumerate() {
                     if let Some(sc) = list_scalar(&a.tipe) {
