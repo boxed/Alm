@@ -23690,17 +23690,13 @@ impl<'a> Codegen<'a> {
             Some(c) => c,
             None => return Ok(false),
         };
-        // filter preserves the element type, so source and result share a kind.
-        let f64 = list_elem_type(Some(&args[1].tipe)).map_or(false, f64_elem);
-        if matches!(callee, Callee::Direct(_)) && f64 {
+        // filter preserves the element type (Char excluded here for now).
+        let sc = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
+        if matches!(callee, Callee::Direct(_)) && sc.is_some() {
             return Ok(false);
         }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = if f64 {
-            self.build_fused_filter_f64(&callee)?
-        } else {
-            self.build_fused_filter(&callee)?
-        };
+        let lidx = self.build_fused_filter(&callee, sc)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -23709,149 +23705,37 @@ impl<'a> Codegen<'a> {
         Ok(true)
     }
 
-    /// `List.filter` over an unboxed `List Float`: forward-fill a max-size
-    /// `T_ARRF`, then tighten to the survivor count. The predicate reads the
-    /// element as raw f64 and returns a boxed `Bool` (i31), like the eqref path.
-    fn build_fused_filter_f64(&mut self, callee: &Callee) -> Result<u32, String> {
+    fn build_fused_filter(&mut self, callee: &Callee, sc: Option<Scalar>) -> Result<u32, String> {
         let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 1;
         self.fn_type(arity);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([])));
 
+        // filter preserves the element type, so source and result share `sc`.
+        let arr = sc.map(|s| s.arr()).unwrap_or(T_ARR);
+        let elem_ty = sc.map(|s| s.val()).unwrap_or_else(eqref);
+        let elem_rep = match sc {
+            Some(Scalar::F64) => Some(Rep::F64),
+            Some(Scalar::I64) => Some(Rep::I64),
+            _ => None,
+        };
         let mut lf = Function::new([
-            (eb + 1, eqref()),   // body-binding pool + scratch_eqref
+            (eb + 2, eqref()),   // body-binding pool + acc(unused) + scratch_eqref
             (1, ValType::I64),   // scratch_i64
-            (4, ValType::I32),   // len, start, i, j
-            (1, ValType::F64),   // element
-            (2, ref_to(T_ARRF)), // ndata (max), tight
+            (4, ValType::I32),   // len, start, i, w
+            (1, elem_ty),        // element (raw scalar, or eqref for a boxed list)
+            (2, ref_to(arr)),    // sdata, ndata
         ]);
         let xs = ncap;
-        let scratch_e = arity + eb;
-        let scratch_i = arity + eb + 1;
-        let l_len = arity + eb + 2;
-        let l_start = arity + eb + 3;
-        let l_i = arity + eb + 4;
-        let l_j = arity + eb + 5;
-        let elem = arity + eb + 6;
-        let l_ndata = arity + eb + 7;
-        let l_tight = arity + eb + 8;
-
-        let mut lctx = FnCtx::new();
-        lctx.next_local = arity;
-        lctx.scratch_eqref = scratch_e;
-        lctx.scratch_i64 = scratch_i;
-        lctx.local_rep.insert(elem, Rep::F64);
-        if let Callee::Inline { pnames, caps, .. } = callee {
-            for (i, name) in caps.iter().enumerate() {
-                lctx.scope.push((name.clone(), i as u32));
-            }
-            if let Some(n) = &pnames[0] {
-                lctx.scope.push((n.clone(), elem));
-            }
-        }
-
-        self.flatten_local(&mut lf, xs, true);
-        list_len_f(&mut lf, xs);
-        lf.instruction(&Instruction::LocalTee(l_len));
-        lf.instruction(&Instruction::ArrayNewDefault(T_ARRF)); // ndata = f64[len]
-        lf.instruction(&Instruction::LocalSet(l_ndata));
-        lf.instruction(&Instruction::I32Const(0));
-        lf.instruction(&Instruction::LocalSet(l_j));
-        lf.instruction(&Instruction::LocalGet(l_len));
-        lf.instruction(&Instruction::If(BlockType::Empty));
-        list_data_f(&mut lf, xs);
-        lf.instruction(&Instruction::LocalSet(l_tight)); // reuse tight slot for sdata
-        list_start_f(&mut lf, xs);
-        lf.instruction(&Instruction::LocalSet(l_start));
-        lf.instruction(&Instruction::I32Const(0));
-        lf.instruction(&Instruction::LocalSet(l_i));
-        lf.instruction(&Instruction::Block(BlockType::Empty));
-        lf.instruction(&Instruction::Loop(BlockType::Empty));
-        lf.instruction(&Instruction::LocalGet(l_i));
-        lf.instruction(&Instruction::LocalGet(l_len));
-        lf.instruction(&Instruction::I32GeS);
-        lf.instruction(&Instruction::BrIf(1));
-        // element = sdata[start + i]
-        lf.instruction(&Instruction::LocalGet(l_tight));
-        lf.instruction(&Instruction::LocalGet(l_start));
-        lf.instruction(&Instruction::LocalGet(l_i));
-        lf.instruction(&Instruction::I32Add);
-        lf.instruction(&Instruction::ArrayGet(T_ARRF));
-        lf.instruction(&Instruction::LocalSet(elem));
-        // if pred(element) then ndata[j] = element; j += 1
-        match callee {
-            Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
-            Callee::Direct(idx) => {
-                lf.instruction(&Instruction::LocalGet(elem));
-                lf.instruction(&Instruction::Call(*idx));
-            }
-        }
-        lf.instruction(&Instruction::RefCastNonNull(HeapType::Abstract {
-            shared: false,
-            ty: AbstractHeapType::I31,
-        }));
-        lf.instruction(&Instruction::I31GetS);
-        lf.instruction(&Instruction::If(BlockType::Empty));
-        lf.instruction(&Instruction::LocalGet(l_ndata));
-        lf.instruction(&Instruction::LocalGet(l_j));
-        lf.instruction(&Instruction::LocalGet(elem));
-        lf.instruction(&Instruction::ArraySet(T_ARRF));
-        bump(&mut lf, l_j, 1);
-        lf.instruction(&Instruction::End); // if pred
-        bump(&mut lf, l_i, 1);
-        lf.instruction(&Instruction::Br(0));
-        lf.instruction(&Instruction::End); // loop
-        lf.instruction(&Instruction::End); // block
-        lf.instruction(&Instruction::End); // if len
-        // tight = f64[j]; copy ndata[0..j] -> tight[0..j]
-        lf.instruction(&Instruction::LocalGet(l_j));
-        lf.instruction(&Instruction::ArrayNewDefault(T_ARRF));
-        lf.instruction(&Instruction::LocalSet(l_tight));
-        lf.instruction(&Instruction::LocalGet(l_tight));
-        lf.instruction(&Instruction::I32Const(0));
-        lf.instruction(&Instruction::LocalGet(l_ndata));
-        lf.instruction(&Instruction::I32Const(0));
-        lf.instruction(&Instruction::LocalGet(l_j));
-        lf.instruction(&Instruction::ArrayCopy {
-            array_type_index_dst: T_ARRF,
-            array_type_index_src: T_ARRF,
-        });
-        // wrap {j, {head=0, tight}}
-        lf.instruction(&Instruction::LocalGet(l_j));
-        lf.instruction(&Instruction::I32Const(0));
-        lf.instruction(&Instruction::LocalGet(l_tight));
-        lf.instruction(&Instruction::StructNew(T_BACKF));
-        lf.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
-        lf.instruction(&Instruction::StructNew(T_LISTF));
-        lf.instruction(&Instruction::End); // function
-        let slot = (lidx - self.lifted_base) as usize;
-        self.lifted[slot] = (arity, lf);
-        Ok(lidx)
-    }
-
-    fn build_fused_filter(&mut self, callee: &Callee) -> Result<u32, String> {
-        let (ncap, eb) = callee_dims(callee);
-        let arity = ncap + 1;
-        self.fn_type(arity);
-        let lidx = self.lifted_base + self.lifted.len() as u32;
-        self.lifted.push((arity, Function::new([])));
-
-        let mut lf = Function::new([
-            (eb + 3, eqref()),  // body-binding pool + element + acc(unused) + scratch_eqref
-            (1, ValType::I64),  // scratch_i64
-            (4, ValType::I32),  // len, start, i, w
-            (2, ref_to(T_ARR)), // sdata, ndata
-        ]);
-        let xs = ncap;
-        let elem = arity + eb;
-        let _acc = arity + eb + 1;
-        let scratch_e = arity + eb + 2;
-        let scratch_i = arity + eb + 3;
-        let l_len = arity + eb + 4;
-        let l_start = arity + eb + 5;
-        let l_i = arity + eb + 6;
-        let l_w = arity + eb + 7;
+        let _acc = arity + eb;
+        let scratch_e = arity + eb + 1;
+        let scratch_i = arity + eb + 2;
+        let l_len = arity + eb + 3;
+        let l_start = arity + eb + 4;
+        let l_i = arity + eb + 5;
+        let l_w = arity + eb + 6;
+        let elem = arity + eb + 7;
         let l_sdata = arity + eb + 8;
         let l_ndata = arity + eb + 9;
 
@@ -23859,6 +23743,9 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
+        if let Some(r) = elem_rep {
+            lctx.local_rep.insert(elem, r);
+        }
         if let Callee::Inline { pnames, caps, .. } = callee {
             for (i, name) in caps.iter().enumerate() {
                 lctx.scope.push((name.clone(), i as u32));
@@ -23873,21 +23760,21 @@ impl<'a> Codegen<'a> {
         // writing kept elements into a cursor descending from the top, so they
         // land head-first at the tail `data[w..len]` — the layout
         // `list_start = cap - len` expects, with `head = start = w`.
-        self.flatten_local(&mut lf, xs, false);
-        list_len(&mut lf, xs);
+        self.flatten_local_scalar(&mut lf, xs, sc);
+        match sc { Some(s) => list_len_s(s, &mut lf, xs), None => list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_len));
-        // ndata = new T_ARR[len]
+        // ndata = new arr[len]
         lf.instruction(&Instruction::LocalGet(l_len));
-        lf.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        lf.instruction(&Instruction::ArrayNewDefault(arr));
         lf.instruction(&Instruction::LocalSet(l_ndata));
         // w = len (write cursor, pre-decremented before each write)
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::LocalSet(l_w));
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut lf, xs);
+        match sc { Some(s) => list_data_s(s, &mut lf, xs), None => list_data(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_sdata));
-        list_start(&mut lf, xs);
+        match sc { Some(s) => list_start_s(s, &mut lf, xs), None => list_start(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_start));
         // i = len-1 downto 0
         lf.instruction(&Instruction::LocalGet(l_len));
@@ -23905,9 +23792,9 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::LocalGet(l_start));
         lf.instruction(&Instruction::LocalGet(l_i));
         lf.instruction(&Instruction::I32Add);
-        lf.instruction(&Instruction::ArrayGet(T_ARR));
+        lf.instruction(&Instruction::ArrayGet(arr));
         lf.instruction(&Instruction::LocalSet(elem));
-        // if callee(element) then acc = cons(element, acc)
+        // if callee(element): ndata[--w] = element
         match callee {
             Callee::Inline { body, .. } => self.emit_expr(body, &mut lctx, &mut lf)?,
             Callee::Direct(idx) => {
@@ -23921,27 +23808,30 @@ impl<'a> Codegen<'a> {
         }));
         lf.instruction(&Instruction::I31GetS);
         lf.instruction(&Instruction::If(BlockType::Empty));
-        // ndata[--w] = element
         bump(&mut lf, l_w, -1);
         lf.instruction(&Instruction::LocalGet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_w));
         lf.instruction(&Instruction::LocalGet(elem));
-        lf.instruction(&Instruction::ArraySet(T_ARR));
+        lf.instruction(&Instruction::ArraySet(arr));
         lf.instruction(&Instruction::End); // if pred
         bump(&mut lf, l_i, -1);
         lf.instruction(&Instruction::Br(0));
         lf.instruction(&Instruction::End); // loop
         lf.instruction(&Instruction::End); // block
         lf.instruction(&Instruction::End); // if len
-        // wrap: T_LIST{ len: len-w, bk: T_BACK{ head: w, data: ndata }, next: [] }
+        // wrap: {len-w, {head:w, ndata}, []}
+        let (b, e, l) = match sc {
+            Some(s) => (s.back(), s.empty(), s.list()),
+            None => (T_BACK, G_EMPTY_LIST, T_LIST),
+        };
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::LocalGet(l_w));
         lf.instruction(&Instruction::I32Sub);
         lf.instruction(&Instruction::LocalGet(l_w));
         lf.instruction(&Instruction::LocalGet(l_ndata));
-        lf.instruction(&Instruction::StructNew(T_BACK));
-        lf.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        lf.instruction(&Instruction::StructNew(T_LIST));
+        lf.instruction(&Instruction::StructNew(b));
+        lf.instruction(&Instruction::GlobalGet(e));
+        lf.instruction(&Instruction::StructNew(l));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);
