@@ -689,10 +689,40 @@ fn list_kind(tipe: &can::Type) -> Rep {
     }
 }
 
+/// Dev gates for the newer scalar-list reps. Default OFF while the Int/Char
+/// paths are wired up incrementally; flipped on once the full path (accessors,
+/// cons, fused ops, widen/narrow, dispatch) is validated end-to-end.
+fn unbox_intlist() -> bool {
+    std::env::var_os("ALM_UNBOX_INTLIST").is_some()
+}
+fn unbox_charlist() -> bool {
+    std::env::var_os("ALM_UNBOX_CHARLIST").is_some()
+}
+
+/// The unboxed `Scalar` backing an element type maps to, when that rep is
+/// enabled: Float→F64, Int→I64, Char→I32. `None` = the boxed eqref backing.
+/// Single source of truth for the rep decision.
+fn scalar_of(tipe: &can::Type) -> Option<Scalar> {
+    if unbox_floatlist() && is_named_type(tipe, "Float") {
+        Some(Scalar::F64)
+    } else if unbox_intlist() && is_named_type(tipe, "Int") {
+        Some(Scalar::I64)
+    } else if unbox_charlist() && is_named_type(tipe, "Char") {
+        Some(Scalar::I32)
+    } else {
+        None
+    }
+}
+
+/// The `Scalar` backing a `List a`'s elements, when unboxed; else `None`.
+fn list_scalar(tipe: &can::Type) -> Option<Scalar> {
+    list_elem_type(Some(tipe)).and_then(scalar_of)
+}
+
 /// Whether an element of type `tipe` uses the unboxed f64 slot (a `Float`, when
 /// unboxing is enabled).
 fn f64_elem(tipe: &can::Type) -> bool {
-    unbox_floatlist() && is_float(tipe)
+    scalar_of(tipe) == Some(Scalar::F64)
 }
 
 /// Opaque kernel types with no exposed constructors — elm's `Debug.toString`
