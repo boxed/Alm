@@ -93,7 +93,7 @@
   <div class="lede">
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Allocation &amp; collections</p>
-      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–2.6×</strong> faster than the JS backend — the compact heap layout and the engine's GC beat JS object churn.</p>
+      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–3×</strong> faster than the JS backend — the compact heap layout and the engine's GC beat JS object churn.</p>
     </div>
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Scalar &amp; float</p>
@@ -115,15 +115,15 @@
   // ms = median across runs; spd = js/wasm (>1 wasm faster). native for reference.
   const GROUPS = [
     { title: "allocation & collection heavy", rows: [
-      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 24.7, wasm: 10.0, native: 3.1 },
-      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.8, wasm: 14.6, native: 10.3 },
-      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.3, wasm: 21.4, native: 33.4 },
-      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.4, wasm: 8.2, native: 8.3 },
+      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 29.0, wasm: 9.2, native: 2.5 },
+      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.4, wasm: 13.9, native: 10.1 },
+      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.0, wasm: 21.3, native: 32.0 },
+      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.3, wasm: 8.2, native: 7.9 },
     ]},
     { title: "scalar & float", rows: [
-      { op: "fib (naive recursion)",     sub: "fib 35",             js: 45.7, wasm: 23.4, native: 14.0 },
-      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.6, wasm: 5.2, native: 6.0 },
-      { op: "float-list sum",            sub: "1,000,000 floats",   js: 46.3, wasm: 4.0, native: 2.5 },
+      { op: "fib (naive recursion)",     sub: "fib 35",             js: 47.8, wasm: 23.2, native: 13.8 },
+      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.7, wasm: 5.3, native: 6.1 },
+      { op: "float-list sum",            sub: "1,000,000 floats",   js: 27.4, wasm: 3.9, native: 2.1 },
     ]},
   ];
 
