@@ -23578,10 +23578,30 @@ impl<'a> Codegen<'a> {
                     return None;
                 }
                 let mut pnames: Vec<Option<String>> = Vec::with_capacity(nparams);
-                for (p, _) in params {
+                let mut elem_fields: Option<Vec<Option<String>>> = None;
+                for (i, (p, _)) in params.iter().enumerate() {
                     match &p.value {
                         can::Pattern_::Var(n) => pnames.push(Some(n.to_string())),
                         can::Pattern_::Anything => pnames.push(None),
+                        // A flat tuple pattern on the *element* param (index 0):
+                        // record its field names so the SoA columnar fold can
+                        // bind them to raw columns. Sub-patterns must be plain
+                        // vars/wildcards (no nested destructuring here).
+                        can::Pattern_::Tuple(a, b, rest) if i == 0 => {
+                            let mut fields = Vec::with_capacity(2 + rest.len());
+                            for sp in std::iter::once(&**a)
+                                .chain(std::iter::once(&**b))
+                                .chain(rest.iter())
+                            {
+                                match &sp.value {
+                                    can::Pattern_::Var(n) => fields.push(Some(n.to_string())),
+                                    can::Pattern_::Anything => fields.push(None),
+                                    _ => return None,
+                                }
+                            }
+                            elem_fields = Some(fields);
+                            pnames.push(None);
+                        }
                         _ => return None,
                     }
                 }
@@ -23595,6 +23615,9 @@ impl<'a> Codegen<'a> {
                 for n in pnames.iter().flatten() {
                     bound.insert(n.clone());
                 }
+                for n in elem_fields.iter().flatten().flatten() {
+                    bound.insert(n.clone());
+                }
                 let mut free = Vec::new();
                 free_locals(body, &bound, &mut free);
                 // Every free local must be a plain eqref local in scope. A
@@ -23606,7 +23629,7 @@ impl<'a> Codegen<'a> {
                         _ => return None,
                     }
                 }
-                Some(Callee::Inline { pnames, body, caps: free })
+                Some(Callee::Inline { pnames, elem_fields, body, caps: free })
             }
             // A named top-level function: direct-call it, skipping apply1. Bail
             // on a specialized (unboxed i64/f64 ABI) callee — its wasm signature
@@ -23649,8 +23672,31 @@ impl<'a> Codegen<'a> {
         if list_scalar(&args[2].tipe) == Some(Scalar::I32) {
             return Ok(false);
         }
-        // SoA source (List of flat tuple) not fused — kernel path widens it.
-        if list_soa(&args[2].tipe).is_some() {
+        // SoA source (List of a flat scalar tuple): fuse columnar when the
+        // callee is an inline lambda destructuring the element into a tuple of
+        // the right arity; otherwise fall to the kernel (which widens).
+        if let Some(reps) = list_soa(&args[2].tipe) {
+            if let Callee::Inline { elem_fields: Some(fields), body, .. } = &callee {
+                if fields.len() == reps.len() {
+                    let acc_f64 = f64_elem(&args[1].tipe);
+                    let acc_i64 = !acc_f64 && is_named_type(&body.tipe, "Int");
+                    let cap_slots = callee_cap_slots(&callee, ctx);
+                    let lidx =
+                        self.build_fused_fold_soa(&callee, rev, &reps, fields, acc_f64, acc_i64)?;
+                    for slot in &cap_slots {
+                        f.instruction(&Instruction::LocalGet(*slot));
+                    }
+                    self.emit_expr(&args[1], ctx, f)?; // initial accumulator
+                    self.emit_expr(&args[2], ctx, f)?; // xs (SoA or boxed)
+                    f.instruction(&Instruction::Call(lidx));
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        // A tuple-destructuring element param is only inlinable via the columnar
+        // SoA path above; on a boxed list, fall to the kernel.
+        if matches!(&callee, Callee::Inline { elem_fields: Some(_), .. }) {
             return Ok(false);
         }
         // Unboxed source element (List Int/Float) and/or f64 accumulator. Only
@@ -23850,6 +23896,191 @@ impl<'a> Codegen<'a> {
         Ok(lidx)
     }
 
+    /// SoA columnar fold: the source is a `List` of a flat scalar tuple stored
+    /// as parallel unboxed columns (`reps`). The callee is an inline lambda
+    /// whose first parameter is a flat tuple pattern (`fields`); each field binds
+    /// to its raw column value (Int→i64, Float→f64, Char→i31 eqref) with no
+    /// per-element tuple materialization. The list arg is first normalized to
+    /// SoA (`soa_narrow`, idempotent), so a boxed input costs one narrow pass and
+    /// then iterates columnar; an already-SoA input (a literal, or a fused map
+    /// that emits columns) iterates directly.
+    fn build_fused_fold_soa(
+        &mut self,
+        callee: &Callee,
+        rev: bool,
+        reps: &[Scalar],
+        fields: &[Option<String>],
+        acc_f64: bool,
+        acc_i64: bool,
+    ) -> Result<u32, String> {
+        let (ncap, eb) = callee_dims(callee);
+        let arity = ncap + 2; // captures + accumulator + list
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+
+        // A Char column value lives in an eqref local (RefI31 of the code point,
+        // the backend's Char rep); Int/Float in their raw scalar local.
+        let colval_ty = |s: Scalar| if s == Scalar::I32 { eqref() } else { s.val() };
+        let mut locals: Vec<(u32, ValType)> = vec![
+            (eb + 1, eqref()),  // body-binding pool + scratch_eqref
+            (1, ValType::I64),  // scratch_i64
+            (3, ValType::I32),  // len, start, i
+            (1, ValType::F64),  // af (unboxed accumulator, iff acc_f64)
+            (1, ValType::I64),  // ai (unboxed accumulator, iff acc_i64)
+            (1, ref_to(T_ARR)), // cols (the array of column arrays)
+        ];
+        for &s in reps {
+            locals.push((1, ref_to(s.arr()))); // typed column array
+            locals.push((1, colval_ty(s))); // per-element column value
+        }
+        let mut lf = Function::new(locals);
+
+        let acc = ncap;
+        let xs = ncap + 1;
+        let scratch_e = arity + eb;
+        let scratch_i = arity + eb + 1;
+        let l_len = arity + eb + 2;
+        let l_start = arity + eb + 3;
+        let l_i = arity + eb + 4;
+        let af = arity + eb + 5;
+        let ai = arity + eb + 6;
+        let cols = arity + eb + 7;
+        let col_base = arity + eb + 8; // colarr_j = col_base+2j, colval_j = +1
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity; // body-let bindings grow into the eqref pool
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        if acc_f64 {
+            lctx.local_rep.insert(af, Rep::F64);
+        }
+        if acc_i64 {
+            lctx.local_rep.insert(ai, Rep::I64);
+        }
+        if let Callee::Inline { pnames, caps, .. } = callee {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            // pnames[0] is None here (the element param is the tuple pattern).
+            if let Some(n) = &pnames[1] {
+                let slot = if acc_f64 { af } else if acc_i64 { ai } else { acc };
+                lctx.scope.push((n.clone(), slot));
+            }
+        }
+        // Bind each tuple field name to its raw column value local.
+        for (j, fld) in fields.iter().enumerate() {
+            if let Some(n) = fld {
+                let cv = col_base + 2 * j as u32 + 1;
+                lctx.scope.push((n.clone(), cv));
+                match reps[j] {
+                    Scalar::I64 => {
+                        lctx.local_rep.insert(cv, Rep::I64);
+                    }
+                    Scalar::F64 => {
+                        lctx.local_rep.insert(cv, Rep::F64);
+                    }
+                    Scalar::I32 => {} // Char stays eqref
+                }
+            }
+        }
+
+        // Unbox the initial accumulator once.
+        if acc_f64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&cast_to(T_FLOAT));
+            lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+            lf.instruction(&Instruction::LocalSet(af));
+        } else if acc_i64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&Instruction::Call(self.unbox_int_idx));
+            lf.instruction(&Instruction::LocalSet(ai));
+        }
+        // Normalize the source to SoA (no-op if already SoA).
+        let narrow = self.soa_narrow(reps);
+        lf.instruction(&Instruction::LocalGet(xs));
+        lf.instruction(&Instruction::Call(narrow));
+        lf.instruction(&Instruction::LocalSet(xs));
+        soa_len(&mut lf, xs);
+        lf.instruction(&Instruction::LocalTee(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        soa_cols_arr(&mut lf, xs);
+        lf.instruction(&Instruction::LocalSet(cols));
+        for (j, &s) in reps.iter().enumerate() {
+            lf.instruction(&Instruction::LocalGet(cols));
+            lf.instruction(&Instruction::I32Const(j as i32));
+            lf.instruction(&Instruction::ArrayGet(T_ARR));
+            lf.instruction(&cast_to(s.arr()));
+            lf.instruction(&Instruction::LocalSet(col_base + 2 * j as u32));
+        }
+        soa_start(&mut lf, xs, cols, reps[0]);
+        lf.instruction(&Instruction::LocalSet(l_start));
+        if rev {
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32Const(1));
+            lf.instruction(&Instruction::I32Sub);
+        } else {
+            lf.instruction(&Instruction::I32Const(0));
+        }
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        if rev {
+            lf.instruction(&Instruction::I32Const(0));
+            lf.instruction(&Instruction::I32LtS);
+        } else {
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32GeS);
+        }
+        lf.instruction(&Instruction::BrIf(1));
+        // Read each column at pos = start + i into its value local.
+        for (j, &s) in reps.iter().enumerate() {
+            lf.instruction(&Instruction::LocalGet(col_base + 2 * j as u32));
+            lf.instruction(&Instruction::LocalGet(l_start));
+            lf.instruction(&Instruction::LocalGet(l_i));
+            lf.instruction(&Instruction::I32Add);
+            lf.instruction(&Instruction::ArrayGet(s.arr()));
+            if s == Scalar::I32 {
+                lf.instruction(&Instruction::RefI31); // code point -> Char eqref
+            }
+            lf.instruction(&Instruction::LocalSet(col_base + 2 * j as u32 + 1));
+        }
+        // accumulator = body(fields.., accumulator)
+        let body = match callee {
+            Callee::Inline { body, .. } => body,
+            Callee::Direct(_) => return Err("wasmgc: SoA fold requires an inline callee".into()),
+        };
+        if acc_f64 {
+            self.emit_f64(body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(af));
+        } else if acc_i64 {
+            self.emit_i64(body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(ai));
+        } else {
+            self.emit_expr(body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(acc));
+        }
+        bump(&mut lf, l_i, if rev { -1 } else { 1 });
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if
+        if acc_f64 {
+            lf.instruction(&Instruction::LocalGet(af));
+            lf.instruction(&Instruction::StructNew(T_FLOAT));
+        } else if acc_i64 {
+            lf.instruction(&Instruction::LocalGet(ai));
+            lf.instruction(&Instruction::Call(self.box_int_idx));
+        } else {
+            lf.instruction(&Instruction::LocalGet(acc));
+        }
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
     /// Fuse `List.map callee xs` when `callee` resolves to a known small
     /// function: synthesize a lifted `(caps.., xs) -> list` loop that inlines
     /// the callee body into the result-array store, skipping per-element
@@ -23875,8 +24106,11 @@ impl<'a> Codegen<'a> {
             return Ok(false);
         }
         // SoA source or SoA result (List of flat tuple) not fused — kernel path.
+        // A tuple-destructuring element param also bails (map has no columnar
+        // path yet).
         if list_soa(&args[1].tipe).is_some()
             || matches!(&callee, Callee::Inline { body, .. } if unbox_soa() && soa_cols(&body.tipe).is_some())
+            || matches!(&callee, Callee::Inline { elem_fields: Some(_), .. })
         {
             return Ok(false);
         }
@@ -24033,8 +24267,10 @@ impl<'a> Codegen<'a> {
         if list_scalar(&args[1].tipe) == Some(Scalar::I32) {
             return Ok(false);
         }
-        // SoA source not fused — kernel path widens it.
-        if list_soa(&args[1].tipe).is_some() {
+        // SoA source, or a tuple-destructuring element param, not fused here.
+        if list_soa(&args[1].tipe).is_some()
+            || matches!(&callee, Callee::Inline { elem_fields: Some(_), .. })
+        {
             return Ok(false);
         }
         // filter preserves the element type.
@@ -28801,7 +29037,11 @@ enum Callee<'e> {
     /// parameters (`pnames`, `None` = wildcard) to the loop's element/acc
     /// locals. `caps` are the body's free locals (bound in the enclosing
     /// scope), passed as the synth function's leading parameters.
-    Inline { pnames: Vec<Option<String>>, body: &'e TypedExpr, caps: Vec<String> },
+    /// `elem_fields` names the sub-bindings of the *first* parameter when it is
+    /// a flat tuple pattern (`\(a, b) -> ..`); in that case `pnames[0]` is
+    /// `None`. Used by the SoA columnar fold to bind each tuple field to its raw
+    /// column local instead of materializing a boxed tuple.
+    Inline { pnames: Vec<Option<String>>, elem_fields: Option<Vec<Option<String>>>, body: &'e TypedExpr, caps: Vec<String> },
     /// A known top-level function of the right arity: direct-call its index per
     /// element (no captures — top-level functions capture nothing).
     Direct(u32),
