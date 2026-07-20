@@ -1476,6 +1476,9 @@ impl Scalar {
     fn val(self) -> ValType {
         match self { Scalar::I32 => ValType::I32, Scalar::I64 => ValType::I64, Scalar::F64 => ValType::F64 }
     }
+    fn ix(self) -> usize {
+        match self { Scalar::I32 => 0, Scalar::I64 => 1, Scalar::F64 => 2 }
+    }
 }
 
 // Scalar-backed accessors, parametric over `Scalar` (I32/I64/F64) — `len` is
@@ -1824,7 +1827,9 @@ struct Codegen<'a> {
     /// (`T_LISTF`) list reps, for `List Float` at unspecialized boundaries.
     listf_widen_idx: Option<u32>,
     listf_narrow_idx: Option<u32>,
-    listf_cons_idx: Option<u32>,
+    /// Lazily-built amortized cons per scalar rep, indexed by `scalar_ix`
+    /// (I32=0, I64=1, F64=2).
+    scalar_cons_idx: [Option<u32>; 3],
     /// Lazily-lifted Test.Html introspection helpers (Elm.Kernel.HtmlAsJson):
     /// translate a vdom node / attribute into the elm/virtual-dom `$`-tagged
     /// Json.Value shape the elm-explorations/test decoder reads.
@@ -2114,7 +2119,7 @@ impl<'a> Codegen<'a> {
             apply1_idx: 0,
             listf_widen_idx: None,
             listf_narrow_idx: None,
-            listf_cons_idx: None,
+            scalar_cons_idx: [None; 3],
             htmljson_node_idx: None,
             htmljson_facts_idx: None,
             htmljson_attr_idx: None,
@@ -24045,34 +24050,42 @@ impl<'a> Codegen<'a> {
     /// O(1) — the f64 twin of `list_cons`. Params: x(0) boxed Float, xs(1)
     /// T_LISTF. Returns its function index.
     fn listf_cons(&mut self) -> u32 {
-        if let Some(i) = self.listf_cons_idx {
+        self.scalar_cons(Scalar::F64)
+    }
+
+    /// Amortized-O(1) prepend for an unboxed scalar list, parametric over
+    /// `Scalar` — the f64/i64/i32 twin of `emit_list_cons`. Fills the backing's
+    /// front slack in place when this list owns the frontmost slot, else grows a
+    /// fresh backing (geometric) and copies. `x`(0) is the boxed element, `xs`(1)
+    /// the list; returns the new list. Lazily built and cached per rep.
+    fn scalar_cons(&mut self, s: Scalar) -> u32 {
+        if let Some(i) = self.scalar_cons_idx[s.ix()] {
             return i;
         }
         self.fn_type(2);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((2, Function::new([])));
         // locals: len(2),cap(3),start(4),newcap(5),nstart(6),k(7):i32,
-        //   bk(8):ref null T_BACKF, ndata(9),odata(10):ref T_ARRF, xf(11):f64
+        //   bk(8):ref null s.back, ndata(9),odata(10):ref s.arr, xv(11):s.val
         let mut f = Function::new([
             (6, ValType::I32),
-            (1, ref_null_to(T_BACKF)),
-            (2, ref_to(T_ARRF)),
-            (1, ValType::F64),
+            (1, ref_null_to(s.back())),
+            (2, ref_to(s.arr())),
+            (1, s.val()),
         ]);
-        // xf = unbox(x)
+        // xv = unbox(x)
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        self.unbox_scalar(s, &mut f);
         f.instruction(&Instruction::LocalSet(11));
         // len = xs.len
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_LISTF));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 0 });
+        f.instruction(&cast_to(s.list()));
+        f.instruction(&Instruction::StructGet { struct_type_index: s.list(), field_index: 0 });
         f.instruction(&Instruction::LocalSet(2));
         // bk = xs.bk
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_LISTF));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_LISTF, field_index: 1 });
+        f.instruction(&cast_to(s.list()));
+        f.instruction(&Instruction::StructGet { struct_type_index: s.list(), field_index: 1 });
         f.instruction(&Instruction::LocalSet(8));
         // in-place fast path when bk != null
         f.instruction(&Instruction::LocalGet(8));
@@ -24081,8 +24094,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         // odata = bk.data
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&cast_to(T_BACKF));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 1 });
+        f.instruction(&cast_to(s.back()));
+        f.instruction(&Instruction::StructGet { struct_type_index: s.back(), field_index: 1 });
         f.instruction(&Instruction::LocalSet(10));
         // cap = odata.len; start = cap - len
         f.instruction(&Instruction::LocalGet(10));
@@ -24095,35 +24108,35 @@ impl<'a> Codegen<'a> {
         // if start == bk.head && start > 0
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&cast_to(T_BACKF));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_BACKF, field_index: 0 });
+        f.instruction(&cast_to(s.back()));
+        f.instruction(&Instruction::StructGet { struct_type_index: s.back(), field_index: 0 });
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32GtS);
         f.instruction(&Instruction::I32And);
         f.instruction(&Instruction::If(BlockType::Empty));
-        // odata[start-1] = xf
+        // odata[start-1] = xv
         f.instruction(&Instruction::LocalGet(10));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::ArraySet(T_ARRF));
+        f.instruction(&Instruction::ArraySet(s.arr()));
         // bk.head = start-1
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&cast_to(T_BACKF));
+        f.instruction(&cast_to(s.back()));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::StructSet { struct_type_index: T_BACKF, field_index: 0 });
-        // return {len+1, bk}
+        f.instruction(&Instruction::StructSet { struct_type_index: s.back(), field_index: 0 });
+        // return {len+1, bk, []}
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
-        f.instruction(&Instruction::StructNew(T_LISTF));
+        f.instruction(&Instruction::GlobalGet(s.empty()));
+        f.instruction(&Instruction::StructNew(s.list()));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -24135,7 +24148,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Mul);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::ArrayNewDefault(T_ARRF));
+        f.instruction(&Instruction::ArrayNewDefault(s.arr()));
         f.instruction(&Instruction::LocalSet(9));
         // nstart = newcap - (len+1)
         f.instruction(&Instruction::LocalGet(5));
@@ -24144,11 +24157,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalSet(6));
-        // ndata[nstart] = xf
+        // ndata[nstart] = xv
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::ArraySet(T_ARRF));
+        f.instruction(&Instruction::ArraySet(s.arr()));
         // copy old elements when bk != null
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::RefIsNull);
@@ -24173,8 +24186,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARRF));
-        f.instruction(&Instruction::ArraySet(T_ARRF));
+        f.instruction(&Instruction::ArrayGet(s.arr()));
+        f.instruction(&Instruction::ArraySet(s.arr()));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
@@ -24183,19 +24196,19 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // return {len+1, {head:nstart, data:ndata}}
+        // return {len+1, {head:nstart, data:ndata}, []}
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::StructNew(T_BACKF));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
-        f.instruction(&Instruction::StructNew(T_LISTF));
+        f.instruction(&Instruction::StructNew(s.back()));
+        f.instruction(&Instruction::GlobalGet(s.empty()));
+        f.instruction(&Instruction::StructNew(s.list()));
         f.instruction(&Instruction::End);
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (2, f);
-        self.listf_cons_idx = Some(lidx);
+        self.scalar_cons_idx[s.ix()] = Some(lidx);
         lidx
     }
 
