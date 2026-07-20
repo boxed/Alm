@@ -15448,6 +15448,7 @@ impl<'a> Codegen<'a> {
         // iterate attrs
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalSet(8)); // sub = attrs
+        self.flatten_local(&mut f, 8, false);
         list_len(&mut f, 8);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -15543,6 +15544,7 @@ impl<'a> Codegen<'a> {
         // kids
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalSet(8)); // sub = kids
+        self.flatten_local(&mut f, 8, false);
         list_len(&mut f, 8);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -15836,6 +15838,7 @@ impl<'a> Codegen<'a> {
         // --- attrs (arg1) ---
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalSet(6));
+        self.flatten_local(&mut f, 6, false);
         list_len(&mut f, 6);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -15961,6 +15964,7 @@ impl<'a> Codegen<'a> {
         // --- kids (arg2) ---
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalSet(6));
+        self.flatten_local(&mut f, 6, false);
         list_len(&mut f, 6);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -16170,6 +16174,7 @@ impl<'a> Codegen<'a> {
         // VNODE same tag: reapply new attrs (AATTR/ASTYLE; events persist)
         ctor_argn(&mut f, 2, 1);
         f.instruction(&Instruction::LocalSet(11));
+        self.flatten_local(&mut f, 11, false);
         list_len(&mut f, 11);
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
@@ -16225,6 +16230,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(10)); // old kids
         ctor_argn(&mut f, 2, 2);
         f.instruction(&Instruction::LocalSet(11)); // new kids
+        self.flatten_local(&mut f, 10, false);
+        self.flatten_local(&mut f, 11, false);
         list_len(&mut f, 10);
         f.instruction(&Instruction::LocalSet(4)); // olen
         list_len(&mut f, 11);
@@ -16326,6 +16333,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 0);
         f.instruction(&Instruction::LocalSet(4));
+        self.flatten_local(&mut f, 4, false);
         list_len(&mut f, 4);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -16768,6 +16776,7 @@ impl<'a> Codegen<'a> {
         // --- mapped attrs (node.arg1) ---
         ctor_argn(&mut f, 1, 1);
         f.instruction(&Instruction::LocalSet(6)); // reuse elem slot to hold attrs list
+        self.flatten_local(&mut f, 6, false);
         list_len(&mut f, 6);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
@@ -16820,6 +16829,7 @@ impl<'a> Codegen<'a> {
         // --- mapped kids (node.arg2), recursively ---
         ctor_argn(&mut f, 1, 2);
         f.instruction(&Instruction::LocalSet(6));
+        self.flatten_local(&mut f, 6, false);
         list_len(&mut f, 6);
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
@@ -18219,6 +18229,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(16)); // result = ""
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(10)); // lastEnd
+        self.flatten_local(&mut f, 15, false);
         list_len(&mut f, 15);
         f.instruction(&Instruction::LocalSet(12)); // len
         f.instruction(&Instruction::I32Const(0));
@@ -18975,6 +18986,7 @@ impl<'a> Codegen<'a> {
     fn emit_strip_keys(&self) -> Function {
         // param list(0). locals: len(1),i(2):i32, arr(3):ref T_ARR, elem(4):eqref
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::LocalGet(1));
@@ -19039,6 +19051,8 @@ impl<'a> Codegen<'a> {
         };
 
         // olen, nlen
+        self.flatten_local(&mut f, 1, false);
+        self.flatten_local(&mut f, 2, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         list_len(&mut f, 2);
@@ -19638,6 +19652,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 0);
         f.instruction(&Instruction::LocalSet(5));
+        self.flatten_local(&mut f, 5, false);
         list_len(&mut f, 5);
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
