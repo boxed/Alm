@@ -115,15 +115,15 @@
   // ms = median across runs; spd = js/wasm (>1 wasm faster). native for reference.
   const GROUPS = [
     { title: "allocation & collection heavy", rows: [
-      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 25.2, wasm: 9.3, native: 2.8 },
-      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.6, wasm: 14.1, native: 10.8 },
-      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.3, wasm: 21.1, native: 33.1 },
-      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.6, wasm: 8.3, native: 8.5 },
+      { op: "list map / filter / fold", sub: "1,000,000 elements", js: 24.7, wasm: 9.2, native: 2.6 },
+      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.2, wasm: 14.0, native: 10.6 },
+      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.1, wasm: 21.1, native: 31.4 },
+      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.4, wasm: 8.4, native: 8.3 },
     ]},
     { title: "scalar & float", rows: [
-      { op: "fib (naive recursion)",     sub: "fib 35",             js: 46.9, wasm: 23.9, native: 14.4 },
-      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.6, wasm: 5.3, native: 6.2 },
-      { op: "float-list sum",            sub: "1,000,000 floats",   js: 27.9, wasm: 4.3, native: 2.2 },
+      { op: "fib (naive recursion)",     sub: "fib 35",             js: 47.2, wasm: 23.3, native: 14.2 },
+      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.7, wasm: 5.3, native: 6.3 },
+      { op: "float-list sum",            sub: "1,000,000 floats",   js: 26.8, wasm: 4.1, native: 2.2 },
     ]},
   ];
 
