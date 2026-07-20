@@ -531,6 +531,7 @@ fn bytes_roundtrip_native_typed() {
         &dir.join("src/Main.elm"),
         &binary,
         generate::native::Target::Native,
+        generate::native::OptLevel::Release,
     );
     std::env::remove_var("ELM_HOME");
     res.unwrap_or_else(|errs| {
@@ -561,6 +562,7 @@ fn bytes_roundtrip_wasm() {
         &dir.join("src/Main.elm"),
         &wasm,
         generate::native::Target::Wasm,
+        generate::native::OptLevel::Release,
     );
     std::env::remove_var("ELM_HOME");
     res.unwrap_or_else(|errs| {

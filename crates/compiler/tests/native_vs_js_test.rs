@@ -38,7 +38,7 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
 
     let program = ir::lower::lower_project(&checked.modules);
     let binary = dir.join("test");
-    generate::native::build(&program, &binary, generate::native::Target::Native)
+    generate::native::build(&program, &binary, generate::native::Target::Native, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| panic!("native build failed: {}", e));
     let native_out = run_command(&mut Command::new(&binary), "native binary");
 

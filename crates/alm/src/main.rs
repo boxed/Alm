@@ -21,7 +21,7 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed] [--source-maps]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed] [--source-maps] [--dev]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -33,7 +33,7 @@ fn print_help() {
 }
 
 fn make(args: &[String]) -> ExitCode {
-    use alm_compiler::generate::native::Target;
+    use alm_compiler::generate::native::{OptLevel, Target};
     #[derive(PartialEq)]
     enum Backend {
         Js,
@@ -47,11 +47,16 @@ fn make(args: &[String]) -> ExitCode {
     let mut output: Option<PathBuf> = None;
     let mut backend = Backend::Js;
     let mut source_maps = false;
+    // Native/wasm only: skip LLVM's `O2` pipeline (the ~98% of native build time)
+    // for fast dev iteration, at the cost of runtime speed. No effect on js/wasm-gc.
+    let mut opt = OptLevel::Release;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
         } else if arg == "--source-maps" {
             source_maps = true;
+        } else if arg == "--dev" {
+            opt = OptLevel::Debug;
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
@@ -91,12 +96,14 @@ fn make(args: &[String]) -> ExitCode {
         Backend::Native(target) => {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
-            alm_compiler::project::compile_project_native(&input, &output, target).map(|()| output)
+            alm_compiler::project::compile_project_native(&input, &output, target, opt)
+                .map(|()| output)
         }
         Backend::Typed(target) => {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
-            alm_compiler::project::compile_project_typed(&input, &output, target).map(|()| output)
+            alm_compiler::project::compile_project_typed(&input, &output, target, opt)
+                .map(|()| output)
         }
         Backend::WasmGc => {
             let output = output.unwrap_or_else(|| input.with_extension("wasm"));

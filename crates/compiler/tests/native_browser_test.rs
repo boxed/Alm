@@ -90,7 +90,7 @@ fn run_steps(
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("write bundle");
 
     let wasm = dir.join("app.wasm");
-    project::compile_project_typed(&entry, &wasm, generate::native::Target::Wasm)
+    project::compile_project_typed(&entry, &wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| {
             panic!(
                 "wasm build failed:\n{}",

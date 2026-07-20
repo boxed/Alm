@@ -40,6 +40,7 @@ pub fn build(
     output: &Path,
     target: Target,
     ports: HashMap<String, bool>,
+    opt: native::OptLevel,
 ) -> Result<(), String> {
     let context = Context::create();
     let mut cg = TypedCodegen::new(&context, layouts);
@@ -51,7 +52,7 @@ pub fn build(
     cg.module
         .verify()
         .map_err(|e| format!("internal error: generated invalid typed IR:\n{}", e))?;
-    native::finish(&cg.module, &context, output, target)
+    native::finish(&cg.module, &context, output, target, opt)
 }
 
 struct TypedCodegen<'ctx, 'l> {

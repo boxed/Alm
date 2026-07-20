@@ -29,7 +29,7 @@ fn run_native(test_name: &str, source: &str) -> String {
     });
     let program = ir::lower::lower_project(&checked.modules);
     let binary: PathBuf = dir.join("test");
-    generate::native::build(&program, &binary, generate::native::Target::Native)
+    generate::native::build(&program, &binary, generate::native::Target::Native, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| panic!("native build failed: {}", e));
 
     let output = Command::new(&binary).output().expect("run binary");

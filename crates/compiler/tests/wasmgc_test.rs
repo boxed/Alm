@@ -124,7 +124,7 @@ fn run(cmd: &mut Command) -> String {
 /// The binary is run under `timeout` since native code is uncapped.
 fn native_out(entry: &std::path::Path, dir: &std::path::Path) -> Option<String> {
     let bin = dir.join("native_app");
-    match project::compile_project_typed(entry, &bin, generate::native::Target::Native) {
+    match project::compile_project_typed(entry, &bin, generate::native::Target::Native, generate::native::OptLevel::Release) {
         Ok(()) => {
             let out = Command::new("timeout")
                 .arg("30")

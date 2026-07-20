@@ -127,10 +127,11 @@ pub fn compile_project_native(
     entry: &Path,
     output: &Path,
     target: generate::native::Target,
+    opt: generate::native::OptLevel,
 ) -> Result<(), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let program = crate::ir::lower::lower_project(&checked.modules);
-    generate::native::build(&program, output, target).map_err(|message| {
+    generate::native::build(&program, output, target, opt).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),
@@ -157,6 +158,7 @@ pub fn compile_project_typed(
     entry: &Path,
     output: &Path,
     target: generate::native::Target,
+    opt: generate::native::OptLevel,
 ) -> Result<(), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let empty_types = HashMap::new();
@@ -208,7 +210,7 @@ pub fn compile_project_typed(
             ports.insert(port.name.to_string(), outgoing);
         }
     }
-    generate::typed::build(&program, &layouts, output, target, ports).map_err(|message| {
+    generate::typed::build(&program, &layouts, output, target, ports, opt).map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
             String::new(),

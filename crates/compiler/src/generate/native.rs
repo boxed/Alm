@@ -69,8 +69,36 @@ pub enum Target {
     Wasm,
 }
 
+/// How hard LLVM should optimize. The LLVM stage (a single-module `O2` pass over
+/// the whole monomorphized program) dominates native build time — ~98% of it on
+/// a real app — so `Debug` trades runtime speed for a much faster build, the way
+/// a native toolchain's debug profile does. `Release` is the default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    /// `O0`: minimal passes, fastest build. For dev iteration.
+    Debug,
+    /// `O2`: full pipeline, fastest runtime. The default.
+    Release,
+}
+
+impl OptLevel {
+    fn machine_level(self) -> OptimizationLevel {
+        match self {
+            OptLevel::Debug => OptimizationLevel::None,
+            OptLevel::Release => OptimizationLevel::Default,
+        }
+    }
+    /// The new-pass-manager pipeline string for `run_passes`.
+    fn pass_pipeline(self) -> &'static str {
+        match self {
+            OptLevel::Debug => "default<O0>",
+            OptLevel::Release => "default<O2>",
+        }
+    }
+}
+
 /// Compile `program` into an executable (native) or `.wasm` module at `output`.
-pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), String> {
+pub fn build(program: &Program, output: &Path, target: Target, opt: OptLevel) -> Result<(), String> {
     let context = Context::create();
     let mut cg = Codegen::new(&context);
     cg.emit_program(program);
@@ -79,7 +107,7 @@ pub fn build(program: &Program, output: &Path, target: Target) -> Result<(), Str
         .verify()
         .map_err(|e| format!("internal error: generated invalid LLVM IR:\n{}", e))?;
 
-    finish(&cg.module, &context, output, target)
+    finish(&cg.module, &context, output, target, opt)
 }
 
 /// Shared back half of every native/wasm build: pick the target machine,
@@ -91,6 +119,7 @@ pub(crate) fn finish<'ctx>(
     context: &'ctx Context,
     output: &Path,
     target: Target,
+    opt: OptLevel,
 ) -> Result<(), String> {
     let (triple, machine) = match target {
         Target::Native => {
@@ -107,7 +136,7 @@ pub(crate) fn finish<'ctx>(
                     &triple,
                     cpu.to_str().unwrap(),
                     features.to_str().unwrap(),
-                    OptimizationLevel::Default,
+                    opt.machine_level(),
                     RelocMode::PIC,
                     CodeModel::Default,
                 )
@@ -123,7 +152,7 @@ pub(crate) fn finish<'ctx>(
                     &triple,
                     "generic",
                     "",
-                    OptimizationLevel::Default,
+                    opt.machine_level(),
                     RelocMode::Static,
                     CodeModel::Default,
                 )
@@ -235,7 +264,7 @@ pub(crate) fn finish<'ctx>(
     // runtime merged in, this inlines it into the generated code.
     module
         .run_passes(
-            "default<O2>",
+            opt.pass_pipeline(),
             &machine,
             inkwell::passes::PassBuilderOptions::create(),
         )

@@ -58,13 +58,13 @@ fn run_both(test_name: &str, source: &str) -> (String, String, String) {
     // Uniform wasm backend, via node's WASI.
     let program = ir::lower::lower_project(&checked.modules);
     let uniform_wasm = dir.join("uniform.wasm");
-    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm)
+    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| panic!("uniform wasm build failed: {}", e));
     let uniform_out = run_wasm(&dir, &uniform_wasm);
 
     // Typed wasm backend (what `--target=wasm` produces).
     let typed_wasm = dir.join("typed.wasm");
-    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm)
+    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| {
             panic!(
                 "typed wasm build failed:\n{}",
@@ -101,12 +101,12 @@ fn run_worker_wasm(test_name: &str, source: &str) -> String {
     // Uniform wasm.
     let program = ir::lower::lower_project(&checked.modules);
     let uniform_wasm = dir.join("uniform.wasm");
-    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm)
+    generate::native::build(&program, &uniform_wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| panic!("uniform wasm build failed: {}", e));
     let uniform_out = run_wasm(&dir, &uniform_wasm);
     // Typed wasm (the `--target=wasm` default) must agree.
     let typed_wasm = dir.join("typed.wasm");
-    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm)
+    project::compile_project_typed(&entry, &typed_wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| {
             panic!(
                 "typed wasm build failed:\n{}",
@@ -232,7 +232,7 @@ fn wasm_has_dwarf_line_table() {
     .expect("write fixture");
 
     let wasm = dir.join("test.wasm");
-    project::compile_project_typed(&entry, &wasm, generate::native::Target::Wasm)
+    project::compile_project_typed(&entry, &wasm, generate::native::Target::Wasm, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| {
             panic!(
                 "typed wasm build failed:\n{}",

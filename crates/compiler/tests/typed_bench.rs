@@ -101,13 +101,13 @@ fn bench_one(label: &str, src: &str) {
     // Uniform native
     let program = lower::lower_project(std::slice::from_ref(&canonical));
     let uni = dir.join("uniform");
-    native::build(&program, &uni, Target::Native).unwrap();
+    native::build(&program, &uni, Target::Native, native::OptLevel::Release).unwrap();
 
     // Typed native
     let mono = mono::specialize_program(&canonical, &checked.types, &checked.node_types);
     let layouts = LayoutCtx::new(&canonical);
     let typ = dir.join("typed");
-    typed::build(&mono, &layouts, &typ, Target::Native, std::collections::HashMap::new()).unwrap();
+    typed::build(&mono, &layouts, &typ, Target::Native, std::collections::HashMap::new(), native::OptLevel::Release).unwrap();
 
     // Correctness first: all three agree.
     let expect = String::from_utf8_lossy(&node.output().unwrap().stdout)

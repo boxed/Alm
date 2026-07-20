@@ -36,7 +36,7 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
     let program = mono::specialize_program(&canonical, &checked.types, &checked.node_types);
     let layouts = LayoutCtx::new(&canonical);
     let binary = dir.join(test_name);
-    typed::build(&program, &layouts, &binary, Target::Native, std::collections::HashMap::new())
+    typed::build(&program, &layouts, &binary, Target::Native, std::collections::HashMap::new(), generate::native::OptLevel::Release)
         .unwrap_or_else(|e| panic!("typed build failed: {}", e));
     let native_out = run(&mut Command::new(&binary));
 
@@ -891,7 +891,7 @@ fn cross_module_specialization() {
 
     // Typed native backend.
     let binary = dir.join("main");
-    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native, alm_compiler::generate::native::OptLevel::Release)
         .unwrap_or_else(|errs| {
             panic!(
                 "typed compile failed:\n{}",
@@ -988,7 +988,7 @@ fn tea_worker_ticks() {
     .unwrap();
 
     let binary = dir.join("test");
-    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native, alm_compiler::generate::native::OptLevel::Release)
         .unwrap_or_else(|errs| {
             panic!(
                 "typed compile failed:\n{}",
@@ -1030,7 +1030,7 @@ fn tea_task_chain() {
     )
     .unwrap();
     let binary = dir.join("test");
-    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native)
+    alm_compiler::project::compile_project_typed(&entry, &binary, Target::Native, alm_compiler::generate::native::OptLevel::Release)
         .unwrap_or_else(|errs| {
             panic!(
                 "typed compile failed:\n{}",
