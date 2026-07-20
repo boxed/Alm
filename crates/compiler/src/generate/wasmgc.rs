@@ -211,7 +211,14 @@ const T_LISTI: u32 = 15; // struct { i32 len, (ref null T_BACKI) bk, (ref null T
 const T_ARRC: u32 = 16; // array (mut i32) — unboxed `List Char` backing (code points)
 const T_BACKC: u32 = 17; // struct { mut i32 head, (ref T_ARRC) data }
 const T_LISTC: u32 = 18; // struct { i32 len, (ref null T_BACKC) bk, (ref null T_LISTC) next }
-const N_FIXED: u32 = 19;
+// SoA (structure-of-arrays) backing for a `List` of a FLAT product of scalars
+// (e.g. `List (Int, Float)`): `cols` is a T_ARR holding one scalar column array
+// (T_ARRI/T_ARRF/T_ARRC) per flattened field; all columns share head/len. The
+// per-column reps come from `flat_columns(elem)` at each op site (the value
+// carries none). Arity-flexible — one type for every flat product.
+const T_SOA_BACK: u32 = 19; // struct { mut i32 head, (ref T_ARR) cols }
+const T_LIST_SOA: u32 = 20; // struct { i32 len, (ref null T_SOA_BACK) bk, (ref null T_LIST_SOA) next }
+const N_FIXED: u32 = 21;
 
 // Imported DOM host functions occupy the first function indices; defined
 // functions are therefore offset by N_IMPORTS (see build()).
@@ -302,6 +309,7 @@ const G_EMPTY_LIST: u32 = 29; // the shared empty list {0,null,null}; the spine 
 const G_EMPTY_LISTF: u32 = 30; // the shared empty `List Float` (T_LISTF) terminator
 const G_EMPTY_LISTI: u32 = 31; // the shared empty `List Int` (T_LISTI) terminator
 const G_EMPTY_LISTC: u32 = 32; // the shared empty `List Char` (T_LISTC) terminator
+const G_EMPTY_LIST_SOA: u32 = 33; // the shared empty SoA list (T_LIST_SOA{0,null,null})
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -3142,6 +3150,15 @@ impl<'a> Codegen<'a> {
             FieldType { element_type: StorageType::Val(ref_null_to(T_BACKC)), mutable: false },
             FieldType { element_type: StorageType::Val(ref_null_to(T_LISTC)), mutable: false },
         ]); // T_LISTC { i32 len, (ref null T_BACKC) bk, (ref null T_LISTC) next }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ref_to(T_ARR)), mutable: false },
+        ]); // T_SOA_BACK { mut i32 head, (ref T_ARR) cols }
+        struct_type(&mut types, &[
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_SOA_BACK)), mutable: false },
+            FieldType { element_type: StorageType::Val(ref_null_to(T_LIST_SOA)), mutable: false },
+        ]); // T_LIST_SOA { i32 len, (ref null T_SOA_BACK) bk, (ref null T_LIST_SOA) next }
         for &arity in &self.fn_type_order {
             types.ty().function(vec![eqref(); arity as usize], vec![eqref()]);
         }
@@ -3905,6 +3922,16 @@ impl<'a> Codegen<'a> {
                 Instruction::RefNull(HeapType::Concrete(T_BACKC)),
                 Instruction::RefNull(HeapType::Concrete(T_LISTC)),
                 Instruction::StructNew(T_LISTC),
+            ]),
+        );
+        // 33=G_EMPTY_LIST_SOA: the shared empty SoA list (no columns needed).
+        globals.global(
+            GlobalType { val_type: ref_to(T_LIST_SOA), mutable: false, shared: false },
+            &ConstExpr::extended(vec![
+                Instruction::I32Const(0),
+                Instruction::RefNull(HeapType::Concrete(T_SOA_BACK)),
+                Instruction::RefNull(HeapType::Concrete(T_LIST_SOA)),
+                Instruction::StructNew(T_LIST_SOA),
             ]),
         );
         // DOM host imports (function indices 0..N_IMPORTS).
