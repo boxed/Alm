@@ -728,6 +728,58 @@ fn list_scalar(tipe: &can::Type) -> Option<Scalar> {
     list_elem_type(Some(tipe)).and_then(scalar_of)
 }
 
+/// The scalar rep of a type ignoring the per-rep gates (Float→F64, Int→I64,
+/// Char→I32) — for structural queries like `flat_columns` where the SoA gate,
+/// not the per-scalar list gates, governs.
+fn scalar_rep(tipe: &can::Type) -> Option<Scalar> {
+    if is_named_type(tipe, "Float") {
+        Some(Scalar::F64)
+    } else if is_named_type(tipe, "Int") {
+        Some(Scalar::I64)
+    } else if is_named_type(tipe, "Char") {
+        Some(Scalar::I32)
+    } else {
+        None
+    }
+}
+
+/// SoA (columnar) feature gate — default off while it's built incrementally.
+fn unbox_soa() -> bool {
+    std::env::var_os("ALM_UNBOX_SOA").is_some()
+}
+
+/// If `tipe` is a FLAT product of scalars — a tuple or field-ordered record
+/// whose fields are all scalars (Int/Float/Char) or themselves flat products —
+/// return its flattened column reps for an SoA (structure-of-arrays) unboxed
+/// backing; else `None`. Any pointer field (String, List, a `Var`, a custom
+/// union, a function) makes the element non-flat, so it stays boxed. Records
+/// flatten in field-declaration order (the caller must use the same order when
+/// assembling/disassembling the element). Bounded depth via the type tree.
+fn flat_columns(tipe: &can::Type) -> Option<Vec<Scalar>> {
+    if let Some(s) = scalar_rep(tipe) {
+        return Some(vec![s]);
+    }
+    match tipe {
+        can::Type::Tuple(a, b, c) => {
+            let mut cols = flat_columns(a)?;
+            cols.extend(flat_columns(b)?);
+            if let Some(c) = c {
+                cols.extend(flat_columns(c)?);
+            }
+            Some(cols)
+        }
+        // Closed record only (an open row `{ r | .. }` has unknown extra fields).
+        can::Type::Record(fields, None) => {
+            let mut cols = Vec::new();
+            for (_, ft) in fields.iter() {
+                cols.extend(flat_columns(ft)?);
+            }
+            (!cols.is_empty()).then_some(cols)
+        }
+        _ => None,
+    }
+}
+
 /// Whether an element of type `tipe` uses the unboxed f64 slot (a `Float`, when
 /// unboxing is enabled).
 fn f64_elem(tipe: &can::Type) -> bool {
