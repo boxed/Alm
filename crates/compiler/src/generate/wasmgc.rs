@@ -21913,6 +21913,39 @@ impl<'a> Codegen<'a> {
                 if module.as_str() == "Basics" && args.len() == 2 {
                     match name.as_str() {
                         "modBy" => {
+                            let s = ctx.scratch_i64;
+                            // Fast path: ONE division + a branchless sign fix-up
+                            // (mirrors the `modby` kernel) when the modulus is a
+                            // literal (so re-emitting it is free and can't touch
+                            // the scratch) and a scratch i64 is reserved for `r`.
+                            if let TypedKind::Int(m) = &args[0].kind {
+                                if s != u32::MAX {
+                                    self.emit_i64(&args[1], ctx, f)?; // x
+                                    f.instruction(&Instruction::I64Const(*m));
+                                    f.instruction(&Instruction::I64RemS);
+                                    f.instruction(&Instruction::LocalSet(s)); // r = x rem m
+                                    // r + m
+                                    f.instruction(&Instruction::LocalGet(s));
+                                    f.instruction(&Instruction::I64Const(*m));
+                                    f.instruction(&Instruction::I64Add);
+                                    // r
+                                    f.instruction(&Instruction::LocalGet(s));
+                                    // cond = r != 0 && (r ^ m) < 0
+                                    f.instruction(&Instruction::LocalGet(s));
+                                    f.instruction(&Instruction::I64Eqz);
+                                    f.instruction(&Instruction::I32Eqz);
+                                    f.instruction(&Instruction::LocalGet(s));
+                                    f.instruction(&Instruction::I64Const(*m));
+                                    f.instruction(&Instruction::I64Xor);
+                                    f.instruction(&Instruction::I64Const(0));
+                                    f.instruction(&Instruction::I64LtS);
+                                    f.instruction(&Instruction::I32And);
+                                    f.instruction(&Instruction::Select); // cond ? r+m : r
+                                    return Ok(());
+                                }
+                            }
+                            // Scratch-free fallback: ((x rem m) + m) rem m
+                            // (two divisions, but no scratch needed).
                             self.emit_i64(&args[1], ctx, f)?; // x
                             self.emit_i64(&args[0], ctx, f)?; // m
                             f.instruction(&Instruction::I64RemS);
@@ -23101,11 +23134,22 @@ impl<'a> Codegen<'a> {
         // fold result is a Float). Only Inline lambdas take the f64 path.
         let src_f64 = list_elem_type(Some(&args[2].tipe)).map_or(false, f64_elem);
         let acc_f64 = f64_elem(&args[1].tipe);
+        // Keep an Int accumulator unboxed in an i64 local too (only for an inline
+        // lambda, whose body we can emit through the scalar `emit_i64` path — a
+        // Direct callee returns a boxed eqref). This removes the per-element
+        // box→unbox of the accumulator and lets the body's arithmetic/modBy/==
+        // inline, the same win acc_f64 already gets for Float folds.
+        let acc_i64 = match &callee {
+            Callee::Inline { body, .. } => {
+                !src_f64 && !acc_f64 && is_named_type(&body.tipe, "Int")
+            }
+            Callee::Direct(_) => false,
+        };
         if matches!(callee, Callee::Direct(_)) && (src_f64 || acc_f64) {
             return Ok(false);
         }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = self.build_fused_fold(&callee, rev, src_f64, acc_f64)?;
+        let lidx = self.build_fused_fold(&callee, rev, src_f64, acc_f64, acc_i64)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -23128,6 +23172,7 @@ impl<'a> Codegen<'a> {
         rev: bool,
         src_f64: bool,
         acc_f64: bool,
+        acc_i64: bool,
     ) -> Result<u32, String> {
         let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 2; // captures + accumulator + list
@@ -23144,6 +23189,7 @@ impl<'a> Codegen<'a> {
             (1, elem_ty),         // element
             (1, ref_to(src_arr)), // data
             (1, ValType::F64),    // af (unboxed accumulator, used iff acc_f64)
+            (1, ValType::I64),    // ai (unboxed accumulator, used iff acc_i64)
         ]);
         let acc = ncap; // eqref accumulator param
         let xs = ncap + 1;
@@ -23154,7 +23200,8 @@ impl<'a> Codegen<'a> {
         let l_i = arity + eb + 4;
         let elem = arity + eb + 5;
         let l_data = arity + eb + 6;
-        let af = arity + eb + 7; // unboxed accumulator
+        let af = arity + eb + 7; // unboxed f64 accumulator
+        let ai = arity + eb + 8; // unboxed i64 accumulator
 
         let mut lctx = FnCtx::new();
         lctx.next_local = arity;
@@ -23166,6 +23213,9 @@ impl<'a> Codegen<'a> {
         if acc_f64 {
             lctx.local_rep.insert(af, Rep::F64);
         }
+        if acc_i64 {
+            lctx.local_rep.insert(ai, Rep::I64);
+        }
         if let Callee::Inline { pnames, caps, .. } = callee {
             for (i, name) in caps.iter().enumerate() {
                 lctx.scope.push((name.clone(), i as u32));
@@ -23174,16 +23224,21 @@ impl<'a> Codegen<'a> {
                 lctx.scope.push((n.clone(), elem));
             }
             if let Some(n) = &pnames[1] {
-                lctx.scope.push((n.clone(), if acc_f64 { af } else { acc }));
+                let slot = if acc_f64 { af } else if acc_i64 { ai } else { acc };
+                lctx.scope.push((n.clone(), slot));
             }
         }
 
-        // Unbox the initial accumulator once (boxed Float -> f64) when f64.
+        // Unbox the initial accumulator once (boxed Float -> f64 / Int -> i64).
         if acc_f64 {
             lf.instruction(&Instruction::LocalGet(acc));
             lf.instruction(&cast_to(T_FLOAT));
             lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
             lf.instruction(&Instruction::LocalSet(af));
+        } else if acc_i64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&Instruction::Call(self.unbox_int_idx));
+            lf.instruction(&Instruction::LocalSet(ai));
         }
         self.flatten_local(&mut lf, xs, src_f64);
         if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
@@ -23226,6 +23281,9 @@ impl<'a> Codegen<'a> {
                 if acc_f64 {
                     self.emit_f64(body, &mut lctx, &mut lf)?;
                     lf.instruction(&Instruction::LocalSet(af));
+                } else if acc_i64 {
+                    self.emit_i64(body, &mut lctx, &mut lf)?;
+                    lf.instruction(&Instruction::LocalSet(ai));
                 } else {
                     self.emit_expr(body, &mut lctx, &mut lf)?;
                     lf.instruction(&Instruction::LocalSet(acc));
@@ -23247,6 +23305,10 @@ impl<'a> Codegen<'a> {
             // re-box the unboxed accumulator to a `Float`.
             lf.instruction(&Instruction::LocalGet(af));
             lf.instruction(&Instruction::StructNew(T_FLOAT));
+        } else if acc_i64 {
+            // re-box the unboxed accumulator to an `Int`.
+            lf.instruction(&Instruction::LocalGet(ai));
+            lf.instruction(&Instruction::Call(self.box_int_idx));
         } else {
             lf.instruction(&Instruction::LocalGet(acc));
         }
