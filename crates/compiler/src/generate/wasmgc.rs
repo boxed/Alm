@@ -23541,16 +23541,16 @@ impl<'a> Codegen<'a> {
         // `res_f64` when the result is. Only Inline lambdas do the f64 path
         // (Direct callees stay on the eqref path); if the source is f64 but the
         // callee is Direct, fall back rather than mis-read the backing.
-        let src_f64 = list_elem_type(Some(&args[1].tipe)).map_or(false, f64_elem);
-        let res_f64 = match &callee {
-            Callee::Inline { body, .. } => f64_elem(&body.tipe),
-            Callee::Direct(_) => false,
+        let src_scalar = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
+        let res_scalar = match &callee {
+            Callee::Inline { body, .. } => scalar_of(&body.tipe).filter(|s| !matches!(s, Scalar::I32)),
+            Callee::Direct(_) => None,
         };
-        if matches!(callee, Callee::Direct(_)) && src_f64 {
+        if matches!(callee, Callee::Direct(_)) && src_scalar.is_some() {
             return Ok(false);
         }
         let cap_slots = callee_cap_slots(&callee, ctx);
-        let lidx = self.build_fused_map(&callee, src_f64, res_f64)?;
+        let lidx = self.build_fused_map(&callee, src_scalar, res_scalar)?;
         for slot in &cap_slots {
             f.instruction(&Instruction::LocalGet(*slot));
         }
@@ -23562,8 +23562,8 @@ impl<'a> Codegen<'a> {
     fn build_fused_map(
         &mut self,
         callee: &Callee,
-        src_f64: bool,
-        res_f64: bool,
+        src_scalar: Option<Scalar>,
+        res_scalar: Option<Scalar>,
     ) -> Result<u32, String> {
         let (ncap, eb) = callee_dims(callee);
         let arity = ncap + 1; // captures + list
@@ -23571,9 +23571,14 @@ impl<'a> Codegen<'a> {
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((arity, Function::new([])));
 
-        let src_arr = if src_f64 { T_ARRF } else { T_ARR };
-        let res_arr = if res_f64 { T_ARRF } else { T_ARR };
-        let elem_ty = if src_f64 { ValType::F64 } else { eqref() };
+        let src_arr = src_scalar.map(|s| s.arr()).unwrap_or(T_ARR);
+        let res_arr = res_scalar.map(|s| s.arr()).unwrap_or(T_ARR);
+        let elem_ty = src_scalar.map(|s| s.val()).unwrap_or_else(eqref);
+        let elem_rep = match src_scalar {
+            Some(Scalar::F64) => Some(Rep::F64),
+            Some(Scalar::I64) => Some(Rep::I64),
+            _ => None,
+        };
         let mut lf = Function::new([
             (eb + 1, eqref()),      // body-binding pool + scratch_eqref
             (1, ValType::I64),      // scratch_i64
@@ -23596,8 +23601,8 @@ impl<'a> Codegen<'a> {
         lctx.next_local = arity;
         lctx.scratch_eqref = scratch_e;
         lctx.scratch_i64 = scratch_i;
-        if src_f64 {
-            lctx.local_rep.insert(elem, Rep::F64);
+        if let Some(r) = elem_rep {
+            lctx.local_rep.insert(elem, r);
         }
         if let Callee::Inline { pnames, caps, .. } = callee {
             for (i, name) in caps.iter().enumerate() {
@@ -23608,16 +23613,16 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        self.flatten_local(&mut lf, xs, src_f64);
-        if src_f64 { list_len_f(&mut lf, xs) } else { list_len(&mut lf, xs) }
+        self.flatten_local_scalar(&mut lf, xs, src_scalar);
+        match src_scalar { Some(s) => list_len_s(s, &mut lf, xs), None => list_len(&mut lf, xs) }
         lf.instruction(&Instruction::LocalTee(l_len));
         lf.instruction(&Instruction::ArrayNewDefault(res_arr));
         lf.instruction(&Instruction::LocalSet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
-        if src_f64 { list_data_f(&mut lf, xs) } else { list_data(&mut lf, xs) }
+        match src_scalar { Some(s) => list_data_s(s, &mut lf, xs), None => list_data(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_sdata));
-        if src_f64 { list_start_f(&mut lf, xs) } else { list_start(&mut lf, xs) }
+        match src_scalar { Some(s) => list_start_s(s, &mut lf, xs), None => list_start(&mut lf, xs) }
         lf.instruction(&Instruction::LocalSet(l_start));
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalSet(l_i));
@@ -23638,13 +23643,11 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::LocalGet(l_ndata));
         lf.instruction(&Instruction::LocalGet(l_i));
         match callee {
-            Callee::Inline { body, .. } => {
-                if res_f64 {
-                    self.emit_f64(body, &mut lctx, &mut lf)?;
-                } else {
-                    self.emit_expr(body, &mut lctx, &mut lf)?;
-                }
-            }
+            Callee::Inline { body, .. } => match res_scalar {
+                Some(Scalar::F64) => self.emit_f64(body, &mut lctx, &mut lf)?,
+                Some(Scalar::I64) => self.emit_i64(body, &mut lctx, &mut lf)?,
+                _ => self.emit_expr(body, &mut lctx, &mut lf)?,
+            },
             Callee::Direct(idx) => {
                 lf.instruction(&Instruction::LocalGet(elem));
                 lf.instruction(&Instruction::Call(*idx));
@@ -23656,13 +23659,17 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::End); // loop
         lf.instruction(&Instruction::End); // block
         lf.instruction(&Instruction::End); // if
-        // wrap ndata as {len, {head=0, ndata}}
+        // wrap ndata as {len, {head=0, ndata}, []}
+        let (rb, re, rl) = match res_scalar {
+            Some(s) => (s.back(), s.empty(), s.list()),
+            None => (T_BACK, G_EMPTY_LIST, T_LIST),
+        };
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::I32Const(0));
         lf.instruction(&Instruction::LocalGet(l_ndata));
-        lf.instruction(&Instruction::StructNew(if res_f64 { T_BACKF } else { T_BACK }));
-        lf.instruction(&Instruction::GlobalGet(if res_f64 { G_EMPTY_LISTF } else { G_EMPTY_LIST }));
-        lf.instruction(&Instruction::StructNew(if res_f64 { T_LISTF } else { T_LIST }));
+        lf.instruction(&Instruction::StructNew(rb));
+        lf.instruction(&Instruction::GlobalGet(re));
+        lf.instruction(&Instruction::StructNew(rl));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);
