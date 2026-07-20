@@ -756,36 +756,31 @@ fn unbox_soa() -> bool {
     std::env::var_os("ALM_UNBOX_SOA").is_some()
 }
 
-/// If `tipe` is a FLAT product of scalars — a tuple or field-ordered record
-/// whose fields are all scalars (Int/Float/Char) or themselves flat products —
-/// return its flattened column reps for an SoA (structure-of-arrays) unboxed
-/// backing; else `None`. Any pointer field (String, List, a `Var`, a custom
-/// union, a function) makes the element non-flat, so it stays boxed. Records
-/// flatten in field-declaration order (the caller must use the same order when
-/// assembling/disassembling the element). Bounded depth via the type tree.
-fn flat_columns(tipe: &can::Type) -> Option<Vec<Scalar>> {
-    if let Some(s) = scalar_rep(tipe) {
-        return Some(vec![s]);
-    }
+/// The SoA (structure-of-arrays) column reps for a list element, when eligible.
+/// First increment: a depth-1 TUPLE of scalars — `(Int, Float)`, `(Int, Int,
+/// Char)`, … — maps to one unboxed scalar column per positional field (the
+/// boxed tuple is a `T_ARR` of those fields, so column f ⇔ tuple slot f). Any
+/// non-scalar field, or a non-tuple, is `None` (stays boxed). Nested products
+/// and records are later increments (records need field-name-sorted order).
+fn soa_cols(tipe: &can::Type) -> Option<Vec<Scalar>> {
     match tipe {
         can::Type::Tuple(a, b, c) => {
-            let mut cols = flat_columns(a)?;
-            cols.extend(flat_columns(b)?);
+            let mut cols = vec![scalar_rep(a)?, scalar_rep(b)?];
             if let Some(c) = c {
-                cols.extend(flat_columns(c)?);
+                cols.push(scalar_rep(c)?);
             }
             Some(cols)
         }
-        // Closed record only (an open row `{ r | .. }` has unknown extra fields).
-        can::Type::Record(fields, None) => {
-            let mut cols = Vec::new();
-            for (_, ft) in fields.iter() {
-                cols.extend(flat_columns(ft)?);
-            }
-            (!cols.is_empty()).then_some(cols)
-        }
         _ => None,
     }
+}
+
+/// The SoA columns of a `List elem` element, when the whole feature is enabled.
+fn list_soa(tipe: &can::Type) -> Option<Vec<Scalar>> {
+    if !unbox_soa() {
+        return None;
+    }
+    list_elem_type(Some(tipe)).and_then(soa_cols)
 }
 
 /// Whether an element of type `tipe` uses the unboxed f64 slot (a `Float`, when
@@ -1518,6 +1513,41 @@ fn list_elem(f: &mut Function, l: u32, iloc: u32) {
     f.instruction(&Instruction::LocalGet(iloc));
     f.instruction(&Instruction::I32Add);
     f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
+// SoA (columnar) list accessors: len (field 0), bk (1), next (2); the columns
+// array (`T_ARR` of scalar column arrays) is `bk.cols`. `start` = shared frontmost
+// index = column0.len - len (all columns share cap/head/len).
+fn soa_len(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LIST_SOA));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LIST_SOA, field_index: 0 });
+}
+fn soa_bk(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LIST_SOA));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LIST_SOA, field_index: 1 });
+}
+fn soa_next(f: &mut Function, l: u32) {
+    f.instruction(&Instruction::LocalGet(l));
+    f.instruction(&cast_to(T_LIST_SOA));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_LIST_SOA, field_index: 2 });
+}
+fn soa_cols_arr(f: &mut Function, l: u32) {
+    soa_bk(f, l);
+    f.instruction(&cast_to(T_SOA_BACK));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_SOA_BACK, field_index: 1 });
+}
+/// `start` for an SoA list whose columns array is in `cols_local`, first column
+/// rep `rep0` (any column works — all share cap/len).
+fn soa_start(f: &mut Function, l: u32, cols_local: u32, rep0: Scalar) {
+    f.instruction(&Instruction::LocalGet(cols_local));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+    f.instruction(&cast_to(rep0.arr()));
+    f.instruction(&Instruction::ArrayLen);
+    soa_len(f, l);
+    f.instruction(&Instruction::I32Sub);
 }
 
 /// The unboxed backing rep of a scalar-element collection: `List Int` (I64),
@@ -22393,6 +22423,70 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
             }
         }
+    }
+
+    /// Assemble a boxed tuple from the SoA columns at absolute index `pos`:
+    /// column f (cast to `reps[f].arr()`) read raw at `pos`, boxed, then all
+    /// fields packed into a `T_ARR` (the boxed-tuple layout). Depth-1 only.
+    fn emit_soa_assemble(&self, reps: &[Scalar], cols_local: u32, pos: u32, f: &mut Function) {
+        for (i, &sc) in reps.iter().enumerate() {
+            f.instruction(&Instruction::LocalGet(cols_local));
+            f.instruction(&Instruction::I32Const(i as i32));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&cast_to(sc.arr()));
+            f.instruction(&Instruction::LocalGet(pos));
+            f.instruction(&Instruction::ArrayGet(sc.arr()));
+            self.box_scalar(sc, f);
+        }
+        f.instruction(&Instruction::ArrayNewFixed {
+            array_type_index: T_ARR,
+            array_size: reps.len() as u32,
+        });
+    }
+
+    /// Disassemble the boxed tuple in `box_local` into the SoA columns at `pos`:
+    /// field f (from the tuple's `T_ARR`) unboxed and written into column f.
+    fn emit_soa_disassemble(&self, reps: &[Scalar], box_local: u32, cols_local: u32, pos: u32, f: &mut Function) {
+        for (i, &sc) in reps.iter().enumerate() {
+            f.instruction(&Instruction::LocalGet(cols_local));
+            f.instruction(&Instruction::I32Const(i as i32));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&cast_to(sc.arr()));
+            f.instruction(&Instruction::LocalGet(pos));
+            f.instruction(&Instruction::LocalGet(box_local));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i as i32));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            self.unbox_scalar(sc, f);
+            f.instruction(&Instruction::ArraySet(sc.arr()));
+        }
+    }
+
+    /// Allocate a fresh SoA backing: a `T_ARR` of `reps.len()` scalar column
+    /// arrays each of length `n` (in local `n_local`), leaving the `cols` array
+    /// in `cols_local` and returning nothing on the stack.
+    fn emit_soa_alloc_cols(&self, reps: &[Scalar], n_local: u32, cols_local: u32, f: &mut Function) {
+        f.instruction(&Instruction::I32Const(reps.len() as i32));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(cols_local));
+        for (i, &sc) in reps.iter().enumerate() {
+            f.instruction(&Instruction::LocalGet(cols_local));
+            f.instruction(&Instruction::I32Const(i as i32));
+            f.instruction(&Instruction::LocalGet(n_local));
+            f.instruction(&Instruction::ArrayNewDefault(sc.arr()));
+            f.instruction(&Instruction::ArraySet(T_ARR));
+        }
+    }
+
+    /// Wrap a filled `cols` array (`cols_local`) of length `n` (`n_local`) as a
+    /// single-chunk `T_LIST_SOA{ n, {head:0, cols}, [] }` on the stack.
+    fn emit_soa_wrap(&self, n_local: u32, cols_local: u32, f: &mut Function) {
+        f.instruction(&Instruction::LocalGet(n_local));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(cols_local));
+        f.instruction(&Instruction::StructNew(T_SOA_BACK));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST_SOA));
+        f.instruction(&Instruction::StructNew(T_LIST_SOA));
     }
 
     /// Emit a `Char`-typed expression, leaving its unboxed code point (`i32`).
