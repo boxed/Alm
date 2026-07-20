@@ -699,6 +699,15 @@ fn unbox_charlist() -> bool {
     std::env::var_os("ALM_UNBOX_CHARLIST").is_some()
 }
 
+/// Whether the unboxed backing for a given `Scalar` rep is enabled.
+fn scalar_enabled(s: Scalar) -> bool {
+    match s {
+        Scalar::F64 => unbox_floatlist(),
+        Scalar::I64 => unbox_intlist(),
+        Scalar::I32 => unbox_charlist(),
+    }
+}
+
 /// The unboxed `Scalar` backing an element type maps to, when that rep is
 /// enabled: Float→F64, Int→I64, Char→I32. `None` = the boxed eqref backing.
 /// Single source of truth for the rep decision.
@@ -1544,20 +1553,18 @@ fn push_empty_list(f: &mut Function) {
     f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
 }
 
-/// If `slot` holds an unboxed `T_LISTF`, widen it in place to a boxed `T_LIST`
-/// (via `widen_idx`). Lets the generic value ops (val_eq/compare/hash, Debug,
-/// json) handle a `List Float` by falling into their existing `T_LIST` logic;
-/// nesting is covered because those ops recurse. No-op when `widen_idx` is None
-/// (unboxing disabled).
-fn widen_listf_local(widen_idx: Option<u32>, slot: u32, f: &mut Function) {
-    if let Some(w) = widen_idx {
+/// Widen `slot` in place from any unboxed scalar list (`T_LIST{s}`) to a boxed
+/// `T_LIST`, for every enabled rep in `widen_idxs`. Lets the generic value ops
+/// (val_eq/compare/hash, Debug, json) handle a scalar list by falling into
+/// their existing boxed `T_LIST` logic; nesting is covered because those ops
+/// recurse. Each widen is idempotent (passes a non-matching value through), so
+/// chaining all enabled reps is safe and a boxed list is left untouched. No-op
+/// for reps whose idx is None (that rep disabled).
+fn widen_scalar_locals(widen_idxs: &[Option<u32>; 3], slot: u32, f: &mut Function) {
+    for w in widen_idxs.iter().flatten() {
         f.instruction(&Instruction::LocalGet(slot));
-        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(slot));
-        f.instruction(&Instruction::Call(w));
+        f.instruction(&Instruction::Call(*w));
         f.instruction(&Instruction::LocalSet(slot));
-        f.instruction(&Instruction::End);
     }
 }
 
@@ -1825,10 +1832,11 @@ struct Codegen<'a> {
     apply1_idx: u32,
     /// Lazily-lifted bridges between the boxed (`T_LIST`) and unboxed f64
     /// (`T_LISTF`) list reps, for `List Float` at unspecialized boundaries.
-    listf_widen_idx: Option<u32>,
-    listf_narrow_idx: Option<u32>,
-    /// Lazily-built amortized cons per scalar rep, indexed by `scalar_ix`
+    /// Widen (`T_LIST{s}` -> boxed `T_LIST`) and narrow (inverse) bridges per
+    /// scalar rep, and the amortized cons — all indexed by `scalar_ix`
     /// (I32=0, I64=1, F64=2).
+    scalar_widen_idx: [Option<u32>; 3],
+    scalar_narrow_idx: [Option<u32>; 3],
     scalar_cons_idx: [Option<u32>; 3],
     /// Lazily-lifted Test.Html introspection helpers (Elm.Kernel.HtmlAsJson):
     /// translate a vdom node / attribute into the elm/virtual-dom `$`-tagged
@@ -2117,8 +2125,8 @@ impl<'a> Codegen<'a> {
             str_append_idx: 0,
             str_from_int_idx: 0,
             apply1_idx: 0,
-            listf_widen_idx: None,
-            listf_narrow_idx: None,
+            scalar_widen_idx: [None; 3],
+            scalar_narrow_idx: [None; 3],
             scalar_cons_idx: [None; 3],
             htmljson_node_idx: None,
             htmljson_facts_idx: None,
@@ -2645,12 +2653,14 @@ impl<'a> Codegen<'a> {
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
-        // Pre-build the f64 list bridges so the `&self` generic ops (val_eq,
-        // val_compare, val_hash, Debug renderers, json) can reference their
-        // indices when unboxing `List Float`.
-        if unbox_floatlist() {
-            self.listf_widen();
-            self.listf_narrow();
+        // Pre-build the scalar-list bridges for every enabled rep so the `&self`
+        // generic ops (val_eq, val_compare, val_hash, Debug renderers, json) can
+        // reference their indices when unboxing a `List Int/Float/Char`.
+        for s in [Scalar::F64, Scalar::I64, Scalar::I32] {
+            if scalar_enabled(s) {
+                self.scalar_widen(s);
+                self.scalar_narrow(s);
+            }
         }
 
         let main = self
@@ -6434,8 +6444,8 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([(6, ValType::I32), (2, ref_to(T_ARR))]);
         // Inner `List Float` (e.g. from `List.concat : List (List Float) -> ..`)
         // arrives as T_LISTF; widen to the boxed rep the eqref body expects.
-        widen_listf_local(self.listf_widen_idx, 0, &mut f);
-        widen_listf_local(self.listf_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(3)); // lenx
         f.instruction(&Instruction::LocalGet(3));
@@ -6930,7 +6940,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(11));
         // An inner `List Float` (nested list) arrives unboxed; widen it so the
         // eqref length/copy below work.
-        widen_listf_local(self.listf_widen_idx, 11, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 11, &mut f);
         self.flatten_local(&mut f, 11, false); // inner list may be chunked
         f.instruction(&Instruction::LocalGet(3));
         list_len(&mut f, 11);
@@ -6960,7 +6970,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(11));
-        widen_listf_local(self.listf_widen_idx, 11, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 11, &mut f);
         self.flatten_local(&mut f, 11, false); // inner list may be chunked
         copy_into(&mut f, 11, 9, 5, 6, 10, 7, 8);
         f.instruction(&Instruction::LocalGet(5));
@@ -8853,8 +8863,8 @@ impl<'a> Codegen<'a> {
         // a(0), b(1); i(2),la(3),lb(4),c(5): i32; ai(6),bi(7): i64; af(8),bf(9): f64
         let mut f = Function::new([(4, ValType::I32), (2, ValType::I64), (2, ValType::F64)]);
         // Unboxed `List Float` operands widen to the boxed rep (T_LIST arm).
-        widen_listf_local(self.listf_widen_idx, 0, &mut f);
-        widen_listf_local(self.listf_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
         let sign_i = |f: &mut Function, x: u32, y: u32, i64ty: bool| {
             f.instruction(&Instruction::LocalGet(x));
             f.instruction(&Instruction::LocalGet(y));
@@ -12698,7 +12708,7 @@ impl<'a> Codegen<'a> {
         // param v(0). locals: h(1),i(2),n(3):i32; s(4):ref T_STR
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_STR))]);
         // An unboxed `List Float` widens to the boxed rep (its T_LIST arm).
-        widen_listf_local(self.listf_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
         // i31 (Char/Bool/Unit/small Int) → its scalar value
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
@@ -21131,8 +21141,8 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([(3, ValType::I32)]);
         // Unboxed `List Float` operands widen to the boxed rep so the T_LIST
         // arm below compares them (and any nested float lists, via recursion).
-        widen_listf_local(self.listf_widen_idx, 0, &mut f);
-        widen_listf_local(self.listf_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
         let false_ret = |f: &mut Function| {
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::RefI31);
@@ -23907,36 +23917,45 @@ impl<'a> Codegen<'a> {
     /// `T_FLOAT`), for handing an unboxed `List Float` to an unspecialized
     /// consumer. Returns its function index.
     fn listf_widen(&mut self) -> u32 {
-        if let Some(i) = self.listf_widen_idx {
+        self.scalar_widen(Scalar::F64)
+    }
+
+    /// Widen bridge `T_LIST{s} -> T_LIST` (box each raw scalar), parametric over
+    /// `Scalar`. Lets the generic value ops (val_eq/compare/hash, Debug, json)
+    /// handle an unboxed scalar list by falling into their existing boxed
+    /// `T_LIST` logic. Idempotent: a value that is not this rep's list (already
+    /// boxed, or another rep) is returned unchanged. Lazily built, cached per rep.
+    fn scalar_widen(&mut self, s: Scalar) -> u32 {
+        if let Some(i) = self.scalar_widen_idx[s.ix()] {
             return i;
         }
         self.fn_type(1);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((1, Function::new([])));
         let mut f = Function::new([
-            (3, ValType::I32),   // len, i, start
-            (1, ref_to(T_ARRF)), // sdata
-            (1, ref_to(T_ARR)),  // ndata
+            (3, ValType::I32),    // len, i, start
+            (1, ref_to(s.arr())), // sdata
+            (1, ref_to(T_ARR)),   // ndata
         ]);
         let (l_len, l_i, l_start, l_sdata, l_ndata) = (1, 2, 3, 4, 5);
-        // Idempotent: only a T_LISTF needs boxing; anything else (already a
-        // boxed T_LIST, from a pass-through kernel) is returned unchanged.
+        // Idempotent: only this rep's list needs boxing; anything else is
+        // returned unchanged.
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(s.list())));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        list_len_f(&mut f, 0);
+        list_len_s(s, &mut f, 0);
         f.instruction(&Instruction::LocalTee(l_len));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
         f.instruction(&Instruction::LocalSet(l_ndata));
         f.instruction(&Instruction::LocalGet(l_len));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data_f(&mut f, 0);
+        list_data_s(s, &mut f, 0);
         f.instruction(&Instruction::LocalSet(l_sdata));
-        list_start_f(&mut f, 0);
+        list_start_s(s, &mut f, 0);
         f.instruction(&Instruction::LocalSet(l_start));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(l_i));
@@ -23953,8 +23972,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(l_start));
         f.instruction(&Instruction::LocalGet(l_i));
         f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARRF));
-        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::ArrayGet(s.arr()));
+        self.box_scalar(s, &mut f);
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, l_i, 1);
         f.instruction(&Instruction::Br(0));
@@ -23970,37 +23989,41 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, f);
-        self.listf_widen_idx = Some(lidx);
+        self.scalar_widen_idx[s.ix()] = Some(lidx);
         lidx
     }
 
-    /// Lazily build the narrow bridge `T_LIST -> T_LISTF` (unbox each `T_FLOAT`
-    /// to f64), to canonicalize a boxed `List Float` produced by an
-    /// unspecialized kernel. Returns its function index.
     fn listf_narrow(&mut self) -> u32 {
-        if let Some(i) = self.listf_narrow_idx {
+        self.scalar_narrow(Scalar::F64)
+    }
+
+    /// Narrow bridge `T_LIST -> T_LIST{s}` (unbox each element to its raw
+    /// scalar), parametric over `Scalar` — canonicalizes a boxed scalar list
+    /// produced by an unspecialized kernel. Idempotent for an already-canonical
+    /// `T_LIST{s}`. Lazily built, cached per rep.
+    fn scalar_narrow(&mut self, s: Scalar) -> u32 {
+        if let Some(i) = self.scalar_narrow_idx[s.ix()] {
             return i;
         }
         self.fn_type(1);
         let lidx = self.lifted_base + self.lifted.len() as u32;
         self.lifted.push((1, Function::new([])));
         let mut f = Function::new([
-            (3, ValType::I32),   // len, i, start
-            (1, ref_to(T_ARR)),  // sdata
-            (1, ref_to(T_ARRF)), // ndata
+            (3, ValType::I32),    // len, i, start
+            (1, ref_to(T_ARR)),   // sdata
+            (1, ref_to(s.arr())), // ndata
         ]);
         let (l_len, l_i, l_start, l_sdata, l_ndata) = (1, 2, 3, 4, 5);
-        // Idempotent: an already-canonical T_LISTF (from a pass-through kernel
-        // like Tuple.first / Maybe.withDefault) is returned unchanged.
+        // Idempotent: an already-canonical T_LIST{s} is returned unchanged.
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LISTF)));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(s.list())));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalTee(l_len));
-        f.instruction(&Instruction::ArrayNewDefault(T_ARRF));
+        f.instruction(&Instruction::ArrayNewDefault(s.arr()));
         f.instruction(&Instruction::LocalSet(l_ndata));
         f.instruction(&Instruction::LocalGet(l_len));
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -24024,9 +24047,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(l_i));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
-        f.instruction(&Instruction::ArraySet(T_ARRF));
+        self.unbox_scalar(s, &mut f);
+        f.instruction(&Instruction::ArraySet(s.arr()));
         bump(&mut f, l_i, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End); // loop
@@ -24035,13 +24057,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(l_len));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(l_ndata));
-        f.instruction(&Instruction::StructNew(T_BACKF));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LISTF));
-        f.instruction(&Instruction::StructNew(T_LISTF));
+        f.instruction(&Instruction::StructNew(s.back()));
+        f.instruction(&Instruction::GlobalGet(s.empty()));
+        f.instruction(&Instruction::StructNew(s.list()));
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, f);
-        self.listf_narrow_idx = Some(lidx);
+        self.scalar_narrow_idx[s.ix()] = Some(lidx);
         lidx
     }
 
