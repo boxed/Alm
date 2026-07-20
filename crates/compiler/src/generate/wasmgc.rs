@@ -24105,16 +24105,32 @@ impl<'a> Codegen<'a> {
         {
             return Ok(false);
         }
-        // SoA source or SoA result (List of flat tuple) not fused — kernel path.
-        // A tuple-destructuring element param also bails (map has no columnar
-        // path yet).
+        // A SoA source, or a tuple-destructuring element param, is not fused by
+        // the scalar map path.
         if list_soa(&args[1].tipe).is_some()
-            || matches!(&callee, Callee::Inline { body, .. } if unbox_soa() && soa_cols(&body.tipe).is_some())
             || matches!(&callee, Callee::Inline { elem_fields: Some(_), .. })
         {
             return Ok(false);
         }
         let src_scalar = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
+        // SoA result: `\x -> (e0, e1, ..)` mapping to a flat scalar tuple. When
+        // the body is a literal tuple, build the columns directly (no boxed
+        // tuple per element). Otherwise fall to the kernel (boxed result).
+        if let Callee::Inline { body, .. } = &callee {
+            if let Some(reps) = (unbox_soa() && matches!(body.kind, TypedKind::Tuple(..)))
+                .then(|| soa_cols(&body.tipe))
+                .flatten()
+            {
+                let cap_slots = callee_cap_slots(&callee, ctx);
+                let lidx = self.build_fused_map_soa(&callee, src_scalar, &reps)?;
+                for slot in &cap_slots {
+                    f.instruction(&Instruction::LocalGet(*slot));
+                }
+                self.emit_expr(&args[1], ctx, f)?; // xs
+                f.instruction(&Instruction::Call(lidx));
+                return Ok(true);
+            }
+        }
         let res_scalar = match &callee {
             Callee::Inline { body, .. } => scalar_of(&body.tipe).filter(|s| !matches!(s, Scalar::I32)),
             Callee::Direct(_) => None,
@@ -24243,6 +24259,145 @@ impl<'a> Codegen<'a> {
         lf.instruction(&Instruction::StructNew(rb));
         lf.instruction(&Instruction::GlobalGet(re));
         lf.instruction(&Instruction::StructNew(rl));
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
+    /// Fuse `List.map (\x -> (e0, e1, ..)) xs` where the result element is a flat
+    /// scalar tuple: write each tuple field straight into its own unboxed column,
+    /// producing a `T_LIST_SOA` with no per-element boxed tuple. The callee body
+    /// must be a literal tuple expression (so its fields are known statically);
+    /// the source is a scalar (`src_scalar`) or boxed list.
+    fn build_fused_map_soa(
+        &mut self,
+        callee: &Callee,
+        src_scalar: Option<Scalar>,
+        reps: &[Scalar],
+    ) -> Result<u32, String> {
+        let (ncap, eb) = callee_dims(callee);
+        let arity = ncap + 1; // captures + list
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+
+        let src_arr = src_scalar.map(|s| s.arr()).unwrap_or(T_ARR);
+        let elem_ty = src_scalar.map(|s| s.val()).unwrap_or_else(eqref);
+        let elem_rep = match src_scalar {
+            Some(Scalar::F64) => Some(Rep::F64),
+            Some(Scalar::I64) => Some(Rep::I64),
+            _ => None,
+        };
+        let mut locals: Vec<(u32, ValType)> = vec![
+            (eb + 1, eqref()),    // body-binding pool + scratch_eqref
+            (1, ValType::I64),    // scratch_i64
+            (3, ValType::I32),    // len, sstart, i
+            (1, elem_ty),         // element
+            (1, ref_to(src_arr)), // sdata
+            (1, ref_to(T_ARR)),   // cols
+        ];
+        for &s in reps {
+            locals.push((1, ref_to(s.arr()))); // typed column array
+        }
+        let mut lf = Function::new(locals);
+
+        let xs = ncap;
+        let scratch_e = arity + eb;
+        let scratch_i = arity + eb + 1;
+        let l_len = arity + eb + 2;
+        let l_sstart = arity + eb + 3;
+        let l_i = arity + eb + 4;
+        let elem = arity + eb + 5;
+        let l_sdata = arity + eb + 6;
+        let cols = arity + eb + 7;
+        let col_base = arity + eb + 8; // colarr_j = col_base + j
+
+        // The tuple fields of the (literal-tuple) callee body.
+        let body = match callee {
+            Callee::Inline { body, .. } => body,
+            Callee::Direct(_) => return Err("wasmgc: SoA map requires an inline callee".into()),
+        };
+        let fields: Vec<&TypedExpr> = match &body.kind {
+            TypedKind::Tuple(a, b, c) => {
+                let mut v = vec![a.as_ref(), b.as_ref()];
+                if let Some(c) = c {
+                    v.push(c.as_ref());
+                }
+                v
+            }
+            _ => return Err("wasmgc: SoA map body is not a literal tuple".into()),
+        };
+        if fields.len() != reps.len() {
+            return Err("wasmgc: SoA map tuple arity mismatch".into());
+        }
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity;
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        if let Some(r) = elem_rep {
+            lctx.local_rep.insert(elem, r);
+        }
+        if let Callee::Inline { pnames, caps, .. } = callee {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+            if let Some(n) = &pnames[0] {
+                lctx.scope.push((n.clone(), elem));
+            }
+        }
+
+        self.flatten_local_scalar(&mut lf, xs, src_scalar);
+        match src_scalar { Some(s) => list_len_s(s, &mut lf, xs), None => list_len(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalSet(l_len));
+        self.emit_soa_alloc_cols(reps, l_len, cols, &mut lf);
+        // Hoist each typed column array into a local (skip the per-element cast).
+        for (j, &s) in reps.iter().enumerate() {
+            lf.instruction(&Instruction::LocalGet(cols));
+            lf.instruction(&Instruction::I32Const(j as i32));
+            lf.instruction(&Instruction::ArrayGet(T_ARR));
+            lf.instruction(&cast_to(s.arr()));
+            lf.instruction(&Instruction::LocalSet(col_base + j as u32));
+        }
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        match src_scalar { Some(s) => list_data_s(s, &mut lf, xs), None => list_data(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalSet(l_sdata));
+        match src_scalar { Some(s) => list_start_s(s, &mut lf, xs), None => list_start(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalSet(l_sstart));
+        lf.instruction(&Instruction::I32Const(0));
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::I32GeS);
+        lf.instruction(&Instruction::BrIf(1));
+        // element = sdata[sstart + i]
+        lf.instruction(&Instruction::LocalGet(l_sdata));
+        lf.instruction(&Instruction::LocalGet(l_sstart));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Add);
+        lf.instruction(&Instruction::ArrayGet(src_arr));
+        lf.instruction(&Instruction::LocalSet(elem));
+        // col_j[i] = field_j (raw scalar)
+        for (j, &s) in reps.iter().enumerate() {
+            lf.instruction(&Instruction::LocalGet(col_base + j as u32));
+            lf.instruction(&Instruction::LocalGet(l_i));
+            match s {
+                Scalar::F64 => self.emit_f64(fields[j], &mut lctx, &mut lf)?,
+                Scalar::I64 => self.emit_i64(fields[j], &mut lctx, &mut lf)?,
+                Scalar::I32 => self.emit_char_code(fields[j], &mut lctx, &mut lf)?,
+            }
+            lf.instruction(&Instruction::ArraySet(s.arr()));
+        }
+        bump(&mut lf, l_i, 1);
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if
+        self.emit_soa_wrap(reps, l_len, cols, &mut lf);
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);
