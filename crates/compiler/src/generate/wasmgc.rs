@@ -6384,19 +6384,32 @@ impl<'a> Codegen<'a> {
     /// list_filter(pred, xs) : keep elements where `pred` holds. Scans from the
     /// tail so consing yields head-first order.
     fn emit_list_filter(&self) -> Function {
-        // params pred(0), xs(1). locals: len(2), start(3), i(4):i32,
-        //   xdata(5):ref T_ARR, acc(6):eqref, elem(7):eqref
+        // Single-writer build into ONE vector — no per-element cons (which would
+        // allocate a T_LIST header per kept element). Over-allocate a backing of
+        // the input length, walk the input in REVERSE writing each kept element
+        // into a cursor descending from the top, so the kept elements end up
+        // head-first at the tail `data[cursor..len]` — exactly the layout
+        // `list_start = cap - len` expects (head at `data[start]`). `head = start`
+        // marks the list as owning its backing, so the leftover front slack is
+        // reusable by a later cons (the ownership guard prevents aliasing).
+        // params pred(0), xs(1). locals: len(2), start(3), i(4), w(5):i32,
+        //   xdata(6), ndata(7):ref T_ARR, elem(8):eqref
         let mut f =
-            Function::new([(3, ValType::I32), (1, ref_to(T_ARR)), (2, eqref())]);
-            self.flatten_local(&mut f, 1, false);
-        push_empty_list(&mut f);
-        f.instruction(&Instruction::LocalSet(6)); // acc = []
+            Function::new([(4, ValType::I32), (2, ref_to(T_ARR)), (1, eqref())]);
+        self.flatten_local(&mut f, 1, false);
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
+        // ndata = new T_ARR[len]  (worst case: every element kept)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(7));
+        // w = len (write cursor, pre-decremented before each write)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
         list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::LocalSet(6));
         list_start(&mut f, 1);
         f.instruction(&Instruction::LocalSet(3));
         // i = len-1 downto 0
@@ -6411,23 +6424,27 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32LtS);
         f.instruction(&Instruction::BrIf(1));
         // elem = xdata[start+i]
-        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(7));
-        // if pred elem: acc = cons(elem, acc)
+        f.instruction(&Instruction::LocalSet(8));
+        // if pred elem: ndata[--w] = elem
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::Call(self.list_cons_idx));
-        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::ArraySet(T_ARR));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(1));
@@ -6437,7 +6454,15 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(6));
+        // wrap: T_LIST{ len: len-w, bk: T_BACK{ head: w, data: ndata }, next: [] }
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::StructNew(T_LIST));
         f.instruction(&Instruction::End);
         f
     }
@@ -21877,6 +21902,37 @@ impl<'a> Codegen<'a> {
                 }
             }
         }
+        // `modBy`/`remainderBy` inline as i64 arithmetic — a per-element call to
+        // the boxed `modby` kernel (with the box/unbox round-trip) is what made
+        // `List.filter (\x -> modBy k x == 0)` and modulo-heavy folds slow.
+        // `modBy` is FLOORED (result takes the modulus's sign): `((x rem m) + m)
+        // rem m` gives that for every sign of x and m (m != 0). `remainderBy` is
+        // truncated: `x rem m`. Args are `(m, x)` for both.
+        if let TypedKind::Call(func, args) = &e.kind {
+            if let TypedKind::Foreign(module, name) = &func.kind {
+                if module.as_str() == "Basics" && args.len() == 2 {
+                    match name.as_str() {
+                        "modBy" => {
+                            self.emit_i64(&args[1], ctx, f)?; // x
+                            self.emit_i64(&args[0], ctx, f)?; // m
+                            f.instruction(&Instruction::I64RemS);
+                            self.emit_i64(&args[0], ctx, f)?; // m
+                            f.instruction(&Instruction::I64Add);
+                            self.emit_i64(&args[0], ctx, f)?; // m
+                            f.instruction(&Instruction::I64RemS);
+                            return Ok(());
+                        }
+                        "remainderBy" => {
+                            self.emit_i64(&args[1], ctx, f)?; // x
+                            self.emit_i64(&args[0], ctx, f)?; // m
+                            f.instruction(&Instruction::I64RemS);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         // Arithmetic sub-tree: emit it directly unboxed, so nested operations
         // (`a*b - c*d`) never box each intermediate only to unbox it again. Only
         // the outermost use (via `emit_expr`) boxes the final result.
@@ -22131,10 +22187,38 @@ impl<'a> Codegen<'a> {
                 }
                 f.instruction(&Instruction::RefI31);
             }
+            // Scalar `==`/`/=` inline as `i64.eq`/`f64.eq` (+negate) — the generic
+            // structural `val_eq` call, with its box→unbox of both operands, is
+            // pure overhead for Int/Float and was the real cost behind slow
+            // `List.filter (\x -> .. == 0)` (NOT the filter build or modBy).
+            "==" if is_float(&l.tipe) => {
+                self.emit_f64(l, ctx, f)?;
+                self.emit_f64(r, ctx, f)?;
+                f.instruction(&Instruction::F64Eq);
+                f.instruction(&Instruction::RefI31);
+            }
+            "==" if is_named_type(&l.tipe, "Int") => {
+                self.emit_i64(l, ctx, f)?;
+                self.emit_i64(r, ctx, f)?;
+                f.instruction(&Instruction::I64Eq);
+                f.instruction(&Instruction::RefI31);
+            }
             "==" => {
                 self.emit_expr(l, ctx, f)?;
                 self.emit_expr(r, ctx, f)?;
                 f.instruction(&Instruction::Call(self.val_eq_idx));
+            }
+            "/=" if is_float(&l.tipe) => {
+                self.emit_f64(l, ctx, f)?;
+                self.emit_f64(r, ctx, f)?;
+                f.instruction(&Instruction::F64Ne);
+                f.instruction(&Instruction::RefI31);
+            }
+            "/=" if is_named_type(&l.tipe, "Int") => {
+                self.emit_i64(l, ctx, f)?;
+                self.emit_i64(r, ctx, f)?;
+                f.instruction(&Instruction::I64Ne);
+                f.instruction(&Instruction::RefI31);
             }
             "/=" => {
                 self.emit_expr(l, ctx, f)?;
@@ -23480,20 +23564,22 @@ impl<'a> Codegen<'a> {
         self.lifted.push((arity, Function::new([])));
 
         let mut lf = Function::new([
-            (eb + 3, eqref()),  // body-binding pool + element + acc + scratch_eqref
+            (eb + 3, eqref()),  // body-binding pool + element + acc(unused) + scratch_eqref
             (1, ValType::I64),  // scratch_i64
-            (3, ValType::I32),  // len, start, i
-            (1, ref_to(T_ARR)), // sdata
+            (4, ValType::I32),  // len, start, i, w
+            (2, ref_to(T_ARR)), // sdata, ndata
         ]);
         let xs = ncap;
         let elem = arity + eb;
-        let acc = arity + eb + 1;
+        let _acc = arity + eb + 1;
         let scratch_e = arity + eb + 2;
         let scratch_i = arity + eb + 3;
         let l_len = arity + eb + 4;
         let l_start = arity + eb + 5;
         let l_i = arity + eb + 6;
-        let l_sdata = arity + eb + 7;
+        let l_w = arity + eb + 7;
+        let l_sdata = arity + eb + 8;
+        let l_ndata = arity + eb + 9;
 
         let mut lctx = FnCtx::new();
         lctx.next_local = arity;
@@ -23508,17 +23594,28 @@ impl<'a> Codegen<'a> {
             }
         }
 
-        push_empty_list(&mut lf);
-        lf.instruction(&Instruction::LocalSet(acc)); // acc = []
+        // Single-writer build into ONE vector (no per-element cons). Over-
+        // allocate a backing of the input length, walk the input in reverse
+        // writing kept elements into a cursor descending from the top, so they
+        // land head-first at the tail `data[w..len]` — the layout
+        // `list_start = cap - len` expects, with `head = start = w`.
         self.flatten_local(&mut lf, xs, false);
         list_len(&mut lf, xs);
-        lf.instruction(&Instruction::LocalTee(l_len));
+        lf.instruction(&Instruction::LocalSet(l_len));
+        // ndata = new T_ARR[len]
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        lf.instruction(&Instruction::LocalSet(l_ndata));
+        // w = len (write cursor, pre-decremented before each write)
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::LocalSet(l_w));
+        lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::If(BlockType::Empty));
         list_data(&mut lf, xs);
         lf.instruction(&Instruction::LocalSet(l_sdata));
         list_start(&mut lf, xs);
         lf.instruction(&Instruction::LocalSet(l_start));
-        // i = len-1 downto 0 (cons builds forward order)
+        // i = len-1 downto 0
         lf.instruction(&Instruction::LocalGet(l_len));
         lf.instruction(&Instruction::I32Const(1));
         lf.instruction(&Instruction::I32Sub);
@@ -23550,17 +23647,27 @@ impl<'a> Codegen<'a> {
         }));
         lf.instruction(&Instruction::I31GetS);
         lf.instruction(&Instruction::If(BlockType::Empty));
+        // ndata[--w] = element
+        bump(&mut lf, l_w, -1);
+        lf.instruction(&Instruction::LocalGet(l_ndata));
+        lf.instruction(&Instruction::LocalGet(l_w));
         lf.instruction(&Instruction::LocalGet(elem));
-        lf.instruction(&Instruction::LocalGet(acc));
-        lf.instruction(&Instruction::Call(self.list_cons_idx));
-        lf.instruction(&Instruction::LocalSet(acc));
+        lf.instruction(&Instruction::ArraySet(T_ARR));
         lf.instruction(&Instruction::End); // if pred
         bump(&mut lf, l_i, -1);
         lf.instruction(&Instruction::Br(0));
         lf.instruction(&Instruction::End); // loop
         lf.instruction(&Instruction::End); // block
         lf.instruction(&Instruction::End); // if len
-        lf.instruction(&Instruction::LocalGet(acc));
+        // wrap: T_LIST{ len: len-w, bk: T_BACK{ head: w, data: ndata }, next: [] }
+        lf.instruction(&Instruction::LocalGet(l_len));
+        lf.instruction(&Instruction::LocalGet(l_w));
+        lf.instruction(&Instruction::I32Sub);
+        lf.instruction(&Instruction::LocalGet(l_w));
+        lf.instruction(&Instruction::LocalGet(l_ndata));
+        lf.instruction(&Instruction::StructNew(T_BACK));
+        lf.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        lf.instruction(&Instruction::StructNew(T_LIST));
         lf.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (arity, lf);

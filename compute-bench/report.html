@@ -93,7 +93,7 @@
   <div class="lede">
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Allocation &amp; collections</p>
-      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–3.9×</strong> faster than the JS backend — the compact heap layout and the engine's GC beat JS object churn.</p>
+      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–4.5×</strong> faster than the JS backend — the compact heap layout and the engine's GC beat JS object churn.</p>
     </div>
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Scalar &amp; float</p>
@@ -115,9 +115,9 @@
   // ms = median across runs; spd = js/wasm (>1 wasm faster). native for reference.
   const GROUPS = [
     { title: "allocation & collection heavy", rows: [
-      { op: "list map",                  sub: "1,000,000 elements", js: 12.1, wasm: 3.1, native: 1.1 },
-      { op: "list filter",               sub: "1,000,000 elements", js: 16.3, wasm: 6.5, native: 1.0 },
-      { op: "list fold",                 sub: "1,000,000 elements", js: 13.3, wasm: 5.7, native: 3.5 },
+      { op: "list map",                  sub: "1,000,000 elements", js: 11.5, wasm: 3.2, native: 1.3 },
+      { op: "list filter",               sub: "1,000,000 elements", js: 16.3, wasm: 3.6, native: 1.2 },
+      { op: "list fold",                 sub: "1,000,000 elements", js: 13.4, wasm: 5.6, native: 3.6 },
       { op: "sort + checksum",           sub: "100,000 random ints", js: 23.2, wasm: 14.0, native: 10.6 },
       { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.1, wasm: 21.1, native: 31.4 },
       { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.4, wasm: 8.4, native: 8.3 },
