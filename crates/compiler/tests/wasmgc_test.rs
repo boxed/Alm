@@ -1298,6 +1298,27 @@ fn tuple_map_xor_map3() {
 }
 
 #[test]
+fn soa_list_of_flat_tuples() {
+    // Structure-of-arrays backing for `List` of a flat scalar tuple. Exercises
+    // the literal (columnar build), pattern-matching the head (widen), fold and
+    // map over the columns, and String rendering — all must match JS/native
+    // whether SoA is on (ALM_UNBOX_SOA) or off (boxed tuples).
+    assert_str_prog(
+        "soa_tuples",
+        "module Test exposing (main)\n\n\
+         pairs : List ( Int, Float )\n\
+         pairs =\n    [ ( 1, 1.5 ), ( 2, 2.5 ), ( 3, 3.5 ) ]\n\n\
+         showP : ( Int, Float ) -> String\n\
+         showP ( n, x ) =\n    String.fromInt n ++ \":\" ++ String.fromFloat x\n\n\
+         headStr : List ( Int, Float ) -> String\n\
+         headStr xs =\n    case xs of\n        ( n, x ) :: _ ->\n            showP ( n, x )\n\n        [] ->\n            \"empty\"\n\n\
+         main : String\n\
+         main =\n    \
+            String.join \",\" (List.map showP pairs)\n        ++ \"|\" ++ String.fromInt (List.foldl (\\( n, _ ) acc -> acc + n) 0 pairs)\n        ++ \"|\" ++ String.fromFloat (List.foldl (\\( _, x ) acc -> acc + x) 0 pairs)\n        ++ \"|\" ++ headStr pairs\n        ++ \"|\" ++ String.join \",\" (List.map (\\( n, x ) -> String.fromInt (n * 2) ++ \"/\" ++ String.fromFloat (x + 1)) pairs)\n        ++ \"|\" ++ String.fromInt (List.length pairs)\n        ++ \"|\" ++ String.join \",\" (List.map showP (List.map (\\( n, x ) -> ( n + 10, x )) pairs))\n",
+    );
+}
+
+#[test]
 fn string_pad_and_list_more() {
     assert_str_prog(
         "pad_more",

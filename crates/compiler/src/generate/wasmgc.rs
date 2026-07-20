@@ -216,7 +216,7 @@ const T_LISTC: u32 = 18; // struct { i32 len, (ref null T_BACKC) bk, (ref null T
 // (T_ARRI/T_ARRF/T_ARRC) per flattened field; all columns share head/len. The
 // per-column reps come from `flat_columns(elem)` at each op site (the value
 // carries none). Arity-flexible — one type for every flat product.
-const T_SOA_BACK: u32 = 19; // struct { mut i32 head, (ref T_ARR) cols }
+const T_SOA_BACK: u32 = 19; // struct { mut i32 head, i32 reptag, (ref T_ARR) cols } — reptag = packed column reps (self-describing for type-erased widen)
 const T_LIST_SOA: u32 = 20; // struct { i32 len, (ref null T_SOA_BACK) bk, (ref null T_LIST_SOA) next }
 const N_FIXED: u32 = 21;
 
@@ -830,6 +830,8 @@ enum ListRep {
 fn list_rep_hint(tipe: Option<&can::Type>) -> ListRep {
     match tipe {
         Some(t) if list_scalar(t).is_some() => ListRep::Scalar(list_scalar(t).unwrap()),
+        // A SoA list is matched via the runtime dispatch (widen to boxed first).
+        Some(t) if list_soa(t).is_some() => ListRep::Unknown,
         Some(can::Type::Type(_, n, _)) if n.as_str() == "List" => ListRep::Boxed,
         _ => ListRep::Unknown,
     }
@@ -1536,6 +1538,12 @@ fn soa_next(f: &mut Function, l: u32) {
 fn soa_cols_arr(f: &mut Function, l: u32) {
     soa_bk(f, l);
     f.instruction(&cast_to(T_SOA_BACK));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_SOA_BACK, field_index: 2 });
+}
+/// The list's packed rep-tag (field 1 of the backing).
+fn soa_reptag_read(f: &mut Function, l: u32) {
+    soa_bk(f, l);
+    f.instruction(&cast_to(T_SOA_BACK));
     f.instruction(&Instruction::StructGet { struct_type_index: T_SOA_BACK, field_index: 1 });
 }
 /// `start` for an SoA list whose columns array is in `cols_local`, first column
@@ -1554,7 +1562,7 @@ fn soa_start(f: &mut Function, l: u32, cols_local: u32, rep0: Scalar) {
 /// `List Float` (F64), `List Char` (I32 = code points). One rep-parametric
 /// layer drives all three, replacing per-type twins. Boxed (`eqref`) lists have
 /// no `Scalar`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Scalar {
     I32,
     I64,
@@ -1580,6 +1588,20 @@ impl Scalar {
     fn ix(self) -> usize {
         match self { Scalar::I32 => 0, Scalar::I64 => 1, Scalar::F64 => 2 }
     }
+    /// 2-bit rep code for the SoA packed rep-tag.
+    fn code(self) -> i32 {
+        match self { Scalar::I64 => 0, Scalar::F64 => 1, Scalar::I32 => 2 }
+    }
+    fn from_code(c: i32) -> Scalar {
+        match c & 3 { 0 => Scalar::I64, 1 => Scalar::F64, _ => Scalar::I32 }
+    }
+}
+
+/// Pack a flat product's column reps into an i32 SoA rep-tag (2 bits/column,
+/// column 0 in the low bits). Up to 16 columns; SoA needs the node to be
+/// self-describing so type-erased consumers (val_eq/Debug/…) can widen it.
+fn soa_reptag(reps: &[Scalar]) -> i32 {
+    reps.iter().enumerate().fold(0, |t, (i, s)| t | (s.code() << (2 * i)))
 }
 
 // Scalar-backed accessors, parametric over `Scalar` (I32/I64/F64) — `len` is
@@ -1652,8 +1674,8 @@ fn push_empty_list(f: &mut Function) {
 /// recurse. Each widen is idempotent (passes a non-matching value through), so
 /// chaining all enabled reps is safe and a boxed list is left untouched. No-op
 /// for reps whose idx is None (that rep disabled).
-fn widen_scalar_locals(widen_idxs: &[Option<u32>; 3], slot: u32, f: &mut Function) {
-    for w in widen_idxs.iter().flatten() {
+fn widen_scalar_locals(widen_idxs: &[Option<u32>; 3], soa: Option<u32>, slot: u32, f: &mut Function) {
+    for w in widen_idxs.iter().flatten().chain(soa.iter()) {
         f.instruction(&Instruction::LocalGet(slot));
         f.instruction(&Instruction::Call(*w));
         f.instruction(&Instruction::LocalSet(slot));
@@ -1930,6 +1952,10 @@ struct Codegen<'a> {
     scalar_widen_idx: [Option<u32>; 3],
     scalar_narrow_idx: [Option<u32>; 3],
     scalar_cons_idx: [Option<u32>; 3],
+    /// Generic SoA->boxed widen (runtime rep-tag driven), prebuilt once.
+    soa_widen_idx: Option<u32>,
+    /// boxed->SoA narrow per column-rep vector (static reps), built on demand.
+    soa_narrow_cache: std::collections::HashMap<Vec<Scalar>, u32>,
     /// Lazily-lifted Test.Html introspection helpers (Elm.Kernel.HtmlAsJson):
     /// translate a vdom node / attribute into the elm/virtual-dom `$`-tagged
     /// Json.Value shape the elm-explorations/test decoder reads.
@@ -2221,6 +2247,8 @@ impl<'a> Codegen<'a> {
             scalar_widen_idx: [None; 3],
             scalar_narrow_idx: [None; 3],
             scalar_cons_idx: [None; 3],
+            soa_widen_idx: None,
+            soa_narrow_cache: std::collections::HashMap::new(),
             htmljson_node_idx: None,
             htmljson_facts_idx: None,
             htmljson_attr_idx: None,
@@ -2757,6 +2785,9 @@ impl<'a> Codegen<'a> {
                 self.scalar_narrow(s);
             }
         }
+        if unbox_soa() {
+            self.soa_widen();
+        }
 
         let main = self
             .mono
@@ -3182,8 +3213,9 @@ impl<'a> Codegen<'a> {
         ]); // T_LISTC { i32 len, (ref null T_BACKC) bk, (ref null T_LISTC) next }
         struct_type(&mut types, &[
             FieldType { element_type: StorageType::Val(ValType::I32), mutable: true },
+            FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
             FieldType { element_type: StorageType::Val(ref_to(T_ARR)), mutable: false },
-        ]); // T_SOA_BACK { mut i32 head, (ref T_ARR) cols }
+        ]); // T_SOA_BACK { mut i32 head, i32 reptag, (ref T_ARR) cols }
         struct_type(&mut types, &[
             FieldType { element_type: StorageType::Val(ValType::I32), mutable: false },
             FieldType { element_type: StorageType::Val(ref_null_to(T_SOA_BACK)), mutable: false },
@@ -5311,7 +5343,7 @@ impl<'a> Codegen<'a> {
         self.lifted.push((arity, Function::new([])));
         // Reserve slots for `emit_kernel`'s float-list arg widening (see there).
         let widen_count = if unbox_floatlist() {
-            args.iter().filter(|a| list_scalar(&a.tipe).is_some()).count() as u32
+            args.iter().filter(|a| list_scalar(&a.tipe).is_some() || list_soa(&a.tipe).is_some()).count() as u32
         } else {
             0
         };
@@ -6574,8 +6606,8 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([(6, ValType::I32), (2, ref_to(T_ARR))]);
         // Inner `List Float` (e.g. from `List.concat : List (List Float) -> ..`)
         // arrives as T_LISTF; widen to the boxed rep the eqref body expects.
-        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
-        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 1, &mut f);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(3)); // lenx
         f.instruction(&Instruction::LocalGet(3));
@@ -7079,7 +7111,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(11));
         // An inner `List Float` (nested list) arrives unboxed; widen it so the
         // eqref length/copy below work.
-        widen_scalar_locals(&self.scalar_widen_idx, 11, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 11, &mut f);
         self.flatten_local(&mut f, 11, false); // inner list may be chunked
         f.instruction(&Instruction::LocalGet(3));
         list_len(&mut f, 11);
@@ -7109,7 +7141,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(11));
-        widen_scalar_locals(&self.scalar_widen_idx, 11, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 11, &mut f);
         self.flatten_local(&mut f, 11, false); // inner list may be chunked
         copy_into(&mut f, 11, 9, 5, 6, 10, 7, 8);
         f.instruction(&Instruction::LocalGet(5));
@@ -9002,8 +9034,8 @@ impl<'a> Codegen<'a> {
         // a(0), b(1); i(2),la(3),lb(4),c(5): i32; ai(6),bi(7): i64; af(8),bf(9): f64
         let mut f = Function::new([(4, ValType::I32), (2, ValType::I64), (2, ValType::F64)]);
         // Unboxed `List Float` operands widen to the boxed rep (T_LIST arm).
-        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
-        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 1, &mut f);
         let sign_i = |f: &mut Function, x: u32, y: u32, i64ty: bool| {
             f.instruction(&Instruction::LocalGet(x));
             f.instruction(&Instruction::LocalGet(y));
@@ -12909,7 +12941,7 @@ impl<'a> Codegen<'a> {
         // param v(0). locals: h(1),i(2),n(3):i32; s(4):ref T_STR
         let mut f = Function::new([(3, ValType::I32), (1, ref_to(T_STR))]);
         // An unboxed `List Float` widens to the boxed rep (its T_LIST arm).
-        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
         // i31 (Char/Bool/Unit/small Int) → its scalar value
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::RefTestNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
@@ -21342,8 +21374,8 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([(3, ValType::I32)]);
         // Unboxed `List Float` operands widen to the boxed rep so the T_LIST
         // arm below compares them (and any nested float lists, via recursion).
-        widen_scalar_locals(&self.scalar_widen_idx, 0, &mut f);
-        widen_scalar_locals(&self.scalar_widen_idx, 1, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 1, &mut f);
         let false_ret = |f: &mut Function| {
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::RefI31);
@@ -22038,6 +22070,28 @@ impl<'a> Codegen<'a> {
                     self.emit_make_closure(lidx, arity, f);
                 }
             }
+            TypedKind::List(items) if list_soa(&e.tipe).is_some() => {
+                // SoA literal: build the boxed list of boxed tuples, then narrow
+                // to columns. Literals are small (compile-time count), so the
+                // transient boxing is negligible; the SoA win is in map/fold.
+                let reps = list_soa(&e.tipe).unwrap();
+                if items.is_empty() {
+                    f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST_SOA));
+                } else {
+                    let n = items.len() as u32;
+                    f.instruction(&Instruction::I32Const(n as i32));
+                    f.instruction(&Instruction::I32Const(0));
+                    for item in items {
+                        self.emit_expr(item, ctx, f)?;
+                    }
+                    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: n });
+                    f.instruction(&Instruction::StructNew(T_BACK));
+                    f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+                    f.instruction(&Instruction::StructNew(T_LIST));
+                    let narrow = self.soa_narrow(&reps);
+                    f.instruction(&Instruction::Call(narrow));
+                }
+            }
             TypedKind::List(items) => {
                 // Build a tight vector: push len and head-index (constants),
                 // then the elements head-first, then fold into T_ARR/T_BACK/T_LIST.
@@ -22479,10 +22533,11 @@ impl<'a> Codegen<'a> {
     }
 
     /// Wrap a filled `cols` array (`cols_local`) of length `n` (`n_local`) as a
-    /// single-chunk `T_LIST_SOA{ n, {head:0, cols}, [] }` on the stack.
-    fn emit_soa_wrap(&self, n_local: u32, cols_local: u32, f: &mut Function) {
+    /// single-chunk `T_LIST_SOA{ n, {head:0, reptag, cols}, [] }` on the stack.
+    fn emit_soa_wrap(&self, reps: &[Scalar], n_local: u32, cols_local: u32, f: &mut Function) {
         f.instruction(&Instruction::LocalGet(n_local));
-        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Const(0)); // head
+        f.instruction(&Instruction::I32Const(soa_reptag(reps))); // reptag
         f.instruction(&Instruction::LocalGet(cols_local));
         f.instruction(&Instruction::StructNew(T_SOA_BACK));
         f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST_SOA));
@@ -23248,9 +23303,13 @@ impl<'a> Codegen<'a> {
             }
             self.emit_kernel(module.as_str(), name.as_str(), args, ctx, f)?;
             // The eqref kernels build a boxed `T_LIST`; canonicalize a scalar-list
-            // result back to its unboxed rep.
-            if let Some(sc) = list_scalar(peel_arrows(&func.tipe, args.len())) {
+            // or SoA result back to its unboxed rep.
+            let rty = peel_arrows(&func.tipe, args.len());
+            if let Some(sc) = list_scalar(rty) {
                 let narrow = self.scalar_narrow(sc);
+                f.instruction(&Instruction::Call(narrow));
+            } else if let Some(reps) = list_soa(rty) {
+                let narrow = self.soa_narrow(&reps);
                 f.instruction(&Instruction::Call(narrow));
             }
             return Ok(());
@@ -23581,6 +23640,10 @@ impl<'a> Codegen<'a> {
         if list_scalar(&args[2].tipe) == Some(Scalar::I32) {
             return Ok(false);
         }
+        // SoA source (List of flat tuple) not fused — kernel path widens it.
+        if list_soa(&args[2].tipe).is_some() {
+            return Ok(false);
+        }
         // Unboxed source element (List Int/Float) and/or f64 accumulator. Only
         // Inline lambdas take the unboxed source path.
         let src_scalar = list_scalar(&args[2].tipe).filter(|s| !matches!(s, Scalar::I32));
@@ -23802,6 +23865,12 @@ impl<'a> Codegen<'a> {
         {
             return Ok(false);
         }
+        // SoA source or SoA result (List of flat tuple) not fused — kernel path.
+        if list_soa(&args[1].tipe).is_some()
+            || matches!(&callee, Callee::Inline { body, .. } if unbox_soa() && soa_cols(&body.tipe).is_some())
+        {
+            return Ok(false);
+        }
         let src_scalar = list_scalar(&args[1].tipe).filter(|s| !matches!(s, Scalar::I32));
         let res_scalar = match &callee {
             Callee::Inline { body, .. } => scalar_of(&body.tipe).filter(|s| !matches!(s, Scalar::I32)),
@@ -23953,6 +24022,10 @@ impl<'a> Codegen<'a> {
         };
         // Char (I32) not fused yet — kernel path handles it.
         if list_scalar(&args[1].tipe) == Some(Scalar::I32) {
+            return Ok(false);
+        }
+        // SoA source not fused — kernel path widens it.
+        if list_soa(&args[1].tipe).is_some() {
             return Ok(false);
         }
         // filter preserves the element type.
@@ -24185,6 +24258,211 @@ impl<'a> Codegen<'a> {
 
     fn listf_narrow(&mut self) -> u32 {
         self.scalar_narrow(Scalar::F64)
+    }
+
+    /// Generic SoA -> boxed `T_LIST` widen: assemble each element into a boxed
+    /// tuple (`T_ARR` of boxed fields) using the node's runtime rep-tag, so
+    /// type-erased consumers (val_eq/compare/hash, Debug, json, `List a` kernels)
+    /// handle it via their existing boxed logic. Idempotent (non-SoA passes
+    /// through). Prebuilt once; reads ncols + per-column rep from the value.
+    fn soa_widen(&mut self) -> u32 {
+        if let Some(i) = self.soa_widen_idx {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        // l(0); i32: len(1),i(2),ncols(3),j(4),start(5),pos(6),reptag(7),code(8);
+        // ref T_ARR: cols(9),ndata(10),tup(11); eqref: col(12)
+        let mut f = Function::new([(8, ValType::I32), (3, ref_to(T_ARR)), (1, eqref())]);
+        let arr_ht = HeapType::Abstract { shared: false, ty: AbstractHeapType::Array };
+        // idempotent
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST_SOA)));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        soa_len(&mut f, 0);
+        f.instruction(&Instruction::LocalTee(1));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(10));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        soa_cols_arr(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(9));
+        soa_reptag_read(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(7));
+        // ncols = cols.len
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalSet(3));
+        // start = (cols[0] as array).len - len
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(arr_ht));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // pos = start + i
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(6));
+        // tup = new T_ARR[ncols]
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(11));
+        // for j in 0..ncols: tup[j] = box(cols[j][pos]) per rep code
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // code = (reptag >> (2*j)) & 3
+        f.instruction(&Instruction::LocalGet(7));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Shl);
+        f.instruction(&Instruction::I32ShrU);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::LocalSet(8));
+        // col = cols[j]
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(12));
+        // tup[j] =
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::LocalGet(4));
+        // switch code -> boxed field (result eqref)
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARRI));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayGet(T_ARRI));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARRF));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayGet(T_ARRF));
+        f.instruction(&Instruction::StructNew(T_FLOAT));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(12));
+        f.instruction(&cast_to(T_ARRC));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayGet(T_ARRC));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 4, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop j
+        f.instruction(&Instruction::End); // block j
+        // ndata[i] = tup
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(11));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop i
+        f.instruction(&Instruction::End); // block i
+        f.instruction(&Instruction::End); // if len
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(10));
+        f.instruction(&Instruction::StructNew(T_BACK));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::StructNew(T_LIST));
+        f.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, f);
+        self.soa_widen_idx = Some(lidx);
+        lidx
+    }
+
+    /// boxed `T_LIST` (of boxed tuples) -> SoA `T_LIST_SOA` for column reps
+    /// `reps` (statically known at the call site). Disassembles each boxed tuple
+    /// into the columns. Idempotent (an already-SoA value passes through). Built
+    /// on demand, cached per rep vector.
+    fn soa_narrow(&mut self, reps: &[Scalar]) -> u32 {
+        if let Some(&i) = self.soa_narrow_cache.get(reps) {
+            return i;
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([])));
+        // l(0); i32: len(1),i(2),bstart(3); ref T_ARR: bdata(4),cols(5); eqref: boxtup(6)
+        let mut f = Function::new([(3, ValType::I32), (2, ref_to(T_ARR)), (1, eqref())]);
+        // idempotent
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST_SOA)));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        self.flatten_local(&mut f, 0, false);
+        list_len(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(1));
+        self.emit_soa_alloc_cols(reps, 1, 5, &mut f);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        list_data(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        list_start(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        // boxtup = bdata[bstart + i]
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(6));
+        // disassemble into cols at pos = i (SoA dense from 0)
+        self.emit_soa_disassemble(reps, 6, 5, 2, &mut f);
+        bump(&mut f, 2, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        f.instruction(&Instruction::End); // if len
+        self.emit_soa_wrap(reps, 1, 5, &mut f);
+        f.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, f);
+        self.soa_narrow_cache.insert(reps.to_vec(), lidx);
+        lidx
     }
 
     /// Narrow bridge `T_LIST -> T_LIST{s}` (unbox each element to its raw
@@ -25450,13 +25728,22 @@ impl<'a> Codegen<'a> {
         // Scalar-transparent kernels read the unboxed backing directly, so their
         // args must NOT be pre-widened (that would box the whole list back).
         let scalar_transparent = matches!((module, name), ("List", "sum") | ("List", "product"));
+        let needs_widen = |a: &TypedExpr| list_scalar(&a.tipe).is_some() || list_soa(&a.tipe).is_some();
         let widened: Vec<TypedExpr>;
         let args: &[TypedExpr] =
-            if !scalar_transparent && args.iter().any(|a| list_scalar(&a.tipe).is_some()) {
+            if !scalar_transparent && args.iter().any(needs_widen) {
                 let mut v: Vec<TypedExpr> = Vec::with_capacity(args.len());
                 for (k, a) in args.iter().enumerate() {
-                    if let Some(sc) = list_scalar(&a.tipe) {
-                        let w = self.scalar_widen(sc);
+                    // A scalar or SoA list arg is widened to a boxed T_LIST so the
+                    // eqref kernel body reads it unchanged.
+                    let w = if let Some(sc) = list_scalar(&a.tipe) {
+                        Some(self.scalar_widen(sc))
+                    } else if list_soa(&a.tipe).is_some() {
+                        Some(self.soa_widen())
+                    } else {
+                        None
+                    };
+                    if let Some(w) = w {
                         self.emit_expr(a, ctx, f)?;
                         f.instruction(&Instruction::Call(w));
                         let nm = format!("$wfl{k}");
@@ -28273,6 +28560,21 @@ impl<'a> Codegen<'a> {
         f: &mut Function,
         body: impl Fn(&Self, &mut Function, ListRep),
     ) {
+        // A SoA list is not one of the scalar reps and has no boxed cons cells;
+        // widen it to a boxed list in place (idempotent) so the Boxed body below
+        // sees boxed tuples. Direct type-erased matching on SoA lists is rare
+        // (kernels/fused-bail widen first), so correctness-over-speed here.
+        if unbox_soa() {
+            if let Some(widen) = self.soa_widen_idx {
+                f.instruction(&Instruction::LocalGet(s));
+                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST_SOA)));
+                f.instruction(&Instruction::If(BlockType::Empty));
+                f.instruction(&Instruction::LocalGet(s));
+                f.instruction(&Instruction::Call(widen));
+                f.instruction(&Instruction::LocalSet(s));
+                f.instruction(&Instruction::End);
+            }
+        }
         let enabled: Vec<Scalar> = [Scalar::F64, Scalar::I64, Scalar::I32]
             .into_iter()
             .filter(|&sc| scalar_enabled(sc))
@@ -28428,7 +28730,7 @@ fn count_bindings(e: &TypedExpr) -> u32 {
             // slot per float-list arg so `emit_kernel` can `bind` them. Only when
             // unboxing is enabled (else zero — no waste).
             let widen = if matches!(g.kind, TypedKind::Foreign(_, _)) {
-                args.iter().filter(|a| list_scalar(&a.tipe).is_some()).count() as u32
+                args.iter().filter(|a| list_scalar(&a.tipe).is_some() || list_soa(&a.tipe).is_some()).count() as u32
             } else {
                 0
             };
