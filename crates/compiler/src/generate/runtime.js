@@ -100,22 +100,16 @@ function _List_tail(xs) {
     var o = xs.o + 1;
     return o < xs.d.length ? { $: '::', d: xs.d, o: o, b: xs.b } : xs.b;
 }
-// Build a list from `arr`, ending in `tail`. Packs into <=_List_LIMIT dense
-// chunks (back-to-front so element order is preserved). When the whole array
-// fits one chunk and there is no prefix to graft onto, `arr` is reused directly
-// — safe because `_List_toArray` always hands back a copy.
+// Build a list from `arr`, ending in `tail`. A bulk build makes ONE dense chunk
+// over the whole array — no size cap, because the _List_LIMIT cap only bounds
+// the geometric growth of the in-place `cons` path (amortization); a bulk chunk
+// is never consed into (its `o` is 0 with no `.hd`), so an arbitrarily large
+// dense chunk is safe and iterates contiguously. `arr` is reused directly —
+// safe because `_List_toArray` always hands back a copy. Slicing large arrays
+// into _List_LIMIT chunks here just double-copied every element for no benefit.
 function _List_fromArrayOnto(arr, tail) {
-    var end = arr.length;
-    if (end === 0) { return tail; }
-    if (end <= _List_LIMIT && tail.$ === '[]') { return { $: '::', d: arr, o: 0, b: tail }; }
-    var out = tail;
-    while (end > 0) {
-        var start = end - _List_LIMIT;
-        if (start < 0) { start = 0; }
-        out = { $: '::', d: arr.slice(start, end), o: 0, b: out };
-        end = start;
-    }
-    return out;
+    if (arr.length === 0) { return tail; }
+    return { $: '::', d: arr, o: 0, b: tail };
 }
 function _List_fromArray(arr) { return _List_fromArrayOnto(arr, _List_Nil); }
 function _List_toArray(xs) {
