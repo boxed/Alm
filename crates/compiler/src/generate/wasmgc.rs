@@ -16472,7 +16472,8 @@ impl<'a> Codegen<'a> {
     fn emit_patch(&self) -> Function {
         // params dom(0):i32, old(1),new(2):eqref. locals: t(3),olen(4),nlen(5),
         //   i(6),common(7),cdom(8):i32, attr(9),osub(10),nsub(11),key(12),val(13):eqref
-        let mut f = Function::new([(6, ValType::I32), (5, eqref())]);
+        //   attr-diff extras: j(14),found(15),applied(16):i32, okey(17),empty(18):eqref
+        let mut f = Function::new([(6, ValType::I32), (5, eqref()), (3, ValType::I32), (2, eqref())]);
         // --- VLAZY (tag 3) memoization, before the generic identity check ---
         // If both sides are lazy with reference-identical f and args, the subtree
         // is unchanged: carry the memoized forced result to the new node and
@@ -16606,6 +16607,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::LocalSet(3)); // same_len
         f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(16)); // applied = 0
+        f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
@@ -16628,6 +16631,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::If(BlockType::Empty));
+        // a position was applied → attrs may have shuffled; enable the removal
+        // scan below (skipped entirely when the lists are positionally identical).
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::LocalSet(16));
         ctor_arg0(&mut f, 9);
         f.instruction(&Instruction::LocalSet(12));
         ctor_argn(&mut f, 9, 1);
@@ -16655,6 +16662,93 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        // Remove old AATTR/ASTYLE attrs whose (tag, key) is absent from the new
+        // node — mirrors the JS backend's unapplyAttr (AAttr→removeAttribute,
+        // AStyle→style[key]=''). Skipped when the attr lists were positionally
+        // identical (same_len && nothing applied), the common no-attr-change case.
+        f.instruction(&Instruction::LocalGet(3)); // same_len
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::LocalGet(16)); // applied
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        push_str_const(&mut f, ""); // empty style value
+        f.instruction(&Instruction::LocalSet(18));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(6)); // i over old attrs
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4)); // olen
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        list_elem(&mut f, 10, 6);
+        f.instruction(&Instruction::LocalSet(9)); // oldA
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(8)); // tag
+        // only AATTR (0) / ASTYLE (1) are removable here
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 9);
+        f.instruction(&Instruction::LocalSet(17)); // oldKey
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(15)); // found = 0
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(14)); // j
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::LocalGet(5)); // nlen
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::LocalGet(15)); // found
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::BrIf(1)); // stop when scanned all or found
+        list_elem(&mut f, 11, 14);
+        f.instruction(&Instruction::LocalSet(13)); // newA
+        // matches = newA.tag == tag && val_eq(newA.key, oldKey)
+        ctor_tag(&mut f, 13);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        ctor_arg0(&mut f, 13);
+        f.instruction(&Instruction::LocalGet(17));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(15)); // found ||= matches
+        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::LocalSet(15));
+        bump(&mut f, 14, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // inner loop
+        f.instruction(&Instruction::End); // inner block
+        // absent from new → unapply
+        f.instruction(&Instruction::LocalGet(15));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0)); // AATTR: removeAttribute(key)
+        self.dom_str(&mut f, 17);
+        f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0)); // ASTYLE: style[key] = ""
+        self.dom_str(&mut f, 17);
+        self.dom_str(&mut f, 18);
+        f.instruction(&Instruction::Call(DOM_SET_STYLE));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // if !found
+        f.instruction(&Instruction::End); // if tag < 2
+        bump(&mut f, 6, 1);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // outer loop
+        f.instruction(&Instruction::End); // outer block
+        f.instruction(&Instruction::End); // if (!same_len || applied)
         // VKEYED (tag 2): reconcile children by key, preserving DOM identity.
         ctor_tag(&mut f, 2);
         f.instruction(&Instruction::I32Const(2));

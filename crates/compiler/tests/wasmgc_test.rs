@@ -1895,6 +1895,37 @@ fn keyed_classlist_update() {
     );
 }
 
+// Attribute REMOVAL parity: when an update drops an attribute key (custom
+// `data-*` = AATTR, and a `style` = ASTYLE) that was present before, the patch
+// must remove it from the DOM — matching the JS backend's unapplyAttr. Before
+// the attr-diff removal pass, wasm-gc left the stale attr, diverging from JS.
+// `class` stays in both states (must NOT be removed).
+#[test]
+fn attr_removal_on_update() {
+    assert_sandbox_click(
+        "attr_removal_on_update",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, text)\n\
+         import Html.Attributes as A\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Toggle\n\n\
+         view : Bool -> Html Msg\n\
+         view on =\n\
+         \x20   div []\n\
+         \x20       [ button [ onClick Toggle ] [ text \"t\" ]\n\
+         \x20       , div\n\
+         \x20           (if on then\n\
+         \x20               [ A.class \"c\", A.attribute \"data-x\" \"y\", A.style \"color\" \"red\" ]\n\
+         \x20            else\n\
+         \x20               [ A.class \"c\" ])\n\
+         \x20           [ text \"x\" ]\n\
+         \x20       ]\n\n\
+         main : Program () Bool Msg\n\
+         main = Browser.sandbox { init = True, update = \\_ _ -> False, view = view }\n",
+    );
+}
+
 #[test]
 fn keyed_handler_table_grows() {
     // Each row carries an event handler, so one render registers one handler per
