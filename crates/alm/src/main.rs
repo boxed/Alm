@@ -97,22 +97,22 @@ fn make(args: &[String]) -> ExitCode {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
             alm_compiler::project::compile_project_native(&input, &output, target, opt)
-                .map(|()| output)
+                .map(|w| (output, w))
         }
         Backend::Typed(target) => {
             let ext = if target == Target::Wasm { "wasm" } else { "" };
             let output = output.unwrap_or_else(|| input.with_extension(ext));
             alm_compiler::project::compile_project_typed(&input, &output, target, opt)
-                .map(|()| output)
+                .map(|w| (output, w))
         }
         Backend::WasmGc => {
             let output = output.unwrap_or_else(|| input.with_extension("wasm"));
             alm_compiler::project::compile_project_wasmgc(&input, &output, source_maps)
-                .map(|()| output)
+                .map(|w| (output, w))
         }
         Backend::Js if source_maps => {
             alm_compiler::project::compile_project_source_maps(&input).and_then(
-                |(mut javascript, map)| {
+                |(mut javascript, map, warnings)| {
                     let output = output.unwrap_or_else(|| input.with_extension("js"));
                     let map_path = output.with_extension("js.map");
                     let map_name = map_path
@@ -128,22 +128,25 @@ fn make(args: &[String]) -> ExitCode {
                     };
                     write(&output, &javascript)?;
                     write(&map_path, &map)?;
-                    Ok(output)
+                    Ok((output, warnings))
                 },
             )
         }
-        Backend::Js => alm_compiler::project::compile_project(&input).and_then(|javascript| {
+        Backend::Js => alm_compiler::project::compile_project(&input).and_then(|(javascript, warnings)| {
             let output = output.unwrap_or_else(|| input.with_extension("js"));
             std::fs::write(&output, javascript).map_err(|err| {
                 eprintln!("I could not write {}: {}", output.display(), err);
                 Vec::new()
             })?;
-            Ok(output)
+            Ok((output, warnings))
         }),
     };
 
     match result {
-        Ok(output) => {
+        Ok((output, warnings)) => {
+            for w in &warnings {
+                eprintln!("{}\n", w.render());
+            }
             println!("Success! Compiled to {}", output.display());
             ExitCode::SUCCESS
         }

@@ -10,6 +10,7 @@ pub mod data;
 pub mod generate;
 pub mod interface;
 pub mod ir;
+pub mod lint;
 pub mod nitpick;
 pub mod parse;
 pub mod project;

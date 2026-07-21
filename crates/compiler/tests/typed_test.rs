@@ -880,7 +880,7 @@ fn cross_module_specialization() {
     .unwrap();
 
     // JS backend.
-    let js = alm_compiler::project::compile_project(&entry)
+    let (js, _) = alm_compiler::project::compile_project(&entry)
         .unwrap_or_else(|errs| panic!("js compile failed with {} errors", errs.len()));
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, js).unwrap();

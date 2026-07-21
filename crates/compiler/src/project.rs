@@ -87,15 +87,17 @@ pub struct CheckedProject {
     pub entry: Name,
 }
 
-pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
+pub fn compile_project(entry: &Path) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let checked = check_project(entry)?;
     // Tree-shake by default; `ALM_NO_DCE=1` emits the whole runtime kernel as a
     // field kill-switch should DCE ever drop something an app needs.
     let dce = std::env::var_os("ALM_NO_DCE").is_none();
-    Ok(generate::generate_project_typed(
-        &checked.modules,
-        checked.node_types,
-        dce,
+    // Lint walks the already-checked AST — a cheap single traversal, not a
+    // second front end — so `alm make` prints hints without re-type-checking.
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    Ok((
+        generate::generate_project_typed(&checked.modules, checked.node_types, dce),
+        warnings,
     ))
 }
 
@@ -105,7 +107,7 @@ pub fn compile_project(entry: &Path) -> Result<String, Vec<BuildError>> {
 /// file and appends the `//# sourceMappingURL` comment.
 pub fn compile_project_source_maps(
     entry: &Path,
-) -> Result<(String, String), Vec<BuildError>> {
+) -> Result<(String, String, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let sources: HashMap<Name, (String, String)> = checked
         .sources
@@ -114,11 +116,10 @@ pub fn compile_project_source_maps(
             (name.clone(), (path.display().to_string(), src.clone()))
         })
         .collect();
-    Ok(generate::generate_project_typed_mapped(
-        &checked.modules,
-        checked.node_types,
-        &sources,
-    ))
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let (js, map) =
+        generate::generate_project_typed_mapped(&checked.modules, checked.node_types, &sources);
+    Ok((js, map, warnings))
 }
 
 /// Compile a project to a native binary or wasm module at `output` via the
@@ -128,18 +129,21 @@ pub fn compile_project_native(
     output: &Path,
     target: generate::native::Target,
     opt: generate::native::OptLevel,
-) -> Result<(), Vec<BuildError>> {
+) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let program = crate::ir::lower::lower_project(&checked.modules);
-    generate::native::build(&program, output, target, opt).map_err(|message| {
-        vec![BuildError::new(
-            entry.to_path_buf(),
-            String::new(),
-            "NATIVE BACKEND",
-            Region::ZERO,
-            message,
-        )]
-    })
+    generate::native::build(&program, output, target, opt)
+        .map(|()| warnings)
+        .map_err(|message| {
+            vec![BuildError::new(
+                entry.to_path_buf(),
+                String::new(),
+                "NATIVE BACKEND",
+                Region::ZERO,
+                message,
+            )]
+        })
 }
 
 /// Compile a project to a native binary via the *typed* (monomorphized)
@@ -159,8 +163,9 @@ pub fn compile_project_typed(
     output: &Path,
     target: generate::native::Target,
     opt: generate::native::OptLevel,
-) -> Result<(), Vec<BuildError>> {
+) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
     // Modules alm implements natively instead of compiling from source. Their
@@ -210,15 +215,17 @@ pub fn compile_project_typed(
             ports.insert(port.name.to_string(), outgoing);
         }
     }
-    generate::typed::build(&program, &layouts, output, target, ports, opt).map_err(|message| {
-        vec![BuildError::new(
-            entry.to_path_buf(),
-            String::new(),
-            "TYPED BACKEND",
-            Region::ZERO,
-            message,
-        )]
-    })
+    generate::typed::build(&program, &layouts, output, target, ports, opt)
+        .map(|()| warnings)
+        .map_err(|message| {
+            vec![BuildError::new(
+                entry.to_path_buf(),
+                String::new(),
+                "TYPED BACKEND",
+                Region::ZERO,
+                message,
+            )]
+        })
 }
 
 /// Compile a project with the experimental WasmGC backend (see
@@ -228,8 +235,9 @@ pub fn compile_project_wasmgc(
     entry: &Path,
     output: &Path,
     source_maps: bool,
-) -> Result<(), Vec<BuildError>> {
+) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
     // The native `Deque` shunt (see `is_native_shunted_module`) does NOT apply
@@ -320,6 +328,7 @@ pub fn compile_project_wasmgc(
         &unions,
         sources.as_ref(),
     )
+    .map(|()| warnings)
     .map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),

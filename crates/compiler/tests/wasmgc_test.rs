@@ -125,7 +125,7 @@ fn run(cmd: &mut Command) -> String {
 fn native_out(entry: &std::path::Path, dir: &std::path::Path) -> Option<String> {
     let bin = dir.join("native_app");
     match project::compile_project_typed(entry, &bin, generate::native::Target::Native, generate::native::OptLevel::Release) {
-        Ok(()) => {
+        Ok(_) => {
             let out = Command::new("timeout")
                 .arg("30")
                 .arg(&bin)

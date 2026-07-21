@@ -57,7 +57,7 @@ fn check_project(files: &[(&str, &str)]) -> Result<(), String> {
 }
 
 fn compile_and_run(entry: &Path) -> Result<String, String> {
-    let javascript = alm_compiler::project::compile_project(entry)
+    let (javascript, _) = alm_compiler::project::compile_project(entry)
         .map_err(|errors| {
             errors
                 .iter()
