@@ -93,7 +93,7 @@
   <div class="lede">
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Allocation &amp; collections</p>
-      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.5–6.5×</strong> faster than the JS backend — the compact heap layout, unboxed scalar element backings (`List Int`/`Float` stored as raw `i64`/`f64` arrays, no per-element box), and the engine's GC beat JS object churn.</p>
+      <p><strong>Lists, dictionaries, sorting.</strong> Building and folding immutable structures runs <strong>1.2–8×</strong> faster than the JS backend (list map 7.9×, filter 6.4×; down to a tie on pointer-chasing trees) — the compact heap layout, unboxed scalar element backings (`List Int`/`Float` stored as raw `i64`/`f64` arrays, no per-element box), and the engine's GC beat JS object churn.</p>
     </div>
     <div class="card">
       <p class="k"><span class="dot" style="background:var(--win-bar)"></span>Scalar &amp; float</p>
@@ -106,7 +106,7 @@
   </section>
 
   <footer>
-    <p><strong>How it was run.</strong> Each workload is a value program (<code>main : Int</code>) exposing <code>bench&nbsp;:&nbsp;Int&nbsp;-&gt;&nbsp;Int</code>, compiled by alm to three targets from identical source. JS: the exported <code>bench(size)</code> called in-process under Node/v8. wasm-gc: <code>main_int()</code> on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary (the AOT ceiling). All three are checked to return the same result before timing. Time is the median of 25 timed calls after 10 warmup calls (native: min of 12 process runs, so it includes ~1&nbsp;ms of process startup). Elm's <code>Int</code> is a 64-bit integer on the wasm/native backends and an IEEE double on JS; workloads keep intermediate values under 2<sup>53</sup> so all three agree exactly.</p>
+    <p><strong>How it was run.</strong> Each workload is a value program (<code>main : Int</code>) exposing <code>bench&nbsp;:&nbsp;Int&nbsp;-&gt;&nbsp;Int</code>, compiled by alm to three targets from identical source. JS: the exported <code>bench(size)</code> called in-process under Node/v8. wasm-gc: <code>main_int()</code> on the instantiated module. native: the unboxed <code>--target=native-typed</code> binary (the AOT ceiling). All three are checked to return the same result before timing. Time is the median of 25 timed calls after 10 warmup calls; the native figure is the min of 12 process runs <strong>minus</strong> a measured ~2.4&nbsp;ms startup floor (a no-work binary: exec + heap init), so all three columns are compute-only and directly comparable. Elm's <code>Int</code> is a 64-bit integer on the wasm/native backends and an IEEE double on JS; workloads keep intermediate values under 2<sup>53</sup> so all three agree exactly.</p>
     <p><strong>Reading it.</strong> The native column is a reference ceiling, not a like-for-like: it wins the scalar loops outright but loses the allocation-churn workloads (<code>binary-trees</code>, <code>Dict</code>) to v8's generational GC, where its conservative collector pays more for short-lived garbage.</p>
   </footer>
 </div>
@@ -115,17 +115,17 @@
   // ms = median across runs; spd = js/wasm (>1 wasm faster). native for reference.
   const GROUPS = [
     { title: "allocation & collection heavy", rows: [
-      { op: "list map",                  sub: "1,000,000 elements", js: 12.3, wasm: 1.9, native: 1.2 },
-      { op: "list filter",               sub: "1,000,000 elements", js: 16.8, wasm: 2.5, native: 1.0 },
-      { op: "list fold",                 sub: "1,000,000 elements", js: 13.7, wasm: 4.4, native: 3.6 },
-      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.2, wasm: 14.0, native: 10.6 },
-      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 31.1, wasm: 21.1, native: 31.4 },
-      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.4, wasm: 8.4, native: 8.3 },
+      { op: "list map",                  sub: "1,000,000 elements", js: 15.0, wasm: 1.9, native: 0.9 },
+      { op: "list filter",               sub: "1,000,000 elements", js: 16.1, wasm: 2.5, native: 1.1 },
+      { op: "list fold",                 sub: "1,000,000 elements", js: 13.3, wasm: 4.4, native: 3.3 },
+      { op: "sort + checksum",           sub: "100,000 random ints", js: 23.7, wasm: 17.7, native: 10.1 },
+      { op: "Dict build + lookup + fold",sub: "100,000 entries",    js: 32.1, wasm: 26.6, native: 32.1 },
+      { op: "binary-trees",              sub: "depth 14 · 60 rounds", js: 8.5, wasm: 8.4, native: 8.3 },
     ]},
     { title: "scalar & float", rows: [
-      { op: "fib (naive recursion)",     sub: "fib 35",             js: 47.2, wasm: 23.3, native: 14.2 },
-      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.7, wasm: 5.3, native: 6.3 },
-      { op: "float-list sum",            sub: "1,000,000 floats",   js: 28.3, wasm: 3.4, native: 2.0 },
+      { op: "fib (naive recursion)",     sub: "fib 35",             js: 45.5, wasm: 22.9, native: 13.8 },
+      { op: "mandelbrot",                sub: "400² · 100 iters",   js: 5.8, wasm: 5.3, native: 6.1 },
+      { op: "float-list sum",            sub: "1,000,000 floats",   js: 27.6, wasm: 3.2, native: 1.9 },
     ]},
   ];
 
