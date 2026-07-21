@@ -26517,6 +26517,8 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(self.dict_values_idx));
             }
             ("Dict", "fromList") => {
+                // Columnar fast path: build the treap straight from the SoA
+                // columns (no per-element tuple), else the boxed-pairs kernel.
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::RefNull(HeapType::Concrete(T_TNODE)));
                 f.instruction(&Instruction::Call(self.treap_insert_pairs_idx));
