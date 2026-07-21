@@ -3211,6 +3211,21 @@ function _VDom_attrKey(attr) {
     return attr.$ + ':' + (attr.key || attr.name);
 }
 
+// Whether the new attr differs from the old one with the same key, so patch can
+// skip re-applying an unchanged attribute (avoids thousands of redundant
+// className/setAttribute writes when a keyed list re-renders and only a couple
+// of rows actually changed). Events always "change": re-applying refreshes the
+// handler's decoder + dispatch (cheap — the listener is only attached once), and
+// their decoder closures aren't value-comparable.
+function _VDom_attrChanged(prev, attr) {
+    switch (attr.$) {
+        case 'AStyle': return prev.val !== attr.val;
+        case 'AAttr':  return prev.val !== attr.val || prev.ns !== attr.ns;
+        case 'AProp':  return prev.val !== attr.val;
+        default:       return true; // AEvent
+    }
+}
+
 function _VDom_unapplyAttr(dom, attr) {
     switch (attr.$) {
         case 'AStyle':
@@ -3272,8 +3287,12 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     var newKeys = {};
     for (var j = 0; j < newV.attrs.length; j++) {
         var attr = newV.attrs[j];
-        newKeys[_VDom_attrKey(attr)] = true;
-        _VDom_applyAttr(dom, attr, dispatch);
+        var ak = _VDom_attrKey(attr);
+        newKeys[ak] = true;
+        var prev = oldAttrs[ak];
+        if (prev === undefined || _VDom_attrChanged(prev, attr)) {
+            _VDom_applyAttr(dom, attr, dispatch);
+        }
     }
     for (var key in oldAttrs) {
         if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
