@@ -9,5 +9,8 @@ mkdir -p build
 echo "elm ...";      elm make Main.elm --optimize --output=build/elm.js >/dev/null
 echo "alm-js ...";   "$ALM" make Main.elm                 --output=build/almjs.js   >/dev/null
 echo "alm-wasm ..."; "$ALM" make Main.elm --target=wasm-gc --output=build/almwasm.wasm >/dev/null
+# Optimized (Html.Lazy) variants of the alm targets — see Main_lazy.elm.
+echo "alm-js (opt) ...";   "$ALM" make Main_lazy.elm                 --output=build/almjs_lazy.js     >/dev/null
+echo "alm-wasm (opt) ..."; "$ALM" make Main_lazy.elm --target=wasm-gc --output=build/almwasm_lazy.wasm >/dev/null
 echo "react+svelte ..."; node build.mjs
 echo "done. now: node drive.mjs   (set CHROME=/path/to/chrome if not macOS)"

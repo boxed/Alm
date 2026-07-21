@@ -34,6 +34,12 @@ const configs = {
     `window.almStart(Uint8Array.from(atob(${JSON.stringify(wasmB64)}),c=>c.charCodeAt(0)));`),
   react: page(``, `<div id="app"></div><script>${rdb('react.bundle.js')}</script>`, ``),
   svelte: page(``, `<div id="app"></div><script>${rdb('svelte.bundle.js')}</script>`, ``),
+  // Optimized (Html.Lazy) alm variants — Main_lazy.elm, so the JS entry is
+  // Elm.Main_lazy; the wasm module is module-agnostic (almStart).
+  'alm-js-opt': page(`<script>${rdb('almjs_lazy.js')}</script>`, `<div id="app"></div>`,
+    `var M=(Elm.Main_lazy.main&&Elm.Main_lazy.main.init)?Elm.Main_lazy.main:Elm.Main_lazy;M.init({node:document.getElementById('app')});`),
+  'alm-wasm-opt': page(`<script>${rd('shim.js')}</script>`, ``,
+    `window.almStart(Uint8Array.from(atob(${JSON.stringify(fs.readFileSync(path.join(J, 'build', 'almwasm_lazy.wasm')).toString('base64'))}),c=>c.charCodeAt(0)));`),
 };
 
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: 'new', args: ['--no-sandbox', '--disable-gpu'] });

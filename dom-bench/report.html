@@ -181,6 +181,7 @@
 
   <footer>
     <p><strong>How the DOM benchmark was run (rebuilt & re-measured 2026-07-21).</strong> A keyed js-framework-benchmark app — create/append 1k &amp; 10k rows, update every 10th, swap, select, remove, clear — implemented five ways: elm (official compiler), alm→JS and alm→WebAssembly-GC (both from the <em>same</em> <code>Main.elm</code>; the wasm module runs on a hand-written DOM-host JS shim, no WASI), React&nbsp;18 (keyed, <code>createRoot</code>) and Svelte&nbsp;4 (keyed <code>#each</code>). <strong>puppeteer-core</strong> drives system Google&nbsp;Chrome headless in <em>real time</em> (no virtual clock). Each operation is <strong>paint-inclusive</strong>: timed from the click to a task scheduled after the next frame's paint (<code>requestAnimationFrame</code>&nbsp;→&nbsp;<code>setTimeout(0)</code>), so it counts the framework's work <em>and</em> the browser's layout/paint. Reported value = median of 3 page reloads, each the median of 15 timed iterations. This measure is fair to frameworks that batch on rAF (elm) and those that commit synchronously (alm/React) alike — both paint on the same frame — which is why sub-frame incremental ops (<em>select</em>, <em>swap</em>, <em>remove</em>) converge near one frame and don't separate the field; the bulk ops (<em>create</em>, <em>append</em>), whose work exceeds a frame, do. Compile/memory/bundle-size figures below are from the earlier full-app run and were not re-measured this pass.</p>
+    <p><strong>naive vs opt.</strong> The two alm targets appear in the Runtime tables <em>twice</em>: <strong>(naive)</strong> is the plain <code>Main.elm</code> shared with elm; <strong>(opt)</strong> is <code>Main_lazy.elm</code>, the same app with <code>Html.Lazy.lazy2</code> on the rows (memoized on <code>(isSelected, row)</code>). That's the idiomatic fix for the vdom re-render/diff cost, and it moves the alm targets onto Svelte's footing for targeted updates: <em>select</em> 1.2&nbsp;→&nbsp;0.4&nbsp;ms (= Svelte), <em>swap</em> and <em>remove</em> match Svelte, and <em>append 1k to 10k</em> drops from 58&nbsp;→&nbsp;39&nbsp;ms (the 10k untouched rows are memoized). Bulk ops (<em>create</em>) are unchanged — every row is new, so there's nothing to memoize. elm/React have their own equivalents (<code>Html.Lazy</code>, <code>React.memo</code>); they're left naive here, and Svelte's fine-grained reactivity needs none. alm's compiler emits a hint pointing at keyed lists that lack <code>Html.Lazy</code>.</p>
     <p><strong>Why Svelte wins <em>select</em>.</strong> Svelte compiles to fine-grained reactivity: selecting a row updates only the two <code>class</code> bindings that actually changed (O(changed)) — no re-render, no diff. The virtual-DOM frameworks (elm, React, and both alm targets) re-render the whole 1000-row view and diff it (O(rows)) even though two rows changed; that's inherent to vdom and is why elm (1.0) and React (1.5) trail Svelte here too. Among the vdom set alm-wasm is the fastest (0.8&nbsp;ms); alm-js (1.2) trails it because the JS runtime can't structurally skip an unchanged row — its event handlers are closures, compared by reference — while the wasm runtime can (its handler decoders are structural data). The idiomatic vdom fix is <code>Html.Lazy</code>: memoizing rows on <code>(isSelected, row)</code> makes the update O(changed) too — measured alm select CPU over 1000 rows drops <strong>0.50&nbsp;ms&nbsp;→&nbsp;0.067&nbsp;ms (7.5×)</strong> with <code>lazy2</code>, matching/beating Svelte. This benchmark is deliberately vanilla (no per-framework memoization) for a consistent baseline.</p>
     <p><strong>vdom diffing — confirmed in this run.</strong> The alm-wasm patch now performs <strong>full patch-time diffing</strong>: attributes and inline styles are diffed rather than blindly re-applied, dropped keys are removed, boolean DOM properties (<code>disabled</code>, <code>checked</code>, …) are applied and cleared, and event listeners are <strong>added, updated in place, and removed</strong> — matching the JS backend. Every operation above rendered correctly on the real WebAssembly-GC engine + real DOM, and a separate in-browser check confirmed a handler's captured value updating on patch, a conditionally-added handler firing, and a removed handler going silent. The change is perf-neutral for these operations — an unchanged handler is structurally equal and skipped, so no listener is re-registered on a steady update.</p>
     <p><strong>How the compile benchmark was run.</strong> Each program is a real package's project (its <code>Main.elm</code> plus every dependency). Time is the min of repeated <code>make</code> runs (min filters scheduler/disk noise; wall clock). <code>alm-js</code>/<code>alm-wasm</code>/<code>alm-native</code> are <code>alm make … --target=js|wasm-gc|native-typed</code> — alm keeps no incremental cache, so each is a full compile of the whole project. <code>elm (full)</code> clears <code>elm-stuff/</code> before every run so the official compiler recompiles the entire dependency set (an apples-to-apples full build); <code>elm (incr.)</code> keeps that cache, i.e. elm's fast path where only changed modules recompile. Same machine, same source; alm's release binary.</p>
@@ -190,18 +191,21 @@
 
 <script>
   const BULK = [
-    { op: "create 1k rows",  elm: 18.2, "alm-js": 16.1, "alm-wasm": 18.0, react: 16.8, svelte: 15.7 },
-    { op: "replace all 1k",  elm: 16.5, "alm-js": 15.9, "alm-wasm": 19.2, react: 19.7, svelte: 20.8 },
-    { op: "create 10k rows", elm: 170.6, "alm-js": 169.7, "alm-wasm": 207.2, react: 266.5, svelte: 173.4 },
-    { op: "clear 1k rows",   elm: 1.6, "alm-js": 1.8, "alm-wasm": 1.5, react: 3.7, svelte: 1.8 },
+    { op: "create 1k rows",  elm: 16.8, "alm-js (naive)": 16.4, "alm-js (opt)": 16.9, "alm-wasm (naive)": 17.4, "alm-wasm (opt)": 17.5, react: 17.2, svelte: 15.4 },
+    { op: "replace all 1k",  elm: 15.9, "alm-js (naive)": 15.9, "alm-js (opt)": 16.4, "alm-wasm (naive)": 19.0, "alm-wasm (opt)": 19.3, react: 19.8, svelte: 16.7 },
+    { op: "create 10k rows", elm: 164.7, "alm-js (naive)": 163.7, "alm-js (opt)": 164.3, "alm-wasm (naive)": 208.5, "alm-wasm (opt)": 202.3, react: 259.9, svelte: 173.7 },
+    { op: "clear 1k rows",   elm: 1.7, "alm-js (naive)": 1.7, "alm-js (opt)": 1.7, "alm-wasm (naive)": 1.6, "alm-wasm (opt)": 1.7, react: 4.1, svelte: 1.8 },
   ];
   const INCR = [
-    { op: "select row",        elm: 1.0, "alm-js": 1.2, "alm-wasm": 0.8, react: 1.5, svelte: 0.4 },
-    { op: "update every 10th", elm: 5.3, "alm-js": 5.4, "alm-wasm": 5.3, react: 5.6, svelte: 4.5 },
-    { op: "swap 2 rows",       elm: 2.4, "alm-js": 2.5, "alm-wasm": 2.6, react: 15.9, svelte: 1.6 },
-    { op: "remove row",        elm: 3.4, "alm-js": 3.5, "alm-wasm": 3.7, react: 4.0, svelte: 2.8 },
-    { op: "append 1k to 10k",  elm: 55.8, "alm-js": 57.0, "alm-wasm": 60.6, react: 58.1, svelte: 43.0 },
+    { op: "select row",        elm: 1.0, "alm-js (naive)": 1.2, "alm-js (opt)": 0.4, "alm-wasm (naive)": 0.8, "alm-wasm (opt)": 0.4, react: 1.5, svelte: 0.4 },
+    { op: "update every 10th", elm: 5.3, "alm-js (naive)": 5.2, "alm-js (opt)": 4.7, "alm-wasm (naive)": 5.2, "alm-wasm (opt)": 4.7, react: 5.8, svelte: 4.4 },
+    { op: "swap 2 rows",       elm: 2.4, "alm-js (naive)": 2.5, "alm-js (opt)": 1.7, "alm-wasm (naive)": 2.5, "alm-wasm (opt)": 1.9, react: 15.9, svelte: 1.7 },
+    { op: "remove row",        elm: 3.4, "alm-js (naive)": 3.6, "alm-js (opt)": 2.8, "alm-wasm (naive)": 3.6, "alm-wasm (opt)": 3.0, react: 4.1, svelte: 2.8 },
+    { op: "append 1k to 10k",  elm: 55.0, "alm-js (naive)": 58.4, "alm-js (opt)": 39.4, "alm-wasm (naive)": 56.4, "alm-wasm (opt)": 46.8, react: 59.5, svelte: 44.4 },
   ];
+  // Runtime tables show the alm targets twice: naive (vanilla Main.elm) and opt
+  // (Main_lazy.elm with Html.Lazy on rows). Memory/size below use the 5-way FWS.
+  const RUNTIME_COLS = ["elm", "alm-js (naive)", "alm-js (opt)", "alm-wasm (naive)", "alm-wasm (opt)", "react", "svelte"];
   const MEM = [
     { op: "ready (empty)",     elm: 0.68, "alm-js": 0.64, "alm-wasm": 0.84, react: 1.19, svelte: 0.63 },
     { op: "after creating 1k", elm: 3.66, "alm-js": 3.52, "alm-wasm": 4.32, react: 4.43, svelte: 2.81 },
@@ -278,8 +282,8 @@
     t.innerHTML = h + "</tbody>";
   }
 
-  renderTable("t-bulk", BULK, 1);
-  renderTable("t-incr", INCR, 1);
+  renderTable("t-bulk", BULK, 1, RUNTIME_COLS);
+  renderTable("t-incr", INCR, 1, RUNTIME_COLS);
   renderTable("t-compute", COMPUTE, 1, COMPUTE_COLS);
   renderTable("t-compile", COMPILE, 0, COMPILE_COLS);
   renderTable("t-mem", MEM, 2);
