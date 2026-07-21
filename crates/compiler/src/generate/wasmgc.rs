@@ -16656,16 +16656,36 @@ impl<'a> Codegen<'a> {
         self.dom_str(&mut f, 13);
         f.instruction(&Instruction::Call(DOM_SET_STYLE));
         f.instruction(&Instruction::End);
+        // ABOOL (3): a boolean DOM property (disabled, checked, …). true → set
+        // the property; false → clear it (removeAttribute, matching the JS
+        // backend's `dom[key] = false` on a reflected boolean).
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(13));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 12);
+        f.instruction(&Instruction::Call(DOM_SET_PROPERTY));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 12);
+        f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // if apply
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // Remove old AATTR/ASTYLE attrs whose (tag, key) is absent from the new
-        // node — mirrors the JS backend's unapplyAttr (AAttr→removeAttribute,
-        // AStyle→style[key]=''). Skipped when the attr lists were positionally
-        // identical (same_len && nothing applied), the common no-attr-change case.
+        // Remove old AATTR/ASTYLE/ABOOL attrs whose (tag, key) is absent from the
+        // new node — mirrors the JS backend's unapplyAttr (AAttr/AProp→
+        // removeAttribute, AStyle→style[key]=''). Skipped when the attr lists were
+        // positionally identical (same_len && nothing applied), the common case.
         f.instruction(&Instruction::LocalGet(3)); // same_len
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::LocalGet(16)); // applied
@@ -16685,10 +16705,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(9)); // oldA
         ctor_tag(&mut f, 9);
         f.instruction(&Instruction::LocalSet(8)); // tag
-        // only AATTR (0) / ASTYLE (1) are removable here
+        // removable: AATTR (0), ASTYLE (1), ABOOL (3) — not AEVENT (2)/ANONE (4)
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32Or);
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 9);
         f.instruction(&Instruction::LocalSet(17)); // oldKey
@@ -16731,19 +16755,20 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(0)); // AATTR: removeAttribute(key)
-        self.dom_str(&mut f, 17);
-        f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
-        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(0)); // ASTYLE: style[key] = ""
         self.dom_str(&mut f, 17);
         self.dom_str(&mut f, 18);
         f.instruction(&Instruction::Call(DOM_SET_STYLE));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(0)); // AATTR/ABOOL: removeAttribute(key)
+        self.dom_str(&mut f, 17);
+        f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // if !found
-        f.instruction(&Instruction::End); // if tag < 2
+        f.instruction(&Instruction::End); // if removable
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End); // outer loop

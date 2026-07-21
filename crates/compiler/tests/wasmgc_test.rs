@@ -1926,6 +1926,32 @@ fn attr_removal_on_update() {
     );
 }
 
+// Boolean-property (ABOOL) parity on patch: the same-tag arm must now APPLY a
+// bool prop whose value changed (disabled True→False → clear it) and REMOVE one
+// whose key is dropped entirely — matching the JS backend's AProp handling.
+// Before this, wasm-gc ignored ABOOL on patch, leaving a stale `disabled`.
+#[test]
+fn bool_prop_toggle_on_update() {
+    assert_sandbox_click(
+        "bool_prop_toggle",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, input)\n\
+         import Html.Attributes as A\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Toggle\n\n\
+         view : Bool -> Html Msg\n\
+         view on =\n\
+         \x20   div []\n\
+         \x20       [ button [ onClick Toggle ] [ Html.text \"t\" ]\n\
+         \x20       , input [ A.disabled on ] []\n\
+         \x20       , input (if on then [ A.disabled True ] else []) []\n\
+         \x20       ]\n\n\
+         main : Program () Bool Msg\n\
+         main = Browser.sandbox { init = True, update = \\_ _ -> False, view = view }\n",
+    );
+}
+
 #[test]
 fn keyed_handler_table_grows() {
     // Each row carries an event handler, so one render registers one handler per
