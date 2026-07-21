@@ -3279,23 +3279,36 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
         return replacement;
     }
 
-    // Same tag: patch attributes...
-    var oldAttrs = {};
-    for (var i = 0; i < oldV.attrs.length; i++) {
-        oldAttrs[_VDom_attrKey(oldV.attrs[i])] = oldV.attrs[i];
-    }
-    var newKeys = {};
-    for (var j = 0; j < newV.attrs.length; j++) {
-        var attr = newV.attrs[j];
-        var ak = _VDom_attrKey(attr);
-        newKeys[ak] = true;
-        var prev = oldAttrs[ak];
-        if (prev === undefined || _VDom_attrChanged(prev, attr)) {
-            _VDom_applyAttr(dom, attr, dispatch);
+    // Same tag: diff attributes. Fast path — when the attr lists line up by key
+    // (the common case: same view code, only values differ), diff positionally
+    // with NO per-node map allocation. This is the hot path of a keyed re-render
+    // (thousands of nodes), so avoiding the `{}` + inserts + `for..in` per node
+    // matters. Fall back to a keyed diff only when attrs were added/removed/
+    // reordered (lengths or per-position keys differ).
+    var oldA = oldV.attrs, newA = newV.attrs, i, aligned = oldA.length === newA.length;
+    if (aligned) {
+        for (i = 0; i < newA.length; i++) {
+            var oa = oldA[i], na = newA[i];
+            if (oa.$ !== na.$ || (oa.key || oa.name) !== (na.key || na.name)) { aligned = false; break; }
         }
     }
-    for (var key in oldAttrs) {
-        if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
+    if (aligned) {
+        for (i = 0; i < newA.length; i++) {
+            if (_VDom_attrChanged(oldA[i], newA[i])) { _VDom_applyAttr(dom, newA[i], dispatch); }
+        }
+    } else {
+        var oldAttrs = {};
+        for (i = 0; i < oldA.length; i++) { oldAttrs[_VDom_attrKey(oldA[i])] = oldA[i]; }
+        var newKeys = {};
+        for (i = 0; i < newA.length; i++) {
+            var attr = newA[i], ak = _VDom_attrKey(attr);
+            newKeys[ak] = true;
+            var prev = oldAttrs[ak];
+            if (prev === undefined || _VDom_attrChanged(prev, attr)) { _VDom_applyAttr(dom, attr, dispatch); }
+        }
+        for (var key in oldAttrs) {
+            if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
+        }
     }
 
     if (oldV.$ === 'VKeyed') {
