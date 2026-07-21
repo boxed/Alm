@@ -1298,6 +1298,25 @@ fn tuple_map_xor_map3() {
 }
 
 #[test]
+fn deforest_fold_map() {
+    // foldl/foldr over a `List.map` deforest into one loop (no intermediate
+    // list). Covers: scalar map (Int sum), tuple map + destructuring fold
+    // (unboxed field splice), foldr order, a capture in both g and f, a
+    // non-tuple eqref map, and map over a scalar (List Int) source.
+    assert_str_prog(
+        "deforest_fold_map",
+        "module Test exposing (main)\n\n\
+         xs : List Int\n\
+         xs =\n    List.range 1 5\n\n\
+         k : Int\n\
+         k =\n    10\n\n\
+         main : String\n\
+         main =\n    \
+            String.fromInt (List.foldl (\\v acc -> acc + v) 0 (List.map (\\n -> n * n) xs))\n        ++ \"|\" ++ String.fromInt (List.foldl (\\( a, b ) acc -> acc + a + b) 0 (List.map (\\n -> ( n, n * 2 )) xs))\n        ++ \"|\" ++ String.fromFloat (List.foldl (\\( _, y ) acc -> acc + y) 0 (List.map (\\n -> ( n, toFloat n / 2 )) xs))\n        ++ \"|\" ++ List.foldr (\\v acc -> acc ++ v) \"\" (List.map (\\n -> String.fromInt n) xs)\n        ++ \"|\" ++ String.fromInt (List.foldl (\\v acc -> acc + v + k) 0 (List.map (\\n -> n * k) xs))\n        ++ \"|\" ++ String.fromInt (List.foldl (\\v acc -> acc + v) 0 (List.map (\\n -> n + 1) [ 10, 20, 30 ]))\n",
+    );
+}
+
+#[test]
 fn soa_list_of_flat_tuples() {
     // Structure-of-arrays backing for `List` of a flat scalar tuple. Exercises
     // the literal (columnar build), pattern-matching the head (widen), fold and

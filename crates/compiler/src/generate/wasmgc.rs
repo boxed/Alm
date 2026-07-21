@@ -23670,6 +23670,83 @@ impl<'a> Codegen<'a> {
     /// per-element `apply1` calls (a fold's 2-arg function is applied curried).
     /// Returns `true` when fused (call-site code emitted), `false` to use the
     /// kernel. `rev` selects foldr (walk tail-first) vs foldl (head-first).
+    /// Deforest `List.foldl/foldr f init (List.map g xs)` into a single loop that
+    /// computes `g(x)` into locals and folds it with `f` — no intermediate list
+    /// is ever materialized (of any representation). When `f` destructures the
+    /// mapped element as a tuple and `g`'s body is a literal tuple, each field is
+    /// bound to `g`'s inline sub-expression directly (no boxed tuple, unboxed
+    /// scalars). Works for any element type; supersedes the SoA map|>fold chain
+    /// with zero cost elsewhere. Returns `true` when it emitted the fused call.
+    fn try_deforest_fold_map(
+        &mut self,
+        args: &[TypedExpr],
+        rev: bool,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<bool, String> {
+        // args[2] must be a saturated `List.map g xs`.
+        let (g_expr, xs) = match &args[2].kind {
+            TypedKind::Call(func, margs)
+                if matches!(&func.kind, TypedKind::Foreign(m, n) if m.as_str() == "List" && n.as_str() == "map")
+                    && margs.len() == 2 =>
+            {
+                (&margs[0], &margs[1])
+            }
+            _ => return Ok(false),
+        };
+        // Char source not handled (element needs an i31 box/unbox).
+        if list_scalar(&xs.tipe) == Some(Scalar::I32) {
+            return Ok(false);
+        }
+        // Both `g` and `f` must be inline lambdas so we can splice their bodies.
+        let g = match self.resolve_fusable(g_expr, 1, ctx) {
+            Some(c @ Callee::Inline { .. }) => c,
+            _ => return Ok(false),
+        };
+        let ff = match self.resolve_fusable(&args[0], 2, ctx) {
+            Some(c @ Callee::Inline { .. }) => c,
+            _ => return Ok(false),
+        };
+        let g_body = match &g {
+            Callee::Inline { body, .. } => *body,
+            _ => unreachable!(),
+        };
+        // If `f` destructures a tuple element, `g`'s body must be a literal tuple
+        // of matching arity so each field splices in unboxed. Otherwise `f`'s
+        // element param must be a single var/wildcard (value mode).
+        let field_mode = matches!(&ff, Callee::Inline { elem_fields: Some(_), .. });
+        if field_mode {
+            let fields = match &ff {
+                Callee::Inline { elem_fields: Some(fs), .. } => fs,
+                _ => unreachable!(),
+            };
+            let tup_len = match &g_body.kind {
+                TypedKind::Tuple(_, _, c) => 2 + c.is_some() as usize,
+                _ => return Ok(false),
+            };
+            if tup_len != fields.len() {
+                return Ok(false);
+            }
+        }
+        let ff_body = match &ff {
+            Callee::Inline { body, .. } => *body,
+            _ => unreachable!(),
+        };
+        let src_scalar = list_scalar(&xs.tipe).filter(|s| !matches!(s, Scalar::I32));
+        let acc_f64 = f64_elem(&args[1].tipe);
+        let acc_i64 = !acc_f64 && is_named_type(&ff_body.tipe, "Int");
+        let g_caps = callee_cap_slots(&g, ctx);
+        let f_caps = callee_cap_slots(&ff, ctx);
+        let lidx = self.build_deforest_fold_map(&g, &ff, rev, src_scalar, acc_f64, acc_i64)?;
+        for slot in g_caps.iter().chain(f_caps.iter()) {
+            f.instruction(&Instruction::LocalGet(*slot));
+        }
+        self.emit_expr(&args[1], ctx, f)?; // initial accumulator
+        self.emit_expr(xs, ctx, f)?; // the source list (never the mapped list)
+        f.instruction(&Instruction::Call(lidx));
+        Ok(true)
+    }
+
     fn try_fuse_fold(
         &mut self,
         args: &[TypedExpr],
@@ -23677,6 +23754,10 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<bool, String> {
+        // Deforest `foldl/foldr f init (map g xs)` first — no intermediate list.
+        if self.try_deforest_fold_map(args, rev, ctx, f)? {
+            return Ok(true);
+        }
         let callee = match self.resolve_fusable(&args[0], 2, ctx) {
             Some(c) => c,
             None => return Ok(false),
@@ -24073,6 +24154,224 @@ impl<'a> Codegen<'a> {
             lf.instruction(&Instruction::LocalSet(ai));
         } else {
             self.emit_expr(body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(acc));
+        }
+        bump(&mut lf, l_i, if rev { -1 } else { 1 });
+        lf.instruction(&Instruction::Br(0));
+        lf.instruction(&Instruction::End); // loop
+        lf.instruction(&Instruction::End); // block
+        lf.instruction(&Instruction::End); // if
+        if acc_f64 {
+            lf.instruction(&Instruction::LocalGet(af));
+            lf.instruction(&Instruction::StructNew(T_FLOAT));
+        } else if acc_i64 {
+            lf.instruction(&Instruction::LocalGet(ai));
+            lf.instruction(&Instruction::Call(self.box_int_idx));
+        } else {
+            lf.instruction(&Instruction::LocalGet(acc));
+        }
+        lf.instruction(&Instruction::End); // function
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (arity, lf);
+        Ok(lidx)
+    }
+
+    /// Build the deforested `foldl/foldr f init (map g xs)` loop: one pass over
+    /// `xs` that computes `g(x)` into locals and folds it with `f`. See
+    /// `try_deforest_fold_map`. `g`/`ff` are inline callees; when `ff`
+    /// destructures a tuple element and `g`'s body is a literal tuple, each field
+    /// splices in as an unboxed scalar local.
+    fn build_deforest_fold_map(
+        &mut self,
+        g: &Callee,
+        ff: &Callee,
+        rev: bool,
+        src_scalar: Option<Scalar>,
+        acc_f64: bool,
+        acc_i64: bool,
+    ) -> Result<u32, String> {
+        let (ng, ebg) = callee_dims(g);
+        let (nf, ebf) = callee_dims(ff);
+        let eb = ebg + ebf;
+        let arity = ng + nf + 2; // g_caps, f_caps, acc, xs
+        self.fn_type(arity);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((arity, Function::new([])));
+
+        let src_arr = src_scalar.map(|s| s.arr()).unwrap_or(T_ARR);
+        let elem_ty = src_scalar.map(|s| s.val()).unwrap_or_else(eqref);
+        let elem_rep = match src_scalar {
+            Some(Scalar::F64) => Some(Rep::F64),
+            Some(Scalar::I64) => Some(Rep::I64),
+            _ => None,
+        };
+        let (g_pnames, g_body) = match g {
+            Callee::Inline { pnames, body, .. } => (pnames, *body),
+            _ => return Err("wasmgc: deforest g not inline".into()),
+        };
+        let (f_pnames, f_fields, f_body) = match ff {
+            Callee::Inline { pnames, elem_fields, body, .. } => (pnames, elem_fields, *body),
+            _ => return Err("wasmgc: deforest f not inline".into()),
+        };
+        // The mapped element as one-or-more (rep, expr): tuple fields when `f`
+        // destructures, else the whole `g` body as a single value.
+        let outs: Vec<(Rep, &TypedExpr)> = if f_fields.is_some() {
+            let subs: Vec<&TypedExpr> = match &g_body.kind {
+                TypedKind::Tuple(a, b, c) => {
+                    let mut v = vec![a.as_ref(), b.as_ref()];
+                    if let Some(c) = c {
+                        v.push(c.as_ref());
+                    }
+                    v
+                }
+                _ => return Err("wasmgc: deforest field mode needs a literal tuple".into()),
+            };
+            subs.into_iter().map(|e| (rep_of(&e.tipe), e)).collect()
+        } else {
+            vec![(rep_of(&g_body.tipe), g_body)]
+        };
+
+        let mut locals: Vec<(u32, ValType)> = vec![
+            (eb + 1, eqref()),    // body-binding pool (both bodies) + scratch_eqref
+            (1, ValType::I64),    // scratch_i64
+            (3, ValType::I32),    // len, start, i
+            (1, elem_ty),         // source element
+            (1, ref_to(src_arr)), // data
+            (1, ValType::F64),    // af
+            (1, ValType::I64),    // ai
+        ];
+        for (r, _) in &outs {
+            locals.push((1, rep_valtype(*r))); // mapped field/value local
+        }
+        let mut lf = Function::new(locals);
+
+        let acc = ng + nf;
+        let xs = ng + nf + 1;
+        let base = arity + eb;
+        let scratch_e = base;
+        let scratch_i = base + 1;
+        let l_len = base + 2;
+        let l_start = base + 3;
+        let l_i = base + 4;
+        let elem = base + 5;
+        let l_data = base + 6;
+        let af = base + 7;
+        let ai = base + 8;
+        let map_base = base + 9;
+
+        let mut lctx = FnCtx::new();
+        lctx.next_local = arity; // let-bindings of both bodies grow into the pool
+        lctx.scratch_eqref = scratch_e;
+        lctx.scratch_i64 = scratch_i;
+        if let Some(r) = elem_rep {
+            lctx.local_rep.insert(elem, r);
+        }
+        if acc_f64 {
+            lctx.local_rep.insert(af, Rep::F64);
+        }
+        if acc_i64 {
+            lctx.local_rep.insert(ai, Rep::I64);
+        }
+        for (j, (r, _)) in outs.iter().enumerate() {
+            if *r != Rep::Eqref {
+                lctx.local_rep.insert(map_base + j as u32, *r);
+            }
+        }
+        // Scope: g captures (params 0..ng), then f captures (ng..ng+nf).
+        if let Callee::Inline { caps, .. } = g {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), i as u32));
+            }
+        }
+        if let Callee::Inline { caps, .. } = ff {
+            for (i, name) in caps.iter().enumerate() {
+                lctx.scope.push((name.clone(), ng + i as u32));
+            }
+        }
+        // g's parameter binds to the source element.
+        if let Some(n) = &g_pnames[0] {
+            lctx.scope.push((n.clone(), elem));
+        }
+        // f's element binding: tuple fields to the mapped locals, or the single
+        // mapped value to f's element param.
+        if let Some(fields) = f_fields {
+            for (j, fld) in fields.iter().enumerate() {
+                if let Some(n) = fld {
+                    lctx.scope.push((n.clone(), map_base + j as u32));
+                }
+            }
+        } else if let Some(n) = &f_pnames[0] {
+            lctx.scope.push((n.clone(), map_base));
+        }
+        // f's accumulator param.
+        if let Some(n) = &f_pnames[1] {
+            let slot = if acc_f64 { af } else if acc_i64 { ai } else { acc };
+            lctx.scope.push((n.clone(), slot));
+        }
+
+        // Unbox the initial accumulator once.
+        if acc_f64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&cast_to(T_FLOAT));
+            lf.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+            lf.instruction(&Instruction::LocalSet(af));
+        } else if acc_i64 {
+            lf.instruction(&Instruction::LocalGet(acc));
+            lf.instruction(&Instruction::Call(self.unbox_int_idx));
+            lf.instruction(&Instruction::LocalSet(ai));
+        }
+        self.flatten_local_scalar(&mut lf, xs, src_scalar);
+        match src_scalar { Some(s) => list_len_s(s, &mut lf, xs), None => list_len(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalTee(l_len));
+        lf.instruction(&Instruction::If(BlockType::Empty));
+        match src_scalar { Some(s) => list_data_s(s, &mut lf, xs), None => list_data(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalSet(l_data));
+        match src_scalar { Some(s) => list_start_s(s, &mut lf, xs), None => list_start(&mut lf, xs) }
+        lf.instruction(&Instruction::LocalSet(l_start));
+        if rev {
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32Const(1));
+            lf.instruction(&Instruction::I32Sub);
+        } else {
+            lf.instruction(&Instruction::I32Const(0));
+        }
+        lf.instruction(&Instruction::LocalSet(l_i));
+        lf.instruction(&Instruction::Block(BlockType::Empty));
+        lf.instruction(&Instruction::Loop(BlockType::Empty));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        if rev {
+            lf.instruction(&Instruction::I32Const(0));
+            lf.instruction(&Instruction::I32LtS);
+        } else {
+            lf.instruction(&Instruction::LocalGet(l_len));
+            lf.instruction(&Instruction::I32GeS);
+        }
+        lf.instruction(&Instruction::BrIf(1));
+        // element = data[start + i]
+        lf.instruction(&Instruction::LocalGet(l_data));
+        lf.instruction(&Instruction::LocalGet(l_start));
+        lf.instruction(&Instruction::LocalGet(l_i));
+        lf.instruction(&Instruction::I32Add);
+        lf.instruction(&Instruction::ArrayGet(src_arr));
+        lf.instruction(&Instruction::LocalSet(elem));
+        // Compute the mapped element (g's body) into the mapped local(s).
+        for (j, (r, e)) in outs.iter().enumerate() {
+            match r {
+                Rep::F64 => self.emit_f64(e, &mut lctx, &mut lf)?,
+                Rep::I64 => self.emit_i64(e, &mut lctx, &mut lf)?,
+                Rep::Eqref => self.emit_expr(e, &mut lctx, &mut lf)?,
+            }
+            lf.instruction(&Instruction::LocalSet(map_base + j as u32));
+        }
+        // accumulator = f(mapped, accumulator)
+        if acc_f64 {
+            self.emit_f64(f_body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(af));
+        } else if acc_i64 {
+            self.emit_i64(f_body, &mut lctx, &mut lf)?;
+            lf.instruction(&Instruction::LocalSet(ai));
+        } else {
+            self.emit_expr(f_body, &mut lctx, &mut lf)?;
             lf.instruction(&Instruction::LocalSet(acc));
         }
         bump(&mut lf, l_i, if rev { -1 } else { 1 });
