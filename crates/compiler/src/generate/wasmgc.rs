@@ -16583,22 +16583,51 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // VNODE same tag: reapply new attrs (AATTR/ASTYLE; events persist)
-        ctor_argn(&mut f, 2, 1);
+        // VNODE same tag: DIFF attrs (AATTR/ASTYLE) — only (re)apply an attribute
+        // whose value actually changed; events persist. When the attr lists have
+        // equal length (the common case: same view code, only values differ),
+        // skip every position whose old and new attr are structurally equal, so
+        // an unchanged `class`/style triggers no host DOM call. `val_eq` on an
+        // event attr compares its handler closure by reference identity (fresh
+        // closures → not equal → "apply", a no-op below), so it's safe. Lists of
+        // differing length fall back to applying every new attr.
+        ctor_argn(&mut f, 1, 1); // old attrs
+        f.instruction(&Instruction::LocalSet(10));
+        self.flatten_local(&mut f, 10, false);
+        ctor_argn(&mut f, 2, 1); // new attrs
         f.instruction(&Instruction::LocalSet(11));
         self.flatten_local(&mut f, 11, false);
+        list_len(&mut f, 10);
+        f.instruction(&Instruction::LocalSet(4)); // olen
         list_len(&mut f, 11);
-        f.instruction(&Instruction::LocalSet(4));
+        f.instruction(&Instruction::LocalSet(5)); // nlen
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::LocalSet(3)); // same_len
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Block(BlockType::Empty));
         f.instruction(&Instruction::Loop(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32GeS);
         f.instruction(&Instruction::BrIf(1));
         list_elem(&mut f, 11, 6);
         f.instruction(&Instruction::LocalSet(9));
+        // apply = !(same_len && val_eq(old[i], new[i]))
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        list_elem(&mut f, 10, 6);
+        f.instruction(&Instruction::LocalGet(9));
+        f.instruction(&Instruction::Call(self.val_eq_idx));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 9);
         f.instruction(&Instruction::LocalSet(12));
         ctor_argn(&mut f, 9, 1);
@@ -16621,6 +16650,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(DOM_SET_STYLE));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // if apply
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
