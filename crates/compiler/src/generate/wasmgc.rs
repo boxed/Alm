@@ -235,7 +235,7 @@ const DOM_SET_TEXT: u32 = 9; // (node,ptr,len)
 const DOM_REMOVE_ATTRIBUTE: u32 = 10; // (node,ptr,len)
 const DOM_REMOVE_CHILD: u32 = 11; // (parent,child)
 const DOM_REPLACE: u32 = 12; // (old,new) — replace old with new in its parent
-const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len,hid)
+const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len) -> freed hid (or -1)
 const HOST_PORT_OUT: u32 = 14; // (nameptr,namelen,jsonptr,jsonlen) — outgoing port
 const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
 const HOST_HTTP: u32 = 16; // (urlptr,urllen,reqId) — start an HTTP GET
@@ -264,13 +264,14 @@ const DOM_SET_PROPERTY: u32 = 36; // (node,ptr,len) — set a boolean DOM proper
 const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before ref (ref=0 → append)
 const DOM_BUILD: u32 = 44; // (streamPtr) -> rootHandle — build a whole subtree from a bytecode stream
 const DOM_CLEAR: u32 = 45; // (parent) — remove & reclaim all children in one host call
+const DOM_GET_EVENT_HID: u32 = 46; // (node,ptr,len) -> existing listener hid for this event name, or -1
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
 const HOST_REGEX_COMPILE: u32 = 41; // (patPtr,patLen,flags) -> id (elm/regex)
 const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
 const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
-const N_IMPORTS: u32 = 46;
+const N_IMPORTS: u32 = 47;
 
 /// Max size of a chunk grown by `cons` (front-slack fill); bulk builders make
 /// single chunks of any size, so this only bounds cons-grown chunks so a run of
@@ -4021,7 +4022,8 @@ impl<'a> Codegen<'a> {
             ("dom_remove_attribute", imp_i3_v),
             ("dom_remove_child", imp_ii_v),
             ("dom_replace", imp_ii_v),
-            ("dom_remove_event_listener", imp_i4_v),
+            ("dom_remove_event_listener", alm_event_ty), // (node,ptr,len) -> freed hid
+
             ("host_port_out", imp_i4_v),
             ("host_set_title", imp_ii_v),
             ("host_http", imp_i3_v),
@@ -4056,6 +4058,7 @@ impl<'a> Codegen<'a> {
             ("host_regex_split", regex5_ty), // (id,sp,sl,n,out) -> piece count (43)
             ("dom_build", i_i_ty), // (streamPtr) -> rootHandle — batched subtree build (44)
             ("dom_clear", imp_i_v), // (parent) — remove+reclaim all children (45)
+            ("dom_get_event_hid", alm_event_ty), // (node,ptr,len) -> listener hid or -1 (46)
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -16464,11 +16467,96 @@ impl<'a> Codegen<'a> {
         f
     }
 
+    /// Patch-time event apply for an AEVENT `attr` on `node`: ensure a listener
+    /// exists for the event name and (re)store its `[decoder, kind]` in
+    /// G_HANDLERS. If a listener is already attached for this name (queried via
+    /// dom_get_event_hid) its hid is reused — so changing a handler's captured
+    /// value just rewrites G_HANDLERS[hid], no re-attach; a genuinely new event
+    /// allocates a fresh hid and attaches. `name_l`=arg0 (name), `dec_l`=arg1
+    /// (decoder); scratch `hid_l`/`len_l` (i32), `na_l` (eqref).
+    fn emit_event_ensure(
+        &self,
+        f: &mut Function,
+        node: u32,
+        attr: u32,
+        name_l: u32,
+        dec_l: u32,
+        hid_l: u32,
+        len_l: u32,
+        na_l: u32,
+    ) {
+        // hid = dom_get_event_hid(node, name)
+        f.instruction(&Instruction::LocalGet(node));
+        self.dom_str(f, name_l);
+        f.instruction(&Instruction::Call(DOM_GET_EVENT_HID));
+        f.instruction(&Instruction::LocalSet(hid_l));
+        // no existing listener → grow the handler table if needed, take the next
+        // id, attach, and bump G_NEXT_HID.
+        f.instruction(&Instruction::LocalGet(hid_l));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32LtS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::LocalTee(len_l));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::I32LeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(len_l));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::LocalSet(na_l));
+        f.instruction(&Instruction::LocalGet(na_l));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalGet(len_l));
+        f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
+        f.instruction(&Instruction::LocalGet(na_l));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_HANDLERS));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::LocalSet(hid_l));
+        f.instruction(&Instruction::LocalGet(node));
+        self.dom_str(f, name_l);
+        f.instruction(&Instruction::LocalGet(hid_l));
+        f.instruction(&Instruction::Call(DOM_ADD_EVENT_LISTENER));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_HID));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_HID));
+        f.instruction(&Instruction::End);
+        // G_HANDLERS[hid] = [decoder, kind] (kind = args[2] when present, else ())
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(hid_l));
+        f.instruction(&Instruction::LocalGet(dec_l));
+        f.instruction(&Instruction::LocalGet(attr));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::ArrayLen);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_argn(f, attr, 2);
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        f.instruction(&Instruction::ArraySet(T_ARR));
+    }
+
     /// patch(dom, old, new) : diff `old`→`new` and mutate the DOM in place,
     /// returning the (possibly replaced) handle. `val_eq`-equal subtrees are
-    /// skipped, preserving DOM node identity. (First draft: attrs are re-applied
-    /// rather than diffed, and event listeners persist across a patch — fine for
-    /// nullary-message handlers.)
+    /// skipped, preserving DOM node identity. Same-tag nodes diff their attrs
+    /// (AATTR/ASTYLE/ABOOL applied & removed) and events (AEVENT: added, updated
+    /// in place by rewriting the handler-table decoder, and removed).
     fn emit_patch(&self) -> Function {
         // params dom(0):i32, old(1),new(2):eqref. locals: t(3),olen(4),nlen(5),
         //   i(6),common(7),cdom(8):i32, attr(9),osub(10),nsub(11),key(12),val(13):eqref
@@ -16674,9 +16762,18 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(0));
         self.dom_str(&mut f, 12);
         f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
+        f.instruction(&Instruction::End); // ABOOL true/false
+        f.instruction(&Instruction::End); // tag==3
+        // AEVENT (2): attach a new listener, or update an existing handler's
+        // decoder in place (reusing its hid). name=arg0 (local 12), decoder=arg1
+        // (local 13); scratch hid=14, len=15, na=17.
+        ctor_tag(&mut f, 9);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        self.emit_event_ensure(&mut f, 0, 9, 12, 13, 14, 15, 17);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End); // outer else
         f.instruction(&Instruction::End); // if apply
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::Br(0));
@@ -16705,14 +16802,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(9)); // oldA
         ctor_tag(&mut f, 9);
         f.instruction(&Instruction::LocalSet(8)); // tag
-        // removable: AATTR (0), ASTYLE (1), ABOOL (3) — not AEVENT (2)/ANONE (4)
+        // removable: everything except ANONE (4) — AATTR/ASTYLE/ABOOL cleared,
+        // AEVENT listener detached.
         f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::I32Const(2));
-        f.instruction(&Instruction::I32LtS);
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::I32Const(3));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::I32Or);
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Ne);
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 9);
         f.instruction(&Instruction::LocalSet(17)); // oldKey
@@ -16763,9 +16857,31 @@ impl<'a> Codegen<'a> {
         self.dom_str(&mut f, 18);
         f.instruction(&Instruction::Call(DOM_SET_STYLE));
         f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // AEVENT (2): detach the listener; free its handler-table slot (the freed
+        // hid comes back from the host, or -1 if it was already gone).
+        f.instruction(&Instruction::LocalGet(0));
+        self.dom_str(&mut f, 17);
+        f.instruction(&Instruction::Call(DOM_REMOVE_EVENT_LISTENER));
+        f.instruction(&Instruction::LocalSet(14));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_HANDLERS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(14));
+        f.instruction(&Instruction::RefNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::Eq }));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(0)); // AATTR/ABOOL: removeAttribute(key)
         self.dom_str(&mut f, 17);
         f.instruction(&Instruction::Call(DOM_REMOVE_ATTRIBUTE));
+        f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // if !found
         f.instruction(&Instruction::End); // if removable

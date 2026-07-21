@@ -33,6 +33,9 @@ function start(wasmPath, doc, clock) {
   // walk is skipped entirely for untouched subtrees (e.g. a cleared lazy row).
   function releaseHandles(node) {
     if (node.__h != null) { nodes[node.__h] = null; node.__h = null; }
+    // Free any listener hids on this reached node (create hids double-free
+    // harmlessly with the __hidLo range; patch-added hids are only here).
+    if (node.__almhids) for (let i = 0; i < node.__almhids.length; i++) pendingFree.push(node.__almhids[i]);
     if (node.__reg) { const k = node.childNodes; if (k) for (let i = 0; i < k.length; i++) releaseHandles(k[i]); }
   }
   function freeNodeWalk(node) {
@@ -68,7 +71,7 @@ function start(wasmPath, doc, clock) {
   // through (the decoder lives in the module's handler table).
   function attachListener(node, name, hid) {
     (node.__almhids || (node.__almhids = [])).push(hid);
-    node.addEventListener(name, (ev) => {
+    const handler = (ev) => {
       const t = (ev && ev.target) || {};
       const payload = { target: { value: t.value || '', checked: !!t.checked } };
       const bytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -77,7 +80,11 @@ function start(wasmPath, doc, clock) {
       flushFree();
       if ((flags & 1) && ev.preventDefault) ev.preventDefault();
       if ((flags & 2) && ev.stopPropagation) ev.stopPropagation();
-    });
+    };
+    node.addEventListener(name, handler);
+    // Record by event name so the patch can find/remove this listener (and its
+    // hid) when the handler is dropped or replaced.
+    (node.__evt || (node.__evt = {}))[name] = { handler, hid };
   }
   // Build a whole subtree from the module's DOM-build bytecode stream in one
   // call (opcodes: 0 END, 1 OPEN<tag>, 2 CLOSE, 3 TEXT<s>, 4 ATTR<k><v>,
@@ -125,7 +132,17 @@ function start(wasmPath, doc, clock) {
     dom_set_property: (n, p, l) => { nodes[n][str(p, l)] = true; },
     dom_append_child: (p, c) => { nodes[p].appendChild(nodes[c]); },
     dom_insert_before: (p, n, ref) => { nodes[p].insertBefore(nodes[n], nodes[ref]); },
+    // Patch-time: attach a listener for a newly-added event. attachListener
+    // records the hid in __almhids, which releaseHandles frees when the node is
+    // later removed, so no extra tracking is needed.
     dom_add_event_listener: (n, np, nl, hid) => attachListener(nodes[n], str(np, nl), hid),
+    // Patch-time: does this node already have a listener for `name`? Returns its
+    // hid so the patch can reuse it (rewrite the decoder) instead of re-attaching.
+    dom_get_event_hid: (n, np, nl) => {
+      const nd = nodes[n];
+      const name = str(np, nl);
+      return nd.__evt && nd.__evt[name] ? nd.__evt[name].hid : -1;
+    },
     dom_build: (ptr) => domBuild(ptr),
     dom_clear: (p) => { const par = nodes[p]; let c; while ((c = par.firstChild)) { par.removeChild(c); freeNode(c); } },
     dom_mount: (r) => { mountedRoot = nodes[r]; doc.body.appendChild(mountedRoot); },
@@ -145,7 +162,17 @@ function start(wasmPath, doc, clock) {
       if (old === mountedRoot) mountedRoot = nodes[nw];
       freeNode(old);
     },
-    dom_remove_event_listener: () => {},
+    // Patch-time: drop the listener for `name` and return its freed hid (-1 if
+    // none) so the wasm side can release the handler-table slot.
+    dom_remove_event_listener: (n, np, nl) => {
+      const nd = nodes[n];
+      const name = str(np, nl);
+      const rec = nd.__evt && nd.__evt[name];
+      if (!rec) return -1;
+      nd.removeEventListener(name, rec.handler);
+      delete nd.__evt[name];
+      return rec.hid;
+    },
     host_port_out: (np, nl, jp, jl) => {
       const name = str(np, nl);
       (outgoing[name] = outgoing[name] || []).push(str(jp, jl));

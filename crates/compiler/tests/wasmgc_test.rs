@@ -2090,6 +2090,108 @@ fn assert_sandbox_click(test_name: &str, source: &str) {
     assert_eq!(parts[2], parts[3], "post-click render disagrees");
 }
 
+/// Drive a Browser.sandbox through a SEQUENCE of clicks (each by element `id`)
+/// on both the JS and WasmGC backends, asserting the serialized DOM agrees after
+/// every step. Exercises event diffing on patch: a handler added to / removed
+/// from / updated on a persisting node must behave identically to the JS oracle
+/// (which surgically diffs listeners). Before wasm-gc gained event diffing, an
+/// added handler never fired, a removed one still fired, and an updated one kept
+/// its stale captured value — all diverging from JS here.
+fn assert_event_steps(test_name: &str, source: &str, clicks: &[&str]) {
+    let dir = common::test_dir("alm-wasmgc", test_name);
+    let entry = dir.join("Test.elm");
+    std::fs::write(&entry, source).expect("write fixture");
+    let checked = project::check_project(&entry).unwrap_or_else(|errors| {
+        panic!("check failed:\n{}", errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let support = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/browser_support");
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("bundle");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let clicks_js = format!("[{}]", clicks.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(","));
+    let script = dir.join("steps.cjs");
+    std::fs::write(
+        &script,
+        format!(
+            "const S={sup:?};\
+             const {{Document,serializeBody,dispatchEvent}}=require(S+'/dom_stub.cjs');\
+             const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
+             const clicks={clicks};\
+             function byId(n,id){{if(n.getAttribute&&n.getAttribute('id')===id)return n;for(const c of (n.childNodes||[])){{const r=byId(c,id);if(r)return r;}}return null;}}\
+             function run(startFn,arg){{const doc=new Document();startFn(arg,doc);const snaps=[serializeBody(doc)];\
+               for(const id of clicks){{const el=byId(doc.body,id);if(el)dispatchEvent(el,'click',{{}});snaps.push(serializeBody(doc));}}return snaps;}}\
+             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
+             process.stdout.write(j.join('\\u001d')+'\\u001f'+w.join('\\u001d'));",
+            sup = support, clicks = clicks_js, b = bundle.display(), w = wasm.display()
+        ),
+    )
+    .expect("script");
+    let out = run(Command::new("node").arg(&script));
+    let (j, w) = out.split_once('\u{1f}').expect("two backends");
+    let js_steps: Vec<&str> = j.split('\u{1d}').collect();
+    let wg_steps: Vec<&str> = w.split('\u{1d}').collect();
+    assert_eq!(js_steps.len(), wg_steps.len(), "snapshot count differs");
+    for (i, (a, b)) in js_steps.iter().zip(wg_steps.iter()).enumerate() {
+        assert_eq!(a, b, "backends disagree at step {i}");
+    }
+}
+
+#[test]
+fn event_decoder_update_on_patch() {
+    // The button's handler captures the current count, so each render the handler
+    // CHANGES (onClick (SetN (n+1))). Clicking twice must reach 2 — proving the
+    // handler's decoder is updated in place on patch (a stale decoder would keep
+    // sending SetN 1, sticking at 1).
+    assert_event_steps(
+        "event_update",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, text)\n\
+         import Html.Attributes exposing (id)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = SetN Int\n\n\
+         view : Int -> Html Msg\n\
+         view n =\n    button [ id \"up\", onClick (SetN (n + 1)) ] [ text (String.fromInt n) ]\n\n\
+         main : Program () Int Msg\n\
+         main = Browser.sandbox { init = 0, update = \\(SetN k) _ -> k, view = view }\n",
+        &["up", "up", "up"],
+    );
+}
+
+#[test]
+fn event_add_and_remove_on_patch() {
+    // \"x\" gains an onClick when armed and loses it when disarmed. Clicking \"x\"
+    // only counts while armed. Sequence: click x (unarmed, no-op) → arm → click x
+    // (counts) → disarm → click x (no-op). A missing add would drop the count; a
+    // failed remove would over-count — both caught against the JS oracle.
+    assert_event_steps(
+        "event_add_remove",
+        "module Test exposing (main)\n\n\
+         import Browser\n\
+         import Html exposing (Html, button, div, text)\n\
+         import Html.Attributes exposing (id)\n\
+         import Html.Events exposing (onClick)\n\n\
+         type Msg = Toggle | Hit\n\n\
+         view : ( Bool, Int ) -> Html Msg\n\
+         view ( on, hits ) =\n    \
+            div []\n\
+         \x20       [ button [ id \"tog\", onClick Toggle ] [ text \"tog\" ]\n\
+         \x20       , button (id \"x\" :: (if on then [ onClick Hit ] else [])) [ text (String.fromInt hits) ]\n\
+         \x20       ]\n\n\
+         update : Msg -> ( Bool, Int ) -> ( Bool, Int )\n\
+         update msg ( on, hits ) =\n    \
+            case msg of\n\
+         \x20       Toggle -> ( not on, hits )\n\n\
+         \x20       Hit -> ( on, hits + 1 )\n\n\
+         main : Program () ( Bool, Int ) Msg\n\
+         main = Browser.sandbox { init = ( False, 0 ), update = update, view = view }\n",
+        &["x", "tog", "x", "tog", "x"],
+    );
+}
+
 #[test]
 fn events_custom() {
     // Html.Events.custom returns { message, stopPropagation, preventDefault };
