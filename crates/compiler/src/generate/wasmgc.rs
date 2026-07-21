@@ -1954,6 +1954,10 @@ struct Codegen<'a> {
     scalar_cons_idx: [Option<u32>; 3],
     /// Generic SoA->boxed widen (runtime rep-tag driven), prebuilt once.
     soa_widen_idx: Option<u32>,
+    /// Whether the whole program contains any SoA-eligible list type. When false
+    /// (the common case), the type-erased SoA-widen paths are skipped entirely so
+    /// non-SoA programs pay zero overhead for the feature being compiled in.
+    has_soa: bool,
     /// boxed->SoA narrow per column-rep vector (static reps), built on demand.
     soa_narrow_cache: std::collections::HashMap<Vec<Scalar>, u32>,
     /// Lazily-lifted Test.Html introspection helpers (Elm.Kernel.HtmlAsJson):
@@ -2248,6 +2252,7 @@ impl<'a> Codegen<'a> {
             scalar_narrow_idx: [None; 3],
             scalar_cons_idx: [None; 3],
             soa_widen_idx: None,
+            has_soa: false,
             soa_narrow_cache: std::collections::HashMap::new(),
             htmljson_node_idx: None,
             htmljson_facts_idx: None,
@@ -2785,7 +2790,11 @@ impl<'a> Codegen<'a> {
                 self.scalar_narrow(s);
             }
         }
-        if unbox_soa() {
+        // Only prebuild the generic SoA widen when the program actually has a
+        // SoA-eligible type; otherwise `soa_widen_idx` stays None and every
+        // type-erased SoA path (scalar_dispatch prologue, widen_scalar_locals)
+        // is skipped, so non-SoA programs pay zero SoA overhead.
+        if self.has_soa {
             self.soa_widen();
         }
 
@@ -21706,6 +21715,11 @@ impl<'a> Codegen<'a> {
     /// every scalar parameter has a trivial `Var`/`_` pattern, and at least one
     /// parameter or the return is a scalar Int/Float worth unboxing.
     fn compute_spec_fns(&mut self) {
+        // Whether any SoA-eligible list type appears in the program; gates the
+        // type-erased SoA-widen paths so non-SoA programs pay nothing.
+        if unbox_soa() {
+            self.has_soa = self.mono.functions.iter().any(|f| expr_has_soa(&f.body));
+        }
         // Nullary constants with a literal body — inlined at use sites.
         for f in &self.mono.functions {
             if f.params.is_empty() {
@@ -28962,18 +28976,17 @@ impl<'a> Codegen<'a> {
     ) {
         // A SoA list is not one of the scalar reps and has no boxed cons cells;
         // widen it to a boxed list in place (idempotent) so the Boxed body below
-        // sees boxed tuples. Direct type-erased matching on SoA lists is rare
-        // (kernels/fused-bail widen first), so correctness-over-speed here.
-        if unbox_soa() {
-            if let Some(widen) = self.soa_widen_idx {
-                f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST_SOA)));
-                f.instruction(&Instruction::If(BlockType::Empty));
-                f.instruction(&Instruction::LocalGet(s));
-                f.instruction(&Instruction::Call(widen));
-                f.instruction(&Instruction::LocalSet(s));
-                f.instruction(&Instruction::End);
-            }
+        // sees boxed tuples. `soa_widen_idx` is only Some when the program has an
+        // SoA type, so non-SoA programs emit nothing here. Direct type-erased
+        // matching on SoA lists is rare (kernels/fused-bail widen first).
+        if let Some(widen) = self.soa_widen_idx {
+            f.instruction(&Instruction::LocalGet(s));
+            f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_LIST_SOA)));
+            f.instruction(&Instruction::If(BlockType::Empty));
+            f.instruction(&Instruction::LocalGet(s));
+            f.instruction(&Instruction::Call(widen));
+            f.instruction(&Instruction::LocalSet(s));
+            f.instruction(&Instruction::End);
         }
         let enabled: Vec<Scalar> = [Scalar::F64, Scalar::I64, Scalar::I32]
             .into_iter()
@@ -29257,6 +29270,47 @@ fn let_size(d: &TypedLetDecl) -> u32 {
         TypedLetDecl::Def { body, .. } => 1 + expr_size(body),
         TypedLetDecl::Destruct(_, ex) => 1 + expr_size(ex),
         TypedLetDecl::Recursive(ds) => ds.iter().map(let_size).sum(),
+    }
+}
+
+/// Whether any sub-expression of `e` has an SoA-eligible list type (a `List` of
+/// a flat scalar tuple). Used to compute a whole-program `has_soa` flag so the
+/// type-erased SoA-widen paths (scalar_dispatch prologue, widen_scalar_locals)
+/// are only emitted when a SoA value can actually exist — a program with no such
+/// types pays zero SoA overhead. Assumes `unbox_soa()` (else `list_soa` is None).
+fn expr_has_soa(e: &TypedExpr) -> bool {
+    use TypedKind::*;
+    if list_soa(&e.tipe).is_some() {
+        return true;
+    }
+    match &e.kind {
+        Int(_) | Float(_) | Str(_) | Chr(_) | Unit | Local(_) | Global(_) | Foreign(_, _)
+        | Accessor(_) | Ctor(_, _, _) => false,
+        Negate(x) | Access(x, _) => expr_has_soa(x),
+        Binop(_, _, _, l, r) => expr_has_soa(l) || expr_has_soa(r),
+        List(xs) => xs.iter().any(expr_has_soa),
+        Call(g, args) => expr_has_soa(g) || args.iter().any(expr_has_soa),
+        If(bs, otherwise) => {
+            bs.iter().any(|(c, t)| expr_has_soa(c) || expr_has_soa(t)) || expr_has_soa(otherwise)
+        }
+        Lambda(_, b) => expr_has_soa(b),
+        Let(decls, body) => decls.iter().any(let_has_soa) || expr_has_soa(body),
+        Case(scrut, branches) => {
+            expr_has_soa(scrut) || branches.iter().any(|(_, b)| expr_has_soa(b))
+        }
+        Update(x, fields) => expr_has_soa(x) || fields.iter().any(|(_, e)| expr_has_soa(e)),
+        Record(fields) => fields.iter().any(|(_, e)| expr_has_soa(e)),
+        Tuple(a, b, c) => {
+            expr_has_soa(a) || expr_has_soa(b) || c.as_ref().map(|x| expr_has_soa(x)).unwrap_or(false)
+        }
+    }
+}
+
+fn let_has_soa(d: &TypedLetDecl) -> bool {
+    match d {
+        TypedLetDecl::Def { body, .. } => expr_has_soa(body),
+        TypedLetDecl::Destruct(_, ex) => expr_has_soa(ex),
+        TypedLetDecl::Recursive(ds) => ds.iter().any(let_has_soa),
     }
 }
 
