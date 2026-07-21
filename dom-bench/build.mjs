@@ -6,11 +6,13 @@ import fs from 'node:fs';
 
 fs.mkdirSync('build', { recursive: true });
 
-// React: JSX bundle, minified, production.
-await esbuild.build({
-  entryPoints: ['App.jsx'], bundle: true, minify: true, format: 'iife', jsx: 'automatic',
-  outfile: 'build/react.bundle.js', define: { 'process.env.NODE_ENV': '"production"' },
-});
+// React: JSX bundle, minified, production. Naive + React.memo-optimized.
+for (const [src, out] of [['App.jsx', 'build/react.bundle.js'], ['App_opt.jsx', 'build/react_opt.bundle.js']]) {
+  await esbuild.build({
+    entryPoints: [src], bundle: true, minify: true, format: 'iife', jsx: 'automatic',
+    outfile: out, define: { 'process.env.NODE_ENV': '"production"' },
+  });
+}
 
 // Svelte: compile the component, then bundle a tiny mount entry.
 const { js } = compile(fs.readFileSync('App.svelte', 'utf8'), { generate: 'dom', css: 'injected' });

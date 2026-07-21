@@ -33,6 +33,7 @@ const configs = {
   'alm-wasm': page(`<script>${rd('shim.js')}</script>`, ``,
     `window.almStart(Uint8Array.from(atob(${JSON.stringify(wasmB64)}),c=>c.charCodeAt(0)));`),
   react: page(``, `<div id="app"></div><script>${rdb('react.bundle.js')}</script>`, ``),
+  'react-opt': page(``, `<div id="app"></div><script>${rdb('react_opt.bundle.js')}</script>`, ``),
   svelte: page(``, `<div id="app"></div><script>${rdb('svelte.bundle.js')}</script>`, ``),
   // Optimized (Html.Lazy) alm variants — Main_lazy.elm, so the JS entry is
   // Elm.Main_lazy; the wasm module is module-agnostic (almStart).
