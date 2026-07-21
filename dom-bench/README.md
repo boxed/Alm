@@ -38,6 +38,22 @@ iterations per op; `drive.mjs` reports the median across `REPEATS` page reloads.
 `--virtual-time-budget` is deliberately **not** used — it virtualizes
 `performance.now()` and destroys the timing.
 
+## `Main_lazy.elm` — the idiomatic-lazy variant
+
+`Main.elm` is deliberately vanilla (no memoization) so all five frameworks are
+compared on the same footing. But on `select` that lets Svelte's compiled
+fine-grained reactivity win — a vdom framework re-renders + diffs the whole list
+(O(rows)), while Svelte updates only the changed rows (O(changed)). See the
+`report.html` note.
+
+`Main_lazy.elm` is the same app with `Html.Lazy.lazy2` on the rows, memoized on
+`(isSelected, row)` — both reference-stable across a select — so only the two
+rows whose selection flipped are rebuilt/diffed. This is the idiomatic vdom fix
+and it closes the gap: measured **sync select CPU over 1000 rows drops
+0.50 ms → 0.067 ms (7.5×)**, matching/beating Svelte. Build it standalone with
+either compiler (`alm make Main_lazy.elm --target=wasm-gc` / `elm make
+Main_lazy.elm`); it's kept out of the five-way comparison on purpose.
+
 ## Files
 
 - `Main.elm` — the shared Elm app (elm / alm-js / alm-wasm)
