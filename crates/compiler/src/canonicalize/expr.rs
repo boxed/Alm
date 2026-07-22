@@ -118,16 +118,13 @@ fn canonicalize_ctor_pattern(
     args: &[src::Pattern],
     bound: &mut Vec<Name>,
 ) -> CResult<can::Pattern_> {
-    if args.len() as u32 != info.ctor.arity {
-        return Err(Error::new(
-            format!(
-                "The `{}` constructor needs {} argument{}, but I see {}.",
-                info.ctor.name,
-                info.ctor.arity,
-                if info.ctor.arity == 1 { "" } else { "s" },
-                args.len()
-            ),
+    if args.len() != info.ctor.arity as usize {
+        return Err(arity_error(
             region,
+            "constructor",
+            &info.ctor.name,
+            info.ctor.arity as usize,
+            args.len(),
         ));
     }
     Ok(can::Pattern_::Ctor(

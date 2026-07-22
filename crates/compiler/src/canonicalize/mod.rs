@@ -41,6 +41,23 @@ impl Error {
 
 type CResult<T> = Result<T, Error>;
 
+/// The "wrong number of arguments" error shared by type-alias, type, and
+/// constructor applications. `kind` is the noun ("type alias", "type",
+/// "constructor").
+fn arity_error(region: Region, kind: &str, name: &Name, expected: usize, actual: usize) -> Error {
+    Error::new(
+        format!(
+            "The `{}` {} needs {} argument{}, but I see {}.",
+            name,
+            kind,
+            expected,
+            if expected == 1 { "" } else { "s" },
+            actual
+        ),
+        region,
+    )
+}
+
 #[derive(Clone)]
 struct CtorInfo {
     home: Name,

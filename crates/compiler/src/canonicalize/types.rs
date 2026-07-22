@@ -179,16 +179,7 @@ fn resolve_foreign_type(
     // Builtin aliases like Http.Metadata or Url.Url.
     if let Some((vars, body)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
         if vars.len() != args.len() {
-            return Err(Error::new(
-                format!(
-                    "The `{}` type alias needs {} argument{}, but I see {}.",
-                    name,
-                    vars.len(),
-                    if vars.len() == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                region,
-            ));
+            return Err(arity_error(region, "type alias", name, vars.len(), args.len()));
         }
         let expanded = builtins::parse_signature(body);
         let map: HashMap<Name, can::Type> =
@@ -207,31 +198,13 @@ fn resolve_foreign_type(
     })?;
     if let Some(union) = interface.unions.get(name) {
         if union.vars.len() != args.len() {
-            return Err(Error::new(
-                format!(
-                    "The `{}` type needs {} argument{}, but I see {}.",
-                    name,
-                    union.vars.len(),
-                    if union.vars.len() == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                region,
-            ));
+            return Err(arity_error(region, "type", name, union.vars.len(), args.len()));
         }
         return Ok(can::Type::Type(module.clone(), name.clone(), Rc::new(args)));
     }
     if let Some((vars, body)) = interface.aliases.get(name) {
         if vars.len() != args.len() {
-            return Err(Error::new(
-                format!(
-                    "The `{}` type alias needs {} argument{}, but I see {}.",
-                    name,
-                    vars.len(),
-                    if vars.len() == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                region,
-            ));
+            return Err(arity_error(region, "type alias", name, vars.len(), args.len()));
         }
         let map: HashMap<Name, can::Type> = vars.iter().cloned().zip(args).collect();
         return Ok(subst_can_type(body, &map));
@@ -291,16 +264,7 @@ fn expand_alias(
     depth: u32,
 ) -> CResult<can::Type> {
     if vars.len() != args.len() {
-        return Err(Error::new(
-            format!(
-                "The `{}` type alias needs {} argument{}, but I see {}.",
-                name,
-                vars.len(),
-                if vars.len() == 1 { "" } else { "s" },
-                args.len()
-            ),
-            region,
-        ));
+        return Err(arity_error(region, "type alias", name, vars.len(), args.len()));
     }
     let substitutions: HashMap<Name, can::Type> =
         vars.iter().cloned().zip(args).collect();
