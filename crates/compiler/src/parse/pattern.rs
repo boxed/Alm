@@ -113,33 +113,24 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Pattern> {
     }
     let first = expression(p)?;
     p.chomp_and_check_indent("I was in the middle of a parenthesized pattern")?;
-    let mut rest = Vec::new();
-    loop {
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another pattern")?;
-                rest.push(expression(p)?);
-                p.chomp_and_check_indent("I was in the middle of a tuple pattern")?;
-            }
-            Some(b')') => {
-                p.bump(1);
-                let end = p.position();
-                return match rest.len() {
-                    0 => Ok(first),
-                    _ => {
-                        let mut it = rest.into_iter();
-                        let second = it.next().unwrap();
-                        Ok(Located::at(
-                            start,
-                            end,
-                            Pattern_::Tuple(Box::new(first), Box::new(second), it.collect()),
-                        ))
-                    }
-                };
-            }
-            _ => return Err(p.error("I was expecting a `,` or `)` in this pattern")),
-        }
+    let (end, first, rest) = p.chomp_tuple_items(
+        first,
+        expression,
+        IndentCheck::Chomp,
+        "I was expecting another pattern",
+        "I was in the middle of a tuple pattern",
+        "I was expecting a `,` or `)` in this pattern",
+    )?;
+    if rest.is_empty() {
+        Ok(first)
+    } else {
+        let mut it = rest.into_iter();
+        let second = it.next().unwrap();
+        Ok(Located::at(
+            start,
+            end,
+            Pattern_::Tuple(Box::new(first), Box::new(second), it.collect()),
+        ))
     }
 }
 

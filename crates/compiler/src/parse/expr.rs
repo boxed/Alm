@@ -201,33 +201,24 @@ fn tuple(p: &mut Parser) -> PResult<Expr> {
 }
 
 fn chomp_tuple_end(p: &mut Parser, start: Position, first: Expr) -> PResult<Expr> {
-    let mut rest = Vec::new();
-    loop {
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another tuple entry")?;
-                rest.push(expression(p)?);
-                p.check_indent("I was expecting the closing `)` to be indented")?;
-            }
-            Some(b')') => {
-                p.bump(1);
-                let end = p.position();
-                return match rest.len() {
-                    0 => Ok(first),
-                    _ => {
-                        let mut it = rest.into_iter();
-                        let second = it.next().unwrap();
-                        Ok(Located::at(
-                            start,
-                            end,
-                            Expr_::Tuple(Box::new(first), Box::new(second), it.collect()),
-                        ))
-                    }
-                };
-            }
-            _ => return Err(p.error("I was expecting a `,` or `)` here")),
-        }
+    let (end, first, rest) = p.chomp_tuple_items(
+        first,
+        expression,
+        IndentCheck::NoChomp,
+        "I was expecting another tuple entry",
+        "I was expecting the closing `)` to be indented",
+        "I was expecting a `,` or `)` here",
+    )?;
+    if rest.is_empty() {
+        Ok(first)
+    } else {
+        let mut it = rest.into_iter();
+        let second = it.next().unwrap();
+        Ok(Located::at(
+            start,
+            end,
+            Expr_::Tuple(Box::new(first), Box::new(second), it.collect()),
+        ))
     }
 }
 

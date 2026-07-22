@@ -734,6 +734,43 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The shared closing loop for a parenthesized single value or tuple: the
+    /// caller has already parsed `first`; this parses any `, item` repetitions
+    /// up to the closing `)`. Returns the position just past the `)`, `first`
+    /// back, and the remaining items (empty for a plain parenthesized value).
+    /// `after_item` selects the indentation check applied after each subsequent
+    /// item, matching the per-caller behaviour.
+    pub fn chomp_tuple_items<T>(
+        &mut self,
+        first: T,
+        mut item: impl FnMut(&mut Parser<'a>) -> PResult<T>,
+        after_item: IndentCheck,
+        after_sep_msg: &str,
+        post_item_msg: &str,
+        close_or_sep_err: &str,
+    ) -> PResult<(Position, T, Vec<T>)> {
+        let mut rest = Vec::new();
+        loop {
+            match self.peek() {
+                Some(b',') => {
+                    self.bump(1);
+                    self.chomp_and_check_indent(after_sep_msg)?;
+                    rest.push(item(self)?);
+                    match after_item {
+                        IndentCheck::Chomp => self.chomp_and_check_indent(post_item_msg)?,
+                        IndentCheck::NoChomp => self.check_indent(post_item_msg)?,
+                    }
+                }
+                Some(b')') => {
+                    self.bump(1);
+                    let end = self.position();
+                    return Ok((end, first, rest));
+                }
+                _ => return Err(self.error(close_or_sep_err.to_string())),
+            }
+        }
+    }
+
     /// Parse zero or more `item`s that follow on the same line or a deeper
     /// indent (argument application: `Ctor a b`, `List a b`, ...). Stops at the
     /// first item that fails to parse or that is not more indented than the
