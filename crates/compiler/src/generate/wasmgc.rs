@@ -1256,6 +1256,12 @@ fn wrap1(f: &mut Function) {
     f.instruction(&Instruction::StructNew(T_CTOR));
 }
 
+/// Unbox a boxed `Float` (`T_FLOAT`) on the stack to a raw `f64`.
+fn unbox_f64(f: &mut Function) {
+    f.instruction(&cast_to(T_FLOAT));
+    f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+}
+
 /// Push a nullary custom-type value `T_CTOR { tag, null }` (no args array).
 fn push_nullary_ctor(f: &mut Function, tag: i32) {
     f.instruction(&Instruction::I32Const(tag));
@@ -6182,8 +6188,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         self.emit_endian_le(&mut f, le);
         ctor_argn(&mut f, 2, 1);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F32DemoteF64);
         f.instruction(&Instruction::I32ReinterpretF32);
         f.instruction(&Instruction::I64ExtendI32U);
@@ -6201,8 +6206,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         self.emit_endian_le(&mut f, le);
         ctor_argn(&mut f, 2, 1);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::I64ReinterpretF64);
         f.instruction(&Instruction::LocalSet(val));
         self.emit_write_int_bytes(&mut f, 0, off, val, le, 8);
@@ -7568,8 +7572,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::LocalSet(17));
         ctor_argn(&mut f, 0, 1);
@@ -7584,8 +7587,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::F64Add);
         f.instruction(&Instruction::LocalSet(17));
@@ -7607,8 +7609,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::LocalSet(19)); // w
         // if countdown > w: countdown -= w; walk others
@@ -7633,8 +7634,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::LocalSet(19));
         // if countdown <= w: done
@@ -7824,18 +7824,15 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::F64Div);
         // range = abs(b - a)
         ctor_argn(&mut f, 0, 1);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         ctor_argn(&mut f, 0, 0);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Sub);
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::F64Mul);
         // + a
         ctor_argn(&mut f, 0, 0);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Add);
         f.instruction(&Instruction::StructNew(T_FLOAT));
         // seed' = next_seed(seed1)
@@ -8376,8 +8373,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(i));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(f);
     }
 
     /// fromPolar (r, theta) = (r*cos theta, r*sin theta).
@@ -8720,8 +8716,7 @@ impl<'a> Codegen<'a> {
         // param x(0):eqref (boxed Float). local len(1):i32
         let mut f = Function::new([(1, ValType::I32)]);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::I32Const(0)); // outptr
         f.instruction(&Instruction::Call(HOST_FTOA));
         f.instruction(&Instruction::LocalSet(1)); // len
@@ -8932,12 +8927,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::LocalSet(9));
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(9));
@@ -9462,8 +9455,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(if product { &Instruction::F64Mul } else { &Instruction::F64Add });
         f.instruction(&Instruction::LocalSet(6));
         loop_tail(&mut f, 3);
@@ -12414,13 +12406,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefTestNonNull(HeapType::Concrete(T_FLOAT)));
         f.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::I64ReinterpretF64);
         f.instruction(&Instruction::I32WrapI64);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::I64ReinterpretF64);
         f.instruction(&Instruction::I64Const(32));
         f.instruction(&Instruction::I64ShrU);
@@ -13222,8 +13212,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
         ctor_arg0(&mut f, 1);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::I64TruncF64S);
         f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.sb_push_int_idx));
@@ -14475,8 +14464,7 @@ impl<'a> Codegen<'a> {
         vtag_is(&mut f, 3);
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_arg0(&mut f, 1);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::LocalSet(13));
         f.instruction(&Instruction::LocalGet(13));
         f.instruction(&Instruction::LocalGet(13));
@@ -19289,8 +19277,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArraySet(T_ARR));
         // host_set_interval(interval(sub.arg0) as f64, slot)
         ctor_arg0(&mut f, 0);
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::Call(HOST_SET_INTERVAL));
         f.instruction(&Instruction::End);
@@ -19466,8 +19453,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_NEXT_REQ));
         f.instruction(&Instruction::Else); // timer
         ctor_argn(f, r_local, 1); // ms (payload, boxed Float)
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(f);
         push_slot(f);
         f.instruction(&Instruction::Call(HOST_SET_TIMEOUT));
         f.instruction(&Instruction::End);
@@ -20687,11 +20673,9 @@ impl<'a> Codegen<'a> {
         test(&mut f, 0, T_FLOAT);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(&mut f);
         f.instruction(&Instruction::F64Eq);
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
@@ -21681,10 +21665,7 @@ impl<'a> Codegen<'a> {
             Scalar::I64 => {
                 f.instruction(&Instruction::Call(self.unbox_int_idx));
             }
-            Scalar::F64 => {
-                f.instruction(&cast_to(T_FLOAT));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
-            }
+            Scalar::F64 => unbox_f64(f),
         }
     }
 
@@ -21830,8 +21811,7 @@ impl<'a> Codegen<'a> {
             _ => {}
         }
         self.emit_expr(e, ctx, f)?;
-        f.instruction(&cast_to(T_FLOAT));
-        f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
+        unbox_f64(f);
         Ok(())
     }
 
