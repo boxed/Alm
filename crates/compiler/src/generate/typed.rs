@@ -899,6 +899,17 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         }
     }
 
+    /// The constructor variants of a tagged-union (e.g. `Maybe`) layout.
+    fn tagged_variants(
+        &self,
+        tipe: &crate::ast::canonical::Type,
+    ) -> Result<Vec<Vec<Layout>>, String> {
+        match self.layouts.layout_of(tipe) {
+            Layout::Tagged(v) => Ok(v),
+            other => Err(format!("typed backend: expected Maybe, got {:?}", other)),
+        }
+    }
+
     /// The heap struct type for one constructor: an i32 tag followed by the
     /// constructor's field types.
     fn ctor_struct(&self, fields: &[Layout]) -> inkwell::types::StructType<'ctx> {
@@ -4003,14 +4014,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         whole: &TypedExpr,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let in_variants = match self.layouts.layout_of(&args[1].tipe) {
-            Layout::Tagged(v) => v,
-            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
-        };
-        let out_variants = match self.layouts.layout_of(&whole.tipe) {
-            Layout::Tagged(v) => v,
-            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
-        };
+        let in_variants = self.tagged_variants(&args[1].tipe)?;
+        let out_variants = self.tagged_variants(&whole.tipe)?;
         let f = self.gen(&args[0])?.into_pointer_value();
         let m = self.gen(&args[1])?.into_pointer_value();
         let i32_t = self.ctx.i32_type();
@@ -4057,10 +4062,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         &mut self,
         args: &[TypedExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let in_variants = match self.layouts.layout_of(&args[1].tipe) {
-            Layout::Tagged(v) => v,
-            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
-        };
+        let in_variants = self.tagged_variants(&args[1].tipe)?;
         let d = self.gen(&args[0])?;
         let m = self.gen(&args[1])?.into_pointer_value();
         let i32_t = self.ctx.i32_type();
@@ -4098,10 +4100,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         args: &[TypedExpr],
         is_head: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let variants = match self.layouts.layout_of(&whole.tipe) {
-            Layout::Tagged(v) => v,
-            other => return Err(format!("typed backend: expected Maybe, got {:?}", other)),
-        };
+        let variants = self.tagged_variants(&whole.tipe)?;
         let elem = self.elem_layout(&args[0].tipe)?;
         let list = self.gen(&args[0])?.into_pointer_value();
         let i64_t = self.ctx.i64_type();
