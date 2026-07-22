@@ -3366,12 +3366,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             }
             ("Basics", "floor") => {
                 let x = self.gen(&args[0])?.into_float_value();
-                let f = self.call_f64_intrinsic("llvm.floor.f64", x);
+                let f = self.call_f64_intrinsic("llvm.floor.f64", &[x]);
                 Ok(self.f_to_int(f))
             }
             ("Basics", "ceiling") => {
                 let x = self.gen(&args[0])?.into_float_value();
-                let f = self.call_f64_intrinsic("llvm.ceil.f64", x);
+                let f = self.call_f64_intrinsic("llvm.ceil.f64", &[x]);
                 Ok(self.f_to_int(f))
             }
             ("Basics", "round") => {
@@ -3379,12 +3379,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 let x = self.gen(&args[0])?.into_float_value();
                 let half = self.ctx.f64_type().const_float(0.5);
                 let shifted = self.builder.build_float_add(x, half, "half").unwrap();
-                let f = self.call_f64_intrinsic("llvm.floor.f64", shifted);
+                let f = self.call_f64_intrinsic("llvm.floor.f64", &[shifted]);
                 Ok(self.f_to_int(f))
             }
             ("Basics", "sqrt") => {
                 let x = self.gen(&args[0])?.into_float_value();
-                Ok(self.call_f64_intrinsic("llvm.sqrt.f64", x).into())
+                Ok(self.call_f64_intrinsic("llvm.sqrt.f64", &[x]).into())
             }
             // elm/bytes: `Bytes` is an opaque uniform byte buffer; `Encoder` is
             // a normal tagged union the runtime's `bytes_encode` tree-walks; a
@@ -3767,8 +3767,8 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // 2^62 - 1024 (largest f64 strictly below 2^62) and -2^62.
         let hi = f64t.const_float(4611686018427386880.0);
         let lo = f64t.const_float(-4611686018427387904.0);
-        let t = self.call_f64_intrinsic2("llvm.minnum.f64", x, hi);
-        let t = self.call_f64_intrinsic2("llvm.maxnum.f64", t, lo);
+        let t = self.call_f64_intrinsic("llvm.minnum.f64", &[x, hi]);
+        let t = self.call_f64_intrinsic("llvm.maxnum.f64", &[t, lo]);
         let clamped = self
             .builder
             .build_float_to_signed_int(t, self.ctx.i64_type(), "toint")
@@ -3787,41 +3787,21 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
             .unwrap()
     }
 
-    /// Call a unary f64 LLVM intrinsic (e.g. `llvm.floor.f64`), declaring it
-    /// on first use.
+    /// Call an f64 LLVM intrinsic (e.g. `llvm.floor.f64`, `llvm.pow.f64`),
+    /// declaring it with the matching arity on first use.
     fn call_f64_intrinsic(
         &self,
         name: &str,
-        x: inkwell::values::FloatValue<'ctx>,
+        args: &[inkwell::values::FloatValue<'ctx>],
     ) -> inkwell::values::FloatValue<'ctx> {
         let f = self.module.get_function(name).unwrap_or_else(|| {
             let f64 = self.ctx.f64_type();
-            self.module.add_function(name, f64.fn_type(&[f64.into()], false), None)
+            let param_tys = vec![f64.into(); args.len()];
+            self.module.add_function(name, f64.fn_type(&param_tys, false), None)
         });
+        let call_args: Vec<_> = args.iter().map(|a| (*a).into()).collect();
         self.builder
-            .build_call(f, &[x.into()], "intr")
-            .unwrap()
-            .try_as_basic_value()
-            .left()
-            .unwrap()
-            .into_float_value()
-    }
-
-    /// Call a binary f64 LLVM intrinsic (e.g. `llvm.pow.f64`), declaring it on
-    /// first use.
-    fn call_f64_intrinsic2(
-        &self,
-        name: &str,
-        x: inkwell::values::FloatValue<'ctx>,
-        y: inkwell::values::FloatValue<'ctx>,
-    ) -> inkwell::values::FloatValue<'ctx> {
-        let f = self.module.get_function(name).unwrap_or_else(|| {
-            let f64 = self.ctx.f64_type();
-            self.module
-                .add_function(name, f64.fn_type(&[f64.into(), f64.into()], false), None)
-        });
-        self.builder
-            .build_call(f, &[x.into(), y.into()], "intr2")
+            .build_call(f, &call_args, "intr")
             .unwrap()
             .try_as_basic_value()
             .left()
@@ -5892,7 +5872,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                 "-" => b.build_float_sub(x, y, "f").unwrap().into(),
                 "*" => b.build_float_mul(x, y, "f").unwrap().into(),
                 "/" => b.build_float_div(x, y, "f").unwrap().into(),
-                "^" => self.call_f64_intrinsic2("llvm.pow.f64", x, y).into(),
+                "^" => self.call_f64_intrinsic("llvm.pow.f64", &[x, y]).into(),
                 "==" => cmp_f(b, FloatPredicate::OEQ, x, y),
                 "/=" => cmp_f(b, FloatPredicate::ONE, x, y),
                 "<" => cmp_f(b, FloatPredicate::OLT, x, y),
@@ -5916,7 +5896,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
                     let f64t = self.ctx.f64_type();
                     let xf = b.build_signed_int_to_float(x, f64t, "xf").unwrap();
                     let yf = b.build_signed_int_to_float(y, f64t, "yf").unwrap();
-                    let rf = self.call_f64_intrinsic2("llvm.pow.f64", xf, yf);
+                    let rf = self.call_f64_intrinsic("llvm.pow.f64", &[xf, yf]);
                     b.build_float_to_signed_int(rf, self.ctx.i64_type(), "powi")
                         .unwrap()
                         .into()
