@@ -3205,22 +3205,19 @@ unsafe extern "C" fn char_to_code(c: u64) -> u64 {
 unsafe extern "C" fn char_from_code(n: u64) -> u64 {
     rt_chr(as_int(n) as i32)
 }
-unsafe extern "C" fn char_is_digit(c: u64) -> u64 {
-    let n = as_int(c);
-    rt_bool((b'0' as i64..=b'9' as i64).contains(&n))
+// Char membership in an inclusive ASCII byte range.
+macro_rules! char_range {
+    ($name:ident, $lo:literal, $hi:literal) => {
+        unsafe extern "C" fn $name(c: u64) -> u64 {
+            let n = as_int(c);
+            rt_bool(($lo as i64..=$hi as i64).contains(&n))
+        }
+    };
 }
-unsafe extern "C" fn char_is_oct_digit(c: u64) -> u64 {
-    let n = as_int(c);
-    rt_bool((b'0' as i64..=b'7' as i64).contains(&n))
-}
-unsafe extern "C" fn char_is_upper(c: u64) -> u64 {
-    let n = as_int(c);
-    rt_bool((b'A' as i64..=b'Z' as i64).contains(&n))
-}
-unsafe extern "C" fn char_is_lower(c: u64) -> u64 {
-    let n = as_int(c);
-    rt_bool((b'a' as i64..=b'z' as i64).contains(&n))
-}
+char_range!(char_is_digit, b'0', b'9');
+char_range!(char_is_oct_digit, b'0', b'7');
+char_range!(char_is_upper, b'A', b'Z');
+char_range!(char_is_lower, b'a', b'z');
 unsafe extern "C" fn char_is_alpha(c: u64) -> u64 {
     let n = as_int(c);
     rt_bool((b'a' as i64..=b'z' as i64).contains(&n) || (b'A' as i64..=b'Z' as i64).contains(&n))
@@ -4198,30 +4195,24 @@ fn js_tan(x: f64) -> f64 {
     k_tan(y0, y1, 1 - ((n & 1) << 1))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn basics_cos(x: u64) -> u64 {
-    rt_float(num(x).cos())
+// A unary f64 method wrapped as a runtime float op.
+macro_rules! unary_float {
+    ($name:ident, $method:ident) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(x: u64) -> u64 {
+            rt_float(num(x).$method())
+        }
+    };
 }
-#[no_mangle]
-pub unsafe extern "C" fn basics_sin(x: u64) -> u64 {
-    rt_float(num(x).sin())
-}
+unary_float!(basics_cos, cos);
+unary_float!(basics_sin, sin);
 #[no_mangle]
 pub unsafe extern "C" fn basics_tan(x: u64) -> u64 {
     rt_float(js_tan(num(x)))
 }
-#[no_mangle]
-pub unsafe extern "C" fn basics_acos(x: u64) -> u64 {
-    rt_float(num(x).acos())
-}
-#[no_mangle]
-pub unsafe extern "C" fn basics_asin(x: u64) -> u64 {
-    rt_float(num(x).asin())
-}
-#[no_mangle]
-pub unsafe extern "C" fn basics_atan(x: u64) -> u64 {
-    rt_float(num(x).atan())
-}
+unary_float!(basics_acos, acos);
+unary_float!(basics_asin, asin);
+unary_float!(basics_atan, atan);
 #[no_mangle]
 pub unsafe extern "C" fn basics_atan2(y: u64, x: u64) -> u64 {
     rt_float(num(y).atan2(num(x)))
@@ -4258,18 +4249,17 @@ pub unsafe extern "C" fn basics_is_infinite(x: u64) -> u64 {
 }
 
 // -- Bitwise: 32-bit, matching JS semantics --
-#[no_mangle]
-pub unsafe extern "C" fn bitwise_and(a: u64, b: u64) -> u64 {
-    mk_int(((int_val(a) as i32) & (int_val(b) as i32)) as i64)
+macro_rules! bit_binop {
+    ($name:ident, $op:tt) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(a: u64, b: u64) -> u64 {
+            mk_int(((int_val(a) as i32) $op (int_val(b) as i32)) as i64)
+        }
+    };
 }
-#[no_mangle]
-pub unsafe extern "C" fn bitwise_or(a: u64, b: u64) -> u64 {
-    mk_int(((int_val(a) as i32) | (int_val(b) as i32)) as i64)
-}
-#[no_mangle]
-pub unsafe extern "C" fn bitwise_xor(a: u64, b: u64) -> u64 {
-    mk_int(((int_val(a) as i32) ^ (int_val(b) as i32)) as i64)
-}
+bit_binop!(bitwise_and, &);
+bit_binop!(bitwise_or, |);
+bit_binop!(bitwise_xor, ^);
 #[no_mangle]
 pub unsafe extern "C" fn bitwise_complement(a: u64) -> u64 {
     mk_int((!(int_val(a) as i32)) as i64)
