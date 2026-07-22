@@ -137,6 +137,22 @@ struct TcoState<'ctx> {
     header: inkwell::basic_block::BasicBlock<'ctx>,
 }
 
+/// Direction of a uniform<->tagged conversion helper (see `get_conv_fn`).
+#[derive(Clone, Copy)]
+enum ConvDir {
+    Box,
+    Unbox,
+}
+
+impl ConvDir {
+    fn prefix(self) -> &'static str {
+        match self {
+            ConvDir::Box => "box",
+            ConvDir::Unbox => "unbox",
+        }
+    }
+}
+
 impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
     fn new(ctx: &'ctx Context, layouts: &'l LayoutCtx) -> Self {
         let module = ctx.create_module("alm_typed");
@@ -1521,25 +1537,7 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         &mut self,
         tipe: &crate::ast::canonical::Type,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let key = format!("{:?}", tipe);
-        if let Some(f) = self.box_fns.get(&key) {
-            return Ok(*f);
-        }
-        let i64_t = self.ctx.i64_type();
-        let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        let fname = format!("box.{}", self.next_id);
-        self.next_id += 1;
-        let fty = i64_t.fn_type(&[ptr_t.into()], false);
-        let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
-        self.box_fns.insert(key, f);
-
-        self.in_function(f, |s| {
-            let param = f.get_nth_param(0).unwrap();
-            let boxed = s.box_tagged(param, tipe)?;
-            s.builder.build_return(Some(&boxed)).unwrap();
-            Ok(())
-        })?;
-        Ok(f)
+        self.get_conv_fn(tipe, ConvDir::Box)
     }
 
     /// Symmetric to [`get_box_fn`]: a recursive helper `unbox_T(uniform) ->
@@ -1548,22 +1546,45 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         &mut self,
         tipe: &crate::ast::canonical::Type,
     ) -> Result<FunctionValue<'ctx>, String> {
+        self.get_conv_fn(tipe, ConvDir::Unbox)
+    }
+
+    /// Shared body for [`get_box_fn`]/[`get_unbox_fn`]: a memoized recursive
+    /// conversion helper for a tagged union, direction chosen by `dir`.
+    fn get_conv_fn(
+        &mut self,
+        tipe: &crate::ast::canonical::Type,
+        dir: ConvDir,
+    ) -> Result<FunctionValue<'ctx>, String> {
         let key = format!("{:?}", tipe);
-        if let Some(f) = self.unbox_fns.get(&key) {
+        let cache = match dir {
+            ConvDir::Box => &self.box_fns,
+            ConvDir::Unbox => &self.unbox_fns,
+        };
+        if let Some(f) = cache.get(&key) {
             return Ok(*f);
         }
         let i64_t = self.ctx.i64_type();
         let ptr_t = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        let fname = format!("unbox.{}", self.next_id);
+        let fname = format!("{}.{}", dir.prefix(), self.next_id);
         self.next_id += 1;
-        let fty = ptr_t.fn_type(&[i64_t.into()], false);
+        let fty = match dir {
+            ConvDir::Box => i64_t.fn_type(&[ptr_t.into()], false),
+            ConvDir::Unbox => ptr_t.fn_type(&[i64_t.into()], false),
+        };
         let f = self.module.add_function(&fname, fty, Some(Linkage::Internal));
-        self.unbox_fns.insert(key, f);
+        match dir {
+            ConvDir::Box => self.box_fns.insert(key, f),
+            ConvDir::Unbox => self.unbox_fns.insert(key, f),
+        };
 
         self.in_function(f, |s| {
             let param = f.get_nth_param(0).unwrap();
-            let unboxed = s.unbox_tagged(param, tipe)?;
-            s.builder.build_return(Some(&unboxed)).unwrap();
+            let converted = match dir {
+                ConvDir::Box => s.box_tagged(param, tipe)?,
+                ConvDir::Unbox => s.unbox_tagged(param, tipe)?,
+            };
+            s.builder.build_return(Some(&converted)).unwrap();
             Ok(())
         })?;
         Ok(f)
