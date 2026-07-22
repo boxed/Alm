@@ -7618,17 +7618,37 @@ unsafe fn mk_floats(v: Vec<f64>) -> u64 {
     alloc(Value::Floats(v))
 }
 
+/// Elementwise combine two equal-length vectors.
+fn vzip(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
+}
+fn vsub(a: &[f64], b: &[f64]) -> Vec<f64> {
+    vzip(a, b, |x, y| x - y)
+}
+fn vdot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| x * y)
+        .reduce(|acc, p| acc + p)
+        .unwrap()
+}
+
+/// One `getX/Y/Z/W` accessor: read component `$idx` of a vector as a float.
+macro_rules! accessor {
+    ($name:ident, $idx:literal) => {
+        unsafe extern "C" fn $name(a: u64) -> u64 {
+            rt_float(floats(a)[$idx])
+        }
+    };
+}
+
 // Vector2
 
 unsafe extern "C" fn mjs_v2_2(x: u64, y: u64) -> u64 {
     mk_floats(vec![num(x), num(y)])
 }
-unsafe extern "C" fn mjs_v2_get_x1(a: u64) -> u64 {
-    rt_float(floats(a)[0])
-}
-unsafe extern "C" fn mjs_v2_get_y1(a: u64) -> u64 {
-    rt_float(floats(a)[1])
-}
+accessor!(mjs_v2_get_x1, 0);
+accessor!(mjs_v2_get_y1, 1);
 unsafe extern "C" fn mjs_v2_set_x2(x: u64, a: u64) -> u64 {
     let a = floats(a);
     mk_floats(vec![num(x), a[1]])
@@ -7651,16 +7671,13 @@ unsafe extern "C" fn mjs_v2_from_record1(r: u64) -> u64 {
     ])
 }
 unsafe extern "C" fn mjs_v2_add2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    mk_floats(vec![a[0] + b[0], a[1] + b[1]])
+    mk_floats(vzip(floats(a), floats(b), |x, y| x + y))
 }
 unsafe extern "C" fn mjs_v2_sub2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    mk_floats(vec![a[0] - b[0], a[1] - b[1]])
+    mk_floats(vsub(floats(a), floats(b)))
 }
 unsafe extern "C" fn mjs_v2_negate1(a: u64) -> u64 {
-    let a = floats(a);
-    mk_floats(vec![-a[0], -a[1]])
+    mk_floats(floats(a).iter().map(|x| -x).collect())
 }
 fn v2_length(a: &[f64]) -> f64 {
     (a[0] * a[0] + a[1] * a[1]).sqrt()
@@ -7697,12 +7714,10 @@ unsafe extern "C" fn mjs_v2_normalize1(a: u64) -> u64 {
 }
 unsafe extern "C" fn mjs_v2_scale2(k: u64, a: u64) -> u64 {
     let k = num(k);
-    let a = floats(a);
-    mk_floats(vec![a[0] * k, a[1] * k])
+    mk_floats(floats(a).iter().map(|x| x * k).collect())
 }
 unsafe extern "C" fn mjs_v2_dot2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    rt_float(a[0] * b[0] + a[1] * b[1])
+    rt_float(vdot(floats(a), floats(b)))
 }
 
 // Vector3
@@ -7710,15 +7725,9 @@ unsafe extern "C" fn mjs_v2_dot2(a: u64, b: u64) -> u64 {
 unsafe extern "C" fn mjs_v3_3(x: u64, y: u64, z: u64) -> u64 {
     mk_floats(vec![num(x), num(y), num(z)])
 }
-unsafe extern "C" fn mjs_v3_get_x1(a: u64) -> u64 {
-    rt_float(floats(a)[0])
-}
-unsafe extern "C" fn mjs_v3_get_y1(a: u64) -> u64 {
-    rt_float(floats(a)[1])
-}
-unsafe extern "C" fn mjs_v3_get_z1(a: u64) -> u64 {
-    rt_float(floats(a)[2])
-}
+accessor!(mjs_v3_get_x1, 0);
+accessor!(mjs_v3_get_y1, 1);
+accessor!(mjs_v3_get_z1, 2);
 unsafe extern "C" fn mjs_v3_set_x2(x: u64, a: u64) -> u64 {
     let a = floats(a);
     mk_floats(vec![num(x), a[1], a[2]])
@@ -7747,8 +7756,7 @@ unsafe extern "C" fn mjs_v3_from_record1(r: u64) -> u64 {
     ])
 }
 unsafe extern "C" fn mjs_v3_add2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    mk_floats(vec![a[0] + b[0], a[1] + b[1], a[2] + b[2]])
+    mk_floats(vzip(floats(a), floats(b), |x, y| x + y))
 }
 fn v3_sub(a: &[f64], b: &[f64]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -7757,8 +7765,7 @@ unsafe extern "C" fn mjs_v3_sub2(a: u64, b: u64) -> u64 {
     mk_floats(v3_sub(floats(a), floats(b)).to_vec())
 }
 unsafe extern "C" fn mjs_v3_negate1(a: u64) -> u64 {
-    let a = floats(a);
-    mk_floats(vec![-a[0], -a[1], -a[2]])
+    mk_floats(floats(a).iter().map(|x| -x).collect())
 }
 fn v3_length(a: &[f64]) -> f64 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
@@ -7799,8 +7806,7 @@ unsafe extern "C" fn mjs_v3_normalize1(a: u64) -> u64 {
 }
 unsafe extern "C" fn mjs_v3_scale2(k: u64, a: u64) -> u64 {
     let k = num(k);
-    let a = floats(a);
-    mk_floats(vec![a[0] * k, a[1] * k, a[2] * k])
+    mk_floats(floats(a).iter().map(|x| x * k).collect())
 }
 fn v3_dot(a: &[f64], b: &[f64]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -7833,18 +7839,10 @@ unsafe extern "C" fn mjs_v3_mul4x4_2(m: u64, v: u64) -> u64 {
 unsafe extern "C" fn mjs_v4_4(x: u64, y: u64, z: u64, w: u64) -> u64 {
     mk_floats(vec![num(x), num(y), num(z), num(w)])
 }
-unsafe extern "C" fn mjs_v4_get_x1(a: u64) -> u64 {
-    rt_float(floats(a)[0])
-}
-unsafe extern "C" fn mjs_v4_get_y1(a: u64) -> u64 {
-    rt_float(floats(a)[1])
-}
-unsafe extern "C" fn mjs_v4_get_z1(a: u64) -> u64 {
-    rt_float(floats(a)[2])
-}
-unsafe extern "C" fn mjs_v4_get_w1(a: u64) -> u64 {
-    rt_float(floats(a)[3])
-}
+accessor!(mjs_v4_get_x1, 0);
+accessor!(mjs_v4_get_y1, 1);
+accessor!(mjs_v4_get_z1, 2);
+accessor!(mjs_v4_get_w1, 3);
 unsafe extern "C" fn mjs_v4_set_x2(x: u64, a: u64) -> u64 {
     let a = floats(a);
     mk_floats(vec![num(x), a[1], a[2], a[3]])
@@ -7880,16 +7878,13 @@ unsafe extern "C" fn mjs_v4_from_record1(r: u64) -> u64 {
     ])
 }
 unsafe extern "C" fn mjs_v4_add2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    mk_floats(vec![a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]])
+    mk_floats(vzip(floats(a), floats(b), |x, y| x + y))
 }
 unsafe extern "C" fn mjs_v4_sub2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    mk_floats(vec![a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]])
+    mk_floats(vsub(floats(a), floats(b)))
 }
 unsafe extern "C" fn mjs_v4_negate1(a: u64) -> u64 {
-    let a = floats(a);
-    mk_floats(vec![-a[0], -a[1], -a[2], -a[3]])
+    mk_floats(floats(a).iter().map(|x| -x).collect())
 }
 fn v4_length(a: &[f64]) -> f64 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]).sqrt()
@@ -7930,12 +7925,10 @@ unsafe extern "C" fn mjs_v4_normalize1(a: u64) -> u64 {
 }
 unsafe extern "C" fn mjs_v4_scale2(k: u64, a: u64) -> u64 {
     let k = num(k);
-    let a = floats(a);
-    mk_floats(vec![a[0] * k, a[1] * k, a[2] * k, a[3] * k])
+    mk_floats(floats(a).iter().map(|x| x * k).collect())
 }
 unsafe extern "C" fn mjs_v4_dot2(a: u64, b: u64) -> u64 {
-    let (a, b) = (floats(a), floats(b));
-    rt_float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
+    rt_float(vdot(floats(a), floats(b)))
 }
 
 // Matrix4 (column-major, like the JS kernel: m[1] is row 2 / column 1).
