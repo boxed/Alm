@@ -3365,12 +3365,38 @@ function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
     // rendered); the LIS of `source` is the set of nodes already in the right
     // relative order, which we leave untouched.
     var oldKids = oldV.kids, newKids = newV.kids;
+    var n = newKids.length;
+
+    // Fast path: identical keys in identical order — nothing moved (select,
+    // update-in-place, an edit that doesn't reorder). Diff positionally with
+    // ZERO allocation, skipping the oldByKey map, the source/used scratch and
+    // the LIS pass. Mirrors the wasm reconciler: for an unchanged lazy child
+    // (999/1000 on select) the reference compare short-circuits BEFORE touching
+    // the DOM, so only the rows that actually changed cost a childNodes fetch +
+    // patch. A same-key positional patch replaces the node in place if its tag
+    // changed, so `kids` stays index-aligned throughout.
+    if (n === oldKids.length) {
+        var aligned = true;
+        for (var s = 0; s < n; s++) {
+            if (oldKids[s].a !== newKids[s].a) { aligned = false; break; }
+        }
+        if (aligned) {
+            var kids = dom.childNodes;
+            for (var p = 0; p < n; p++) {
+                var ov = oldKids[p].b, nv = newKids[p].b;
+                if (ov === nv) { continue; }
+                if (ov.$ === 'VLazy' && nv.$ === 'VLazy' && _VDom_sameLazy(ov, nv)) { nv.forced = ov.forced; continue; }
+                _VDom_patch(kids[p], ov, nv, dispatch, doc);
+            }
+            return dom;
+        }
+    }
+
     var oldByKey = {};
     for (var i = 0; i < oldKids.length; i++) {
         oldByKey[oldKids[i].a] = { vnode: oldKids[i].b, dom: dom.childNodes[i], index: i };
     }
 
-    var n = newKids.length;
     var newDoms = new Array(n);
     var source = new Array(n);
     var used = {};
