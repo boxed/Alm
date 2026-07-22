@@ -19786,12 +19786,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // if all keys matched: patch in place and return. Compare each child's
-        // old/new vnode FIRST and only fetch the DOM node + patch when they
-        // differ — an unchanged child (the common case: 999/1000 on select)
-        // then costs one val_eq and zero wasm↔JS boundary crossings, instead of
-        // a dom_child fetch + a patch call that re-compares and does nothing.
-        // Locals 27/28 hold the old/new child vnode.
+        // if all keys matched: patch in place and return. Decide whether each
+        // child changed FIRST and only fetch the DOM node + patch when it did —
+        // an unchanged child (the common case: 999/1000 on select) then costs
+        // one reference/structural compare and ZERO wasm↔JS boundary crossings,
+        // instead of a dom_child fetch + a patch call that does nothing.
+        // Locals 27/28 hold the old/new child vnode; 18 holds the unchanged flag.
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
@@ -19812,12 +19812,54 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(28));
-        // if old and new differ: patch(dom_child(dom,i), old, new)
+        // Unchanged? For a lazy child (T_CTOR tag 3 — the opt case) use
+        // same_lazy: reference-compare f + args, IGNORING the `forced` memo
+        // field. val_eq can't decide this — it structurally compares `forced`,
+        // which is set on the old node but null on the freshly built new node,
+        // so it calls EVERY unchanged lazy row "changed" and the fast path then
+        // crosses the wasm↔JS boundary (dom_child) 1000× for nothing. Non-lazy
+        // children keep val_eq (it skips structurally equal subtrees).
+        ctor_tag(&mut f, 27);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        ctor_tag(&mut f, 28);
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::I32And);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // both lazy: unchanged = same_lazy(old, new)
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&Instruction::LocalGet(28));
+        f.instruction(&Instruction::Call(self.same_lazy_idx));
+        f.instruction(&Instruction::RefCastNonNull(i31()));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(18));
+        // if unchanged, carry the memoized forced result forward so a later
+        // change to this row doesn't re-run the old thunk: new.args[2]=old.args[2].
+        f.instruction(&Instruction::LocalGet(18));
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(28));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::LocalGet(27));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
+        // non-lazy: unchanged = val_eq(old, new)
         f.instruction(&Instruction::LocalGet(27));
         f.instruction(&Instruction::LocalGet(28));
         f.instruction(&Instruction::Call(self.val_eq_idx));
         f.instruction(&Instruction::RefCastNonNull(i31()));
         f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::LocalSet(18));
+        f.instruction(&Instruction::End);
+        // if changed: patch(dom_child(dom, i), old, new)
+        f.instruction(&Instruction::LocalGet(18));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(0));
