@@ -4186,24 +4186,31 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.build_select(over, len, pos, "clamp").unwrap().into_int_value()
     }
 
-    /// `List.all`/`List.any pred xs : Bool` — short-circuiting predicate fold.
-    fn kernel_list_all_any(
+    /// Shared scaffold for short-circuiting boolean list walks
+    /// (`List.all`/`any`/`member`): iterate the dense backing with a phi index,
+    /// call `per_elem` to test each element, and jump out early on the first
+    /// "hit". Reaching the end yields `!hit_result`; a hit yields `hit_result`.
+    fn emit_short_circuit_loop(
         &mut self,
-        args: &[TypedExpr],
-        is_all: bool,
+        elem: &Layout,
+        list: inkwell::values::PointerValue<'ctx>,
+        prefix: &str,
+        hit_result: bool,
+        mut per_elem: impl FnMut(
+            &mut Self,
+            BasicValueEnum<'ctx>,
+        ) -> Result<inkwell::values::IntValue<'ctx>, String>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let elem = self.elem_layout(&args[1].tipe)?;
-        let list = self.gen(&args[1])?.into_pointer_value();
-        let (backing, len) = self.list_dense(list, &elem);
+        let (backing, len) = self.list_dense(list, elem);
         let i64_t = self.ctx.i64_type();
         let i1_t = self.ctx.bool_type();
         let entry = self.builder.get_insert_block().unwrap();
-        let loop_bb = self.new_block("aa.loop");
-        let body_bb = self.new_block("aa.body");
-        let cont_bb = self.new_block("aa.cont");
-        let short_bb = self.new_block("aa.short");
-        let end_bb = self.new_block("aa.end");
-        let merge = self.new_block("aa.merge");
+        let loop_bb = self.new_block(&format!("{}.loop", prefix));
+        let body_bb = self.new_block(&format!("{}.body", prefix));
+        let cont_bb = self.new_block(&format!("{}.cont", prefix));
+        let hit_bb = self.new_block(&format!("{}.hit", prefix));
+        let miss_bb = self.new_block(&format!("{}.miss", prefix));
+        let merge = self.new_block(&format!("{}.end", prefix));
 
         self.builder.build_unconditional_branch(loop_bb).unwrap();
         self.builder.position_at_end(loop_bb);
@@ -4212,17 +4219,12 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         idx.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
         let i = idx.as_basic_value().into_int_value();
         let more = self.builder.build_int_compare(IntPredicate::SLT, i, len, "more").unwrap();
-        self.builder.build_conditional_branch(more, body_bb, end_bb).unwrap();
+        self.builder.build_conditional_branch(more, body_bb, miss_bb).unwrap();
 
         self.builder.position_at_end(body_bb);
-        let v = self.list_load(backing, &elem, i);
-        let p = self.apply_fn_expr(&args[0], &[v])?.into_int_value();
-        // all: continue while p true, short-circuit on false. any: opposite.
-        if is_all {
-            self.builder.build_conditional_branch(p, cont_bb, short_bb).unwrap();
-        } else {
-            self.builder.build_conditional_branch(p, short_bb, cont_bb).unwrap();
-        }
+        let v = self.list_load(backing, elem, i);
+        let hit = per_elem(self, v)?;
+        self.builder.build_conditional_branch(hit, hit_bb, cont_bb).unwrap();
 
         self.builder.position_at_end(cont_bb);
         let i2: BasicValueEnum = self.builder.build_int_add(i, i64_t.const_int(1, false), "i2").unwrap().into();
@@ -4230,19 +4232,34 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         self.builder.build_unconditional_branch(loop_bb).unwrap();
         idx.add_incoming(&[(&i2 as &dyn BasicValue, cont_end)]);
 
-        // Reached the end without short-circuiting: all=true, any=false.
-        self.builder.position_at_end(end_bb);
+        // Hit: short-circuited early. Miss: reached the end without a hit.
+        self.builder.position_at_end(hit_bb);
         self.builder.build_unconditional_branch(merge).unwrap();
-        // Short-circuited: all=false, any=true.
-        self.builder.position_at_end(short_bb);
+        self.builder.position_at_end(miss_bb);
         self.builder.build_unconditional_branch(merge).unwrap();
 
         self.builder.position_at_end(merge);
-        let phi = self.builder.build_phi(i1_t, "aa").unwrap();
-        let end_val: BasicValueEnum = i1_t.const_int(is_all as u64, false).into();
-        let short_val: BasicValueEnum = i1_t.const_int(!is_all as u64, false).into();
-        phi.add_incoming(&[(&end_val as &dyn BasicValue, end_bb), (&short_val as &dyn BasicValue, short_bb)]);
+        let phi = self.builder.build_phi(i1_t, prefix).unwrap();
+        let hit_val: BasicValueEnum = i1_t.const_int(hit_result as u64, false).into();
+        let miss_val: BasicValueEnum = i1_t.const_int(!hit_result as u64, false).into();
+        phi.add_incoming(&[(&hit_val as &dyn BasicValue, hit_bb), (&miss_val as &dyn BasicValue, miss_bb)]);
         Ok(phi.as_basic_value())
+    }
+
+    /// `List.all`/`List.any pred xs : Bool` — short-circuiting predicate fold.
+    fn kernel_list_all_any(
+        &mut self,
+        args: &[TypedExpr],
+        is_all: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let elem = self.elem_layout(&args[1].tipe)?;
+        let list = self.gen(&args[1])?.into_pointer_value();
+        // all: short-circuit (→false) on the first false predicate.
+        // any: short-circuit (→true) on the first true predicate.
+        self.emit_short_circuit_loop(&elem, list, "aa", !is_all, |s, v| {
+            let p = s.apply_fn_expr(&args[0], &[v])?.into_int_value();
+            Ok(if is_all { s.builder.build_not(p, "notp").unwrap() } else { p })
+        })
     }
 
     /// `List.member x xs : Bool` — walk comparing each element to `x`,
@@ -4254,52 +4271,15 @@ impl<'ctx, 'l> TypedCodegen<'ctx, 'l> {
         // to pointer identity there and miss structurally-equal values. Compare
         // by element *type* in that case, exactly as the `==` operator does.
         let elem_ty = list_elem_type(&args[1].tipe);
+        let has_ref = layout_has_ref(&elem);
         let target = self.gen(&args[0])?;
         let list = self.gen(&args[1])?.into_pointer_value();
-        let (backing, len) = self.list_dense(list, &elem);
-        let i64_t = self.ctx.i64_type();
-        let entry = self.builder.get_insert_block().unwrap();
-        let loop_bb = self.new_block("mem.loop");
-        let body_bb = self.new_block("mem.body");
-        let cont_bb = self.new_block("mem.cont");
-        let found_bb = self.new_block("mem.found");
-        let none_bb = self.new_block("mem.none");
-        let merge = self.new_block("mem.end");
-
-        self.builder.build_unconditional_branch(loop_bb).unwrap();
-        self.builder.position_at_end(loop_bb);
-        let idx = self.builder.build_phi(i64_t, "i").unwrap();
-        let zero: BasicValueEnum = i64_t.const_zero().into();
-        idx.add_incoming(&[(&zero as &dyn BasicValue, entry)]);
-        let i = idx.as_basic_value().into_int_value();
-        let more = self.builder.build_int_compare(IntPredicate::SLT, i, len, "more").unwrap();
-        self.builder.build_conditional_branch(more, body_bb, none_bb).unwrap();
-
-        self.builder.position_at_end(body_bb);
-        let head = self.list_load(backing, &elem, i);
-        let eq = match (&elem_ty, layout_has_ref(&elem)) {
-            (Some(ty), true) => self.equals_typed(head, target, ty)?,
-            _ => self.equals_vals(head, target, &elem)?,
-        };
-        self.builder.build_conditional_branch(eq, found_bb, cont_bb).unwrap();
-
-        self.builder.position_at_end(cont_bb);
-        let i2: BasicValueEnum = self.builder.build_int_add(i, i64_t.const_int(1, false), "i2").unwrap().into();
-        let cont_end = self.builder.get_insert_block().unwrap();
-        self.builder.build_unconditional_branch(loop_bb).unwrap();
-        idx.add_incoming(&[(&i2 as &dyn BasicValue, cont_end)]);
-
-        self.builder.position_at_end(found_bb);
-        self.builder.build_unconditional_branch(merge).unwrap();
-        self.builder.position_at_end(none_bb);
-        self.builder.build_unconditional_branch(merge).unwrap();
-
-        self.builder.position_at_end(merge);
-        let phi = self.builder.build_phi(self.ctx.bool_type(), "member").unwrap();
-        let t: BasicValueEnum = self.ctx.bool_type().const_int(1, false).into();
-        let f: BasicValueEnum = self.ctx.bool_type().const_int(0, false).into();
-        phi.add_incoming(&[(&t as &dyn BasicValue, found_bb), (&f as &dyn BasicValue, none_bb)]);
-        Ok(phi.as_basic_value())
+        self.emit_short_circuit_loop(&elem, list, "mem", true, |s, head| {
+            match (&elem_ty, has_ref) {
+                (Some(ty), true) => s.equals_typed(head, target, ty),
+                _ => s.equals_vals(head, target, &elem),
+            }
+        })
     }
 
     /// `List.map2 : (a -> b -> c) -> List a -> List b -> List c` — walk both
