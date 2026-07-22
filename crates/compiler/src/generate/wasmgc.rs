@@ -5105,13 +5105,6 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR)); // outer field
             return Ok(());
         }
-        // Basics.pi / e : Float constants.
-        if module == "Basics" && (name == "pi" || name == "e") {
-            let v = if name == "pi" { std::f64::consts::PI } else { std::f64::consts::E };
-            f.instruction(&Instruction::F64Const(v.into()));
-            f.instruction(&Instruction::StructNew(T_FLOAT));
-            return Ok(());
-        }
         // Http.emptyBody : the host HTTP shim ignores the request body, so any
         // placeholder value works (a unit ctor). Http.stringBody/jsonBody/
         // bytesBody are functions handled in emit_kernel and likewise ignored.
