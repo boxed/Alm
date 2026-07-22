@@ -28,6 +28,8 @@ const rdb = (f) => fs.readFileSync(path.join(J, 'build', f), 'utf8');
 const configs = {
   elm: page(`<script>${rdb('elm.js')}</script>`, `<div id="app"></div>`,
     `Elm.Main.init({node:document.getElementById('app')});`),
+  'elm-opt': page(`<script>${rdb('elm_lazy.js')}</script>`, `<div id="app"></div>`,
+    `Elm.Main_lazy.init({node:document.getElementById('app')});`),
   'alm-js': page(`<script>${rdb('almjs.js')}</script>`, `<div id="app"></div>`,
     `var M=(Elm.Main.main&&Elm.Main.main.init)?Elm.Main.main:Elm.Main;M.init({node:document.getElementById('app')});`),
   'alm-wasm': page(`<script>${rd('shim.js')}</script>`, ``,

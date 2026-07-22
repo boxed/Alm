@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 ALM=${ALM:-../target/release/alm}
 mkdir -p build
 echo "elm ...";      elm make Main.elm --optimize --output=build/elm.js >/dev/null
+echo "elm (opt) ..."; elm make Main_lazy.elm --optimize --output=build/elm_lazy.js >/dev/null
 echo "alm-js ...";   "$ALM" make Main.elm                 --output=build/almjs.js   >/dev/null
 echo "alm-wasm ..."; "$ALM" make Main.elm --target=wasm-gc --output=build/almwasm.wasm >/dev/null
 # Optimized (Html.Lazy) variants of the alm targets — see Main_lazy.elm.
