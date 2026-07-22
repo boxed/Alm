@@ -1,6 +1,6 @@
 //! Port of `Parse.Module` and `Parse.Declaration`.
 
-use super::{expr, type_, PResult, ParseError, Parser};
+use super::{expr, type_, IndentCheck, PResult, ParseError, Parser};
 use crate::ast::source::{
     Alias, Associativity, Def, Exposed, Exposing, Import, Infix, Module, Port, Privacy, Union,
     Value,
@@ -200,21 +200,16 @@ fn chomp_exposing(p: &mut Parser) -> PResult<Exposing> {
         return Ok(Exposing::Open);
     }
     let mut exposed = vec![chomp_exposed(p)?];
-    loop {
-        p.chomp_and_check_indent("I was in the middle of an exposing list")?;
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another name to expose")?;
-                exposed.push(chomp_exposed(p)?);
-            }
-            Some(b')') => {
-                p.bump(1);
-                return Ok(Exposing::Explicit(exposed));
-            }
-            _ => return Err(p.error("I was expecting a `,` or `)` in this exposing list")),
-        }
-    }
+    p.sep_until(
+        b')',
+        IndentCheck::Chomp,
+        chomp_exposed,
+        &mut exposed,
+        "I was in the middle of an exposing list",
+        "I was expecting another name to expose",
+        "I was expecting a `,` or `)` in this exposing list",
+    )?;
+    Ok(Exposing::Explicit(exposed))
 }
 
 fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {

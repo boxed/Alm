@@ -32,6 +32,16 @@ impl ParseError {
 
 pub type PResult<T> = Result<T, ParseError>;
 
+/// Which indentation check to run at the top of each iteration of
+/// [`Parser::sep_until`]: some callers re-chomp whitespace first, others expect
+/// the cursor to already be positioned on the next significant token.
+pub enum IndentCheck {
+    /// `chomp_and_check_indent`: consume whitespace, then require deeper indent.
+    Chomp,
+    /// `check_indent`: require deeper indent without consuming whitespace.
+    NoChomp,
+}
+
 /// Mirrors `Parse.Primitives.State`: byte offset plus editor coordinates
 /// plus the current indentation context.
 #[derive(Debug, Clone, Copy)]
@@ -687,6 +697,41 @@ impl<'a> Parser<'a> {
         let value = f(self)?;
         let end = self.position();
         Ok(Located::at(start, end, value))
+    }
+
+    /// The shared comma-separated-list tail: repeatedly parse `item`s separated
+    /// by `,` until the `close` byte, appending each to `items`. The first item
+    /// is parsed by the caller; this drives the loop after it. On success the
+    /// `close` byte has been consumed and the caller wraps `items` into its own
+    /// AST node.
+    pub fn sep_until<T>(
+        &mut self,
+        close: u8,
+        top_check: IndentCheck,
+        mut item: impl FnMut(&mut Parser<'a>) -> PResult<T>,
+        items: &mut Vec<T>,
+        middle_msg: &str,
+        after_sep_msg: &str,
+        close_or_sep_err: &str,
+    ) -> PResult<()> {
+        loop {
+            match top_check {
+                IndentCheck::Chomp => self.chomp_and_check_indent(middle_msg)?,
+                IndentCheck::NoChomp => self.check_indent(middle_msg)?,
+            }
+            match self.peek() {
+                Some(b',') => {
+                    self.bump(1);
+                    self.chomp_and_check_indent(after_sep_msg)?;
+                    items.push(item(self)?);
+                }
+                Some(b) if b == close => {
+                    self.bump(1);
+                    return Ok(());
+                }
+                _ => return Err(self.error(close_or_sep_err.to_string())),
+            }
+        }
     }
 
     /// Parse zero or more `item`s that follow on the same line or a deeper

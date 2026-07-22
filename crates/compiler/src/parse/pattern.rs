@@ -1,6 +1,6 @@
 //! Port of `Parse.Pattern`.
 
-use super::{NumberLit, PResult, Parser};
+use super::{IndentCheck, NumberLit, PResult, Parser};
 use crate::ast::source::{Pattern, Pattern_};
 use crate::reporting::{Located, Region};
 
@@ -70,21 +70,16 @@ fn record(p: &mut Parser) -> PResult<Pattern> {
         return Ok(Located::at(start, p.position(), Pattern_::Record(vec![])));
     }
     let mut fields = vec![p.located(|p| p.lower_name("a record field name"))?];
-    loop {
-        p.chomp_and_check_indent("I was in the middle of a record pattern")?;
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting a field name")?;
-                fields.push(p.located(|p| p.lower_name("a record field name"))?);
-            }
-            Some(b'}') => {
-                p.bump(1);
-                return Ok(Located::at(start, p.position(), Pattern_::Record(fields)));
-            }
-            _ => return Err(p.error("I was expecting a `,` or `}` in this record pattern")),
-        }
-    }
+    p.sep_until(
+        b'}',
+        IndentCheck::Chomp,
+        |p| p.located(|p| p.lower_name("a record field name")),
+        &mut fields,
+        "I was in the middle of a record pattern",
+        "I was expecting a field name",
+        "I was expecting a `,` or `}` in this record pattern",
+    )?;
+    Ok(Located::at(start, p.position(), Pattern_::Record(fields)))
 }
 
 fn list(p: &mut Parser) -> PResult<Pattern> {
@@ -96,21 +91,16 @@ fn list(p: &mut Parser) -> PResult<Pattern> {
         return Ok(Located::at(start, p.position(), Pattern_::List(vec![])));
     }
     let mut entries = vec![expression(p)?];
-    loop {
-        p.chomp_and_check_indent("I was in the middle of a list pattern")?;
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another pattern")?;
-                entries.push(expression(p)?);
-            }
-            Some(b']') => {
-                p.bump(1);
-                return Ok(Located::at(start, p.position(), Pattern_::List(entries)));
-            }
-            _ => return Err(p.error("I was expecting a `,` or `]` in this list pattern")),
-        }
-    }
+    p.sep_until(
+        b']',
+        IndentCheck::Chomp,
+        expression,
+        &mut entries,
+        "I was in the middle of a list pattern",
+        "I was expecting another pattern",
+        "I was expecting a `,` or `]` in this list pattern",
+    )?;
+    Ok(Located::at(start, p.position(), Pattern_::List(entries)))
 }
 
 fn parens_or_tuple(p: &mut Parser) -> PResult<Pattern> {

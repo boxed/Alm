@@ -1,6 +1,6 @@
 //! Port of `Parse.Type`.
 
-use super::{PResult, Parser};
+use super::{IndentCheck, PResult, Parser};
 use crate::ast::source::{Type, Type_};
 use crate::reporting::{Located, Region};
 
@@ -121,25 +121,20 @@ fn record(p: &mut Parser) -> PResult<Type> {
         p.bump(1);
         p.chomp_and_check_indent("I was expecting a field after this `|`")?;
         let mut fields = vec![field(p)?];
-        loop {
-            p.chomp_and_check_indent("I was in the middle of a record type")?;
-            match p.peek() {
-                Some(b',') => {
-                    p.bump(1);
-                    p.chomp_and_check_indent("I was expecting another field")?;
-                    fields.push(field(p)?);
-                }
-                Some(b'}') => {
-                    p.bump(1);
-                    return Ok(Located::at(
-                        start,
-                        p.position(),
-                        Type_::Record(fields, Some(first_name)),
-                    ));
-                }
-                _ => return Err(p.error("I was expecting a `,` or `}` in this record type")),
-            }
-        }
+        p.sep_until(
+            b'}',
+            IndentCheck::Chomp,
+            field,
+            &mut fields,
+            "I was in the middle of a record type",
+            "I was expecting another field",
+            "I was expecting a `,` or `}` in this record type",
+        )?;
+        return Ok(Located::at(
+            start,
+            p.position(),
+            Type_::Record(fields, Some(first_name)),
+        ));
     }
 
     // Plain record: first_name must be followed by `:`
@@ -147,25 +142,16 @@ fn record(p: &mut Parser) -> PResult<Type> {
     p.chomp_and_check_indent("I was expecting a type after this `:`")?;
     let first_type = expression(p)?;
     let mut fields = vec![(first_name, first_type)];
-    loop {
-        p.chomp_and_check_indent("I was in the middle of a record type")?;
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another field")?;
-                fields.push(field(p)?);
-            }
-            Some(b'}') => {
-                p.bump(1);
-                return Ok(Located::at(
-                    start,
-                    p.position(),
-                    Type_::Record(fields, None),
-                ));
-            }
-            _ => return Err(p.error("I was expecting a `,` or `}` in this record type")),
-        }
-    }
+    p.sep_until(
+        b'}',
+        IndentCheck::Chomp,
+        field,
+        &mut fields,
+        "I was in the middle of a record type",
+        "I was expecting another field",
+        "I was expecting a `,` or `}` in this record type",
+    )?;
+    Ok(Located::at(start, p.position(), Type_::Record(fields, None)))
 }
 
 fn field(p: &mut Parser) -> PResult<(Located<crate::data::Name>, Type)> {

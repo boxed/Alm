@@ -1,6 +1,6 @@
 //! Port of `Parse.Expression`.
 
-use super::{one_of, pattern, NumberLit, PResult, Parser};
+use super::{one_of, pattern, IndentCheck, NumberLit, PResult, Parser};
 use crate::ast::source::{Def, Expr, Expr_, VarType};
 use crate::data::Name;
 use crate::reporting::{Located, Position};
@@ -144,21 +144,16 @@ fn list(p: &mut Parser) -> PResult<Expr> {
         return Ok(Located::at(start, p.position(), Expr_::List(vec![])));
     }
     let mut entries = vec![expression(p)?];
-    loop {
-        p.check_indent("I was in the middle of a list and need `,` or `]` to be indented")?;
-        match p.peek() {
-            Some(b',') => {
-                p.bump(1);
-                p.chomp_and_check_indent("I was expecting another list entry")?;
-                entries.push(expression(p)?);
-            }
-            Some(b']') => {
-                p.bump(1);
-                return Ok(Located::at(start, p.position(), Expr_::List(entries)));
-            }
-            _ => return Err(p.error("I was expecting a `,` or `]` in this list")),
-        }
-    }
+    p.sep_until(
+        b']',
+        IndentCheck::NoChomp,
+        expression,
+        &mut entries,
+        "I was in the middle of a list and need `,` or `]` to be indented",
+        "I was expecting another list entry",
+        "I was expecting a `,` or `]` in this list",
+    )?;
+    Ok(Located::at(start, p.position(), Expr_::List(entries)))
 }
 
 // TUPLES, PARENS, OPERATOR REFERENCES
@@ -253,25 +248,16 @@ fn record(p: &mut Parser) -> PResult<Expr> {
             p.bump(1);
             p.chomp_and_check_indent("I was expecting a field to update")?;
             let mut fields = vec![field(p)?];
-            loop {
-                p.check_indent("I was in the middle of a record update")?;
-                match p.peek() {
-                    Some(b',') => {
-                        p.bump(1);
-                        p.chomp_and_check_indent("I was expecting another field")?;
-                        fields.push(field(p)?);
-                    }
-                    Some(b'}') => {
-                        p.bump(1);
-                        return Ok(Located::at(
-                            start,
-                            p.position(),
-                            Expr_::Update(starter, fields),
-                        ));
-                    }
-                    _ => return Err(p.error("I was expecting a `,` or `}` in this record")),
-                }
-            }
+            p.sep_until(
+                b'}',
+                IndentCheck::NoChomp,
+                field,
+                &mut fields,
+                "I was in the middle of a record update",
+                "I was expecting another field",
+                "I was expecting a `,` or `}` in this record",
+            )?;
+            Ok(Located::at(start, p.position(), Expr_::Update(starter, fields)))
         }
         Some(b'=') => {
             p.bump(1);
