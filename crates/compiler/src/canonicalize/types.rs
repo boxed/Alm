@@ -181,10 +181,7 @@ fn resolve_foreign_type(
         if vars.len() != args.len() {
             return Err(arity_error(region, "type alias", name, vars.len(), args.len()));
         }
-        let expanded = builtins::parse_signature(body);
-        let map: HashMap<Name, can::Type> =
-            vars.iter().map(|v| Name::from(*v)).zip(args).collect();
-        return Ok(subst_can_type(&expanded, &map));
+        return Ok(builtins::expand_signature_alias(vars, body, args));
     }
     // Builtin types addressed by module, e.g. `Http.Error` or `Html.Html`.
     if builtins::is_builtin_type(module.as_str(), name.as_str()) {

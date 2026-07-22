@@ -1242,7 +1242,7 @@ fn canonicalize_signature_type(tipe: &source::Type) -> Type {
     }
 }
 
-fn expand_signature_alias(vars: &[&str], body: &str, args: Vec<Type>) -> Type {
+pub(crate) fn expand_signature_alias(vars: &[&str], body: &str, args: Vec<Type>) -> Type {
     let expanded = parse_signature(body);
     let map: std::collections::HashMap<Name, Type> = vars
         .iter()
