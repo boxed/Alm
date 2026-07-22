@@ -1244,14 +1244,19 @@ fn wrap1(f: &mut Function) {
     f.instruction(&Instruction::StructNew(T_CTOR));
 }
 
+/// Push a nullary custom-type value `T_CTOR { tag, null }` (no args array).
+fn push_nullary_ctor(f: &mut Function, tag: i32) {
+    f.instruction(&Instruction::I32Const(tag));
+    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
+    f.instruction(&Instruction::StructNew(T_CTOR));
+}
+
 /// Push a decode failure: `Err (Failure "" null)` (Result tag 1 → Error tag 3).
 fn push_decode_err(f: &mut Function) {
     f.instruction(&Instruction::I32Const(1)); // Err
     f.instruction(&Instruction::I32Const(3)); // Failure
     push_str_const(f, "");
-    f.instruction(&Instruction::I32Const(0)); // a JNULL Value
-    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-    f.instruction(&Instruction::StructNew(T_CTOR));
+    push_nullary_ctor(f, 0); // a JNULL Value
     f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
     f.instruction(&Instruction::StructNew(T_CTOR)); // Failure
     f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
@@ -5008,9 +5013,7 @@ impl<'a> Codegen<'a> {
         }
         // Platform.Cmd.none / Platform.Sub.none : CMD_NONE (tag0, no args).
         if (module == "Platform.Cmd" || module == "Platform.Sub") && name == "none" {
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 0);
             return Ok(());
         }
         // Browser.Navigation.reload / reloadAndSkipCache are nullary `Cmd msg`
@@ -5018,9 +5021,7 @@ impl<'a> Codegen<'a> {
         // emit_kernel). Headless has no page to reload, so they are an inert Cmd
         // (tag0, no args) — matching elm run headless.
         if module == "Browser.Navigation" && (name == "reload" || name == "reloadAndSkipCache") {
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 0);
             return Ok(());
         }
         // elm-explorations/linear-algebra: Mat4.identity is a nullary matrix value.
@@ -5031,9 +5032,7 @@ impl<'a> Codegen<'a> {
         }
         // Json.Encode.null : a JSON Value with tag 0, no args.
         if module == "Json.Encode" && name == "null" {
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 0);
             return Ok(());
         }
         // Leaf Json.Decode decoders (used as first-class values): a decoder AST
@@ -5058,9 +5057,7 @@ impl<'a> Codegen<'a> {
         // so it decodes as the opaque-value decoder (tag 4). (Materializing a real
         // File still needs a browser upload; the other File.* ops trap.)
         if module == "File" && name == "decoder" {
-            f.instruction(&Instruction::I32Const(4)); // DValue
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 4); // DValue
             return Ok(());
         }
         // Html.Events.keyCode : `Json.Decode.field "keyCode" Json.Decode.int`,
@@ -5068,9 +5065,7 @@ impl<'a> Codegen<'a> {
         if module == "Html.Events" && name == "keyCode" {
             f.instruction(&Instruction::I32Const(8)); // DField
             push_str_const(f, "keyCode");
-            f.instruction(&Instruction::I32Const(1)); // DInt leaf
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 1); // DInt leaf
             f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
             f.instruction(&Instruction::StructNew(T_CTOR));
             return Ok(());
@@ -5104,9 +5099,7 @@ impl<'a> Codegen<'a> {
         // placeholder value works (a unit ctor). Http.stringBody/jsonBody/
         // bytesBody are functions handled in emit_kernel and likewise ignored.
         if module == "Http" && name == "emptyBody" {
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 0);
             return Ok(());
         }
         // elm/regex: `Regex.never` is a never-matching regex (id -2, which the
@@ -5158,9 +5151,7 @@ impl<'a> Codegen<'a> {
         }
         // Time.now : a nullary Task (ctor tag 10 = Now leaf).
         if module == "Time" && name == "now" {
-            f.instruction(&Instruction::I32Const(10));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 10);
             return Ok(());
         }
         // Time.getZoneName : Task x ZoneName. In elm it uses `Intl` and falls
@@ -5197,9 +5188,7 @@ impl<'a> Codegen<'a> {
         }
         // Random.independentSeed : a nullary Generator (ctor tag 14).
         if module == "Random" && name == "independentSeed" {
-            f.instruction(&Instruction::I32Const(14));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 14);
             return Ok(());
         }
         // Random.minInt / maxInt : the 32-bit signed bounds, as boxed Ints.
@@ -6603,9 +6592,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Catch(0)); // the Bytes exception -> Nothing
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::End); // try
         f.instruction(&Instruction::End); // function
         f
@@ -7180,9 +7167,7 @@ impl<'a> Codegen<'a> {
         list_is_empty(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         // Nothing
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Else);
         // Just head / Just tail
         f.instruction(&Instruction::I32Const(0));
@@ -7280,9 +7265,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         for _ in 0..n {
             f.instruction(&Instruction::Else);
-            f.instruction(&Instruction::I32Const(1)); // Nothing
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(&mut f, 1); // Nothing
             f.instruction(&Instruction::End);
         }
         f.instruction(&Instruction::End); // function
@@ -8907,9 +8890,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -9473,9 +9454,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         list_data(&mut f, 0);
@@ -10105,9 +10084,7 @@ impl<'a> Codegen<'a> {
         ]);
         // Nothing = ctor tag 1, null args
         let nothing = |f: &mut Function| {
-            f.instruction(&Instruction::I32Const(1));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 1);
         };
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_STR));
@@ -10484,9 +10461,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
@@ -10675,9 +10650,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -11422,18 +11395,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32LtS);
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::End);
         f
     }
@@ -12192,9 +12161,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f
@@ -13156,9 +13123,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Nothing
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::End);
         f
     }
@@ -14870,9 +14835,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         self.json_advance(&mut f, 4);
-        f.instruction(&Instruction::I32Const(0)); // JNULL
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 0); // JNULL
         f.instruction(&Instruction::Else);
         // number if '-' or digit, else error
         f.instruction(&Instruction::LocalGet(0));
@@ -14891,9 +14854,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::GlobalSet(2)); // jerr
-        f.instruction(&Instruction::I32Const(0)); // JNULL placeholder
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 0); // JNULL placeholder
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -15446,9 +15407,7 @@ impl<'a> Codegen<'a> {
         wrap1(&mut f);
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0)); // Ok
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         wrap1(&mut f);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Return);
@@ -15458,9 +15417,7 @@ impl<'a> Codegen<'a> {
         vtag_is(&mut f, 0);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0)); // Ok
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         wrap1(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
@@ -17284,9 +17241,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7));
         ctor_arg0(&mut f, 7);
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 0);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalSet(7));
         f.instruction(&Instruction::LocalGet(3));
@@ -18667,9 +18622,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(2)); // cur += subLen
         f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::I32Const(1)); // Nothing tag
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing tag
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 8, 1);
@@ -18751,9 +18704,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32LtS);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::I32Const(1)); // Nothing
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 1); // Nothing
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::I32Const(0)); // Just
         f.instruction(&Instruction::LocalGet(4));
@@ -19028,9 +18979,7 @@ impl<'a> Codegen<'a> {
         let mut f = Function::new([(2, ValType::I32), (10, eqref()), (1, ValType::I32)]);
         // Maybe: Just = tag 0 [x], Nothing = tag 1 (Elm declares Just first).
         let nothing = |f: &mut Function| {
-            f.instruction(&Instruction::I32Const(1));
-            f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-            f.instruction(&Instruction::StructNew(T_CTOR));
+            push_nullary_ctor(f, 1);
         };
         // isEmpty(local) → push i32 (1 if empty)
         let is_empty = |f: &mut Function, l: u32| {
@@ -21060,9 +21009,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
-        f.instruction(&Instruction::I32Const(2)); // NetworkError_
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 2); // NetworkError_
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(200));
@@ -21198,9 +21145,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Result(eqref())));
         f.instruction(&Instruction::I32Const(1)); // Err
-        f.instruction(&Instruction::I32Const(2)); // NetworkError
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 2); // NetworkError
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Else);
@@ -26193,9 +26138,7 @@ impl<'a> Codegen<'a> {
         build(&mut f, "a2", key, tmp, true, val);
         f.instruction(&Instruction::Else);
         // AEVENT / ANONE → JNull
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-        f.instruction(&Instruction::StructNew(T_CTOR));
+        push_nullary_ctor(&mut f, 0);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -28626,9 +28569,7 @@ impl<'a> Codegen<'a> {
             | ("Http", "jsonBody")
             | ("Http", "bytesBody")
             | ("Http", "header") => {
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 0);
             }
             // Http.request / riskyRequest { method, headers, url, body, expect,
             // timeout, tracker } → CMD_HTTP [url, expect]. The host shim ignores
@@ -28698,9 +28639,7 @@ impl<'a> Codegen<'a> {
             | ("Http", "stringPart")
             | ("Http", "bytesPart")
             | ("Http", "filePart") => {
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 0);
             }
             // Http.stringResolver / bytesResolver toResult → the record {toResult}
             // (a single-field record = T_ARR [toResult]).
@@ -28800,16 +28739,12 @@ impl<'a> Codegen<'a> {
             // page-visibility events, so both are inert subscriptions (never fire).
             // A real browser deployment would wire them to host listeners.
             ("Browser.Events", "onResize") | ("Browser.Events", "onVisibilityChange") => {
-                f.instruction(&Instruction::I32Const(0)); // Sub none
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 0); // Sub none
             }
             // Browser.Navigation.back / forward move through history; headless has
             // no history, so they are an inert Cmd (matching elm run headless).
             ("Browser.Navigation", "back") | ("Browser.Navigation", "forward") => {
-                f.instruction(&Instruction::I32Const(0)); // Cmd none
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 0); // Cmd none
             }
             // onAnimationFrame(Delta) → SubAnimation tag6 [toMsg, deltaFlag].
             ("Browser.Events", "onAnimationFrameDelta")
@@ -29064,9 +28999,7 @@ impl<'a> Codegen<'a> {
                 push_str_const(f, "target");
                 f.instruction(&Instruction::I32Const(8)); // DField
                 push_str_const(f, "value");
-                f.instruction(&Instruction::I32Const(0)); // DString
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 0); // DString
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR)); // inner DField "value"
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
@@ -29086,9 +29019,7 @@ impl<'a> Codegen<'a> {
                 push_str_const(f, "target");
                 f.instruction(&Instruction::I32Const(8)); // DField
                 push_str_const(f, "checked");
-                f.instruction(&Instruction::I32Const(3)); // DBool
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
+                push_nullary_ctor(f, 3); // DBool
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR)); // DField "checked"
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
