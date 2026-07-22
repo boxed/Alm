@@ -1226,6 +1226,18 @@ fn ctor_arg0(f: &mut Function, local: u32) {
     ctor_argn(f, local, 0);
 }
 
+/// Run a sub-decoder (`Call(run_idx)`), store its result in `out`, and if it is
+/// an `Err` (ctor tag 8) return it immediately from the enclosing function.
+fn run_subdecoder_or_return(f: &mut Function, run_idx: u32, out: u32) {
+    f.instruction(&Instruction::Call(run_idx));
+    f.instruction(&Instruction::LocalSet(out));
+    ctor_tag(f, out);
+    f.instruction(&Instruction::If(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(out));
+    f.instruction(&Instruction::Return);
+    f.instruction(&Instruction::End);
+}
+
 /// Push argument `n` of the custom-type value in `local`.
 fn ctor_argn(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalGet(local));
@@ -14564,13 +14576,7 @@ impl<'a> Codegen<'a> {
         loop_head(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(12));
         list_elem(&mut f, 9, 5);
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 8);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.list_cons_idx));
@@ -14790,13 +14796,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         ctor_arg0(&mut f, 0);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         f.instruction(&Instruction::I32Const(0)); // Ok
         f.instruction(&Instruction::I32Const(0)); // Just
         ctor_arg0(&mut f, 8);
@@ -14808,13 +14808,7 @@ impl<'a> Codegen<'a> {
         arm(&mut f, 15);
         ctor_argn(&mut f, 0, 1); // sub
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         f.instruction(&Instruction::I32Const(0)); // Ok
         ctor_arg0(&mut f, 0); // f
         ctor_arg0(&mut f, 8); // x
@@ -14826,24 +14820,12 @@ impl<'a> Codegen<'a> {
         arm(&mut f, 16);
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 8);
         f.instruction(&Instruction::LocalSet(7)); // x1
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         f.instruction(&Instruction::I32Const(0)); // Ok
         ctor_arg0(&mut f, 0); // f
         f.instruction(&Instruction::LocalGet(7));
@@ -14857,35 +14839,17 @@ impl<'a> Codegen<'a> {
         arm(&mut f, 17);
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 8);
         f.instruction(&Instruction::LocalSet(7)); // x1
         ctor_argn(&mut f, 0, 2);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 8);
         f.instruction(&Instruction::LocalSet(9)); // x2
         ctor_argn(&mut f, 0, 3);
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         f.instruction(&Instruction::I32Const(0)); // Ok
         ctor_arg0(&mut f, 0);
         f.instruction(&Instruction::LocalGet(7));
@@ -14984,13 +14948,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 8);
         f.instruction(&Instruction::LocalSet(9)); // xs : List a
         list_is_empty(&mut f, 9);
@@ -15011,13 +14969,7 @@ impl<'a> Codegen<'a> {
         arm(&mut f, 18);
         ctor_argn(&mut f, 0, 1); // sub
         f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::Call(self.json_run_idx));
-        f.instruction(&Instruction::LocalSet(8));
-        ctor_tag(&mut f, 8);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        run_subdecoder_or_return(&mut f, self.json_run_idx, 8);
         ctor_arg0(&mut f, 0); // f
         ctor_arg0(&mut f, 8); // x
         f.instruction(&Instruction::Call(self.apply1_idx)); // f x = Decoder
