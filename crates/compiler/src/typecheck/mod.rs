@@ -686,49 +686,7 @@ impl Checker<'_> {
     /// zonks later in one consistent state (see `let_depth`).
     fn generalize_scheme(&mut self, var: Variable) -> Scheme {
         let env_free = self.env_free_vars();
-        let mut reserved = std::collections::HashSet::new();
-        for scope in &self.rigid_scope {
-            for name in scope.keys() {
-                reserved.insert(name.clone());
-            }
-        }
-        let mut state = GeneralizeState {
-            names: HashMap::new(),
-            free: HashMap::new(),
-            memo: HashMap::new(),
-            counter: self.zonk_name_counter,
-            reserved,
-        };
-        let mut seeds: Vec<Variable> = env_free.iter().copied().collect();
-        seeds.sort_unstable();
-        for root in seeds {
-            let name = match self.pool.content(root) {
-                Content::RigidVar(name)
-                | Content::FlexVar(Some(name))
-                | Content::RigidSuper(_, name) => Some(name),
-                _ => None,
-            };
-            if let Some(mut name) = name {
-                let orig = name.clone();
-                while state.free.contains_key(&name) {
-                    name = Name::from(format!("{}_", name));
-                }
-                // Write a collision rename BACK to the variable: a later
-                // state re-reads the stored name, and a stale one would
-                // name the same variable differently across states.
-                if name != orig {
-                    let renamed = match self.pool.content(root) {
-                        Content::RigidVar(_) => Content::RigidVar(name.clone()),
-                        Content::FlexVar(Some(_)) => Content::FlexVar(Some(name.clone())),
-                        Content::RigidSuper(sup, _) => Content::RigidSuper(sup.clone(), name.clone()),
-                        c => c.clone(),
-                    };
-                    self.pool.set_content(root, renamed);
-                }
-                state.names.insert(root, name.clone());
-                state.free.insert(name, root);
-            }
-        }
+        let mut state = self.seed_generalize_state(&env_free);
         let tipe = self.variable_to_type(var, &env_free, &mut state);
         self.zonk_name_counter = state.counter;
         Scheme {
@@ -737,18 +695,10 @@ impl Checker<'_> {
         }
     }
 
-    /// Generalize a definition's inferred type and, with the very same
-    /// naming state, zonk the body expressions recorded in `start..end`.
-    /// Sharing the state is what makes a subexpression's captured type use
-    /// the same variable names as the function's scheme.
-    fn generalize_and_zonk(
-        &mut self,
-        var: Variable,
-        start: usize,
-        end: usize,
-        name_region: Region,
-    ) -> Scheme {
-        let env_free = self.env_free_vars();
+    /// Build a fresh `GeneralizeState` for generalizing a definition: reserve
+    /// enclosing annotated definitions' rigid names, then seed the already-named
+    /// free variables so anonymous name generation skips them.
+    fn seed_generalize_state(&mut self, env_free: &HashSet<Variable>) -> GeneralizeState {
         // Reserve enclosing annotated definitions' rigid variable names so this
         // (inner) definition's freshly-generated names never collide with them.
         let mut reserved = std::collections::HashSet::new();
@@ -811,6 +761,22 @@ impl Checker<'_> {
                 state.free.insert(name, root);
             }
         }
+        state
+    }
+
+    /// Generalize a definition's inferred type and, with the very same
+    /// naming state, zonk the body expressions recorded in `start..end`.
+    /// Sharing the state is what makes a subexpression's captured type use
+    /// the same variable names as the function's scheme.
+    fn generalize_and_zonk(
+        &mut self,
+        var: Variable,
+        start: usize,
+        end: usize,
+        name_region: Region,
+    ) -> Scheme {
+        let env_free = self.env_free_vars();
+        let mut state = self.seed_generalize_state(&env_free);
         let tipe = self.variable_to_type(var, &env_free, &mut state);
         // Record the definition's own type at its name region NOW, in this
         // state's (scheme-consistent) names, exempt from deferral. The name
