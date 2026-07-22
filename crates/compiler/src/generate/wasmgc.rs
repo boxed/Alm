@@ -1507,6 +1507,24 @@ fn list_start(f: &mut Function, l: u32) {
     f.instruction(&Instruction::I32Sub);
 }
 
+/// Stash a flattened list's backing array and head offset into locals, ready
+/// for an indexed walk: `data_l = list.data`, `start_l = list.start`.
+fn list_walk_setup(f: &mut Function, l: u32, data_l: u32, start_l: u32) {
+    list_data(f, l);
+    f.instruction(&Instruction::LocalSet(data_l));
+    list_start(f, l);
+    f.instruction(&Instruction::LocalSet(start_l));
+}
+
+/// Push element `data_l[start_l + i_l]` of a walked list.
+fn list_elem_at(f: &mut Function, data_l: u32, start_l: u32, i_l: u32) {
+    f.instruction(&Instruction::LocalGet(data_l));
+    f.instruction(&Instruction::LocalGet(start_l));
+    f.instruction(&Instruction::LocalGet(i_l));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::ArrayGet(T_ARR));
+}
+
 /// Push the head element (`data[start]`). Caller must ensure the list is
 /// non-empty.
 fn list_head(f: &mut Function, l: u32) {
@@ -4939,21 +4957,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(5));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 1, 5, 3);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
         loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 5, 3, 4);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
         loop_tail(&mut f, 4);
@@ -4979,20 +4990,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(6));
-        list_start(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(4));
+        list_walk_setup(&mut f, 2, 6, 4);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         loop_head(&mut f, 5, 3);
         // a = f (xdata[start+i]) a
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 6, 4, 5);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -6622,10 +6626,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(4));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(2));
+        list_walk_setup(&mut f, 0, 4, 2);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         loop_head(&mut f, 3, 1);
@@ -6636,11 +6637,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Sub);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 2, 3);
         f.instruction(&Instruction::ArraySet(T_ARR));
         loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
@@ -6678,10 +6675,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(6));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 1, 6, 3);
         // i = len-1 downto 0
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
@@ -6694,11 +6688,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32LtS);
         f.instruction(&Instruction::BrIf(1));
         // elem = xdata[start+i]
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 6, 3, 4);
         f.instruction(&Instruction::LocalSet(8));
         // if pred elem: ndata[--w] = elem
         f.instruction(&Instruction::LocalGet(0));
@@ -6748,10 +6738,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(6));
-        list_start(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(4));
+        list_walk_setup(&mut f, 2, 6, 4);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
@@ -6764,11 +6751,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::BrIf(1));
         // a = f (xdata[start+i]) a
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 6, 4, 5);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.apply1_idx));
@@ -6895,19 +6878,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(5));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 1, 5, 3);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
         loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 5, 3, 4);
         f.instruction(&Instruction::Call(self.val_eq_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
@@ -6960,20 +6936,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(6));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(4));
+        list_walk_setup(&mut f, 1, 6, 4);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         loop_head(&mut f, 5, 2);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 6, 4, 5);
         f.instruction(&Instruction::ArraySet(T_ARR));
         loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
@@ -8282,11 +8251,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7)); // start
         // item accessor: data[start + i] as T_STR (leaves it on the stack)
         let item = |f: &mut Function| {
-            f.instruction(&Instruction::LocalGet(9));
-            f.instruction(&Instruction::LocalGet(7));
-            f.instruction(&Instruction::LocalGet(4));
-            f.instruction(&Instruction::I32Add);
-            f.instruction(&Instruction::ArrayGet(T_ARR));
+            list_elem_at(f, 9, 7, 4);
             f.instruction(&cast_to(T_STR));
         };
         // pass 1: total = Σ len(item) + seplen*(len-1)
@@ -9131,10 +9096,7 @@ impl<'a> Codegen<'a> {
         self.flatten_local(&mut f, 0, false);
         list_len(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(5));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(2));
+        list_walk_setup(&mut f, 0, 5, 2);
         // arr = fresh[n]; arr[0..n] <- data[start..start+n]
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -9175,10 +9137,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_SORT_CMP));
         list_len(&mut f, 1);
         f.instruction(&Instruction::LocalSet(2));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(6));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 1, 6, 3);
         // arr = fresh[n]; arr[0..n] <- data[start..start+n]
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -9216,19 +9175,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(5));
-        list_start(&mut f, 1);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 1, 5, 3);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
         loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 5, 3, 4);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
@@ -9264,10 +9216,7 @@ impl<'a> Codegen<'a> {
         push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(4));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(2));
+        list_walk_setup(&mut f, 0, 4, 2);
         // best = data[start]
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -9277,21 +9226,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         loop_head(&mut f, 3, 1);
         // e = data[start+i]; if compare(e, best) (max:>0/min:<0) best = e
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 2, 3);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(if max { &Instruction::I32GtS } else { &Instruction::I32LtS });
         f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 2, 3);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
         loop_tail(&mut f, 3);
@@ -9322,10 +9263,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(7));
-        list_start(&mut f, 2);
-        f.instruction(&Instruction::LocalSet(4));
+        list_walk_setup(&mut f, 2, 7, 4);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         loop_head(&mut f, 5, 3);
@@ -9339,11 +9277,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 7, 4, 5);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
         loop_tail(&mut f, 5);
@@ -9434,10 +9368,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(4));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(2));
+        list_walk_setup(&mut f, 0, 4, 2);
         // float path if data[start] is a Float
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -9450,11 +9381,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         loop_head(&mut f, 3, 1);
         f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 2, 3);
         unbox_f64(&mut f);
         f.instruction(if product { &Instruction::F64Mul } else { &Instruction::F64Add });
         f.instruction(&Instruction::LocalSet(6));
@@ -9472,11 +9399,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         loop_head(&mut f, 3, 1);
         f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 2, 3);
         f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(if product { &Instruction::I64Mul } else { &Instruction::I64Add });
         f.instruction(&Instruction::LocalSet(5));
@@ -9525,17 +9448,9 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 7, 4, 6);
         f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 8, 5, 6);
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
         loop_tail(&mut f, 6);
@@ -10040,19 +9955,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(8));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(7));
+        list_walk_setup(&mut f, 0, 8, 7);
         // pass 1: total bytes
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
         loop_head(&mut f, 6, 1);
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 8, 7, 6);
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::LocalSet(4));
@@ -10077,11 +9985,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
         loop_head(&mut f, 6, 1);
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 8, 7, 6);
         f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::LocalSet(4));
@@ -19792,10 +19696,7 @@ impl<'a> Codegen<'a> {
         push_empty_list(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(7));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(4));
+        list_walk_setup(&mut f, 0, 7, 4);
         // arr = fresh[n]; arr[0..n] <- data[start..start+n]
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArrayNewDefault(T_ARR));
@@ -24300,19 +24201,12 @@ impl<'a> Codegen<'a> {
         self.emit_soa_alloc_cols(reps, 1, 5, &mut f);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::If(BlockType::Empty));
-        list_data(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(4));
-        list_start(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(3));
+        list_walk_setup(&mut f, 0, 4, 3);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
         loop_head(&mut f, 2, 1);
         // boxtup = bdata[bstart + i]
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::ArrayGet(T_ARR));
+        list_elem_at(&mut f, 4, 3, 2);
         f.instruction(&Instruction::LocalSet(6));
         // disassemble into cols at pos = i (SoA dense from 0)
         self.emit_soa_disassemble(reps, 6, 5, 2, &mut f);
