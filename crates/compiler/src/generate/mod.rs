@@ -690,7 +690,7 @@ impl Generator {
                     "var {} = _Platform_outgoingPort('{}', {});",
                     var,
                     port.name,
-                    to_js_converter(payload)
+                    js_converter(payload, PortDir::ToJs)
                 )
                 .unwrap();
             }
@@ -699,7 +699,7 @@ impl Generator {
                 if matches!(&**result, can::Type::Type(_, n, _) if n.as_str() == "Sub") =>
             {
                 let payload = match &**handler {
-                    can::Type::Lambda(payload, _) => from_js_converter(payload),
+                    can::Type::Lambda(payload, _) => js_converter(payload, PortDir::FromJs),
                     _ => "function (v) { return v; }".to_string(),
                 };
                 writeln!(
@@ -1499,86 +1499,90 @@ fn pattern_tests(
 // PORT CONVERTERS — JS expressions converting between Elm values and the
 // plain JS values that flow through ports, driven by the port's type.
 
-fn to_js_converter(tipe: &can::Type) -> String {
-    use can::Type::*;
-    match tipe {
-        Type(_, name, args) => match name.as_str() {
-            "Int" | "Float" | "Bool" | "String" | "Char" | "Value" => "_Port_id".to_string(),
-            "List" => format!(
-                "function (l) {{ return _List_toArray(l).map({}); }}",
-                to_js_converter(&args[0])
-            ),
-            "Array" => format!(
-                "function (a) {{ return _Array_toJsArray(a).map({}); }}",
-                to_js_converter(&args[0])
-            ),
-            "Maybe" => format!(
-                "function (m) {{ return m.$ === 'Just' ? ({})(m.a) : null; }}",
-                to_js_converter(&args[0])
-            ),
-            _ => "_Port_id".to_string(),
-        },
-        Unit => "function (_v) { return null; }".to_string(),
-        Record(fields, _) => {
-            let parts: Vec<String> = fields
-                .iter()
-                .map(|(name, t)| format!("{}: ({})(r.{})", name, to_js_converter(t), name))
-                .collect();
-            format!("function (r) {{ return {{ {} }}; }}", parts.join(", "))
-        }
-        Tuple(a, b, c) => {
-            let mut parts = vec![
-                format!("({})(t.a)", to_js_converter(a)),
-                format!("({})(t.b)", to_js_converter(b)),
-            ];
-            if let Some(c) = c {
-                parts.push(format!("({})(t.c)", to_js_converter(c)));
-            }
-            format!("function (t) {{ return [{}]; }}", parts.join(", "))
-        }
-        _ => "_Port_id".to_string(),
-    }
+/// Direction of a port converter: Elm value -> JS (`ToJs`) or JS -> Elm
+/// (`FromJs`).
+#[derive(Clone, Copy)]
+enum PortDir {
+    ToJs,
+    FromJs,
 }
 
-fn from_js_converter(tipe: &can::Type) -> String {
+fn js_converter(tipe: &can::Type, dir: PortDir) -> String {
     use can::Type::*;
     match tipe {
         Type(_, name, args) => match name.as_str() {
             "Int" | "Float" | "Bool" | "String" | "Char" | "Value" => "_Port_id".to_string(),
-            "List" => format!(
-                "function (a) {{ return _List_fromArray(a.map({})); }}",
-                from_js_converter(&args[0])
-            ),
-            "Array" => format!(
-                "function (a) {{ return _Array_fromJsArray(a.map({})); }}",
-                from_js_converter(&args[0])
-            ),
-            "Maybe" => format!(
-                "function (v) {{ return v === null || v === undefined ? $Maybe$Nothing : $Maybe$Just(({})(v)); }}",
-                from_js_converter(&args[0])
-            ),
+            "List" => {
+                let inner = js_converter(&args[0], dir);
+                match dir {
+                    PortDir::ToJs => {
+                        format!("function (l) {{ return _List_toArray(l).map({}); }}", inner)
+                    }
+                    PortDir::FromJs => {
+                        format!("function (a) {{ return _List_fromArray(a.map({})); }}", inner)
+                    }
+                }
+            }
+            "Array" => {
+                let inner = js_converter(&args[0], dir);
+                match dir {
+                    PortDir::ToJs => {
+                        format!("function (a) {{ return _Array_toJsArray(a).map({}); }}", inner)
+                    }
+                    PortDir::FromJs => {
+                        format!("function (a) {{ return _Array_fromJsArray(a.map({})); }}", inner)
+                    }
+                }
+            }
+            "Maybe" => {
+                let inner = js_converter(&args[0], dir);
+                match dir {
+                    PortDir::ToJs => {
+                        format!("function (m) {{ return m.$ === 'Just' ? ({})(m.a) : null; }}", inner)
+                    }
+                    PortDir::FromJs => format!(
+                        "function (v) {{ return v === null || v === undefined ? $Maybe$Nothing : $Maybe$Just(({})(v)); }}",
+                        inner
+                    ),
+                }
+            }
             _ => "_Port_id".to_string(),
         },
-        Unit => "function (_v) { return _Utils_Tuple0; }".to_string(),
+        Unit => match dir {
+            PortDir::ToJs => "function (_v) { return null; }".to_string(),
+            PortDir::FromJs => "function (_v) { return _Utils_Tuple0; }".to_string(),
+        },
         Record(fields, _) => {
             let parts: Vec<String> = fields
                 .iter()
-                .map(|(name, t)| format!("{}: ({})(r.{})", name, from_js_converter(t), name))
+                .map(|(name, t)| format!("{}: ({})(r.{})", name, js_converter(t, dir), name))
                 .collect();
             format!("function (r) {{ return {{ {} }}; }}", parts.join(", "))
         }
-        Tuple(a, b, c) => match c {
-            None => format!(
-                "function (t) {{ return {{ $: '#2', a: ({})(t[0]), b: ({})(t[1]) }}; }}",
-                from_js_converter(a),
-                from_js_converter(b)
-            ),
-            Some(c) => format!(
-                "function (t) {{ return {{ $: '#3', a: ({})(t[0]), b: ({})(t[1]), c: ({})(t[2]) }}; }}",
-                from_js_converter(a),
-                from_js_converter(b),
-                from_js_converter(c)
-            ),
+        Tuple(a, b, c) => match dir {
+            PortDir::ToJs => {
+                let mut parts = vec![
+                    format!("({})(t.a)", js_converter(a, dir)),
+                    format!("({})(t.b)", js_converter(b, dir)),
+                ];
+                if let Some(c) = c {
+                    parts.push(format!("({})(t.c)", js_converter(c, dir)));
+                }
+                format!("function (t) {{ return [{}]; }}", parts.join(", "))
+            }
+            PortDir::FromJs => match c {
+                None => format!(
+                    "function (t) {{ return {{ $: '#2', a: ({})(t[0]), b: ({})(t[1]) }}; }}",
+                    js_converter(a, dir),
+                    js_converter(b, dir)
+                ),
+                Some(c) => format!(
+                    "function (t) {{ return {{ $: '#3', a: ({})(t[0]), b: ({})(t[1]), c: ({})(t[2]) }}; }}",
+                    js_converter(a, dir),
+                    js_converter(b, dir),
+                    js_converter(c, dir)
+                ),
+            },
         },
         _ => "_Port_id".to_string(),
     }
