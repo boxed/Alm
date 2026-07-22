@@ -36,21 +36,7 @@ fn app(p: &mut Parser) -> PResult<Type> {
     }
     let (qual, name, _) = p.qualified_name("a type")?;
     let name_region = Region::new(start, p.position());
-    let mut args = Vec::new();
-    loop {
-        let snapshot = p.save();
-        if p.chomp_space().is_err() || p.col <= p.indent || p.is_at_end() {
-            p.restore(snapshot);
-            break;
-        }
-        match term(p) {
-            Ok(arg) => args.push(arg),
-            Err(_) => {
-                p.restore(snapshot);
-                break;
-            }
-        }
-    }
+    let args = p.chomp_indented_terms(term);
     let end = args.last().map(|a| a.region.end).unwrap_or(name_region.end);
     let type_ = match qual {
         Some(q) => Type_::TypeQual(name_region, q, name, args),

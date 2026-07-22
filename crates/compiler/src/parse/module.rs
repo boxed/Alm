@@ -297,21 +297,7 @@ fn chomp_union(p: &mut Parser) -> PResult<Union> {
 
 fn chomp_ctor(p: &mut Parser) -> PResult<(Located<Name>, Vec<crate::ast::source::Type>)> {
     let name = p.located(|p| p.upper_name("a constructor name"))?;
-    let mut args = Vec::new();
-    loop {
-        let snapshot = p.save();
-        if p.chomp_space().is_err() || p.col <= p.indent || p.is_at_end() {
-            p.restore(snapshot);
-            break;
-        }
-        match type_::term(p) {
-            Ok(arg) => args.push(arg),
-            Err(_) => {
-                p.restore(snapshot);
-                break;
-            }
-        }
-    }
+    let args = p.chomp_indented_terms(type_::term);
     Ok((name, args))
 }
 

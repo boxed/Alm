@@ -688,6 +688,32 @@ impl<'a> Parser<'a> {
         let end = self.position();
         Ok(Located::at(start, end, value))
     }
+
+    /// Parse zero or more `item`s that follow on the same line or a deeper
+    /// indent (argument application: `Ctor a b`, `List a b`, ...). Stops at the
+    /// first item that fails to parse or that is not more indented than the
+    /// current construct, restoring the cursor to before that item.
+    pub fn chomp_indented_terms<T>(
+        &mut self,
+        mut item: impl FnMut(&mut Parser<'a>) -> PResult<T>,
+    ) -> Vec<T> {
+        let mut items = Vec::new();
+        loop {
+            let snapshot = self.save();
+            if self.chomp_space().is_err() || self.col <= self.indent || self.is_at_end() {
+                self.restore(snapshot);
+                break;
+            }
+            match item(self) {
+                Ok(arg) => items.push(arg),
+                Err(_) => {
+                    self.restore(snapshot);
+                    break;
+                }
+            }
+        }
+        items
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

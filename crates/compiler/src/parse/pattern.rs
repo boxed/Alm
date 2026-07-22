@@ -201,21 +201,7 @@ fn term_with_args(p: &mut Parser) -> PResult<Pattern> {
     }
     let (qual, name, _) = p.qualified_name("a pattern")?;
     let name_region = Region::new(start, p.position());
-    let mut args = Vec::new();
-    loop {
-        let snapshot = p.save();
-        if p.chomp_space().is_err() || p.col <= p.indent || p.is_at_end() {
-            p.restore(snapshot);
-            break;
-        }
-        match term(p) {
-            Ok(arg) => args.push(arg),
-            Err(_) => {
-                p.restore(snapshot);
-                break;
-            }
-        }
-    }
+    let args = p.chomp_indented_terms(term);
     let end = args.last().map(|a| a.region.end).unwrap_or(name_region.end);
     let pattern_ = match qual {
         Some(q) => Pattern_::CtorQual(name_region, q, name, args),
