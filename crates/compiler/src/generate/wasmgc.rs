@@ -1308,6 +1308,17 @@ fn loop_tail(f: &mut Function, idx: u32) {
     f.instruction(&Instruction::Br(0));
 }
 
+/// Cast the string argument in `arg` to `T_STR`, stash it in `s_local`, and
+/// stash its length in `len_local` — the standard preamble of a String kernel.
+fn str_arg_len(f: &mut Function, arg: u32, s_local: u32, len_local: u32) {
+    f.instruction(&Instruction::LocalGet(arg));
+    f.instruction(&cast_to(T_STR));
+    f.instruction(&Instruction::LocalSet(s_local));
+    f.instruction(&Instruction::LocalGet(s_local));
+    f.instruction(&Instruction::ArrayLen);
+    f.instruction(&Instruction::LocalSet(len_local));
+}
+
 /// The DOM event name for a plain-message `Html.Events.on*` helper (those whose
 /// handler is just `Decode.succeed msg`), or None for the rest.
 fn html_event_name(ev: &str) -> Option<&'static str> {
@@ -5836,12 +5847,7 @@ impl<'a> Codegen<'a> {
         let app = self.str_append_idx;
         // locals: str(1):T_STR, n(2), i(3), first(4), hasspace(5):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (4, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
         // scan for a space (0x20)
@@ -5899,12 +5905,7 @@ impl<'a> Codegen<'a> {
         // locals: src(2),out(3):T_STR; n(4),i(5),b(6),outlen(7),esc(8),sec(9),
         //         j(10),qc(11):i32
         let mut f = Function::new([(2, ref_to(T_STR)), (8, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(4));
+        str_arg_len(&mut f, 0, 2, 4);
         // qc = isChar ? '\'' : '"' (isChar arrives boxed as an i31, per the
         // uniform (eqref,eqref)->eqref lifted-function signature)
         f.instruction(&Instruction::LocalGet(1));
@@ -9558,12 +9559,7 @@ impl<'a> Codegen<'a> {
             (3, ValType::I32),
             (1, ref_to(T_STR)),
         ]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayNewDefault(T_STR));
         f.instruction(&Instruction::LocalSet(5));
@@ -9622,12 +9618,7 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::I32Or);
             }
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         // advance start past whitespace (only when trimming the left)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
@@ -9713,12 +9704,7 @@ impl<'a> Codegen<'a> {
             (5, ValType::I32),
             (1, ref_to(T_STR)),
         ]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(4));
+        str_arg_len(&mut f, 1, 2, 4);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(&Instruction::I32WrapI64);
@@ -9822,12 +9808,7 @@ impl<'a> Codegen<'a> {
         let nothing = |f: &mut Function| {
             push_nullary_ctor(f, 1);
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -10005,12 +9986,7 @@ impl<'a> Codegen<'a> {
         // params s(0). locals: sstr(1):str, blen(2),i(3),cp(4),adv(5),count(6),
         //   k(7):i32, data(8):ref T_ARR
         let mut f = Function::new([(1, ref_to(T_STR)), (6, ValType::I32), (1, ref_to(T_ARR))]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         // pass 1: count
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
@@ -10151,12 +10127,7 @@ impl<'a> Codegen<'a> {
             (4, ValType::I32),
             (1, ref_to(T_STR)),
         ]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         // empty -> Nothing
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Eqz);
@@ -10211,12 +10182,7 @@ impl<'a> Codegen<'a> {
     fn emit_str_length(&self) -> Function {
         // locals: sstr(1):str, len(2), i(3), cp(4), adv(5), count(6):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
@@ -10528,12 +10494,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::I32LtU);
             f.instruction(&Instruction::I32Or);
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::I32Const(0));
@@ -10622,12 +10583,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::Call(self.list_cons_idx));
             f.instruction(&Instruction::LocalSet(8));
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         push_empty_list(&mut f);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::I32Const(0));
@@ -13089,12 +13045,7 @@ impl<'a> Codegen<'a> {
     fn emit_json_escape(&self) -> Function {
         // params s(0). locals: sstr(1):str, len(2),i(3),c(4):i32, out(5):eqref, d(6):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (3, ValType::I32), (1, eqref()), (1, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         push_str_const(&mut f, "\"");
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
@@ -13486,12 +13437,7 @@ impl<'a> Codegen<'a> {
     fn emit_sb_push_str(&self) -> Function {
         // params sb(0), s(1). locals: ss(2):ref T_STR, slen(3):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (1, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(3));
+        str_arg_len(&mut f, 1, 2, 3);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::Call(self.sb_ensure_idx));
@@ -13596,12 +13542,7 @@ impl<'a> Codegen<'a> {
     fn emit_sb_escape(&self) -> Function {
         // params sb(0), s(1). locals: ss(2):ref T_STR, len(3),i(4),run(5),c(6),d(7):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (5, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(3));
+        str_arg_len(&mut f, 1, 2, 3);
         // opening quote
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::I32Const(34));
@@ -15172,12 +15113,7 @@ impl<'a> Codegen<'a> {
     fn emit_html_escape(&self, attr: bool) -> Function {
         // param s(0). locals: sstr(1):str, len(2),i(3),c(4):i32, out(5):eqref
         let mut f = Function::new([(1, ref_to(T_STR)), (3, ValType::I32), (1, eqref())]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         push_str_const(&mut f, "");
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
@@ -15405,12 +15341,7 @@ impl<'a> Codegen<'a> {
     fn emit_marshal(&self) -> Function {
         // param s(0). locals: sstr(1):str, len(2),i(3),ptr(4):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (3, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::GlobalGet(G_BUMP));
         f.instruction(&Instruction::LocalSet(4));
         // Grow linear memory if [ptr, ptr+len) would exceed the current size.
@@ -15508,12 +15439,7 @@ impl<'a> Codegen<'a> {
     fn emit_stream_str(&self) -> Function {
         // param s(0):eqref. locals str(1):ref T_STR, len(2),i(3):i32
         let mut f = Function::new([(1, ref_to(T_STR)), (2, ValType::I32)]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         // ensure 4 + len bytes
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(4));
@@ -18179,12 +18105,7 @@ impl<'a> Codegen<'a> {
     fn emit_index_byte(&self) -> Function {
         // params s(0):eqref, ch(1):i32. locals: i(2),n(3):i32, str(4):ref T_STR
         let mut f = Function::new([(2, ValType::I32), (1, ref_to(T_STR))]);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(3));
+        str_arg_len(&mut f, 0, 4, 3);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
         loop_head(&mut f, 2, 3);
@@ -18548,12 +18469,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::ArrayGetU(T_STR));
             f.instruction(&Instruction::LocalSet(4));
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         // pass 1: outlen
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
@@ -18689,12 +18605,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::End);
             f.instruction(&Instruction::End);
         };
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&cast_to(T_STR));
-        f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::ArrayLen);
-        f.instruction(&Instruction::LocalSet(2));
+        str_arg_len(&mut f, 0, 1, 2);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayNewDefault(T_STR));
         f.instruction(&Instruction::LocalSet(6)); // out (max size)
