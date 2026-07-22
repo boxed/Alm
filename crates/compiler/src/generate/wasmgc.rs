@@ -3382,237 +3382,246 @@ impl<'a> Codegen<'a> {
         }
 
         // Function section: user funcs, str_append, str_from_int, main_int, render.
+        // Synthesized helper functions, paired (function-type index, body)
+        // in registration order. This single table drives both the function
+        // section and the code section, so the two can never drift apart; the
+        // order must match the `next()` index assignments above.
+        let helper_fns: Vec<(u32, &Function)> = vec![
+            (ft2, &str_append),
+            (ft1, &str_from_int),
+            (ft2, &apply1),
+            (ft2, &list_cons),
+            (ft2, &list_map),
+            (ft3, &list_foldl),
+            (ft1, &list_length),
+            (ft2, &list_append),
+            (ft2, &val_eq),
+            (e_e_ty, &force_lazy),
+            (imp_i_v, &stream_ensure),
+            (eqref_to_void_ty, &stream_str),
+            (eqref_to_void_ty, &serialize_dom),
+            (ee_eqref_ty, &same_lazy),
+            (ft1, &list_reverse),
+            (ft2, &list_filter),
+            (ft3, &list_foldr),
+            (ft2, &modby),
+            (ft2, &list_range),
+            (ft2, &list_member),
+            (ft2, &list_take),
+            (ft2, &list_drop),
+            (ft1, &list_concat),
+            (ft1, &list_head),
+            (ft1, &list_tail),
+            (ft2, &maybe_with_default),
+            (ft2, &maybe_map),
+            (ft2, &maybe_and_then),
+            (ft3, &maybe_map2),
+            (ft4, &maybe_map3),
+            (ft5, &maybe_map4),
+            (ft6, &maybe_map5),
+            (ft2, &str_join),
+            (ft2, &str_repeat),
+            (ft2, &str_starts_with),
+            (ft2, &str_ends_with),
+            (val_compare_ty, &val_compare),
+            (ft2, &list_insert),
+            (ft1, &list_sort),
+            (ft2, &list_all),
+            (ft2, &list_any),
+            (ft1, &list_min),
+            (ft1, &list_max),
+            (ft3, &list_indexed_map),
+            (ft1, &list_sum),
+            (ft1, &list_product),
+            (ft3, &list_map2),
+            (ft1, &str_upper),
+            (ft1, &str_lower),
+            (ft1, &str_trim),
+            (ft1, &str_trim_left),
+            (ft1, &str_trim_right),
+            (ft2, &str_left),
+            (ft2, &str_right),
+            (ft2, &str_dropleft),
+            (ft2, &str_dropright),
+            (ft1, &str_to_int),
+            (ft2, &str_contains),
+            (ft1, &str_to_list),
+            (ft1, &str_from_list),
+            (ft1, &str_from_char),
+            (ft1, &str_uncons),
+            (ft1, &str_length),
+            (ft3, &clamp),
+            (ft2, &result_with_default),
+            (ft2, &result_map),
+            (ft2, &result_map_error),
+            (ft2, &result_and_then),
+            (ft1, &result_to_maybe),
+            (ft2, &result_from_maybe),
+            (ft3, &result_map2),
+            (ft4, &result_map3),
+            (ft5, &result_map4),
+            (ft6, &result_map5),
+            (ft2, &str_split),
+            (ft1, &str_words),
+            (ft1, &str_lines),
+            (ft2, &list_repeat),
+            (ft2, &list_filter_map),
+            (ft2, &list_sortby),
+            (ft3, &list_sortby_insert),
+            (ft3, &str_pad_left),
+            (ft3, &str_pad_right),
+            (ft1, &from_polar),
+            (ft1, &to_polar),
+            (ft3, &str_slice),
+            (ft3, &str_pad_both),
+            (ft1, &class_list),
+            (ft2, &attr_property),
+            (ft2, &str_indexes),
+            (ft1, &str_from_float),
+            (ft1, &str_to_float),
+            (ft2, &list_intersperse),
+            (ft4, &list_map3),
+            (ft5, &list_map4),
+            (ft6, &list_map5),
+            (ft2, &list_partition),
+            (ft1, &list_unzip),
+            (ft2, &dict_get),
+            (ft3, &dict_insert),
+            (ft2, &dict_remove),
+            (ft2, &dict_from_list),
+            (ft3, &dict_foldl),
+            (ft3, &dict_foldr),
+            (ft2, &dict_map),
+            (ft2, &dict_filter),
+            (ft2, &dict_partition),
+            (ft6, &dict_merge),
+            (ft1, &dict_keys),
+            (ft1, &dict_values),
+            (ft2, &dict_intersect),
+            (ft2, &dict_diff),
+            (ft3, &dict_update),
+            (ft2, &set_insert),
+            (ft2, &set_member),
+            (ft2, &set_remove),
+            (ft2, &set_from_list),
+            (ft2, &set_intersect),
+            (ft2, &set_diff),
+            (eqref_to_i32_ty, &val_hash),
+            (ft2, &treap_get),
+            (ft3, &treap_insert),
+            (ft2, &treap_merge),
+            (ft2, &treap_remove),
+            (ft2, &treap_pairs),
+            (ft3, &treap_foldl),
+            (ft3, &treap_foldr),
+            (ft2, &treap_insert_pairs),
+            (ft2, &treap_insert_elems),
+            (ft2, &array_get),
+            (ft3, &array_set),
+            (ft2, &array_push),
+            (ft1, &array_tighten),
+            (ft1, &list_to_array),
+            (ft3, &array_slice),
+            (ft2, &array_initialize),
+            (ft1, &array_to_indexed),
+            (ft3, &json_enc),
+            (ft1, &json_escape),
+            (ft3, &json_dict_pairs),
+            (jw_ty, &json_write),
+            (sb_i_v_ty, &sb_ensure),
+            (sb_i_v_ty, &sb_push_byte),
+            (sb_e_v_ty, &sb_push_str),
+            (sb_e_v_ty, &sb_escape),
+            (sb_e_v_ty, &sb_push_int),
+            (sb_ret_ty, &sb_finish),
+            (json_void_ty, &json_skipws),
+            (json_ret_ty, &json_pstr),
+            (json_ret_ty, &json_pnum),
+            (json_ret_ty, &json_pval),
+            (json_ret_ty, &json_parr),
+            (json_ret_ty, &json_pobj),
+            (ft1, &json_parse),
+            (ft2, &json_run),
+            (ft2, &json_decstr),
+            (ft1, &html_esc_text),
+            (ft1, &html_esc_attr),
+            (ft1, &serialize_html),
+            (json_ret_ty, &view_html),
+            (eqref_to_i32_ty, &marshal),
+            (eqref_to_i32_ty, &render_dom),
+            (json_void_ty, &rerender),
+            (patch_ty, &patch),
+            (eqref_to_void_ty, &run_cmd),
+            (ii_eqref_ty, &str_from_mem),
+            (json_ret_ty, &render_document),
+            (eqref_to_void_ty, &dispatch_msg),
+            (imp_i4_v, &port_in),
+            (ee_eqref_ty, &sub_find_port),
+            (ee_eqref_ty, &html_map),
+            (imp_i4_v, &http_response),
+            (json_void_ty, &reconcile_subs),
+            (eqref_to_void_ty, &walk_timers),
+            (if_v_ty, &tick),
+            (imp_ii_v, &free_handler),
+            (imp_i_v, &task_resume),
+            (imp_i3_v, &dom_event),
+            (ei_i_ty, &index_byte),
+            (e_e_ty, &url_from_string),
+            (e_e_ty, &url_to_string),
+            (e_e_ty, &percent_encode),
+            (e_e_ty, &percent_decode),
+            (e_e_ty, &json_err_to_string),
+            (e_e_ty, &strip_keys),
+            (kr_ty, &keyed_reconcile),
+            (iff_v_ty, &frame),
+            (i64_e_ty, &box_int),
+            (e_i64_ty, &unbox_int),
+            (msort_ty, &msort),
+            (msort_ty, &msort_key),
+            (msort_ty, &msort_cmp),
+            (ft2, &list_sort_with),
+            (e_i64_ty, &random_peel),
+            (ft1, &random_next_seed),
+            (ft1, &random_initial_seed),
+            (ft2, &random_step),
+            (ft1, &task_run),
+            (e_e_ty, &dict_sorted_build),
+            (e_e_ty, &set_sorted_build),
+            (ft3, &compose3),
+            (ee_eqref_ty, &cmd_map),
+            (ee_eqref_ty, &sub_map),
+            (ee_eqref_ty, &attr_map),
+            (ee_eqref_ty, &time_adj_minutes),
+            (e_e_ty, &time_civil),
+            (ii_eqref_ty, &regex_read_strings),
+            (ii_eqref_ty, &regex_read_matches),
+            (ee_eqref_ty, &regex_compile),
+            (ft3, &regex_find),
+            (ft3, &regex_split),
+            (ft4, &regex_replace),
+            (ft3, &parser_is_sub_char),
+            (ft3, &parser_is_ascii_code),
+            (ft2, &parser_chomp_base10),
+            (ft3, &parser_consume_base),
+            (ft2, &parser_consume_base16),
+            (ft5, &parser_is_sub_string),
+            (ft5, &parser_find_sub_string),
+            (alm_event_ty, &alm_event),
+            (main_int_ty, &mi),
+            (render_ty, &render),
+            (render_ty, &render_html),
+            (json_void_ty, &alm_browser_start),
+            (ft1, &list_flatten),
+            (ft1, &list_flatten_f),
+            (ft1, &list_flatten_i),
+        ];
         let mut funcs = FunctionSection::new();
         for &t in &func_type_idx {
             funcs.function(t);
         }
-        funcs.function(ft2); // str_append
-        funcs.function(ft1); // str_from_int
-        funcs.function(ft2); // apply1 : (clos, arg) -> eqref
-        funcs.function(ft2); // list_cons : (x, xs) -> list
-        funcs.function(ft2); // list_map
-        funcs.function(ft3); // list_foldl
-        funcs.function(ft1); // list_length
-        funcs.function(ft2); // list_append
-        funcs.function(ft2); // val_eq
-        funcs.function(e_e_ty); // force_lazy : (eqref) -> eqref
-        funcs.function(imp_i_v); // stream_ensure : (needBytes) -> ()
-        funcs.function(eqref_to_void_ty); // stream_str : (str) -> ()
-        funcs.function(eqref_to_void_ty); // serialize_dom : (node) -> ()
-        funcs.function(ee_eqref_ty); // same_lazy : (eqref,eqref) -> eqref(i31 bool)
-        funcs.function(ft1); // list_reverse
-        funcs.function(ft2); // list_filter
-        funcs.function(ft3); // list_foldr
-        funcs.function(ft2); // modby
-        funcs.function(ft2); // list_range
-        funcs.function(ft2); // list_member
-        funcs.function(ft2); // list_take
-        funcs.function(ft2); // list_drop
-        funcs.function(ft1); // list_concat
-        funcs.function(ft1); // list_head
-        funcs.function(ft1); // list_tail
-        funcs.function(ft2); // maybe_with_default
-        funcs.function(ft2); // maybe_map
-        funcs.function(ft2); // maybe_and_then
-        funcs.function(ft3); // maybe_map2
-        funcs.function(ft4); // maybe_map3
-        funcs.function(ft5); // maybe_map4
-        funcs.function(ft6); // maybe_map5
-        funcs.function(ft2); // str_join
-        funcs.function(ft2); // str_repeat
-        funcs.function(ft2); // str_starts_with
-        funcs.function(ft2); // str_ends_with
-        funcs.function(val_compare_ty); // val_compare
-        funcs.function(ft2); // list_insert
-        funcs.function(ft1); // list_sort
-        funcs.function(ft2); // list_all
-        funcs.function(ft2); // list_any
-        funcs.function(ft1); // list_min
-        funcs.function(ft1); // list_max
-        funcs.function(ft3); // list_indexed_map
-        funcs.function(ft1); // list_sum
-        funcs.function(ft1); // list_product
-        funcs.function(ft3); // list_map2
-        funcs.function(ft1); // str_upper
-        funcs.function(ft1); // str_lower
-        funcs.function(ft1); // str_trim
-        funcs.function(ft1); // str_trim_left
-        funcs.function(ft1); // str_trim_right
-        funcs.function(ft2); // str_left
-        funcs.function(ft2); // str_right
-        funcs.function(ft2); // str_dropleft
-        funcs.function(ft2); // str_dropright
-        funcs.function(ft1); // str_to_int
-        funcs.function(ft2); // str_contains
-        funcs.function(ft1); // str_to_list
-        funcs.function(ft1); // str_from_list
-        funcs.function(ft1); // str_from_char
-        funcs.function(ft1); // str_uncons
-        funcs.function(ft1); // str_length
-        funcs.function(ft3); // clamp
-        funcs.function(ft2); // result_with_default
-        funcs.function(ft2); // result_map
-        funcs.function(ft2); // result_map_error
-        funcs.function(ft2); // result_and_then
-        funcs.function(ft1); // result_to_maybe
-        funcs.function(ft2); // result_from_maybe
-        funcs.function(ft3); // result_map2
-        funcs.function(ft4); // result_map3
-        funcs.function(ft5); // result_map4
-        funcs.function(ft6); // result_map5
-        funcs.function(ft2); // str_split
-        funcs.function(ft1); // str_words
-        funcs.function(ft1); // str_lines
-        funcs.function(ft2); // list_repeat
-        funcs.function(ft2); // list_filter_map
-        funcs.function(ft2); // list_sortby
-        funcs.function(ft3); // list_sortby_insert
-        funcs.function(ft3); // str_pad_left
-        funcs.function(ft3); // str_pad_right
-        funcs.function(ft1); // from_polar
-        funcs.function(ft1); // to_polar
-        funcs.function(ft3); // str_slice
-        funcs.function(ft3); // str_pad_both
-        funcs.function(ft1); // class_list
-        funcs.function(ft2); // attr_property
-        funcs.function(ft2); // str_indexes
-        funcs.function(ft1); // str_from_float
-        funcs.function(ft1); // str_to_float
-        funcs.function(ft2); // list_intersperse
-        funcs.function(ft4); // list_map3
-        funcs.function(ft5); // list_map4
-        funcs.function(ft6); // list_map5
-        funcs.function(ft2); // list_partition
-        funcs.function(ft1); // list_unzip
-        funcs.function(ft2); // dict_get
-        funcs.function(ft3); // dict_insert
-        funcs.function(ft2); // dict_remove
-        funcs.function(ft2); // dict_from_list (pairs, acc)
-        funcs.function(ft3); // dict_foldl
-        funcs.function(ft3); // dict_foldr
-        funcs.function(ft2); // dict_map
-        funcs.function(ft2); // dict_filter
-        funcs.function(ft2); // dict_partition
-        funcs.function(ft6); // dict_merge
-        funcs.function(ft1); // dict_keys
-        funcs.function(ft1); // dict_values
-        funcs.function(ft2); // dict_intersect
-        funcs.function(ft2); // dict_diff (toRemove, acc)
-        funcs.function(ft3); // dict_update
-        funcs.function(ft2); // set_insert
-        funcs.function(ft2); // set_member
-        funcs.function(ft2); // set_remove
-        funcs.function(ft2); // set_from_list (xs, acc)
-        funcs.function(ft2); // set_intersect
-        funcs.function(ft2); // set_diff (toRemove, base)
-        funcs.function(eqref_to_i32_ty); // val_hash
-        funcs.function(ft2); // treap_get (k, t)
-        funcs.function(ft3); // treap_insert (k, v, t)
-        funcs.function(ft2); // treap_merge (l, r)
-        funcs.function(ft2); // treap_remove (k, t)
-        funcs.function(ft2); // treap_pairs (t, acc)
-        funcs.function(ft3); // treap_foldl (f, acc, t)
-        funcs.function(ft3); // treap_foldr (f, acc, t)
-        funcs.function(ft2); // treap_insert_pairs (pairs, t)
-        funcs.function(ft2); // treap_insert_elems (elems, t)
-        funcs.function(ft2); // array_get
-        funcs.function(ft3); // array_set
-        funcs.function(ft2); // array_push
-        funcs.function(ft1); // array_tighten
-        funcs.function(ft1); // list_to_array
-        funcs.function(ft3); // array_slice
-        funcs.function(ft2); // array_initialize
-        funcs.function(ft1); // array_to_indexed
-        funcs.function(ft3); // json_enc (value, gap, prefix)
-        funcs.function(ft1); // json_escape
-        funcs.function(ft3); // json_dict_pairs
-        funcs.function(jw_ty); // json_write
-        funcs.function(sb_i_v_ty); // sb_ensure
-        funcs.function(sb_i_v_ty); // sb_push_byte
-        funcs.function(sb_e_v_ty); // sb_push_str
-        funcs.function(sb_e_v_ty); // sb_escape
-        funcs.function(sb_e_v_ty); // sb_push_int
-        funcs.function(sb_ret_ty); // sb_finish
-        funcs.function(json_void_ty); // json_skipws : () -> ()
-        funcs.function(json_ret_ty); // json_pstr : () -> eqref
-        funcs.function(json_ret_ty); // json_pnum : () -> eqref
-        funcs.function(json_ret_ty); // json_pval : () -> eqref
-        funcs.function(json_ret_ty); // json_parr : () -> eqref
-        funcs.function(json_ret_ty); // json_pobj : () -> eqref
-        funcs.function(ft1); // json_parse : String -> Result
-        funcs.function(ft2); // json_run : (decoder, value) -> Result
-        funcs.function(ft2); // json_decstr : (decoder, string) -> Result
-        funcs.function(ft1); // html_esc_text
-        funcs.function(ft1); // html_esc_attr
-        funcs.function(ft1); // serialize_html
-        funcs.function(json_ret_ty); // view_html : () -> eqref
-        funcs.function(eqref_to_i32_ty); // marshal
-        funcs.function(eqref_to_i32_ty); // render_dom
-        funcs.function(json_void_ty); // rerender
-        funcs.function(patch_ty); // patch
-        funcs.function(eqref_to_void_ty); // run_cmd
-        funcs.function(ii_eqref_ty); // str_from_mem
-        funcs.function(json_ret_ty); // doc_vnode : () -> eqref
-        funcs.function(eqref_to_void_ty); // dispatch_msg : eqref -> ()
-        funcs.function(imp_i4_v); // alm_port_in : (i32,i32,i32,i32) -> ()
-        funcs.function(ee_eqref_ty); // sub_find_port : (eqref,eqref) -> eqref
-        funcs.function(ee_eqref_ty); // html_map : (eqref,eqref) -> eqref
-        funcs.function(imp_i4_v); // alm_http_response : (reqId,status,ptr,len) -> ()
-        funcs.function(json_void_ty); // reconcile_subs : () -> ()
-        funcs.function(eqref_to_void_ty); // walk_timers : eqref -> ()
-        funcs.function(if_v_ty); // alm_tick : (slot, millis:f64) -> ()
-        funcs.function(imp_ii_v); // alm_free_handlers : (ptr, count) -> ()
-        funcs.function(imp_i_v); // alm_task_resume : (slot) -> ()
-        funcs.function(imp_i3_v); // alm_dom_event : (slot, ptr, len) -> ()
-        funcs.function(ei_i_ty); // index_byte : (str, ch) -> i32
-        funcs.function(e_e_ty); // url_from_string : String -> Maybe Url
-        funcs.function(e_e_ty); // url_to_string : Url -> String
-        funcs.function(e_e_ty); // percent_encode : String -> String
-        funcs.function(e_e_ty); // percent_decode : String -> Maybe String
-        funcs.function(e_e_ty); // json_err_to_string : Error -> String
-        funcs.function(e_e_ty); // strip_keys : List (k, Html) -> List Html
-        funcs.function(kr_ty); // keyed_reconcile (dom, oldKids, newKids)
-        funcs.function(iff_v_ty); // alm_frame : (slot, delta, now) -> ()
-        funcs.function(i64_e_ty); // box_int : (i64) -> eqref
-        funcs.function(e_i64_ty); // unbox_int : (eqref) -> i64
-        funcs.function(msort_ty); // msort (by element)
-        funcs.function(msort_ty); // msort_key (by pair[0])
-        funcs.function(msort_ty); // msort_cmp (by user comparator)
-        funcs.function(ft2); // list_sort_with (cmp, list)
-        funcs.function(e_i64_ty); // random_peel (seed) -> i64
-        funcs.function(ft1); // random_next_seed (seed) -> seed
-        funcs.function(ft1); // random_initial_seed (x) -> seed
-        funcs.function(ft2); // random_step (gen, seed) -> (value, seed)
-        funcs.function(ft1); // task_run (task) -> Result
-        funcs.function(e_e_ty); // dict_sorted_build : pairs -> Dict
-        funcs.function(e_e_ty); // set_sorted_build : elems -> Set
-        funcs.function(ft3); // compose3 : (f, g, x) -> f (g x)
-        funcs.function(ee_eqref_ty); // cmd_map : (f, cmd) -> cmd
-        funcs.function(ee_eqref_ty); // sub_map : (f, sub) -> sub
-        funcs.function(ee_eqref_ty); // attr_map : (f, attr) -> attr
-        funcs.function(ee_eqref_ty); // time_adj_minutes : (zone, posix) -> Int
-        funcs.function(e_e_ty); // time_civil : minutes -> [y, m, d]
-        funcs.function(ii_eqref_ty); // regex_read_strings : (out, count) -> List String
-        funcs.function(ii_eqref_ty); // regex_read_matches : (out, count) -> List Match
-        funcs.function(ee_eqref_ty); // regex_compile : (options, string) -> Maybe Regex
-        funcs.function(ft3); // regex_find : (regex, n, subject) -> List Match
-        funcs.function(ft3); // regex_split : (regex, n, subject) -> List String
-        funcs.function(ft4); // regex_replace : (regex, n, replacer, subject) -> String
-        funcs.function(ft3); // parser_is_sub_char : (pred, offset, string) -> Int
-        funcs.function(ft3); // parser_is_ascii_code : (code, offset, string) -> Bool
-        funcs.function(ft2); // parser_chomp_base10 : (offset, string) -> Int
-        funcs.function(ft3); // parser_consume_base : (base, offset, string) -> (o, n)
-        funcs.function(ft2); // parser_consume_base16 : (offset, string) -> (o, n)
-        funcs.function(ft5); // parser_is_sub_string : (sm, o, r, c, big) -> (o, r, c)
-        funcs.function(ft5); // parser_find_sub_string : (sm, o, r, c, big) -> (o, r, c)
-        funcs.function(alm_event_ty); // alm_event
-        funcs.function(main_int_ty);
-        funcs.function(render_ty); // render
-        funcs.function(render_ty); // render_html
-        funcs.function(json_void_ty); // alm_browser_start
-        funcs.function(ft1); // list_flatten
-        funcs.function(ft1); // list_flatten_f
-        funcs.function(ft1); // list_flatten_i
+        for &(t, _) in &helper_fns {
+            funcs.function(t);
+        }
         let lifted_types: Vec<u32> =
             self.lifted.iter().map(|(a, _)| self.fn_types[a]).collect();
         for &t in &lifted_types {
@@ -3623,233 +3632,9 @@ impl<'a> Codegen<'a> {
         for b in &bodies {
             code.function(b);
         }
-        code.function(&str_append);
-        code.function(&str_from_int);
-        code.function(&apply1);
-        code.function(&list_cons);
-        code.function(&list_map);
-        code.function(&list_foldl);
-        code.function(&list_length);
-        code.function(&list_append);
-        code.function(&val_eq);
-        code.function(&force_lazy);
-        code.function(&stream_ensure);
-        code.function(&stream_str);
-        code.function(&serialize_dom);
-        code.function(&same_lazy);
-        code.function(&list_reverse);
-        code.function(&list_filter);
-        code.function(&list_foldr);
-        code.function(&modby);
-        code.function(&list_range);
-        code.function(&list_member);
-        code.function(&list_take);
-        code.function(&list_drop);
-        code.function(&list_concat);
-        code.function(&list_head);
-        code.function(&list_tail);
-        code.function(&maybe_with_default);
-        code.function(&maybe_map);
-        code.function(&maybe_and_then);
-        code.function(&maybe_map2);
-        code.function(&maybe_map3);
-        code.function(&maybe_map4);
-        code.function(&maybe_map5);
-        code.function(&str_join);
-        code.function(&str_repeat);
-        code.function(&str_starts_with);
-        code.function(&str_ends_with);
-        code.function(&val_compare);
-        code.function(&list_insert);
-        code.function(&list_sort);
-        code.function(&list_all);
-        code.function(&list_any);
-        code.function(&list_min);
-        code.function(&list_max);
-        code.function(&list_indexed_map);
-        code.function(&list_sum);
-        code.function(&list_product);
-        code.function(&list_map2);
-        code.function(&str_upper);
-        code.function(&str_lower);
-        code.function(&str_trim);
-        code.function(&str_trim_left);
-        code.function(&str_trim_right);
-        code.function(&str_left);
-        code.function(&str_right);
-        code.function(&str_dropleft);
-        code.function(&str_dropright);
-        code.function(&str_to_int);
-        code.function(&str_contains);
-        code.function(&str_to_list);
-        code.function(&str_from_list);
-        code.function(&str_from_char);
-        code.function(&str_uncons);
-        code.function(&str_length);
-        code.function(&clamp);
-        code.function(&result_with_default);
-        code.function(&result_map);
-        code.function(&result_map_error);
-        code.function(&result_and_then);
-        code.function(&result_to_maybe);
-        code.function(&result_from_maybe);
-        code.function(&result_map2);
-        code.function(&result_map3);
-        code.function(&result_map4);
-        code.function(&result_map5);
-        code.function(&str_split);
-        code.function(&str_words);
-        code.function(&str_lines);
-        code.function(&list_repeat);
-        code.function(&list_filter_map);
-        code.function(&list_sortby);
-        code.function(&list_sortby_insert);
-        code.function(&str_pad_left);
-        code.function(&str_pad_right);
-        code.function(&from_polar);
-        code.function(&to_polar);
-        code.function(&str_slice);
-        code.function(&str_pad_both);
-        code.function(&class_list);
-        code.function(&attr_property);
-        code.function(&str_indexes);
-        code.function(&str_from_float);
-        code.function(&str_to_float);
-        code.function(&list_intersperse);
-        code.function(&list_map3);
-        code.function(&list_map4);
-        code.function(&list_map5);
-        code.function(&list_partition);
-        code.function(&list_unzip);
-        code.function(&dict_get);
-        code.function(&dict_insert);
-        code.function(&dict_remove);
-        code.function(&dict_from_list);
-        code.function(&dict_foldl);
-        code.function(&dict_foldr);
-        code.function(&dict_map);
-        code.function(&dict_filter);
-        code.function(&dict_partition);
-        code.function(&dict_merge);
-        code.function(&dict_keys);
-        code.function(&dict_values);
-        code.function(&dict_intersect);
-        code.function(&dict_diff);
-        code.function(&dict_update);
-        code.function(&set_insert);
-        code.function(&set_member);
-        code.function(&set_remove);
-        code.function(&set_from_list);
-        code.function(&set_intersect);
-        code.function(&set_diff);
-        code.function(&val_hash);
-        code.function(&treap_get);
-        code.function(&treap_insert);
-        code.function(&treap_merge);
-        code.function(&treap_remove);
-        code.function(&treap_pairs);
-        code.function(&treap_foldl);
-        code.function(&treap_foldr);
-        code.function(&treap_insert_pairs);
-        code.function(&treap_insert_elems);
-        code.function(&array_get);
-        code.function(&array_set);
-        code.function(&array_push);
-        code.function(&array_tighten);
-        code.function(&list_to_array);
-        code.function(&array_slice);
-        code.function(&array_initialize);
-        code.function(&array_to_indexed);
-        code.function(&json_enc);
-        code.function(&json_escape);
-        code.function(&json_dict_pairs);
-        code.function(&json_write);
-        code.function(&sb_ensure);
-        code.function(&sb_push_byte);
-        code.function(&sb_push_str);
-        code.function(&sb_escape);
-        code.function(&sb_push_int);
-        code.function(&sb_finish);
-        code.function(&json_skipws);
-        code.function(&json_pstr);
-        code.function(&json_pnum);
-        code.function(&json_pval);
-        code.function(&json_parr);
-        code.function(&json_pobj);
-        code.function(&json_parse);
-        code.function(&json_run);
-        code.function(&json_decstr);
-        code.function(&html_esc_text);
-        code.function(&html_esc_attr);
-        code.function(&serialize_html);
-        code.function(&view_html);
-        code.function(&marshal);
-        code.function(&render_dom);
-        code.function(&rerender);
-        code.function(&patch);
-        code.function(&run_cmd);
-        code.function(&str_from_mem);
-        code.function(&render_document);
-        code.function(&dispatch_msg);
-        code.function(&port_in);
-        code.function(&sub_find_port);
-        code.function(&html_map);
-        code.function(&http_response);
-        code.function(&reconcile_subs);
-        code.function(&walk_timers);
-        code.function(&tick);
-        code.function(&free_handler);
-        code.function(&task_resume);
-        code.function(&dom_event);
-        code.function(&index_byte);
-        code.function(&url_from_string);
-        code.function(&url_to_string);
-        code.function(&percent_encode);
-        code.function(&percent_decode);
-        code.function(&json_err_to_string);
-        code.function(&strip_keys);
-        code.function(&keyed_reconcile);
-        code.function(&frame);
-        code.function(&box_int);
-        code.function(&unbox_int);
-        code.function(&msort);
-        code.function(&msort_key);
-        code.function(&msort_cmp);
-        code.function(&list_sort_with);
-        code.function(&random_peel);
-        code.function(&random_next_seed);
-        code.function(&random_initial_seed);
-        code.function(&random_step);
-        code.function(&task_run);
-        code.function(&dict_sorted_build);
-        code.function(&set_sorted_build);
-        code.function(&compose3);
-        code.function(&cmd_map);
-        code.function(&sub_map);
-        code.function(&attr_map);
-        code.function(&time_adj_minutes);
-        code.function(&time_civil);
-        code.function(&regex_read_strings);
-        code.function(&regex_read_matches);
-        code.function(&regex_compile);
-        code.function(&regex_find);
-        code.function(&regex_split);
-        code.function(&regex_replace);
-        code.function(&parser_is_sub_char);
-        code.function(&parser_is_ascii_code);
-        code.function(&parser_chomp_base10);
-        code.function(&parser_consume_base);
-        code.function(&parser_consume_base16);
-        code.function(&parser_is_sub_string);
-        code.function(&parser_find_sub_string);
-        code.function(&alm_event);
-        code.function(&mi);
-        code.function(&render);
-        code.function(&render_html);
-        code.function(&alm_browser_start);
-        code.function(&list_flatten);
-        code.function(&list_flatten_f);
-        code.function(&list_flatten_i);
+        for &(_, b) in &helper_fns {
+            code.function(b);
+        }
         for (_, body) in &self.lifted {
             code.function(body);
         }
