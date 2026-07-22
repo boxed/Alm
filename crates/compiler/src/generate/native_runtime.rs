@@ -2712,16 +2712,22 @@ unsafe extern "C" fn list_intersperse(sep: u64, xs: u64) -> u64 {
     }
     list_from_slice(&out)
 }
-#[export_name = "rtb$List$map2"]
-unsafe extern "C" fn list_map2(f: u64, xs: u64, ys: u64) -> u64 {
-    let (xs, ys) = (to_vec(xs), to_vec(ys));
-    let out: Vec<u64> = xs
-        .iter()
-        .zip(ys.iter())
-        .map(|(&a, &b)| ap2(f, a, b))
-        .collect();
-    list_from_slice(&out)
+// List.mapN family: zip N lists to the shortest length, applying `f`.
+macro_rules! list_mapn {
+    ($(#[$attr:meta])* $vis:vis $name:ident, $ap:ident, $($arg:ident),+) => {
+        $(#[$attr])*
+        $vis unsafe extern "C" fn $name(f: u64, $($arg: u64),+) -> u64 {
+            $(let $arg = to_vec($arg);)+
+            let n = [$($arg.len()),+].into_iter().min().unwrap();
+            let out: Vec<u64> = (0..n).map(|i| $ap(f, $($arg[i]),+)).collect();
+            list_from_slice(&out)
+        }
+    };
 }
+list_mapn!(#[export_name = "rtb$List$map2"] list_map2, ap2, a, b);
+list_mapn!(#[no_mangle] pub list_map3, ap3, a, b, c);
+list_mapn!(#[no_mangle] pub list_map4, ap4, a, b, c, d);
+list_mapn!(#[no_mangle] pub list_map5, ap5, a, b, c, d, e);
 #[export_name = "rtb$List$isEmpty"]
 unsafe extern "C" fn list_is_empty(xs: u64) -> u64 {
     rt_bool(rt_is_nil(xs))
@@ -3283,13 +3289,23 @@ unsafe extern "C" fn maybe_map(f: u64, m: u64) -> u64 {
         m
     }
 }
-unsafe extern "C" fn maybe_map2(f: u64, ma: u64, mb: u64) -> u64 {
-    if is_ctor0(ma) && is_ctor0(mb) {
-        just(ap2(f, rt_ctor_arg(ma, 0), rt_ctor_arg(mb, 0)))
-    } else {
-        nothing()
-    }
+// Maybe.mapN family: apply `f` only when every argument is `Just`.
+macro_rules! maybe_mapn {
+    ($(#[$attr:meta])* $vis:vis $name:ident, $ap:ident, $($arg:ident),+) => {
+        $(#[$attr])*
+        $vis unsafe extern "C" fn $name(f: u64, $($arg: u64),+) -> u64 {
+            if $(is_ctor0($arg))&&+ {
+                just($ap(f, $(rt_ctor_arg($arg, 0)),+))
+            } else {
+                nothing()
+            }
+        }
+    };
 }
+maybe_mapn!(maybe_map2, ap2, a, b);
+maybe_mapn!(#[no_mangle] pub maybe_map3, ap3, a, b, c);
+maybe_mapn!(#[no_mangle] pub maybe_map4, ap4, a, b, c, d);
+maybe_mapn!(#[no_mangle] pub maybe_map5, ap5, a, b, c, d, e);
 unsafe extern "C" fn maybe_and_then(f: u64, m: u64) -> u64 {
     if is_ctor0(m) {
         ap1(f, rt_ctor_arg(m, 0))
@@ -3978,78 +3994,6 @@ unsafe fn ap5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
     let args = [a, b, c, d, e];
     rt_apply(f, 5, args.as_ptr())
 }
-#[no_mangle]
-pub unsafe extern "C" fn list_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
-    let (a, b, c, d) = (to_vec(a), to_vec(b), to_vec(c), to_vec(d));
-    let n = a.len().min(b.len()).min(c.len()).min(d.len());
-    let out: Vec<u64> = (0..n).map(|i| ap4(f, a[i], b[i], c[i], d[i])).collect();
-    list_from_slice(&out)
-}
-#[no_mangle]
-pub unsafe extern "C" fn list_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
-    let (a, b, c, d, e) = (to_vec(a), to_vec(b), to_vec(c), to_vec(d), to_vec(e));
-    let n = a.len().min(b.len()).min(c.len()).min(d.len()).min(e.len());
-    let out: Vec<u64> = (0..n).map(|i| ap5(f, a[i], b[i], c[i], d[i], e[i])).collect();
-    list_from_slice(&out)
-}
-#[no_mangle]
-pub unsafe extern "C" fn maybe_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
-    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) && is_ctor0(d) && is_ctor0(e) {
-        just(ap5(
-            f,
-            rt_ctor_arg(a, 0),
-            rt_ctor_arg(b, 0),
-            rt_ctor_arg(c, 0),
-            rt_ctor_arg(d, 0),
-            rt_ctor_arg(e, 0),
-        ))
-    } else {
-        nothing()
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn result_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    if !is_ctor0(a) {
-        a
-    } else if !is_ctor0(b) {
-        b
-    } else if !is_ctor0(c) {
-        c
-    } else {
-        res_ok(ap3(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0), rt_ctor_arg(c, 0)))
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn result_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
-    for r in [a, b, c, d] {
-        if !is_ctor0(r) {
-            return r;
-        }
-    }
-    res_ok(ap4(
-        f,
-        rt_ctor_arg(a, 0),
-        rt_ctor_arg(b, 0),
-        rt_ctor_arg(c, 0),
-        rt_ctor_arg(d, 0),
-    ))
-}
-#[no_mangle]
-pub unsafe extern "C" fn result_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
-    for r in [a, b, c, d, e] {
-        if !is_ctor0(r) {
-            return r;
-        }
-    }
-    res_ok(ap5(
-        f,
-        rt_ctor_arg(a, 0),
-        rt_ctor_arg(b, 0),
-        rt_ctor_arg(c, 0),
-        rt_ctor_arg(d, 0),
-        rt_ctor_arg(e, 0),
-    ))
-}
 unsafe fn tuple_xy(v: u64) -> (f64, f64) {
     if let Value::Tuple(t) = deref(v) {
         (num(t[0]), num(t[1]))
@@ -4394,46 +4338,24 @@ pub unsafe extern "C" fn char_is_hex_digit(c: u64) -> u64 {
     )
 }
 
-// -- List/Maybe/Result combinators --
-#[no_mangle]
-pub unsafe extern "C" fn list_map3(f: u64, xs: u64, ys: u64, zs: u64) -> u64 {
-    let (xs, ys, zs) = (to_vec(xs), to_vec(ys), to_vec(zs));
-    let n = xs.len().min(ys.len()).min(zs.len());
-    let out: Vec<u64> = (0..n).map(|i| ap3(f, xs[i], ys[i], zs[i])).collect();
-    list_from_slice(&out)
+// Result.mapN family: return the first `Err`, else apply `f` to the `Ok`s.
+macro_rules! result_mapn {
+    ($(#[$attr:meta])* $vis:vis $name:ident, $ap:ident, $($arg:ident),+) => {
+        $(#[$attr])*
+        $vis unsafe extern "C" fn $name(f: u64, $($arg: u64),+) -> u64 {
+            for r in [$($arg),+] {
+                if !is_ctor0(r) {
+                    return r;
+                }
+            }
+            res_ok($ap(f, $(rt_ctor_arg($arg, 0)),+))
+        }
+    };
 }
-#[no_mangle]
-pub unsafe extern "C" fn maybe_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) {
-        just(ap3(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0), rt_ctor_arg(c, 0)))
-    } else {
-        nothing()
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn maybe_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
-    if is_ctor0(a) && is_ctor0(b) && is_ctor0(c) && is_ctor0(d) {
-        just(ap4(
-            f,
-            rt_ctor_arg(a, 0),
-            rt_ctor_arg(b, 0),
-            rt_ctor_arg(c, 0),
-            rt_ctor_arg(d, 0),
-        ))
-    } else {
-        nothing()
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn result_map2(f: u64, a: u64, b: u64) -> u64 {
-    if !is_ctor0(a) {
-        a
-    } else if !is_ctor0(b) {
-        b
-    } else {
-        res_ok(ap2(f, rt_ctor_arg(a, 0), rt_ctor_arg(b, 0)))
-    }
-}
+result_mapn!(#[no_mangle] pub result_map2, ap2, a, b);
+result_mapn!(#[no_mangle] pub result_map3, ap3, a, b, c);
+result_mapn!(#[no_mangle] pub result_map4, ap4, a, b, c, d);
+result_mapn!(#[no_mangle] pub result_map5, ap5, a, b, c, d, e);
 
 // -- String folds --
 #[no_mangle]
@@ -5946,90 +5868,34 @@ unsafe extern "C" fn random_map_gen(f: u64, g: u64, seed: u64) -> u64 {
     pair(ap1(f, rt_tuple_item(r, 0)), rt_tuple_item(r, 1))
 }
 
-unsafe extern "C" fn random_map2(f: u64, ga: u64, gb: u64) -> u64 {
-    mk_generator(closure(random_map2_gen as *const (), 4, &[f, ga, gb]))
+// Random.mapN family: generator wrapper + seed-threading `_gen` twin per arity.
+macro_rules! random_mapn {
+    (
+        $wrap:ident, $gen:ident, $ap:ident, $size:literal,
+        $(#[$genattr:meta])* ($($g:ident => $r:ident),+)
+    ) => {
+        unsafe extern "C" fn $wrap(f: u64, $($g: u64),+) -> u64 {
+            mk_generator(closure($gen as *const (), $size, &[f, $($g),+]))
+        }
+        $(#[$genattr])*
+        unsafe extern "C" fn $gen(f: u64, $($g: u64),+, seed: u64) -> u64 {
+            let mut seed = seed;
+            $(
+                let $r = ap1(rt_ctor_arg($g, 0), seed);
+                seed = rt_tuple_item($r, 1);
+            )+
+            pair($ap(f, $(rt_tuple_item($r, 0)),+), seed)
+        }
+    };
 }
-unsafe extern "C" fn random_map2_gen(f: u64, ga: u64, gb: u64, seed: u64) -> u64 {
-    let ra = ap1(rt_ctor_arg(ga, 0), seed);
-    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
-    pair(
-        ap2(f, rt_tuple_item(ra, 0), rt_tuple_item(rb, 0)),
-        rt_tuple_item(rb, 1),
-    )
-}
-
-unsafe extern "C" fn random_map3(f: u64, ga: u64, gb: u64, gc: u64) -> u64 {
-    mk_generator(closure(random_map3_gen as *const (), 5, &[f, ga, gb, gc]))
-}
-unsafe extern "C" fn random_map3_gen(f: u64, ga: u64, gb: u64, gc: u64, seed: u64) -> u64 {
-    let ra = ap1(rt_ctor_arg(ga, 0), seed);
-    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
-    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
-    pair(
-        ap3(
-            f,
-            rt_tuple_item(ra, 0),
-            rt_tuple_item(rb, 0),
-            rt_tuple_item(rc, 0),
-        ),
-        rt_tuple_item(rc, 1),
-    )
-}
-
-unsafe extern "C" fn random_map4(f: u64, ga: u64, gb: u64, gc: u64, gd: u64) -> u64 {
-    mk_generator(closure(random_map4_gen as *const (), 6, &[f, ga, gb, gc, gd]))
-}
-unsafe extern "C" fn random_map4_gen(f: u64, ga: u64, gb: u64, gc: u64, gd: u64, seed: u64) -> u64 {
-    let ra = ap1(rt_ctor_arg(ga, 0), seed);
-    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
-    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
-    let rd = ap1(rt_ctor_arg(gd, 0), rt_tuple_item(rc, 1));
-    pair(
-        ap4(
-            f,
-            rt_tuple_item(ra, 0),
-            rt_tuple_item(rb, 0),
-            rt_tuple_item(rc, 0),
-            rt_tuple_item(rd, 0),
-        ),
-        rt_tuple_item(rd, 1),
-    )
-}
-
-unsafe extern "C" fn random_map5(f: u64, ga: u64, gb: u64, gc: u64, gd: u64, ge: u64) -> u64 {
-    mk_generator(closure(
-        random_map5_gen as *const (),
-        7,
-        &[f, ga, gb, gc, gd, ge],
-    ))
-}
-#[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn random_map5_gen(
-    f: u64,
-    ga: u64,
-    gb: u64,
-    gc: u64,
-    gd: u64,
-    ge: u64,
-    seed: u64,
-) -> u64 {
-    let ra = ap1(rt_ctor_arg(ga, 0), seed);
-    let rb = ap1(rt_ctor_arg(gb, 0), rt_tuple_item(ra, 1));
-    let rc = ap1(rt_ctor_arg(gc, 0), rt_tuple_item(rb, 1));
-    let rd = ap1(rt_ctor_arg(gd, 0), rt_tuple_item(rc, 1));
-    let re = ap1(rt_ctor_arg(ge, 0), rt_tuple_item(rd, 1));
-    pair(
-        ap5(
-            f,
-            rt_tuple_item(ra, 0),
-            rt_tuple_item(rb, 0),
-            rt_tuple_item(rc, 0),
-            rt_tuple_item(rd, 0),
-            rt_tuple_item(re, 0),
-        ),
-        rt_tuple_item(re, 1),
-    )
-}
+random_mapn!(random_map2, random_map2_gen, ap2, 4, (ga => ra, gb => rb));
+random_mapn!(random_map3, random_map3_gen, ap3, 5, (ga => ra, gb => rb, gc => rc));
+random_mapn!(random_map4, random_map4_gen, ap4, 6, (ga => ra, gb => rb, gc => rc, gd => rd));
+random_mapn!(
+    random_map5, random_map5_gen, ap5, 7,
+    #[allow(clippy::too_many_arguments)]
+    (ga => ra, gb => rb, gc => rc, gd => rd, ge => re)
+);
 
 unsafe extern "C" fn random_and_then(f: u64, g: u64) -> u64 {
     mk_generator(closure(random_and_then_gen as *const (), 3, &[f, g]))
@@ -6457,38 +6323,22 @@ unsafe extern "C" fn json_lazy(thunk: u64) -> u64 {
 unsafe extern "C" fn json_map(f: u64, dec: u64) -> u64 {
     mk_decoder(Decoder::Map(f, dec))
 }
-unsafe extern "C" fn json_map2(f: u64, a: u64, b: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b]))
+// Json.Decode mapN family: one macro over the argument arity.
+macro_rules! json_mapn {
+    ($(#[$attr:meta])* $name:ident, $($arg:ident),+) => {
+        $(#[$attr])*
+        unsafe extern "C" fn $name(f: u64, $($arg: u64),+) -> u64 {
+            mk_decoder(Decoder::MapMany(f, vec![$($arg),+]))
+        }
+    };
 }
-unsafe extern "C" fn json_map3(f: u64, a: u64, b: u64, c: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c]))
-}
-unsafe extern "C" fn json_map4(f: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d]))
-}
-unsafe extern "C" fn json_map5(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e]))
-}
-unsafe extern "C" fn json_map6(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64, g: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g]))
-}
-unsafe extern "C" fn json_map7(f: u64, a: u64, b: u64, c: u64, d: u64, e: u64, g: u64, h: u64) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g, h]))
-}
-#[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn json_map8(
-    f: u64,
-    a: u64,
-    b: u64,
-    c: u64,
-    d: u64,
-    e: u64,
-    g: u64,
-    h: u64,
-    i: u64,
-) -> u64 {
-    mk_decoder(Decoder::MapMany(f, vec![a, b, c, d, e, g, h, i]))
-}
+json_mapn!(json_map2, a, b);
+json_mapn!(json_map3, a, b, c);
+json_mapn!(json_map4, a, b, c, d);
+json_mapn!(json_map5, a, b, c, d, e);
+json_mapn!(json_map6, a, b, c, d, e, g);
+json_mapn!(json_map7, a, b, c, d, e, g, h);
+json_mapn!(#[allow(clippy::too_many_arguments)] json_map8, a, b, c, d, e, g, h, i);
 unsafe extern "C" fn json_and_then(f: u64, dec: u64) -> u64 {
     mk_decoder(Decoder::AndThen(f, dec))
 }
