@@ -1999,44 +1999,41 @@ unsafe fn ap2(f: u64, a: u64, b: u64) -> u64 {
 // `int_val`/`mk_int` so it is correct for both the unboxed (host) and boxed
 // (wasm) integer representations.
 
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_add(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return mk_int(int_val(a).wrapping_add(int_val(b)));
-    }
-    rt_add_slow(a, b)
-}
-#[inline(never)]
-unsafe fn rt_add_slow(a: u64, b: u64) -> u64 {
-    rt_float(num(a) + num(b))
-}
-
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_sub(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return mk_int(int_val(a).wrapping_sub(int_val(b)));
-    }
-    rt_sub_slow(a, b)
-}
-#[inline(never)]
-unsafe fn rt_sub_slow(a: u64, b: u64) -> u64 {
-    rt_float(num(a) - num(b))
+// One inlinable comparison operator: int fast path, else `value_cmp`.
+macro_rules! cmp_op {
+    ($name:ident, $op:tt) => {
+        #[no_mangle]
+        #[inline]
+        pub unsafe extern "C" fn $name(a: u64, b: u64) -> u64 {
+            if is_int(a) && is_int(b) {
+                return rt_bool(int_val(a) $op int_val(b));
+            }
+            rt_bool(value_cmp(a, b) $op 0)
+        }
+    };
 }
 
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_mul(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return mk_int(int_val(a).wrapping_mul(int_val(b)));
-    }
-    rt_mul_slow(a, b)
+// One inlinable arithmetic operator: wrapping-int fast path, float out-of-line.
+macro_rules! arith_op {
+    ($name:ident, $slow:ident, $wrapping:ident, $op:tt) => {
+        #[no_mangle]
+        #[inline]
+        pub unsafe extern "C" fn $name(a: u64, b: u64) -> u64 {
+            if is_int(a) && is_int(b) {
+                return mk_int(int_val(a).$wrapping(int_val(b)));
+            }
+            $slow(a, b)
+        }
+        #[inline(never)]
+        unsafe fn $slow(a: u64, b: u64) -> u64 {
+            rt_float(num(a) $op num(b))
+        }
+    };
 }
-#[inline(never)]
-unsafe fn rt_mul_slow(a: u64, b: u64) -> u64 {
-    rt_float(num(a) * num(b))
-}
+
+arith_op!(rt_add, rt_add_slow, wrapping_add, +);
+arith_op!(rt_sub, rt_sub_slow, wrapping_sub, -);
+arith_op!(rt_mul, rt_mul_slow, wrapping_mul, *);
 
 #[no_mangle]
 #[inline]
@@ -2279,38 +2276,10 @@ pub unsafe extern "C" fn rt_neq(a: u64, b: u64) -> u64 {
     }
     rt_bool(!value_eq(a, b))
 }
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_lt(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return rt_bool(int_val(a) < int_val(b));
-    }
-    rt_bool(value_cmp(a, b) < 0)
-}
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_le(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return rt_bool(int_val(a) <= int_val(b));
-    }
-    rt_bool(value_cmp(a, b) <= 0)
-}
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_gt(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return rt_bool(int_val(a) > int_val(b));
-    }
-    rt_bool(value_cmp(a, b) > 0)
-}
-#[no_mangle]
-#[inline]
-pub unsafe extern "C" fn rt_ge(a: u64, b: u64) -> u64 {
-    if is_int(a) && is_int(b) {
-        return rt_bool(int_val(a) >= int_val(b));
-    }
-    rt_bool(value_cmp(a, b) >= 0)
-}
+cmp_op!(rt_lt, <);
+cmp_op!(rt_le, <=);
+cmp_op!(rt_gt, >);
+cmp_op!(rt_ge, >=);
 
 // APPEND — strings and lists.
 
