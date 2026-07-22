@@ -1289,6 +1289,25 @@ fn bump(f: &mut Function, local: u32, n: i32) {
     f.instruction(&Instruction::LocalSet(local));
 }
 
+/// Emit the header of a counted `for idx in ..limit` loop: a `Block`/`Loop`
+/// pair whose body is entered only while `idx < limit` (breaks to the enclosing
+/// block via `BrIf(1)`). Caller initialises `idx` and closes both scopes.
+fn loop_head(f: &mut Function, idx: u32, limit: u32) {
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::Loop(BlockType::Empty));
+    f.instruction(&Instruction::LocalGet(idx));
+    f.instruction(&Instruction::LocalGet(limit));
+    f.instruction(&Instruction::I32GeS);
+    f.instruction(&Instruction::BrIf(1));
+}
+
+/// Emit the footer of a counted loop opened with `loop_head`: `idx += 1` then
+/// branch back to the loop start. Caller closes the `Loop`/`Block` scopes.
+fn loop_tail(f: &mut Function, idx: u32) {
+    bump(f, idx, 1);
+    f.instruction(&Instruction::Br(0));
+}
+
 /// The DOM event name for a plain-message `Html.Events.on*` helper (those whose
 /// handler is just `Decode.succeed msg`), or None for the rest.
 fn html_event_name(ev: &str) -> Option<&'static str> {
@@ -4342,11 +4361,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I32Load8U(mem0()));
         f.instruction(&Instruction::ArraySet(T_STR));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End); // loop
         f.instruction(&Instruction::End); // block
         f.instruction(&Instruction::LocalGet(6));
@@ -4367,23 +4382,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(1));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // mem[i] = s[i]
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::I32Store8(mem0()));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(1));
@@ -4910,12 +4916,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(0));
@@ -4926,8 +4927,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -4956,12 +4956,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         // a = f (xdata[start+i]) a
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(6));
@@ -4973,8 +4968,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalSet(7));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -5651,12 +5645,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         // separator before all but the first
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(0));
@@ -5673,11 +5662,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(er));
         f.instruction(&Instruction::Call(app));
         f.instruction(&Instruction::LocalSet(1));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End); // loop
         f.instruction(&Instruction::End); // block
         f.instruction(&Instruction::LocalGet(1));
@@ -5862,12 +5847,7 @@ impl<'a> Codegen<'a> {
         // scan for a space (0x20)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -5877,11 +5857,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // first = n>0 ? str[0] : -1
@@ -5948,12 +5924,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -5968,11 +5939,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // allocate output
@@ -5984,12 +5951,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(10));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -6025,11 +5987,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(10));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
@@ -6660,12 +6618,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         // ndata[len-1-i] = xdata[start+i]
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(1));
@@ -6679,8 +6632,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -6899,12 +6851,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         // data[i] = loi + i   (raw i64 unboxed, or boxed Int)
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(5));
@@ -6916,8 +6863,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::Call(self.box_int_idx));
         }
         f.instruction(&Instruction::ArraySet(arr));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
@@ -6945,12 +6891,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(3));
@@ -6965,8 +6906,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -7016,12 +6956,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(6));
@@ -7030,8 +6965,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -7090,12 +7024,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         // inner = xss[oi]
         list_data(&mut f, 0);
         list_start(&mut f, 0);
@@ -7111,8 +7040,7 @@ impl<'a> Codegen<'a> {
         list_len(&mut f, 11);
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(3));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
@@ -7123,12 +7051,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         list_data(&mut f, 0);
         list_start(&mut f, 0);
         f.instruction(&Instruction::LocalGet(4));
@@ -7142,8 +7065,7 @@ impl<'a> Codegen<'a> {
         list_len(&mut f, 11);
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 3, 9);
@@ -7577,12 +7499,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5)); // cur = seed
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(15)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(15));
-        f.instruction(&Instruction::LocalGet(16));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 15, 16);
         // ta = step(gen, cur)
         ctor_argn(&mut f, 0, 1);
         f.instruction(&Instruction::LocalGet(5));
@@ -7601,8 +7518,7 @@ impl<'a> Codegen<'a> {
         // cur = ta.seed
         telem(&mut f, 2, 1);
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 15, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 15);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // ( list, cur )
@@ -7656,12 +7572,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(16));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(15));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(15));
-        f.instruction(&Instruction::LocalGet(16));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 15, 16);
         f.instruction(&Instruction::LocalGet(17));
         list_elem(&mut f, 12, 15);
         f.instruction(&cast_to(T_ARR));
@@ -7672,8 +7583,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::F64Abs);
         f.instruction(&Instruction::F64Add);
         f.instruction(&Instruction::LocalSet(17));
-        bump(&mut f, 15, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 15);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // countdown = draw_unit * total
@@ -7706,12 +7616,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(18));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(15));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(15));
-        f.instruction(&Instruction::LocalGet(16));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 15, 16);
         // sel = others[i].v ; w = |others[i].w|
         list_elem(&mut f, 12, 15);
         f.instruction(&cast_to(T_ARR));
@@ -7735,8 +7640,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(19));
         f.instruction(&Instruction::F64Sub);
         f.instruction(&Instruction::LocalSet(18));
-        bump(&mut f, 15, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 15);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -7784,12 +7688,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(16));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(15));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(15));
-        f.instruction(&Instruction::LocalGet(16));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 15, 16);
         list_elem(&mut f, 12, 15);
         f.instruction(&Instruction::LocalSet(13)); // sel = rest[i]
         f.instruction(&Instruction::LocalGet(18));
@@ -7800,8 +7699,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::F64Const(1.0.into()));
         f.instruction(&Instruction::F64Sub);
         f.instruction(&Instruction::LocalSet(18));
-        bump(&mut f, 15, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 15);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -8328,12 +8226,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 6);
         list_elem(&mut f, 7, 5);
         f.instruction(&Instruction::Call(self.task_run_idx));
         f.instruction(&Instruction::LocalSet(1));
@@ -8346,8 +8239,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         ctor_arg0(&mut f, 1);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Ok(T_LIST{len, T_BACK{0, arr}})
@@ -8399,19 +8291,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3)); // total
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(3));
         item(&mut f);
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(3));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // + separators (len > 0 ? seplen*(len-1) : 0)
@@ -8436,12 +8322,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5)); // off
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         // if i > 0: copy sep at off, off += seplen
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Const(0));
@@ -8475,8 +8356,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(10));
@@ -8790,12 +8670,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 7, 4);
         f.instruction(&Instruction::LocalGet(3)); // sS
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(7));
@@ -8810,8 +8685,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::Br(2)); // break inner
         f.instruction(&Instruction::End);
-        bump(&mut f, 7, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 7);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // if ok: acc = cons(box(i), acc)
@@ -8824,8 +8698,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(9));
         f.instruction(&Instruction::End);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // reverse (we prepended) → ascending
@@ -8909,12 +8782,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5)); // off
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(6));
@@ -8925,8 +8793,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(7));
@@ -8968,12 +8835,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&cast_to(T_STR));
         f.instruction(&Instruction::LocalGet(5));
@@ -8988,11 +8850,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         false_ret(&mut f);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(1));
@@ -9142,11 +9000,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // lengths
@@ -9185,8 +9039,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // shorter list sorts first: sign(la - lb)
@@ -9209,12 +9062,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(2));
@@ -9232,11 +9080,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
@@ -9379,12 +9223,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(3));
@@ -9402,8 +9241,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -9438,12 +9276,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         // e = data[start+i]; if compare(e, best) (max:>0/min:<0) best = e
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -9462,8 +9295,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
@@ -9497,12 +9329,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         // ndata[i] = f (box(base+i)) (xdata[start+i])
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(5));
@@ -9520,8 +9347,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -9575,12 +9401,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::LocalSet(2));
             f.instruction(&Instruction::I32Const(0));
             f.instruction(&Instruction::LocalSet(3));
-            f.instruction(&Instruction::Block(BlockType::Empty));
-            f.instruction(&Instruction::Loop(BlockType::Empty));
-            f.instruction(&Instruction::LocalGet(3));
-            f.instruction(&Instruction::LocalGet(1));
-            f.instruction(&Instruction::I32GeS);
-            f.instruction(&Instruction::BrIf(1));
+            loop_head(&mut f, 3, 1);
             f.instruction(&Instruction::LocalGet(if boxed_res { 6 } else { 5 }));
             f.instruction(&Instruction::LocalGet(dat));
             f.instruction(&Instruction::LocalGet(2));
@@ -9589,8 +9410,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::ArrayGet(sc.arr()));
             f.instruction(if product { &mul } else { &add });
             f.instruction(&Instruction::LocalSet(if boxed_res { 6 } else { 5 }));
-            bump(&mut f, 3, 1);
-            f.instruction(&Instruction::Br(0));
+            loop_tail(&mut f, 3);
             f.instruction(&Instruction::End); // loop
             f.instruction(&Instruction::End); // block
             f.instruction(&Instruction::End); // if len
@@ -9629,12 +9449,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -9645,8 +9460,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructGet { struct_type_index: T_FLOAT, field_index: 0 });
         f.instruction(if product { &Instruction::F64Mul } else { &Instruction::F64Add });
         f.instruction(&Instruction::LocalSet(6));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(6));
@@ -9658,12 +9472,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -9673,8 +9482,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.unbox_int_idx));
         f.instruction(if product { &Instruction::I64Mul } else { &Instruction::I64Add });
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -9715,12 +9523,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 3);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(0));
@@ -9737,8 +9540,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -9767,12 +9569,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -9797,11 +9594,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::ArraySet(T_STR));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -9839,12 +9632,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
         if left {
-            f.instruction(&Instruction::Block(BlockType::Empty));
-            f.instruction(&Instruction::Loop(BlockType::Empty));
-            f.instruction(&Instruction::LocalGet(3));
-            f.instruction(&Instruction::LocalGet(2));
-            f.instruction(&Instruction::I32GeS);
-            f.instruction(&Instruction::BrIf(1));
+            loop_head(&mut f, 3, 2);
             f.instruction(&Instruction::LocalGet(1));
             f.instruction(&Instruction::LocalGet(3));
             f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -9852,11 +9640,7 @@ impl<'a> Codegen<'a> {
             push_is_ws(&mut f);
             f.instruction(&Instruction::I32Eqz);
             f.instruction(&Instruction::BrIf(1));
-            f.instruction(&Instruction::LocalGet(3));
-            f.instruction(&Instruction::I32Const(1));
-            f.instruction(&Instruction::I32Add);
-            f.instruction(&Instruction::LocalSet(3));
-            f.instruction(&Instruction::Br(0));
+            loop_tail(&mut f, 3);
             f.instruction(&Instruction::End);
             f.instruction(&Instruction::End);
         }
@@ -9911,11 +9695,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::ArraySet(T_STR));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(7));
@@ -10021,11 +9801,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::ArraySet(T_STR));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 7);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(8));
@@ -10094,12 +9870,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I64Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -10126,11 +9897,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::I64Add);
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // apply sign
@@ -10249,12 +10016,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         utf8_decode(&mut f, 1, 3, 4, 5);
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::LocalGet(3));
@@ -10272,12 +10034,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         utf8_decode(&mut f, 1, 3, 4, 5);
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(7));
@@ -10317,12 +10074,7 @@ impl<'a> Codegen<'a> {
         // pass 1: total bytes
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 1);
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(6));
@@ -10336,8 +10088,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(2));
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -10352,12 +10103,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 1);
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(6));
@@ -10367,8 +10113,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I31GetS);
         f.instruction(&Instruction::LocalSet(4));
         utf8_encode(&mut f, 9, 3, 4);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -10446,11 +10191,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::ArraySet(T_STR));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Just (Char cp, rest)
@@ -10480,12 +10221,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         utf8_decode(&mut f, 1, 3, 4, 5);
         // +1 per code point, +1 more for astral (surrogate pair)
         bump(&mut f, 6, 1);
@@ -10665,12 +10401,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 7, 5);
         utf8_decode(&mut f, 3, 7, 10, 11);
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalSet(8)); // a = i
@@ -10823,8 +10554,7 @@ impl<'a> Codegen<'a> {
         is_ws(&mut f);
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::BrIf(1)); // non-ws → stop skipping
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End); // skipl
         f.instruction(&Instruction::End); // skip
         // if exhausted, done
@@ -10847,8 +10577,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7));
         is_ws(&mut f);
         f.instruction(&Instruction::BrIf(1)); // ws → end of word
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End); // wordl
         f.instruction(&Instruction::End); // word
         // piece = s[start..i]
@@ -10905,12 +10634,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -10990,18 +10714,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 2, 4);
@@ -11318,12 +11036,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         list_elem(&mut f, 1, 3);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(0));
@@ -11348,8 +11061,7 @@ impl<'a> Codegen<'a> {
         push_nullary_ctor(&mut f, 1);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         push_nullary_ctor(&mut f, 1);
@@ -11368,12 +11080,7 @@ impl<'a> Codegen<'a> {
         // pos = first index where key >= k
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         list_elem(&mut f, 2, 4);
         f.instruction(&Instruction::LocalSet(10));
         f.instruction(&Instruction::LocalGet(0));
@@ -11382,8 +11089,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32LeS);
         f.instruction(&Instruction::BrIf(1));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // skip = (pos < len && d[pos].key == k) ? 1 : 0
@@ -11417,18 +11123,12 @@ impl<'a> Codegen<'a> {
         // copy prefix [0, pos)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 4);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(6));
         list_elem(&mut f, 2, 6);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // ndata[pos] = [k, v]
@@ -11447,19 +11147,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 3);
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(7));
         list_elem(&mut f, 2, 6);
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 6, 1);
-        bump(&mut f, 7, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 7);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // wrap
@@ -11481,12 +11175,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::LocalGet(0));
@@ -11497,8 +11186,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(2));
@@ -11513,12 +11201,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::LocalSet(8));
         f.instruction(&Instruction::LocalGet(0));
@@ -11533,8 +11216,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 4, 7);
@@ -11641,12 +11323,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         list_elem(&mut f, 1, 3);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::LocalGet(4));
@@ -11659,8 +11336,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 2, 4);
@@ -11752,12 +11428,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7)); // j
         // for j in 0..rlen
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 7, 9);
         list_elem(&mut f, 4, 7);
         f.instruction(&Instruction::LocalSet(13)); // rpair
         f.instruction(&Instruction::LocalGet(13));
@@ -11785,8 +11456,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Eqz);
         f.instruction(&Instruction::BrIf(1)); // key >= rk: stop
         left_step(&mut f);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // eq = (i<llen && compare(left[i].key, rk) == 0)
@@ -11844,22 +11514,15 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
-        bump(&mut f, 7, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 7);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // drain remaining left
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 8);
         list_elem(&mut f, 3, 6);
         f.instruction(&Instruction::LocalSet(12));
         left_step(&mut f);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -11941,20 +11604,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         list_elem(&mut f, 0, 2);
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(2));
         self.load_arr(4, field, &mut f);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 1, 3);
@@ -12125,12 +11782,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         // ndata[j] = (j == ii) ? x : a[j]
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(5));
@@ -12143,8 +11795,7 @@ impl<'a> Codegen<'a> {
         list_elem(&mut f, 2, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 4, 6);
@@ -12371,8 +12022,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -12439,12 +12089,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
         // gen(box i)
@@ -12454,8 +12099,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.box_int_idx));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 2, 4);
@@ -12474,12 +12118,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // ndata[i] = (box i, a[i])
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(2));
@@ -12489,8 +12128,7 @@ impl<'a> Codegen<'a> {
         list_elem(&mut f, 0, 2);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 1, 3);
@@ -12510,20 +12148,14 @@ impl<'a> Codegen<'a> {
         // pos = first index where s[i] >= x
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(0));
         list_elem(&mut f, 1, 3);
         f.instruction(&Instruction::Call(self.val_compare_idx));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::I32LeS);
         f.instruction(&Instruction::BrIf(1));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // skip = (pos < len && s[pos] == x) ? 1 : 0
@@ -12554,18 +12186,12 @@ impl<'a> Codegen<'a> {
         // prefix
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(5));
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // ndata[pos] = x
@@ -12582,19 +12208,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::LocalGet(6));
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 5, 1);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 7, 8);
@@ -12610,12 +12230,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(0));
         list_elem(&mut f, 1, 3);
         f.instruction(&Instruction::Call(self.val_compare_idx));
@@ -12635,8 +12250,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
@@ -12656,12 +12270,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         f.instruction(&Instruction::LocalGet(0));
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::Call(self.val_compare_idx));
@@ -12670,8 +12279,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(2));
@@ -12685,12 +12293,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 2);
         f.instruction(&Instruction::LocalGet(0));
         list_elem(&mut f, 1, 5);
         f.instruction(&Instruction::Call(self.val_compare_idx));
@@ -12703,8 +12306,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 6, 1);
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 4, 7);
@@ -12878,12 +12480,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
@@ -12892,8 +12489,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(16777619)); // FNV prime
         f.instruction(&Instruction::I32Mul);
         f.instruction(&Instruction::LocalSet(1));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(1));
@@ -12910,12 +12506,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(31));
         f.instruction(&Instruction::I32Mul);
@@ -12926,8 +12517,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.val_hash_idx));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(1));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(1));
@@ -12942,12 +12532,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(31));
         f.instruction(&Instruction::I32Mul);
@@ -12955,8 +12540,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.val_hash_idx));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(1));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(1));
@@ -13515,12 +13099,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -13579,8 +13158,7 @@ impl<'a> Codegen<'a> {
         }
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -13746,12 +13324,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.sb_push_byte_idx));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(8));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(f, 8, 7);
         // "," between elements
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::I32Const(0));
@@ -13806,8 +13379,7 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::LocalGet(6));
             f.instruction(&Instruction::Call(self.json_write_idx));
         }
-        bump(f, 8, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(f, 8);
         f.instruction(&Instruction::End); // loop
         f.instruction(&Instruction::End); // block
         // closeSep: "\n" ++ prefix when pretty and non-empty
@@ -14038,12 +13610,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         // c = ss[i]
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(4));
@@ -14072,8 +13639,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // flush trailing run [run, len)
@@ -14231,12 +13797,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         list_elem(&mut f, 2, 4);
         f.instruction(&Instruction::LocalSet(6));
         // ndata[i] = (toKey pair[0], toVal pair[1])
@@ -14250,8 +13811,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 3, 5);
@@ -14380,8 +13940,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::GlobalSet(1));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(2));
@@ -15068,12 +14627,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(12));
         list_elem(&mut f, 9, 5);
         f.instruction(&Instruction::Call(self.json_run_idx));
@@ -15087,8 +14641,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(7));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
@@ -15111,12 +14664,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         list_elem(&mut f, 9, 5);
         f.instruction(&Instruction::LocalSet(11)); // pair
         ctor_arg0(&mut f, 0); // name
@@ -15130,8 +14678,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.json_run_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         push_decode_err(&mut f);
@@ -15231,12 +14778,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         list_elem(&mut f, 9, 5);
         f.instruction(&Instruction::LocalSet(11)); // pair
         f.instruction(&Instruction::LocalGet(12));
@@ -15255,8 +14797,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::Call(self.list_cons_idx));
         f.instruction(&Instruction::LocalSet(7));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // reversed kv list
@@ -15558,12 +15099,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         list_elem(&mut f, 9, 5);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.json_run_idx));
@@ -15574,8 +15110,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         push_decode_err(&mut f);
@@ -15647,12 +15182,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -15679,8 +15209,7 @@ impl<'a> Codegen<'a> {
         }
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(5));
@@ -15717,12 +15246,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         list_elem(&mut f, 8, 3);
         f.instruction(&Instruction::LocalSet(7)); // attr
         ctor_tag(&mut f, 7);
@@ -15777,8 +15301,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // if styleAcc non-empty: attrsAcc ++= " style=\"" ++ escAttr(styleAcc) ++ "\""
@@ -15813,12 +15336,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(4));
         // node = (VKEYED) ? kid[1] : kid   (tag is in local 1)
         list_elem(&mut f, 8, 3);
@@ -15837,8 +15355,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.serialize_html_idx));
         f.instruction(&Instruction::Call(self.str_append_idx));
         f.instruction(&Instruction::LocalSet(4));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // out ++= "</" ++ tagName ++ ">"
@@ -15923,12 +15440,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Add);
@@ -15936,8 +15448,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::I32Store8(mem0()));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // bump += len
@@ -16019,12 +15530,7 @@ impl<'a> Codegen<'a> {
         // copy bytes
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::GlobalGet(G_BUMP));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32Add);
@@ -16032,8 +15538,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
         f.instruction(&Instruction::I32Store8(mem0()));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::GlobalGet(G_BUMP));
@@ -16107,12 +15612,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         list_elem(&mut f, 6, 4);
         f.instruction(&Instruction::LocalSet(5)); // attr
         ctor_arg0(&mut f, 5);
@@ -16221,8 +15721,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // ABOOL else
         f.instruction(&Instruction::End); // ASTYLE else
         f.instruction(&Instruction::End); // AATTR else
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // --- kids (arg2) ---
@@ -16233,12 +15732,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 2);
         // knode = (VKEYED) ? kid[1] : kid
         list_elem(&mut f, 6, 4);
         f.instruction(&Instruction::LocalSet(11));
@@ -16254,8 +15748,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Call(self.serialize_dom_idx));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         op(&mut f, 2); // CLOSE
@@ -16547,12 +16040,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(16)); // applied = 0
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 5);
         list_elem(&mut f, 11, 6);
         f.instruction(&Instruction::LocalSet(9));
         // apply = !(same_len && val_eq(old[i], new[i]))
@@ -16624,8 +16112,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // outer else
         f.instruction(&Instruction::End); // if apply
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Remove old AATTR/ASTYLE/ABOOL attrs whose (tag, key) is absent from the
@@ -16689,8 +16176,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(15)); // found ||= matches
         f.instruction(&Instruction::I32Or);
         f.instruction(&Instruction::LocalSet(15));
-        bump(&mut f, 14, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 14);
         f.instruction(&Instruction::End); // inner loop
         f.instruction(&Instruction::End); // inner block
         // absent from new → unapply
@@ -16734,8 +16220,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // if !found
         f.instruction(&Instruction::End); // if removable
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End); // outer loop
         f.instruction(&Instruction::End); // outer block
         f.instruction(&Instruction::End); // if (!same_len || applied)
@@ -16775,12 +16260,7 @@ impl<'a> Codegen<'a> {
         // patch [0, common)
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 7);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::Call(DOM_CHILD));
@@ -16788,23 +16268,16 @@ impl<'a> Codegen<'a> {
         list_elem(&mut f, 11, 6);
         f.instruction(&Instruction::Call(self.patch_idx));
         f.instruction(&Instruction::Drop);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // append extra new kids [common, nlen)
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 5);
         f.instruction(&Instruction::LocalGet(0));
         list_elem(&mut f, 11, 6);
         f.instruction(&Instruction::Call(self.render_dom_idx));
         f.instruction(&Instruction::Call(DOM_APPEND_CHILD));
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // remove extra old kids: (olen-nlen) removals at index nlen
@@ -16864,16 +16337,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         list_elem(&mut f, 4, 3);
         f.instruction(&Instruction::Call(self.run_cmd_idx));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -17038,12 +16505,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(0));
@@ -17051,8 +16513,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::I32Load8U(mem0()));
         f.instruction(&Instruction::ArraySet(T_STR));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
@@ -17308,12 +16769,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5)); // arr
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         f.instruction(&Instruction::LocalGet(5)); // arr (for ArraySet)
         f.instruction(&Instruction::LocalGet(4)); // i
         // attr = attrs[i]; but attrs list is in local 6 — re-fetch each iter
@@ -17339,8 +16795,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // wrap arr as T_LIST{len, T_BACK{0, arr}}
@@ -17356,12 +16811,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(4));
         ctor_argn(&mut f, 1, 2);
@@ -17390,8 +16840,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.html_map_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 3, 5);
@@ -17930,12 +17379,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayLen);
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 4);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -17949,11 +17393,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32GtS);
         f.instruction(&Instruction::I32Or);
         f.instruction(&Instruction::BrIf(1));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
@@ -17984,12 +17424,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7)); // total
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 5);
         // digit = big[off] - 0x30
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(4));
@@ -18013,11 +17448,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(8));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(4));
@@ -18047,12 +17478,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 4);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -18087,11 +17513,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(3));
@@ -18267,12 +17689,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(15)); // ok = 1
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(14)); // j = 0
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(14));
-        f.instruction(&Instruction::LocalGet(10));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 14, 10);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -18287,11 +17704,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(15));
         f.instruction(&Instruction::Br(2));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(14));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(14));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 14);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // if ok { found = i; break }
@@ -18301,11 +17714,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(12));
         f.instruction(&Instruction::Br(2));
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(13));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 13);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // target = found<0 ? bglen : found + smlen
@@ -18321,12 +17730,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalSet(13)); // target
         // walk off..target updating row/col
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(13));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 7, 13);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -18382,12 +17786,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2)); // cur = out
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         // len = mem[cur]; cur += 4
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Load(mem0()));
@@ -18408,8 +17807,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(2));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // List{count, T_BACK{0, arr}}
@@ -18451,12 +17849,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 1);
         load_advance(&mut f, 5); // byteStart
         load_advance(&mut f, 6); // matchLen
         // matchStr = str_from_mem(cur, matchLen); cur += matchLen
@@ -18475,12 +17868,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(9));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(8));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 8, 7);
         load_advance(&mut f, 10); // present
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(8));
@@ -18502,8 +17890,7 @@ impl<'a> Codegen<'a> {
         push_nullary_ctor(&mut f, 1); // Nothing tag
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 8, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 8);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // arr[i] = Match [box byteStart, matchStr, box (i+1), submatchesList]
@@ -18522,8 +17909,7 @@ impl<'a> Codegen<'a> {
         wrap_single_chunk(&mut f, 7, 9);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         wrap_single_chunk(&mut f, 1, 4);
@@ -18727,12 +18113,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(12)); // len
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(11)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 11, 12);
         list_elem(&mut f, 15, 11);
         f.instruction(&Instruction::LocalSet(17)); // m
         // idx = unbox(m[0]); mstr = m[1]; mlen = mstr.len
@@ -18775,8 +18156,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(14));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(10));
-        bump(&mut f, 11, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 11);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // result ++ subj[lastEnd..sl]
@@ -18807,12 +18187,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -18822,8 +18197,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(-1));
@@ -19185,12 +18559,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         load_c(&mut f);
         f.instruction(&Instruction::LocalGet(5));
         unreserved(&mut f);
@@ -19201,8 +18570,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(5));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // out = new(outlen)
@@ -19214,12 +18582,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         load_c(&mut f);
         unreserved(&mut f);
         f.instruction(&Instruction::If(BlockType::Empty));
@@ -19286,8 +18649,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::End);
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(7));
@@ -19340,12 +18702,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(4)); // oi
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayGetU(T_STR));
@@ -19394,8 +18751,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArraySet(T_STR));
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Just(res) where res = out if oi==len else an exact copy of [0,oi).
@@ -19485,12 +18841,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         f.instruction(&Instruction::LocalGet(3)); // arr (for ArraySet)
         f.instruction(&Instruction::LocalGet(2)); // i
         list_elem(&mut f, 0, 2); // the (key, html) tuple
@@ -19498,8 +18849,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR)); // tuple[1] = html
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // T_LIST{len, T_BACK{0, arr}}
@@ -19568,12 +18918,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         list_elem(&mut f, 1, 5); // oldk[i][0]
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(0));
@@ -19591,8 +18936,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         f.instruction(&Instruction::Br(2)); // break out of the key-check loop
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // if all keys matched: patch in place and return. Decide whether each
@@ -19605,12 +18949,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         list_elem(&mut f, 1, 5); // oldk[i][1]
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::I32Const(1));
@@ -19679,8 +19018,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.patch_idx));
         f.instruction(&Instruction::Drop);
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::Return);
@@ -19716,12 +19054,7 @@ impl<'a> Codegen<'a> {
         // Phase 1 — capture each old child's DOM handle, index key→oldIndex.
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         // oldHandles[i] = i31(dom_child(dom, i))
         f.instruction(&Instruction::LocalGet(19));
         f.instruction(&Instruction::LocalGet(5));
@@ -19740,8 +19073,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(26));
         f.instruction(&Instruction::Call(self.treap_insert_idx));
         f.instruction(&Instruction::LocalSet(26));
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
 
@@ -19749,12 +19081,7 @@ impl<'a> Codegen<'a> {
         // render fresh. Record source[j] (old index or -1) and newDoms[j].
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(6)); // j
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 4);
         list_elem(&mut f, 2, 6);
         f.instruction(&Instruction::LocalSet(27)); // pair
         // found = treap_get(pair[0], idxMap)
@@ -19828,20 +19155,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::ArraySet(T_ARR));
         f.instruction(&Instruction::End);
-        bump(&mut f, 6, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 6);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
 
         // Phase 3 — remove old nodes whose key vanished.
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 3);
         f.instruction(&Instruction::LocalGet(25));
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayGet(T_ARR));
@@ -19851,8 +19172,7 @@ impl<'a> Codegen<'a> {
         geti(&mut f, 19, 5); // oldHandles[i]
         f.instruction(&Instruction::Call(DOM_REMOVE_CHILD));
         f.instruction(&Instruction::End);
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
 
@@ -19863,12 +19183,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(8)); // tlen
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(5)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         geti(&mut f, 20, 5); // si = source[i]
         f.instruction(&Instruction::LocalSet(17));
         // if si != -1 (skip freshly-rendered nodes)
@@ -19926,12 +19241,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalSet(12)); // hi
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(11));
-        f.instruction(&Instruction::LocalGet(12));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 11, 12);
         // mid = (lo+hi)>>1
         f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::LocalGet(12));
@@ -19990,8 +19300,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // end source[last]<si else
         f.instruction(&Instruction::End); // end tlen==0 else
         f.instruction(&Instruction::End); // end si != -1
-        bump(&mut f, 5, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 5);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Backtrack the parent chain from the last tail: mark LIS members.
@@ -20185,16 +19494,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(2));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(3));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 3, 2);
         list_elem(&mut f, 5, 3);
         f.instruction(&Instruction::Call(self.walk_timers_idx));
-        bump(&mut f, 3, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 3);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -20222,12 +19525,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3)); // len
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2)); // i
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // hid = load_i32(ptr + i*4)
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::LocalGet(2));
@@ -20247,8 +19545,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefNull(eq_heap()));
         f.instruction(&Instruction::ArraySet(T_ARR));
         f.instruction(&Instruction::End);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End); // function body
@@ -20558,12 +19855,7 @@ impl<'a> Codegen<'a> {
             bump(f, src_local, 1);
         };
         // main merge loop
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::I32GeS);
@@ -20596,23 +19888,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // drain left
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 5, 4);
         take(&mut f, 5);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // drain right
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 6, 3);
         take(&mut f, 6);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
@@ -20699,12 +19981,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // keep = (i+1 >= n) || key(i) != key(i+1)
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(1));
@@ -20732,8 +20009,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::End);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // Copy the oi kept elements into a tight backing (the vector invariant
@@ -21062,12 +20338,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         list_elem(&mut f, 5, 4);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.sub_find_port_idx));
@@ -21079,8 +20350,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(6));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
@@ -21371,20 +20641,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
         // for i in 0..n: result = apply1(result, argsArr[i])
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 5);
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::LocalSet(3));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // args[2] = result (memoize); return result
@@ -21455,12 +20719,7 @@ impl<'a> Codegen<'a> {
         // for i in 0..n: aA[i] ref.eq bA[i]
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 5);
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::ArrayGet(T_ARR));
@@ -21472,8 +20731,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         false_ret(&mut f);
         f.instruction(&Instruction::End);
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(1));
@@ -21601,12 +20859,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_STR));
         f.instruction(&Instruction::LocalGet(2));
@@ -21619,11 +20872,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         false_ret(&mut f);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(1));
@@ -21648,12 +20897,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 3);
         list_elem(&mut f, 0, 2);
         list_elem(&mut f, 1, 2);
         f.instruction(&Instruction::Call(self.val_eq_idx));
@@ -21663,8 +20907,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         false_ret(&mut f);
         f.instruction(&Instruction::End);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(1));
@@ -21742,12 +20985,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(f, 2, 3);
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(2));
@@ -21765,11 +21003,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::RefI31);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(f, 2);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::I32Const(1));
@@ -25125,12 +24359,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(5));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // pos = start + i
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(2));
@@ -25143,12 +24372,7 @@ impl<'a> Codegen<'a> {
         // for j in 0..ncols: tup[j] = box(cols[j][pos]) per rep code
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(4));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 4, 3);
         // code = (reptag >> (2*j)) & 3
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::LocalGet(4));
@@ -25194,8 +24418,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 4, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 4);
         f.instruction(&Instruction::End); // loop j
         f.instruction(&Instruction::End); // block j
         // ndata[i] = tup
@@ -25203,8 +24426,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::LocalGet(11));
         f.instruction(&Instruction::ArraySet(T_ARR));
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End); // loop i
         f.instruction(&Instruction::End); // block i
         f.instruction(&Instruction::End); // if len
@@ -25248,12 +24470,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(3));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(2));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 2, 1);
         // boxtup = bdata[bstart + i]
         f.instruction(&Instruction::LocalGet(4));
         f.instruction(&Instruction::LocalGet(3));
@@ -25263,8 +24480,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(6));
         // disassemble into cols at pos = i (SoA dense from 0)
         self.emit_soa_disassemble(reps, 6, 5, 2, &mut f);
-        bump(&mut f, 2, 1);
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 2);
         f.instruction(&Instruction::End); // loop
         f.instruction(&Instruction::End); // block
         f.instruction(&Instruction::End); // if len
@@ -25470,12 +24686,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Block(BlockType::Empty));
-        f.instruction(&Instruction::Loop(BlockType::Empty));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32GeS);
-        f.instruction(&Instruction::BrIf(1));
+        loop_head(&mut f, 7, 2);
         // ndata[nstart+1+k] = odata[start+k]
         f.instruction(&Instruction::LocalGet(9));
         f.instruction(&Instruction::LocalGet(6));
@@ -25489,11 +24700,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::ArrayGet(s.arr()));
         f.instruction(&Instruction::ArraySet(s.arr()));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::LocalSet(7));
-        f.instruction(&Instruction::Br(0));
+        loop_tail(&mut f, 7);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
