@@ -9,21 +9,33 @@ pub(super) fn canonicalize_value(env: &mut Env, value: &src::Value) -> CResult<c
         Some(tipe) => Some(canonicalize_type(env, tipe)?),
         None => None,
     };
+    let (args, body) = canon_args_scoped(env, &value.args, &value.body)?;
+    Ok(can::Def {
+        name: value.name.clone(),
+        args,
+        body,
+        annotation,
+    })
+}
+
+/// Canonicalize a list of argument patterns, push the bound names as a new
+/// scope, canonicalize `body` within that scope, then pop the scope. The pop
+/// always runs (even when body canonicalization fails) to keep the scope stack
+/// balanced.
+fn canon_args_scoped(
+    env: &mut Env,
+    args: &[src::Pattern],
+    body: &src::Expr,
+) -> CResult<(Vec<can::Pattern>, can::Expr)> {
     let mut bound = Vec::new();
-    let args = value
-        .args
+    let args = args
         .iter()
         .map(|p| canonicalize_pattern(env, p, &mut bound))
         .collect::<CResult<Vec<_>>>()?;
     env.scopes.push(bound.into_iter().collect());
-    let body = canonicalize_expr(env, &value.body);
+    let body = canonicalize_expr(env, body);
     env.scopes.pop();
-    Ok(can::Def {
-        name: value.name.clone(),
-        args,
-        body: body?,
-        annotation,
-    })
+    Ok((args, body?))
 }
 
 fn canonicalize_pattern(
@@ -260,15 +272,8 @@ fn canonicalize_expr(env: &mut Env, expr: &src::Expr) -> CResult<can::Expr> {
             return resolve_binops(env, exprs_and_ops, last);
         }
         src::Expr_::Lambda(args, body) => {
-            let mut bound = Vec::new();
-            let args = args
-                .iter()
-                .map(|p| canonicalize_pattern(env, p, &mut bound))
-                .collect::<CResult<Vec<_>>>()?;
-            env.scopes.push(bound.into_iter().collect());
-            let body = canonicalize_expr(env, body);
-            env.scopes.pop();
-            can::Expr_::Lambda(args, Box::new(body?))
+            let (args, body) = canon_args_scoped(env, args, body)?;
+            can::Expr_::Lambda(args, Box::new(body))
         }
         src::Expr_::Call(func, args) => can::Expr_::Call(
             Box::new(canonicalize_expr(env, func)?),
@@ -606,18 +611,11 @@ fn canonicalize_let(
                         Some(tipe) => Some(canonicalize_type(env, tipe)?),
                         None => None,
                     };
-                    let mut bound = Vec::new();
-                    let args = args
-                        .iter()
-                        .map(|p| canonicalize_pattern(env, p, &mut bound))
-                        .collect::<CResult<Vec<_>>>()?;
-                    env.scopes.push(bound.into_iter().collect());
-                    let def_body = canonicalize_expr(env, def_body);
-                    env.scopes.pop();
+                    let (args, def_body) = canon_args_scoped(env, args, def_body)?;
                     decls.push(can::LetDecl::Def(can::Def {
                         name: name.clone(),
                         args,
-                        body: def_body?,
+                        body: def_body,
                         annotation,
                     }));
                 }
