@@ -1673,6 +1673,23 @@ fn push_empty_list(f: &mut Function) {
     f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
 }
 
+/// Wrap `[data, head, len]` (already on the stack) into a single-chunk boxed
+/// list: `T_LIST { T_BACK{data, head, len}, next = empty }`.
+fn list_wrap(f: &mut Function) {
+    f.instruction(&Instruction::StructNew(T_BACK));
+    f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+    f.instruction(&Instruction::StructNew(T_LIST));
+}
+
+/// Wrap the backing array in `data_local` (offset 0, length `len_local`) into a
+/// single-chunk boxed list.
+fn wrap_single_chunk(f: &mut Function, data_local: u32, len_local: u32) {
+    f.instruction(&Instruction::LocalGet(data_local));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::LocalGet(len_local));
+    list_wrap(f);
+}
+
 /// Widen `slot` in place from any unboxed scalar list (`T_LIST{s}`) to a boxed
 /// `T_LIST`, for every enabled rep in `widen_idxs`. Lets the generic value ops
 /// (val_eq/compare/hash, Debug, json) handle a scalar list by falling into
@@ -4915,12 +4932,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // wrap ndata (start=0, len = ndata.len)
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 6);
         f.instruction(&Instruction::End);
         f
     }
@@ -6625,12 +6637,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalSet(7));
         copy_into(&mut f, 1, 8, 7, 4, 9, 6, 5);
         // wrap
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 8);
         f.instruction(&Instruction::End);
         f
     }
@@ -6677,12 +6684,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 5);
         f.instruction(&Instruction::End);
         f
     }
@@ -6766,9 +6768,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End);
         f
     }
@@ -7035,12 +7035,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 7);
         f.instruction(&Instruction::End);
         f
     }
@@ -7151,12 +7146,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 9);
         f.instruction(&Instruction::End);
         f
     }
@@ -7616,12 +7606,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // ( list, cur )
-        f.instruction(&Instruction::LocalGet(16));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(14));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 16, 14);
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
         f.instruction(&Instruction::Return);
@@ -8367,12 +8352,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         // Ok(T_LIST{len, T_BACK{0, arr}})
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 6, 4);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::End);
@@ -9332,12 +9312,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::Call(self.msort_idx));
         // T_LIST{n, T_BACK{0, arr}}
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 3);
         f.instruction(&Instruction::End);
         f
     }
@@ -9384,12 +9359,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(7));
         f.instruction(&Instruction::GlobalSet(G_SORT_CMP));
         // T_LIST{n, T_BACK{0, arr}}
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -9555,12 +9525,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 8);
         f.instruction(&Instruction::End);
         f
     }
@@ -9777,12 +9742,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 9);
         f.instruction(&Instruction::End);
         f
     }
@@ -10332,12 +10292,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 6, 8);
         f.instruction(&Instruction::End);
         f
     }
@@ -11049,12 +11004,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -11513,12 +11463,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // wrap
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 8, 9);
         f.instruction(&Instruction::End);
         f
     }
@@ -11592,12 +11537,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 4, 7);
         f.instruction(&Instruction::End);
         f
     }
@@ -11723,12 +11663,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -12022,12 +11957,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 3);
         f.instruction(&Instruction::End);
         f
     }
@@ -12217,12 +12147,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 4, 6);
         f.instruction(&Instruction::End);
         f
     }
@@ -12317,9 +12242,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::I32Add);
         f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End);
         f
     }
@@ -12360,9 +12283,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End);
         f
     }
@@ -12397,9 +12318,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End);
         f
     }
@@ -12461,9 +12380,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Sub);
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End);
         f
     }
@@ -12541,12 +12458,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 2, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -12581,12 +12493,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 3);
         f.instruction(&Instruction::End);
         f
     }
@@ -12690,12 +12597,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(8));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 7, 8);
         f.instruction(&Instruction::End);
         f
     }
@@ -12805,12 +12707,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 4, 7);
         f.instruction(&Instruction::End);
         f
     }
@@ -14357,12 +14254,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 5);
         f.instruction(&Instruction::End);
         f
     }
@@ -17452,12 +17344,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // wrap arr as T_LIST{len, T_BACK{0, arr}}
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 5);
         // --- mapped kids (node.arg2), recursively ---
         ctor_argn(&mut f, 1, 2);
         f.instruction(&Instruction::LocalSet(6));
@@ -17507,12 +17394,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 5);
         // <tag>[tagName, attrs, kids]
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 3 });
         f.instruction(&Instruction::StructNew(T_CTOR));
@@ -18531,12 +18413,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // List{count, T_BACK{0, arr}}
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -18642,24 +18519,14 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::Call(self.box_int_idx));
         // submatchesList = List{nsubs, T_BACK{0, subArr}}
-        f.instruction(&Instruction::LocalGet(7));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(9));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 7, 9);
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 4 });
         f.instruction(&Instruction::ArraySet(T_ARR));
         bump(&mut f, 3, 1);
         f.instruction(&Instruction::Br(0));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 4);
         f.instruction(&Instruction::End);
         f
     }
@@ -18778,9 +18645,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::LocalGet(2));
@@ -19638,12 +19503,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         // T_LIST{len, T_BACK{0, arr}}
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 3);
         f.instruction(&Instruction::End);
         f
     }
@@ -20888,12 +20748,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(3));
         f.instruction(&Instruction::ArrayCopy { array_type_index_dst: T_ARR, array_type_index_src: T_ARR });
         // T_LIST{oi, T_BACK{0, final}}
-        f.instruction(&Instruction::LocalGet(3));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(6));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 3, 6);
         f.instruction(&Instruction::End);
         f
     }
@@ -22351,9 +22206,7 @@ impl<'a> Codegen<'a> {
                         self.emit_expr(item, ctx, f)?;
                     }
                     f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: n });
-                    f.instruction(&Instruction::StructNew(T_BACK));
-                    f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-                    f.instruction(&Instruction::StructNew(T_LIST));
+                    list_wrap(f);
                     let narrow = self.soa_narrow(&reps);
                     f.instruction(&Instruction::Call(narrow));
                 }
@@ -25211,9 +25064,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(l_len));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::LocalGet(l_ndata));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        list_wrap(&mut f);
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, f);
@@ -25357,12 +25208,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // loop i
         f.instruction(&Instruction::End); // block i
         f.instruction(&Instruction::End); // if len
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(10));
-        f.instruction(&Instruction::StructNew(T_BACK));
-        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
-        f.instruction(&Instruction::StructNew(T_LIST));
+        wrap_single_chunk(&mut f, 1, 10);
         f.instruction(&Instruction::End); // function
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, f);
