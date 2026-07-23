@@ -2,24 +2,30 @@
 
 A port of the [Elm compiler](https://github.com/elm/compiler) from Haskell to Rust.
 
-alm compiles Elm 0.19 applications to JavaScript through the same pipeline
-as the original compiler:
+alm runs Elm 0.19 applications through the same front-end pipeline as the
+original compiler, then hands off to one of several code generators:
 
 ```
-parse → canonicalize → type check → exhaustiveness check → generate JavaScript
+parse → canonicalize → type check → exhaustiveness check → generate
 ```
+
+The `generate` stage targets JavaScript (the default), native code via
+LLVM, or WebAssembly (a from-scratch WasmGC backend).
 
 It compiles real production applications: all 19 entry points of a
 ~40k-line production codebase (ports, Http, Json decoders, Svg, custom
 operators, elm/parser, two dozen package dependencies) compile, boot,
-and render. Pure code compiled by alm produces output byte-identical to
-the official compiler's.
+and render. Pure code compiled to JavaScript is byte-identical to the
+official compiler's output.
 
 ## Usage
 
 ```sh
 alm make src/Main.elm --output=main.js
 ```
+
+`--target=js|native|wasm|wasm-gc` selects the backend (default `js`), and
+`--source-maps` writes a `.map` beside the JavaScript or WasmGC output.
 
 Projects are discovered through `elm.json` (`source-directories`), and
 package dependencies compile directly from the `~/.elm` cache — pure Elm
@@ -58,9 +64,12 @@ app.ports.somePort.subscribe(function (value) { ... });
   `Platform.worker`, ports with type-driven JS value conversion, CPS
   task scheduler (Task/Process), Http via fetch, Time, Random,
   Browser.Dom/Events/Navigation subscriptions.
-- **Code generation** in Elm kernel style (`F2`/`A2` currying, tagged
-  objects, cons lists) with tail-call optimization: self tail calls
-  compile to loops and run in constant stack space.
+- **Multiple backends**: JavaScript in Elm kernel style (`F2`/`A2`
+  currying, tagged objects, cons lists), native code via LLVM (with its
+  own garbage collector), and WebAssembly (a from-scratch WasmGC code
+  generator). A differential test suite runs the same programs through
+  the backends and checks their output agrees. Self tail calls compile
+  to loops that run in constant stack space.
 - Standard library: Basics, List, String, Char, Maybe, Result, Tuple,
   Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
   Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
@@ -68,8 +77,9 @@ app.ports.somePort.subscribe(function (value) { ... });
 
 ## Benchmark
 
-Apple Silicon, production codebase, median of 5 runs (3 for suites).
-One 8,357-line entry point and its 13-module graph:
+Compile speed for the JavaScript target. Apple Silicon, production
+codebase, median of 5 runs (3 for suites). One 8,357-line entry point
+and its 13-module graph:
 
 | | median | best |
 |---|---|---|
@@ -139,8 +149,11 @@ crates/compiler/src/
   canonicalize/  Canonicalize/*.hs names, binop precedence, aliases, SCC
   typecheck/     Type/*.hs         union-find HM inference
   nitpick.rs     Nitpick/PatternMatches.hs   exhaustiveness
-  generate/      Generate/*.hs     JS codegen + runtime kernel (vdom,
-                                   tasks, ports, Json, Http, ...)
+  generate/      Generate/*.hs     code generation + runtime kernels:
+                                   runtime.js (JS), native.rs +
+                                   native_runtime.rs (LLVM), wasmgc.rs
+                                   (WasmGC), typed.rs (monomorphized),
+                                   sourcemap.rs
   interface.rs   Elm/Interface.hs  module interfaces
   project.rs     builder/          elm.json, module discovery, packages
   builtins.rs                      core library signatures (parsed by alm)
