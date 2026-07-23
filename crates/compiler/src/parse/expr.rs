@@ -458,8 +458,15 @@ fn if_(p: &mut Parser) -> PResult<Expr> {
         p.keyword("then").map_err(|_| if_stuck())?;
         p.chomp_and_check_indent("I was expecting an expression after `then`")?;
         let then_branch = expression(p)?;
-        p.check_indent("I was expecting `else` to be indented")?;
-        p.keyword("else")?;
+        let else_stuck = then_branch.region.end;
+        let if_else_stuck = || {
+            crate::parse::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::IfElse {
+                region: crate::reporting::Region::new(else_stuck, else_stuck),
+            })
+        };
+        p.check_indent("I was expecting `else` to be indented")
+            .map_err(|_| if_else_stuck())?;
+        p.keyword("else").map_err(|_| if_else_stuck())?;
         p.chomp_and_check_indent("I was expecting an expression after `else`")?;
         branches.push((condition, then_branch));
         if starts_keyword(p, "if") {
