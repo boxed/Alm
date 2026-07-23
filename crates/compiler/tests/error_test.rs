@@ -274,7 +274,7 @@ fn misc_parse_errors() {
     expect("x = {- never closed\n", "closing `-}`");
     expect("x = 99999999999999999999999\n", "out of the range");
     expect("x = \"\\q\"\n", "not a valid escape");
-    expect("x = 0x\n", "Expecting hexadecimal digits after `0x`");
+    expect("x = 0x\n", "I thought I was reading a hexidecimal number");
 }
 
 // TOP-LEVEL SHAPE
@@ -318,7 +318,7 @@ fn string_and_escape_errors() {
     // `lone_surrogate_escapes_round_trip_like_elm`.
     expect("x = \"\\u{}\"\n", "hex digits");
     expect("x = \"\\u{41\"\n", "closing `}`");
-    expect("x = ''\n", "character literal");
+    expect("x = ''\n", "Please switch to double quotes instead");
 }
 
 #[test]

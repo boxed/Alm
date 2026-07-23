@@ -1,0 +1,13 @@
+-- WEIRD HEXIDECIMAL ---------------------------------------------- src/Main.elm
+
+I thought I was reading a hexidecimal number until I got here:
+
+3| x = 0x
+         ^
+Valid hexidecimal digits include 0123456789abcdefABCDEF, so I can only recognize
+things like this:
+
+    0x2B
+    0x002B
+    0x00ffb3
+

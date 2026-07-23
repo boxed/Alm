@@ -448,7 +448,9 @@ impl<'a> Parser<'a> {
                 self.bump(1);
             }
             if start == self.pos {
-                return Err(self.error("Expecting hexadecimal digits after `0x`"));
+                return Err(ParseError::from_syntax(SyntaxError::WeirdHex {
+                    region: self.region_here(),
+                }));
             }
             let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
             let n = i64::from_str_radix(text, 16)
@@ -598,10 +600,20 @@ impl<'a> Parser<'a> {
         if self.peek() != Some(b'\'') {
             return Err(self.error("Expecting a character"));
         }
+        let quote_start = self.position();
         self.bump(1);
         let c = match self.peek() {
-            None | Some(b'\n') | Some(b'\'') => {
-                return Err(self.error("This character literal is empty or malformed"))
+            Some(b'\'') => {
+                // `''` — elm points at both quotes and asks for double quotes.
+                let end = Position::new(self.row, self.col + 1);
+                return Err(ParseError::from_syntax(SyntaxError::CharDoubleQuotes {
+                    region: Region::new(quote_start, end),
+                }));
+            }
+            None | Some(b'\n') => {
+                return Err(ParseError::from_syntax(SyntaxError::CharEnd {
+                    region: self.region_here(),
+                }))
             }
             Some(b'\\') => self.escape()?,
             Some(b) => {
@@ -613,7 +625,12 @@ impl<'a> Parser<'a> {
                 c
             }
         };
-        self.eat_byte(b'\'', "the closing single quote of a character literal")?;
+        self.eat_byte(b'\'', "the closing single quote of a character literal")
+            .map_err(|_| {
+                ParseError::from_syntax(SyntaxError::CharEnd {
+                    region: self.region_here(),
+                })
+            })?;
         Ok(c)
     }
 

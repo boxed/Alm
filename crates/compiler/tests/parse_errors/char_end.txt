@@ -1,0 +1,9 @@
+-- MISSING SINGLE QUOTE ------------------------------------------- src/Main.elm
+
+I thought I was parsing a character, but I got to the end of the line without
+seeing the closing single quote:
+
+3| x = 'a
+         ^
+Add a closing single quote here!
+

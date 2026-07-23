@@ -1,0 +1,15 @@
+-- NEEDS DOUBLE QUOTES -------------------------------------------- src/Main.elm
+
+The following string uses single quotes:
+
+3| x = ''
+       ^^
+Please switch to double quotes instead:
+
+    'this' => "this"
+
+Note: Elm uses double quotes for strings like "hello", whereas it uses single
+quotes for individual characters like 'a' and 'ø'. This distinction helps with
+code like (String.any (\c -> c == 'X') "90210") where you are inspecting
+individual characters.
+
