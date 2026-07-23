@@ -11,6 +11,7 @@ pub mod pattern;
 pub mod type_;
 
 use crate::data::Name;
+use crate::reporting::syntax::SyntaxError;
 use crate::reporting::{Located, Position, Region};
 
 pub use module::parse_module;
@@ -19,6 +20,9 @@ pub use module::parse_module;
 pub struct ParseError {
     pub message: String,
     pub region: Region,
+    /// When present, render this parse error using the byte-exact elm catalogue
+    /// (`Reporting.Error.Syntax`) instead of the legacy terse message.
+    pub syntax: Option<SyntaxError>,
 }
 
 impl ParseError {
@@ -26,6 +30,16 @@ impl ParseError {
         ParseError {
             message: message.into(),
             region,
+            syntax: None,
+        }
+    }
+
+    /// A structured parse error carrying its exact elm report.
+    pub fn from_syntax(e: SyntaxError) -> ParseError {
+        ParseError {
+            message: String::new(),
+            region: e.region(),
+            syntax: Some(e),
         }
     }
 }

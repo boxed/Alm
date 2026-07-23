@@ -35,8 +35,15 @@ impl BuildError {
                 title: title.to_string(),
                 region,
                 message,
+                elm: None,
             }],
         }
+    }
+
+    /// A build error carrying already-built reports (e.g. a byte-exact parse
+    /// diagnostic from the syntax catalogue).
+    fn from_reports(path: PathBuf, source: String, reports: Vec<Report>) -> Self {
+        BuildError { path, source, reports }
     }
 
     pub fn render(&self) -> String {
@@ -761,14 +768,17 @@ fn load_module_file(
         )
     })?;
 
-    let module = parse::parse_module(&source).map_err(|e| {
-        BuildError::new(
+    let module = parse::parse_module(&source).map_err(|e| match e.syntax {
+        Some(se) => {
+            BuildError::from_reports(path.to_path_buf(), source.clone(), vec![se.to_report()])
+        }
+        None => BuildError::new(
             path.to_path_buf(),
             source.clone(),
             "SYNTAX PROBLEM",
             e.region,
             e.message,
-        )
+        ),
     })?;
 
     let declared_name = module.get_name();

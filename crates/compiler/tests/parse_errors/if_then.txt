@@ -1,0 +1,8 @@
+-- UNFINISHED IF -------------------------------------------------- src/Main.elm
+
+I was expecting to see more of this `if` expression, but I got stuck here:
+
+4|     if True 1 else 2
+                 ^
+I was expecting to see the then keyword next.
+

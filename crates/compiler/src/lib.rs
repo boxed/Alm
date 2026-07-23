@@ -51,10 +51,14 @@ pub fn compile_with_source_map(source: &str) -> Result<(String, String), Vec<Rep
 /// Parse, canonicalize, type-check and nitpick a single module.
 fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
     let module = parse::parse_module(source).map_err(|e| {
-        vec![Report {
-            title: "SYNTAX PROBLEM".to_string(),
-            region: e.region,
-            message: e.message,
+        vec![match e.syntax {
+            Some(se) => se.to_report(),
+            None => Report {
+                title: "SYNTAX PROBLEM".to_string(),
+                region: e.region,
+                message: e.message,
+                elm: None,
+            },
         }]
     })?;
 
@@ -65,6 +69,7 @@ fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
                 title: "NAMING PROBLEM".to_string(),
                 region: e.region,
                 message: e.message,
+                elm: None,
             })
             .collect::<Vec<_>>()
     })?;
@@ -76,6 +81,7 @@ fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
                 title: "TYPE MISMATCH".to_string(),
                 region: e.region,
                 message: e.message,
+                elm: None,
             })
             .collect::<Vec<_>>()
     })?;
@@ -88,6 +94,7 @@ fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
                 title: "MISSING PATTERNS".to_string(),
                 region: e.region,
                 message: e.message,
+                elm: None,
             })
             .collect::<Vec<_>>()
     })?;

@@ -190,7 +190,7 @@ pub fn lint(
             out.push(Warning {
                 path: path.clone(),
                 source: src.clone(),
-                report: Report { title: HINT.to_string(), region, message: message() },
+                report: Report { title: HINT.to_string(), region, message: message(), elm: None },
             });
         }
     }
