@@ -58,10 +58,11 @@ app.ports.somePort.subscribe(function (value) { ... });
   expressions, endless strings and comments, weird numbers and bad
   escapes, endless shaders, pattern and type-annotation problems, module /
   import / exposing / port / type-alias / custom-type declaration errors,
-  stray-token classification, indentation problems, module-name mismatches
-  and `effect module` misuse all render identically to the official
-  compiler — pinned by a differential test suite of 80+ fixtures that diffs
-  alm against `elm make` 0.19.1 output byte-for-byte.
+  stray-token classification, indentation problems, module-name mismatches,
+  `effect module` misuse, and application/package port validation all render
+  identically to the official compiler — pinned by a differential test suite
+  of 89 fixtures that diffs alm against `elm make` 0.19.1 output
+  byte-for-byte.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
