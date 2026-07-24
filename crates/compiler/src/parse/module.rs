@@ -20,6 +20,23 @@ pub fn parse_module(source: &str) -> Result<Module, ParseError> {
 fn chomp_module(p: &mut Parser) -> PResult<Module> {
     p.chomp_space()?;
 
+    // `effect module ...` — reserved for the @elm organization.
+    if p.peek_keyword("effect") {
+        let a = p.position();
+        let after = &p.src_from_here()[6..];
+        let ws = after.iter().take_while(|&&b| b == b' ').count();
+        if after[ws..].starts_with(b"module")
+            && !after.get(ws + 6).copied().is_some_and(super::is_inner_char)
+        {
+            let end = crate::reporting::Position::new(a.row, a.col + 6 + ws as u32 + 6);
+            return Err(ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::InvalidEffectModule {
+                    region: Region::new(a, end),
+                },
+            ));
+        }
+    }
+
     // HEADER — `module Name exposing (..)` or `port module ...`
     let mut is_port_module = false;
     // Region of the `module` keyword, for the UNEXPECTED PORTS diagnostic.
