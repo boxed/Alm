@@ -67,20 +67,42 @@ pub fn term(p: &mut Parser) -> PResult<Pattern> {
 fn record(p: &mut Parser) -> PResult<Pattern> {
     let start = p.position();
     p.eat_byte(b'{', "a record pattern")?;
-    p.chomp_and_check_indent("I was expecting a field name in this record pattern")?;
+    let field_err = |region| ParseError::from_syntax(SyntaxError::RecordPatternField { region });
+    let end_err = |region| ParseError::from_syntax(SyntaxError::RecordPatternEnd { region });
+    let open_end = p.position();
+    p.chomp_and_check_indent("")
+        .map_err(|_| field_err(Region::new(open_end, open_end)))?;
     if p.peek() == Some(b'}') {
         p.bump(1);
         return Ok(Located::at(start, p.position(), Pattern_::Record(vec![])));
     }
-    let mut fields = vec![p.located(|p| p.lower_name("a record field name"))?];
-    p.sep_until(
-        b'}',
-        IndentCheck::Chomp,
-        |p| p.located(|p| p.lower_name("a record field name")),
-        &mut fields,
-        "I was expecting a field name",
-        |r| ParseError::new("I was expecting a `,` or `}` in this record pattern", r),
-    )?;
+    let at = p.region_here();
+    let mut fields = vec![p
+        .located(|p| p.lower_name("a record field name"))
+        .map_err(|_| field_err(at))?];
+    loop {
+        let last_end = fields.last().unwrap().region.end;
+        p.chomp_and_check_indent("")
+            .map_err(|_| end_err(Region::new(last_end, last_end)))?;
+        match p.peek() {
+            Some(b',') => {
+                p.bump(1);
+                let comma_end = p.position();
+                p.chomp_and_check_indent("")
+                    .map_err(|_| field_err(Region::new(comma_end, comma_end)))?;
+                let at = p.region_here();
+                fields.push(
+                    p.located(|p| p.lower_name("a record field name"))
+                        .map_err(|_| field_err(at))?,
+                );
+            }
+            Some(b'}') => {
+                p.bump(1);
+                break;
+            }
+            _ => return Err(end_err(p.region_here())),
+        }
+    }
     Ok(Located::at(start, p.position(), Pattern_::Record(fields)))
 }
 

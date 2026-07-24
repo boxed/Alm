@@ -128,6 +128,10 @@ pub enum SyntaxError {
     ListPatternIndentEnd { region: Region },
     /// A list pattern with a trailing `,` but no following pattern.
     ListPatternExpr { region: Region },
+    /// A record pattern position expecting a field name.
+    RecordPatternField { region: Region },
+    /// A record pattern whose closing `}` is missing.
+    RecordPatternEnd { region: Region },
 }
 
 impl SyntaxError {
@@ -191,7 +195,9 @@ impl SyntaxError {
             | SyntaxError::ListPatternOpen { region }
             | SyntaxError::ListPatternEnd { region }
             | SyntaxError::ListPatternIndentEnd { region }
-            | SyntaxError::ListPatternExpr { region } => *region,
+            | SyntaxError::ListPatternExpr { region }
+            | SyntaxError::RecordPatternField { region }
+            | SyntaxError::RecordPatternEnd { region } => *region,
         }
     }
 
@@ -945,6 +951,20 @@ impl SyntaxError {
                         .to_string(),
                 )],
             ),
+            SyntaxError::RecordPatternField { region } => snippet(
+                "UNFINISHED RECORD PATTERN",
+                *region,
+                "I was partway through parsing a record pattern, but I got stuck here:",
+                "I was expecting to see a field name next.",
+                vec![Section::Para(RECORD_PATTERN_HINT.to_string())],
+            ),
+            SyntaxError::RecordPatternEnd { region } => snippet(
+                "UNFINISHED RECORD PATTERN",
+                *region,
+                "I was partway through parsing a record pattern, but I got stuck here:",
+                "I was expecting to see a closing curly brace next. Try adding a } here?",
+                vec![Section::Para(RECORD_PATTERN_HINT.to_string())],
+            ),
         }
     }
 }
@@ -964,6 +984,9 @@ fn case_notes() -> Vec<Section> {
         ),
     ]
 }
+/// The hint shared by the UNFINISHED RECORD PATTERN errors.
+const RECORD_PATTERN_HINT: &str = "Hint: A record pattern looks like {x,y} or {name,age} \
+     where you list the field names you want to access.";
 
 /// The multi-line record example elm shows in several record diagnostics.
 const RECORD_EXAMPLE: &str =

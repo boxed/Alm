@@ -255,7 +255,7 @@ fn pattern_parse_errors() {
     );
     expect(
         "f { a b } = a\n\nx = 1\n",
-        "I was expecting a `,` or `}` in this record pattern",
+        "I was expecting to see a closing curly brace next",
     );
     expect(
         "f ( a b = a\n\nx = 1\n",

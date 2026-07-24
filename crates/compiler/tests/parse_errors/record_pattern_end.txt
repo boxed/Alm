@@ -1,0 +1,11 @@
+-- UNFINISHED RECORD PATTERN -------------------------------------- src/Main.elm
+
+I was partway through parsing a record pattern, but I got stuck here:
+
+4|   { a b } -> 1
+         ^
+I was expecting to see a closing curly brace next. Try adding a } here?
+
+Hint: A record pattern looks like {x,y} or {name,age} where you list the field
+names you want to access.
+
