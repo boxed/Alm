@@ -1,0 +1,20 @@
+-- UNFINISHED PORT ------------------------------------------------ src/Main.elm
+
+I just saw the start of a `port` declaration, but then I got stuck here:
+
+3| port foo 
+           ^
+I was expecting to see a colon next. And then a type that tells me what type of
+values are going to flow through.
+
+Note: Here are some example `port` declarations for reference:
+
+    port send : String -> Cmd msg
+    port receive : (String -> msg) -> Sub msg
+
+The first line defines a `send` port so you can send strings out to JavaScript.
+Maybe you send them on a WebSocket or put them into IndexedDB. The second line
+defines a `receive` port so you can receive strings from JavaScript. Maybe you
+get receive messages when new WebSocket messages come in or when the IndexedDB
+is changed for some external reason.
+

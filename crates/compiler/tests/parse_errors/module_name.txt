@@ -1,0 +1,15 @@
+-- EXPECTING MODULE NAME ------------------------------------------ src/Main.elm
+
+I was parsing an `module` declaration until I got stuck here:
+
+1| module 1 exposing (..)
+          ^
+I was expecting to see the module name next, like in these examples:
+
+    module Dict exposing (..)
+    module Maybe exposing (..)
+    module Html.Attributes exposing (..)
+    module Json.Decode exposing (..)
+
+Notice that the module names all start with capital letters. That is required!
+

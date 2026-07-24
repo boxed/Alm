@@ -1,0 +1,19 @@
+-- UNFINISHED DEFINITION ------------------------------------------ src/Main.elm
+
+I got stuck while parsing the `x` definition:
+
+3| x =
+      ^
+I was expecting to see an expression next. What is it equal to?
+
+Here is a valid definition (with a type annotation) for reference:
+
+    greet : String -> String
+    greet name =
+      "Hello " ++ name ++ "!"
+
+The top line (called a "type annotation") is optional. You can leave it off if
+you want. As you get more comfortable with Elm and as your project grows, it
+becomes more and more valuable to add them though! They work great as
+compiler-verified documentation, and they often improve error messages!
+

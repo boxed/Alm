@@ -1,0 +1,18 @@
+-- UNFINISHED IMPORT ---------------------------------------------- src/Main.elm
+
+I am partway through parsing an import, but I got stuck here:
+
+3| import 
+         ^
+Here are some examples of valid `import` declarations:
+
+    import Html
+    import Html as H
+    import Html as H exposing (..)
+    import Html exposing (Html, div, text)
+
+You are probably trying to import a different module, but try to make it look
+like one of these examples!
+
+Read <https://elm-lang.org/0.19.1/imports> to learn more.
+

@@ -225,7 +225,7 @@ fn import_exposing_problems() {
 fn port_module_required() {
     expect_module(
         "module Test exposing (..)\n\nport send : String -> Cmd msg\n\nx = 1\n",
-        "the header must say `port module`",
+        "Switch this to say port module instead",
     );
 }
 

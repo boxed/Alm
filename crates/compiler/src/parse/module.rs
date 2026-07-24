@@ -22,12 +22,16 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
 
     // HEADER — `module Name exposing (..)` or `port module ...`
     let mut is_port_module = false;
+    // Region of the `module` keyword, for the UNEXPECTED PORTS diagnostic.
+    let mut module_kw = Region::ZERO;
     let (name, exports) = if p.src_from_here().starts_with(b"port module") {
         is_port_module = true;
         p.keyword("port")?;
         p.chomp_and_check_indent("I was expecting `module` after `port`")?;
         chomp_header(p)?
     } else if p.src_from_here().starts_with(b"module") {
+        let a = p.position();
+        module_kw = Region::new(a, crate::reporting::Position::new(a.row, a.col + 6));
         chomp_header(p)?
     } else {
         (
@@ -80,20 +84,40 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
             && !p.peek_at(4).is_some_and(super::is_inner_char)
         {
             if !is_port_module {
-                return Err(p.error(
-                    "This module declares a port, so the header must say `port module`.",
+                return Err(ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::UnexpectedPorts { region: module_kw },
                 ));
             }
             p.keyword("port")?;
             p.chomp_and_check_indent("I was expecting a port name after `port`")?;
             let name = p.located(|p| p.lower_name("a port name"))?;
-            p.chomp_and_check_indent("I was expecting a `:` after this port name")?;
-            p.eat_byte(b':', "a `:` after this port name")?;
+            let port_stuck = || {
+                ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedPort {
+                    region: Region::new(name.region.end, name.region.end),
+                })
+            };
+            p.chomp_and_check_indent("").map_err(|_| port_stuck())?;
+            p.eat_byte(b':', "").map_err(|_| port_stuck())?;
             p.chomp_and_check_indent("I was expecting the port's type after `:`")?;
             let tipe = type_::expression(p)?;
             ports.push(Port { name, tipe });
         } else {
-            let def = expr::definition(p)?;
+            let decl_start = p.position();
+            let def = expr::definition(p).map_err(|e| {
+                // Only a failure to even parse the definition name (error anchored
+                // at the start of the line) is a WEIRD DECLARATION; a failure
+                // further in — a missing body, a bad expression — keeps its own
+                // report.
+                if e.region.start == decl_start {
+                    ParseError::from_syntax(
+                        crate::reporting::syntax::SyntaxError::WeirdDeclaration {
+                            region: Region::new(decl_start, decl_start),
+                        },
+                    )
+                } else {
+                    e
+                }
+            })?;
             let region = def.region;
             match def.value {
                 Def::Define(name, args, body, annotation) => {
@@ -133,12 +157,24 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
 type Header = (Option<Located<Name>>, Located<Exposing>);
 
 fn chomp_header(p: &mut Parser) -> PResult<Header> {
+    use crate::reporting::syntax::SyntaxError;
     p.keyword("module")?;
     p.chomp_and_check_indent("I was expecting the module name after `module`")?;
-    let name = p.located(|p| chomp_module_name(p))?;
+    let name_pos = p.position();
+    let name = p.located(|p| chomp_module_name(p)).map_err(|_| {
+        ParseError::from_syntax(SyntaxError::ExpectingModuleName {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
     p.chomp_and_check_indent("I was expecting `exposing` after the module name")?;
     p.keyword("exposing")?;
-    p.chomp_and_check_indent("I was expecting `(..)` or an explicit list after `exposing`")?;
+    let after_exposing = p.position();
+    let unfinished = || {
+        ParseError::from_syntax(SyntaxError::UnfinishedModuleDecl {
+            region: Region::new(after_exposing, after_exposing),
+        })
+    };
+    p.chomp_and_check_indent("").map_err(|_| unfinished())?;
     let exports = p.located(chomp_exposing)?;
     Ok((Some(name), exports))
 }
@@ -157,10 +193,21 @@ fn chomp_module_name(p: &mut Parser) -> PResult<Name> {
     }
 }
 
+/// An `import` that got stuck, underlined at `pos`.
+fn import_stuck(pos: crate::reporting::Position) -> ParseError {
+    ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedImport {
+        region: Region::new(pos, pos),
+    })
+}
+
 fn chomp_import(p: &mut Parser) -> PResult<Import> {
     p.keyword("import")?;
-    p.chomp_and_check_indent("I was expecting a module name after `import`")?;
-    let name = p.located(|p| chomp_module_name(p))?;
+    let name_stuck = p.position();
+    p.chomp_and_check_indent("")
+        .map_err(|_| import_stuck(name_stuck))?;
+    let name = p
+        .located(|p| chomp_module_name(p))
+        .map_err(|_| import_stuck(name_stuck))?;
 
     let mut alias = None;
     let mut exposing = Exposing::Explicit(vec![]);
@@ -168,8 +215,13 @@ fn chomp_import(p: &mut Parser) -> PResult<Import> {
     let snapshot = p.save();
     p.chomp_space()?;
     if p.col > 1 && p.src_from_here().starts_with(b"as") && p.keyword("as").is_ok() {
-        p.chomp_and_check_indent("I was expecting an alias after `as`")?;
-        alias = Some(p.upper_name("an alias like `JD`")?);
+        let as_stuck = p.position();
+        p.chomp_and_check_indent("")
+            .map_err(|_| import_stuck(as_stuck))?;
+        alias = Some(
+            p.upper_name("an alias like `JD`")
+                .map_err(|_| import_stuck(as_stuck))?,
+        );
     } else {
         p.restore(snapshot);
     }
@@ -206,9 +258,36 @@ fn chomp_exposing(p: &mut Parser) -> PResult<Exposing> {
         chomp_exposed,
         &mut exposed,
         "I was expecting another name to expose",
-        |r| ParseError::new("I was expecting a `,` or `)` in this exposing list", r),
-    )?;
+        |r| {
+            ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedExposing {
+                region: r,
+            })
+        },
+    )
+    .map_err(|e| match &e.syntax {
+        // Point the caret at the end of the last exposed value: the loop chomps
+        // trailing newlines, so the raw stuck position lands on a later line.
+        Some(crate::reporting::syntax::SyntaxError::UnfinishedExposing { .. }) => {
+            if let Some(end) = exposed.last().map(exposed_end) {
+                return ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::UnfinishedExposing {
+                        region: Region::new(end, end),
+                    },
+                );
+            }
+            e
+        }
+        _ => e,
+    })?;
     Ok(Exposing::Explicit(exposed))
+}
+
+/// The end position of an exposed value, for caret placement.
+fn exposed_end(e: &Exposed) -> crate::reporting::Position {
+    match e {
+        Exposed::Lower(n) | Exposed::Upper(n, _) => n.region.end,
+        Exposed::Operator(r, _) => r.end,
+    }
 }
 
 fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {

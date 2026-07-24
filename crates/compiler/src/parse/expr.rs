@@ -727,10 +727,17 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
     }
 
     let mut arg_patterns = Vec::new();
+    let mut last_end = def_name.region.end;
     loop {
         if p.peek() == Some(b'=') {
             p.bump(1);
-            p.chomp_and_check_indent("I was expecting the body of this definition")?;
+            let eq_end = p.position();
+            // Skipping whitespace/comments may raise a real error (e.g. an
+            // unterminated comment) which must propagate; only a bad indent after
+            // it means the body is missing.
+            p.chomp_space()?;
+            p.check_indent("")
+                .map_err(|_| def_unfinished(&def_name, eq_end, true))?;
             let body = expression(p)?;
             let end = body.region.end;
             return Ok(Located::at(
@@ -739,9 +746,38 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
                 Def::Define(def_name, arg_patterns, body, annotation),
             ));
         }
-        arg_patterns.push(pattern::term(p)?);
-        p.chomp_and_check_indent("I was expecting `=` or another argument")?;
+        let before = p.position();
+        match pattern::term(p) {
+            Ok(pat) => {
+                last_end = pat.region.end;
+                arg_patterns.push(pat);
+                p.chomp_space()?;
+                p.check_indent("")
+                    .map_err(|_| def_unfinished(&def_name, last_end, false))?;
+            }
+            // No progress → the token is not an argument, so the definition is
+            // unfinished. If the arg parser committed before failing, that is a
+            // real pattern error and must propagate.
+            Err(e) => {
+                if p.position() == before {
+                    return Err(def_unfinished(&def_name, last_end, false));
+                }
+                return Err(e);
+            }
+        }
     }
+}
+
+/// An UNFINISHED DEFINITION error: `body` selects the "expression next" vs
+/// "argument or equals sign next" wording, underlined at `stuck`.
+fn def_unfinished(name: &Located<Name>, stuck: Position, body: bool) -> super::ParseError {
+    let region = crate::reporting::Region::new(stuck, stuck);
+    let n = name.value.as_str().to_string();
+    super::ParseError::from_syntax(if body {
+        crate::reporting::syntax::SyntaxError::DefBody { region, name: n }
+    } else {
+        crate::reporting::syntax::SyntaxError::DefEquals { region, name: n }
+    })
 }
 
 fn destructure(p: &mut Parser) -> PResult<Located<Def>> {

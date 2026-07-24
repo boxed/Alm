@@ -1,0 +1,13 @@
+-- UNEXPECTED PORTS ----------------------------------------------- src/Main.elm
+
+You are declaring ports in a normal module.
+
+1| module Main exposing (..)
+   ^^^^^^
+Switch this to say port module instead, marking that this module contains port
+declarations.
+
+Note: Ports are not a traditional FFI for calling JS functions directly. They
+need a different mindset! Read <https://elm-lang.org/0.19.1/ports> to learn the
+syntax and how to use it effectively.
+

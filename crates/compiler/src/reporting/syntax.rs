@@ -38,6 +38,24 @@ pub enum SyntaxError {
     CaseArrow { region: Region },
     /// A `let` block with no `in` keyword.
     LetProblem { region: Region },
+    /// A top-level line that does not start a valid declaration.
+    WeirdDeclaration { region: Region },
+    /// A definition `name =` with no expression body.
+    DefBody { region: Region, name: String },
+    /// A definition `name` with neither more args nor `=`.
+    DefEquals { region: Region, name: String },
+    /// A `module` declaration whose name is missing/lowercase.
+    ExpectingModuleName { region: Region },
+    /// A `module` declaration that stops before/at `exposing`.
+    UnfinishedModuleDecl { region: Region },
+    /// An `exposing (...)` list with no closing `)`.
+    UnfinishedExposing { region: Region },
+    /// An `import` declaration that got stuck.
+    UnfinishedImport { region: Region },
+    /// A `port` declaration missing its `:` and type.
+    UnfinishedPort { region: Region },
+    /// A `port` declaration in a non-`port module`.
+    UnexpectedPorts { region: Region },
 }
 
 impl SyntaxError {
@@ -58,7 +76,16 @@ impl SyntaxError {
             | SyntaxError::MissingExpression { region, .. }
             | SyntaxError::CaseOf { region }
             | SyntaxError::CaseArrow { region }
-            | SyntaxError::LetProblem { region } => *region,
+            | SyntaxError::LetProblem { region }
+            | SyntaxError::WeirdDeclaration { region }
+            | SyntaxError::DefBody { region, .. }
+            | SyntaxError::DefEquals { region, .. }
+            | SyntaxError::ExpectingModuleName { region }
+            | SyntaxError::UnfinishedModuleDecl { region }
+            | SyntaxError::UnfinishedExposing { region }
+            | SyntaxError::UnfinishedImport { region }
+            | SyntaxError::UnfinishedPort { region }
+            | SyntaxError::UnexpectedPorts { region } => *region,
         }
     }
 
@@ -275,6 +302,150 @@ impl SyntaxError {
                         .to_string(),
                 )],
             ),
+            SyntaxError::WeirdDeclaration { region } => snippet(
+                "WEIRD DECLARATION",
+                *region,
+                "I am trying to parse a declaration, but I am getting stuck here:",
+                "When a line has no spaces at the beginning, I expect it to be a declaration \
+                 like one of these:",
+                vec![
+                    Section::Block(format!(
+                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
+                    )),
+                    Section::Para(
+                        "Try to make your declaration look like one of those? Or if this is \
+                         not supposed to be a declaration, try adding some spaces before it?"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::DefBody { region, name } => snippet_owned(
+                "UNFINISHED DEFINITION".to_string(),
+                *region,
+                format!("I got stuck while parsing the `{name}` definition:"),
+                "I was expecting to see an expression next. What is it equal to?".to_string(),
+                def_notes(),
+            ),
+            SyntaxError::DefEquals { region, name } => snippet_owned(
+                "UNFINISHED DEFINITION".to_string(),
+                *region,
+                format!("I got stuck while parsing the `{name}` definition:"),
+                "I was expecting to see an argument or an equals sign next.".to_string(),
+                def_notes(),
+            ),
+            SyntaxError::ExpectingModuleName { region } => snippet(
+                "EXPECTING MODULE NAME",
+                *region,
+                "I was parsing an `module` declaration until I got stuck here:",
+                "I was expecting to see the module name next, like in these examples:",
+                vec![
+                    Section::Block(
+                        "    module Dict exposing (..)\n    module Maybe exposing (..)\n    \
+                         module Html.Attributes exposing (..)\n    module Json.Decode \
+                         exposing (..)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Notice that the module names all start with capital letters. That is \
+                         required!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnfinishedModuleDecl { region } => snippet(
+                "UNFINISHED MODULE DECLARATION",
+                *region,
+                "I am parsing an `module` declaration, but I got stuck here:",
+                "Here are some examples of valid `module` declarations:",
+                vec![
+                    Section::Block(
+                        "    module Main exposing (..)\n    module Dict exposing (Dict, empty, \
+                         get)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "I generally recommend using an explicit exposing list. I can skip \
+                         compiling a bunch of files when the public interface of a module \
+                         stays the same, so exposing fewer values can help improve compile \
+                         times!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnfinishedExposing { region } => snippet(
+                "UNFINISHED EXPOSING",
+                *region,
+                "I was partway through parsing exposed values, but I got stuck here:",
+                "I was expecting a closing parenthesis. Try adding a ) right here?",
+                vec![Section::Para(
+                    "Note: I can get confused when there is not enough indentation, so if you \
+                     already have a closing parenthesis, it probably just needs some spaces \
+                     in front of it."
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::UnfinishedImport { region } => snippet(
+                "UNFINISHED IMPORT",
+                *region,
+                "I am partway through parsing an import, but I got stuck here:",
+                "Here are some examples of valid `import` declarations:",
+                vec![
+                    Section::Block(
+                        "    import Html\n    import Html as H\n    import Html as H exposing \
+                         (..)\n    import Html exposing (Html, div, text)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "You are probably trying to import a different module, but try to \
+                         make it look like one of these examples!"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Read <https://elm-lang.org/0.19.1/imports> to learn more.".to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnfinishedPort { region } => snippet(
+                "UNFINISHED PORT",
+                *region,
+                "I just saw the start of a `port` declaration, but then I got stuck here:",
+                "I was expecting to see a colon next. And then a type that tells me what type \
+                 of values are going to flow through.",
+                vec![
+                    Section::Para(
+                        "Note: Here are some example `port` declarations for reference:"
+                            .to_string(),
+                    ),
+                    Section::Block(
+                        "    port send : String -> Cmd msg\n    port receive : (String -> \
+                         msg) -> Sub msg"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "The first line defines a `send` port so you can send strings out to \
+                         JavaScript. Maybe you send them on a WebSocket or put them into \
+                         IndexedDB. The second line defines a `receive` port so you can \
+                         receive strings from JavaScript. Maybe you get receive messages when \
+                         new WebSocket messages come in or when the IndexedDB is changed for \
+                         some external reason."
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnexpectedPorts { region } => snippet(
+                "UNEXPECTED PORTS",
+                *region,
+                "You are declaring ports in a normal module.",
+                "Switch this to say port module instead, marking that this module contains \
+                 port declarations.",
+                vec![Section::Para(
+                    "Note: Ports are not a traditional FFI for calling JS functions directly. \
+                     They need a different mindset! Read \
+                     <https://elm-lang.org/0.19.1/ports> to learn the syntax and how to use \
+                     it effectively."
+                        .to_string(),
+                )],
+            ),
             SyntaxError::RecordEquals { region } => snippet(
                 "PROBLEM IN RECORD",
                 *region,
@@ -305,6 +476,27 @@ const RECORD_EXAMPLE: &str =
 
 /// The multi-line `case` example elm shows in several case diagnostics.
 const CASE_EXAMPLE: &str = "    case maybeWidth of\n      Just width ->\n        width + 200\n\n      Nothing ->\n        400";
+
+/// The `greet` definition example elm shows in several declaration diagnostics.
+const DEF_EXAMPLE: &str =
+    "    greet : String -> String\n    greet name =\n      \"Hello \" ++ name ++ \"!\"";
+
+/// The example + type-annotation note shared by the UNFINISHED DEFINITION errors.
+fn def_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Here is a valid definition (with a type annotation) for reference:".to_string(),
+        ),
+        Section::Block(DEF_EXAMPLE.to_string()),
+        Section::Para(
+            "The top line (called a \"type annotation\") is optional. You can leave it off if \
+             you want. As you get more comfortable with Elm and as your project grows, it \
+             becomes more and more valuable to add them though! They work great as \
+             compiler-verified documentation, and they often improve error messages!"
+                .to_string(),
+        ),
+    ]
+}
 
 /// Build a `Report` from an elm snippet-style body.
 fn snippet(title: &str, region: Region, before: &str, after: &str, notes: Vec<Section>) -> Report {

@@ -1,0 +1,18 @@
+-- WEIRD DECLARATION ---------------------------------------------- src/Main.elm
+
+I am trying to parse a declaration, but I am getting stuck here:
+
+3| = 1
+   ^
+When a line has no spaces at the beginning, I expect it to be a declaration like
+one of these:
+
+    greet : String -> String
+    greet name =
+      "Hello " ++ name ++ "!"
+    
+    type User = Anonymous | LoggedIn String
+
+Try to make your declaration look like one of those? Or if this is not supposed
+to be a declaration, try adding some spaces before it?
+

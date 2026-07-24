@@ -1,0 +1,11 @@
+-- UNFINISHED EXPOSING -------------------------------------------- src/Main.elm
+
+I was partway through parsing exposed values, but I got stuck here:
+
+1| module Main exposing (x
+                          ^
+I was expecting a closing parenthesis. Try adding a ) right here?
+
+Note: I can get confused when there is not enough indentation, so if you already
+have a closing parenthesis, it probably just needs some spaces in front of it.
+
