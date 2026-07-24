@@ -339,6 +339,12 @@ pub fn values() -> &'static [BuiltinValue] {
                 "worker",
                 "{ init : flags -> ( model, Cmd msg ), update : msg -> model -> ( model, Cmd msg ), subscriptions : model -> Sub msg } -> Program flags model msg",
             ),
+            // Effect-manager routing (available to `effect module` code).
+            V("Platform", "sendToApp", "Router msg selfMsg -> msg -> Task x ()"),
+            V("Platform", "sendToSelf", "Router msg selfMsg -> selfMsg -> Task x ()"),
+            // Process (background tasks for effect managers).
+            V("Process", "spawn", "Task x a -> Task y Id"),
+            V("Process", "kill", "Id -> Task x ()"),
             // Platform.Cmd
             V("Platform.Cmd", "none", "Cmd msg"),
             V("Platform.Cmd", "batch", "List (Cmd msg) -> Cmd msg"),
@@ -1065,6 +1071,8 @@ pub const OPAQUE_TYPES: &[(&str, &str)] = &[
     ("Html", "Html"),
     ("Html", "Attribute"),
     ("Platform", "Program"),
+    ("Platform", "Router"),
+    ("Process", "Id"),
     ("Platform.Cmd", "Cmd"),
     ("Platform.Sub", "Sub"),
     ("Random", "Generator"),
@@ -1087,6 +1095,8 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "Html" | "Attribute" => Some("Html"),
         "Handler" => Some("VirtualDom"),
         "Program" => Some("Platform"),
+        "Router" => Some("Platform"),
+        "Id" => Some("Process"),
         "Cmd" => Some("Platform.Cmd"),
         "Sub" => Some("Platform.Sub"),
         "Value" => Some("Json.Encode"),

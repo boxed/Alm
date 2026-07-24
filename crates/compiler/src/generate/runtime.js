@@ -4482,6 +4482,134 @@ function _Platform_incomingPort(name, converter) {
     };
 }
 
+// EFFECT MANAGERS
+//
+// A port of elm's `_Platform` effect-manager protocol onto alm's CPS `_Task`
+// model. `command`/`subscription` produce `Leaf` bags tagged with a manager
+// `home`; each `effect module` registers a manager here. At program start each
+// manager becomes a long-lived "process" with private state and a mailbox.
+// Every update we gather the manager's Cmd/Sub leaves and deliver them to its
+// `onEffects`; `sendToSelf` posts to its own mailbox, `sendToApp` feeds the app.
+// alm's own effects (Http/Time/ports/...) stay concrete and never come here.
+
+var _Platform_effectManagers = {};
+
+function _Platform_leaf(home) {
+    return function (value) { return { $: 'Leaf', home: home, value: value }; };
+}
+
+function _Platform_createManager(init, onEffects, onSelfMsg, cmdMap, subMap) {
+    return { init: init, onEffects: onEffects, onSelfMsg: onSelfMsg, cmdMap: cmdMap, subMap: subMap };
+}
+
+// Walk a Cmd/Sub bag, applying accumulated taggers through each manager's
+// cmdMap/subMap, and bucket the resulting effects by manager home. Concrete
+// alm effects (any tag other than the batch/map/leaf shapes) are ignored here —
+// the runtime dispatch loop executes those directly.
+function _Platform_toEffect(map, taggers, value) {
+    return A2(map, function (x) {
+        for (var t = taggers; t; t = t.rest) { x = t.tagger(x); }
+        return x;
+    }, value);
+}
+
+function _Platform_gatherEffects(isCmd, bag, taggers, dict) {
+    if (!bag) { return; }
+    switch (bag.$) {
+        case 'CmdNone': case 'SubNone': return;
+        case 'CmdBatch':
+            bag.cmds.forEach(function (b) { _Platform_gatherEffects(isCmd, b, taggers, dict); });
+            return;
+        case 'SubBatch':
+            bag.subs.forEach(function (b) { _Platform_gatherEffects(isCmd, b, taggers, dict); });
+            return;
+        case 'CmdMap':
+            _Platform_gatherEffects(isCmd, bag.cmd, { tagger: bag.f, rest: taggers }, dict);
+            return;
+        case 'SubMap':
+            _Platform_gatherEffects(isCmd, bag.sub, { tagger: bag.f, rest: taggers }, dict);
+            return;
+        case 'Leaf': {
+            var mgr = _Platform_effectManagers[bag.home];
+            var effect = _Platform_toEffect(isCmd ? mgr.cmdMap : mgr.subMap, taggers, bag.value);
+            var slot = dict[bag.home] || (dict[bag.home] = { cmds: [], subs: [] });
+            (isCmd ? slot.cmds : slot.subs).push(effect);
+            return;
+        }
+        default: return;
+    }
+}
+
+// A manager process: init runs once to produce initial state; messages
+// (`fx` batches from the app, or `self` messages from sendToSelf) are handled
+// one at a time, each producing the next state via a CPS task.
+function _Platform_instantiateManager(home, sendToApp) {
+    var info = _Platform_effectManagers[home];
+    var proc = { mailbox: [], state: undefined, ready: false, running: false, info: info };
+    proc.router = { sendToApp: sendToApp, proc: proc };
+    _Task_fork(info.init, function (initialState) {
+        proc.state = initialState;
+        proc.ready = true;
+        _Platform_stepManager(proc);
+    }, function () {});
+    return proc;
+}
+
+function _Platform_stepManager(proc) {
+    if (proc.running || !proc.ready || proc.mailbox.length === 0) { return; }
+    proc.running = true;
+    var msg = proc.mailbox.shift();
+    var info = proc.info;
+    var task;
+    if (msg.type === 'self') {
+        task = A3(info.onSelfMsg, proc.router, msg.value, proc.state);
+    } else {
+        task = (info.cmdMap && info.subMap)
+            ? A4(info.onEffects, proc.router, msg.cmds, msg.subs, proc.state)
+            : A3(info.onEffects, proc.router, info.cmdMap ? msg.cmds : msg.subs, proc.state);
+    }
+    _Task_fork(task, function (newState) {
+        proc.state = newState;
+        proc.running = false;
+        _Platform_stepManager(proc);
+    }, function () {
+        proc.running = false;
+        _Platform_stepManager(proc);
+    });
+}
+
+function _Platform_sendToManager(proc, msg) {
+    proc.mailbox.push(msg);
+    _Platform_stepManager(proc);
+}
+
+var $Platform$sendToApp = F2(function (router, msg) {
+    return _Task(function (ok) {
+        router.sendToApp(msg);
+        ok(_Utils_Tuple0);
+    });
+});
+
+var $Platform$sendToSelf = F2(function (router, msg) {
+    return _Task(function (ok) {
+        _Platform_sendToManager(router.proc, { type: 'self', value: msg });
+        ok(_Utils_Tuple0);
+    });
+});
+
+// Process: background tasks for effect managers. alm's CPS tasks cannot be
+// interrupted, so `kill` is a no-op (the spawned task simply runs to
+// completion); this is enough for managers that spawn fire-and-forget loops.
+var $Process$spawn = function (task) {
+    return _Task(function (ok) {
+        _Task_fork(task, function () {}, function () {});
+        ok({ $: 'ProcessId' });
+    });
+};
+var $Process$kill = function (_id) {
+    return _Task(function (ok) { ok(_Utils_Tuple0); });
+};
+
 // PROGRAMS
 
 var $Browser$sandbox = function (impl) {
@@ -4591,6 +4719,7 @@ function _Platform_initialize(program, opts) {
             var next = A2(impl.update, msg, model);
             model = next.a;
             runCmd(next.b, function (m) { return m; });
+            enqueueManagerEffects(next.b);
         }
         if (view) {
             var newVnode = view(model);
@@ -4598,6 +4727,31 @@ function _Platform_initialize(program, opts) {
             vnode = newVnode;
         }
         updateSubs();
+    }
+
+    // Effect-manager processes for this program instance (empty for the common
+    // case of no `effect module`s). Manager definitions are global; each program
+    // gets its own processes so two mounted programs do not share state.
+    var managerHomes = Object.keys(_Platform_effectManagers);
+    var managerProcs = {};
+    for (var _mi = 0; _mi < managerHomes.length; _mi++) {
+        managerProcs[managerHomes[_mi]] = _Platform_instantiateManager(managerHomes[_mi], dispatch);
+    }
+    function enqueueManagerEffects(cmdBag) {
+        if (managerHomes.length === 0) { return; }
+        var subBag = (!isSandbox && impl.subscriptions) ? impl.subscriptions(model) : null;
+        var dict = {};
+        _Platform_gatherEffects(true, cmdBag, null, dict);
+        _Platform_gatherEffects(false, subBag, null, dict);
+        for (var i = 0; i < managerHomes.length; i++) {
+            var home = managerHomes[i];
+            var fx = dict[home] || { cmds: [], subs: [] };
+            _Platform_sendToManager(managerProcs[home], {
+                type: 'fx',
+                cmds: _List_fromArray(fx.cmds),
+                subs: _List_fromArray(fx.subs)
+            });
+        }
     }
 
     function runCmd(cmd, tagger) {
@@ -4798,6 +4952,12 @@ function _Platform_initialize(program, opts) {
     // `init()` returns receives values the Cmd sends (matching Elm).
     if (initialCmd) {
         _Platform_defer(function () { runCmd(initialCmd, function (m) { return m; }); });
+    }
+    // Deliver the initial batch of manager effects (initial Cmd + subscriptions),
+    // deferred like the initial Cmd so port subscribers attached right after
+    // `init()` returns are in place before a manager can call back into the app.
+    if (managerHomes.length > 0) {
+        _Platform_defer(function () { enqueueManagerEffects(initialCmd); });
     }
 
     // The app.ports API.
