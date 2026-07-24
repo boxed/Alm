@@ -62,7 +62,10 @@ app.ports.somePort.subscribe(function (value) { ... });
   `effect module` misuse, and application/package port validation all render
   identically to the official compiler — pinned by a differential test suite
   of 89 fixtures that diffs alm against `elm make` 0.19.1 output
-  byte-for-byte.
+  byte-for-byte. Malformed GLSL in a `[glsl|…|]` block is also caught
+  (`SHADER PROBLEM`), via a vendored Rust GLSL parser; its embedded message
+  differs from elm's, which delegates to a different 3rd-party parser, so
+  that one report is not byte-exact.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
