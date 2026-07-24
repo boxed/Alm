@@ -24,6 +24,8 @@ pub enum SyntaxError {
     UnfinishedParens { region: Region },
     /// A single-line string with no closing double quote before end of line.
     EndlessString { region: Region },
+    /// A `\arg` lambda missing its `->` arrow.
+    UnfinishedLambda { region: Region },
 }
 
 impl SyntaxError {
@@ -37,7 +39,8 @@ impl SyntaxError {
             | SyntaxError::CharDoubleQuotes { region }
             | SyntaxError::UnfinishedList { region }
             | SyntaxError::UnfinishedParens { region }
-            | SyntaxError::EndlessString { region } => *region,
+            | SyntaxError::EndlessString { region }
+            | SyntaxError::UnfinishedLambda { region } => *region,
         }
     }
 
@@ -144,6 +147,24 @@ impl SyntaxError {
                             .to_string(),
                     ),
                 ],
+            ),
+            SyntaxError::UnfinishedLambda { region } => snippet(
+                "UNFINISHED ANONYMOUS FUNCTION",
+                *region,
+                "I just saw the beginning of an anonymous function, so I was expecting to \
+                 see an arrow next:",
+                "The syntax for anonymous functions is (\\x -> x + 1) so I am missing the \
+                 arrow and the body of the function.",
+                // NB: elm's text contains the typo "indetation"; reproduced for byte-exact
+                // output.
+                vec![Section::Para(
+                    "Note: It is possible that I am confused about indetation! I generally \
+                     recommend switching to named functions if the definition cannot fit \
+                     inline nicely, so either (1) try to fit the whole anonymous function \
+                     on one line or (2) break the whole thing out into a named function. \
+                     Things tend to be clearer that way!"
+                        .to_string(),
+                )],
             ),
         }
     }

@@ -521,14 +521,28 @@ fn function(p: &mut Parser) -> PResult<Expr> {
     p.eat_byte(b'\\', "a lambda")?;
     p.chomp_and_check_indent("I was expecting an argument pattern after this `\\`")?;
     let mut arg_patterns = vec![pattern::term(p)?];
-    p.chomp_and_check_indent("I was expecting `->` or another argument")?;
+    let mut last_end = arg_patterns[0].region.end;
     loop {
+        let lam_stuck = || {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedLambda {
+                    region: crate::reporting::Region::new(last_end, last_end),
+                },
+            )
+        };
+        p.chomp_and_check_indent("I was expecting `->` or another argument")
+            .map_err(|_| lam_stuck())?;
         if p.src_from_here().starts_with(b"->") {
             p.bump(2);
             break;
         }
-        arg_patterns.push(pattern::term(p)?);
-        p.chomp_and_check_indent("I was expecting `->` or another argument")?;
+        match pattern::term(p) {
+            Ok(pat) => {
+                last_end = pat.region.end;
+                arg_patterns.push(pat);
+            }
+            Err(_) => return Err(lam_stuck()),
+        }
     }
     p.chomp_and_check_indent("I was expecting the body of this lambda")?;
     let body = expression(p)?;

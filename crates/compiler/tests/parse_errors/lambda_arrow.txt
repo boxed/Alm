@@ -1,0 +1,15 @@
+-- UNFINISHED ANONYMOUS FUNCTION ---------------------------------- src/Main.elm
+
+I just saw the beginning of an anonymous function, so I was expecting to see an
+arrow next:
+
+4|     \a a
+           ^
+The syntax for anonymous functions is (\x -> x + 1) so I am missing the arrow
+and the body of the function.
+
+Note: It is possible that I am confused about indetation! I generally recommend
+switching to named functions if the definition cannot fit inline nicely, so
+either (1) try to fit the whole anonymous function on one line or (2) break the
+whole thing out into a named function. Things tend to be clearer that way!
+
