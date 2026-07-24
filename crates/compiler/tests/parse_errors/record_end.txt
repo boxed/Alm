@@ -1,0 +1,20 @@
+-- UNFINISHED RECORD ---------------------------------------------- src/Main.elm
+
+I was partway through parsing a record, but I got stuck here:
+
+4|     { a = 1
+              ^
+I was expecting to see a closing curly brace next. Try putting a } next and see
+if that helps?
+
+Note: I may be confused by indentation. For example, if you are trying to define
+a record across multiple lines, I recommend using this format:
+
+    { name = "Alice"
+    , age = 42
+    , height = 1.75
+    }
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem!
+

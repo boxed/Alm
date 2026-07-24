@@ -306,8 +306,8 @@ fn expression_parse_errors() {
     );
     expect("x = [ 1, 2\ny = 3\n", "I cannot find the end of this list");
     expect("x = ( 1, 2\ny = 3\n", "");
-    expect("x = { a = 1 b = 2 }\n", "I was expecting a `,` or `}`");
-    expect("x = { a 1 }\n", "I was expecting `=` or `|`");
+    expect("x = { a = 1 b = 2 }\n", "I was expecting to see a closing curly brace next");
+    expect("x = { a 1 }\n", "I was expecting to see an equals sign next");
     expect("x = .\n", "field name after this `.`");
 }
 

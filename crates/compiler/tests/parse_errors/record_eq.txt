@@ -1,0 +1,20 @@
+-- PROBLEM IN RECORD ---------------------------------------------- src/Main.elm
+
+I am partway through parsing a record, but I got stuck here:
+
+4|     { a 1 }
+           ^
+I just saw a field name, so I was expecting to see an equals sign next. So try
+putting an = sign here?
+
+Note: If you are trying to define a record across multiple lines, I recommend
+using this format:
+
+    { name = "Alice"
+    , age = 42
+    , height = 1.75
+    }
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+

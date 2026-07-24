@@ -26,6 +26,10 @@ pub enum SyntaxError {
     EndlessString { region: Region },
     /// A `\arg` lambda missing its `->` arrow.
     UnfinishedLambda { region: Region },
+    /// A record literal with no closing `}`.
+    UnfinishedRecord { region: Region },
+    /// A record field name not followed by `=`.
+    RecordEquals { region: Region },
 }
 
 impl SyntaxError {
@@ -40,7 +44,9 @@ impl SyntaxError {
             | SyntaxError::UnfinishedList { region }
             | SyntaxError::UnfinishedParens { region }
             | SyntaxError::EndlessString { region }
-            | SyntaxError::UnfinishedLambda { region } => *region,
+            | SyntaxError::UnfinishedLambda { region }
+            | SyntaxError::UnfinishedRecord { region }
+            | SyntaxError::RecordEquals { region } => *region,
         }
     }
 
@@ -166,9 +172,54 @@ impl SyntaxError {
                         .to_string(),
                 )],
             ),
+            SyntaxError::UnfinishedRecord { region } => snippet(
+                "UNFINISHED RECORD",
+                *region,
+                "I was partway through parsing a record, but I got stuck here:",
+                "I was expecting to see a closing curly brace next. Try putting a } next \
+                 and see if that helps?",
+                vec![
+                    Section::Para(
+                        "Note: I may be confused by indentation. For example, if you are \
+                         trying to define a record across multiple lines, I recommend using \
+                         this format:"
+                            .to_string(),
+                    ),
+                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    Section::Para(
+                        "Notice that each line starts with some indentation. Usually two or \
+                         four spaces. This is the stylistic convention in the Elm ecosystem!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::RecordEquals { region } => snippet(
+                "PROBLEM IN RECORD",
+                *region,
+                "I am partway through parsing a record, but I got stuck here:",
+                "I just saw a field name, so I was expecting to see an equals sign next. So \
+                 try putting an = sign here?",
+                vec![
+                    Section::Para(
+                        "Note: If you are trying to define a record across multiple lines, I \
+                         recommend using this format:"
+                            .to_string(),
+                    ),
+                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    Section::Para(
+                        "Notice that each line starts with some indentation. Usually two or \
+                         four spaces. This is the stylistic convention in the Elm ecosystem."
+                            .to_string(),
+                    ),
+                ],
+            ),
         }
     }
 }
+
+/// The multi-line record example elm shows in several record diagnostics.
+const RECORD_EXAMPLE: &str =
+    "    { name = \"Alice\"\n    , age = 42\n    , height = 1.75\n    }";
 
 /// Build a `Report` from an elm snippet-style body.
 fn snippet(title: &str, region: Region, before: &str, after: &str, notes: Vec<Section>) -> Report {

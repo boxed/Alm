@@ -285,25 +285,39 @@ fn record(p: &mut Parser) -> PResult<Expr> {
             p.bump(1);
             p.chomp_and_check_indent("I was expecting an expression after this `=`")?;
             let value = expression(p)?;
-            p.check_indent("I was in the middle of a record")?;
+            let mut last_end = value.region.end;
+            let rec_stuck = |end: Position| {
+                crate::parse::ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::UnfinishedRecord {
+                        region: crate::reporting::Region::new(end, end),
+                    },
+                )
+            };
+            p.check_indent("").map_err(|_| rec_stuck(last_end))?;
             let mut fields = vec![(starter, value)];
             loop {
                 match p.peek() {
                     Some(b',') => {
                         p.bump(1);
                         p.chomp_and_check_indent("I was expecting another field")?;
-                        fields.push(field(p)?);
-                        p.check_indent("I was in the middle of a record")?;
+                        let f = field(p)?;
+                        last_end = f.1.region.end;
+                        fields.push(f);
+                        p.check_indent("").map_err(|_| rec_stuck(last_end))?;
                     }
                     Some(b'}') => {
                         p.bump(1);
                         return Ok(Located::at(start, p.position(), Expr_::Record(fields)));
                     }
-                    _ => return Err(p.error("I was expecting a `,` or `}` in this record")),
+                    _ => return Err(rec_stuck(last_end)),
                 }
             }
         }
-        _ => Err(p.error("I was expecting `=` or `|` after this record field name")),
+        _ => Err(crate::parse::ParseError::from_syntax(
+            crate::reporting::syntax::SyntaxError::RecordEquals {
+                region: p.region_here(),
+            },
+        )),
     }
 }
 
