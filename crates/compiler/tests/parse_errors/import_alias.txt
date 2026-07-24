@@ -1,0 +1,16 @@
+-- EXPECTING IMPORT ALIAS ----------------------------------------- src/Main.elm
+
+I was parsing an `import` until I got stuck here:
+
+2| import Html as 5
+                  ^
+I was expecting to see an alias next, like in these examples:
+
+    import Html.Attributes as Attr
+    import WebGL.Texture as Texture
+    import Json.Decode as D
+
+Notice that the alias always starts with a capital letter. That is required!
+
+Read <https://elm-lang.org/0.19.1/imports> to learn more.
+

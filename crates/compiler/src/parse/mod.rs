@@ -782,6 +782,7 @@ impl<'a> Parser<'a> {
         after_sep_msg: &str,
         end_of: impl Fn(&T) -> Position,
         stuck: impl Fn(Region) -> ParseError,
+        after_sep_stuck: impl Fn(Region) -> ParseError,
     ) -> PResult<(Position, T, Vec<T>)> {
         // Track the end of the last value so a missing-close error points there
         // (the item parser chomps trailing whitespace past it), matching elm.
@@ -791,7 +792,9 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(b',') => {
                     self.bump(1);
-                    self.chomp_and_check_indent(after_sep_msg)?;
+                    let after_comma = self.position();
+                    self.chomp_and_check_indent(after_sep_msg)
+                        .map_err(|_| after_sep_stuck(Region::new(after_comma, after_comma)))?;
                     let it = item(self)?;
                     last_end = end_of(&it);
                     rest.push(it);

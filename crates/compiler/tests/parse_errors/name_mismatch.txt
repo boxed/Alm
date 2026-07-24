@@ -1,0 +1,12 @@
+-- NAME MISMATCH -------------------------------------------------- src/Main.elm
+
+I just saw a type annotation for `x`, but it is followed by a definition for
+`y`:
+
+2| x : Int
+3| y = 1
+   ^
+These names do not match! Is there a typo?
+
+    y -> x
+

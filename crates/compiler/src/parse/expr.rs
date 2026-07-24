@@ -34,7 +34,14 @@ pub fn term(p: &mut Parser) -> PResult<Expr> {
         }
         Some(b'.') => {
             p.bump(1);
-            let field = p.lower_name("a field name after this `.`")?;
+            let dot_end = p.position();
+            let field = p.lower_name("a field name after this `.`").map_err(|_| {
+                crate::parse::ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::RecordAccessor {
+                        region: crate::reporting::Region::new(dot_end, dot_end),
+                    },
+                )
+            })?;
             Ok(Located::at(start, p.position(), Expr_::Accessor(field)))
         }
         _ if p.starts_lower() || p.starts_upper() => {
@@ -208,7 +215,14 @@ fn tuple(p: &mut Parser) -> PResult<Expr> {
                 p.check_indent("I was expecting the closing `)` to be indented")?;
                 return chomp_tuple_end(p, start, entry);
             } else {
-                p.eat_byte(b')', "a closing `)` after this operator")?;
+                let op_end = p.position();
+                p.eat_byte(b')', "a closing `)` after this operator").map_err(|_| {
+                    crate::parse::ParseError::from_syntax(
+                        crate::reporting::syntax::SyntaxError::OperatorFunction {
+                            region: crate::reporting::Region::new(op_end, op_end),
+                        },
+                    )
+                })?;
                 return Ok(Located::at(start, p.position(), Expr_::Op(op)));
             }
         }
@@ -238,6 +252,11 @@ fn chomp_tuple_end(p: &mut Parser, start: Position, first: Expr) -> PResult<Expr
         |r| {
             crate::parse::ParseError::from_syntax(
                 crate::reporting::syntax::SyntaxError::UnfinishedParens { region: r },
+            )
+        },
+        |r| {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedTuple { region: r },
             )
         },
     )?;
@@ -596,7 +615,15 @@ fn case_(p: &mut Parser) -> PResult<Expr> {
         }
         return Err(p.error("Expecting keyword `of` of this case expression"));
     }
-    p.chomp_and_check_indent("I was expecting a pattern after `of`")?;
+    let of_end = p.position();
+    p.chomp_and_check_indent("I was expecting a pattern after `of`")
+        .map_err(|_| {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedCase {
+                    region: crate::reporting::Region::new(of_end, of_end),
+                },
+            )
+        })?;
     p.with_indent(|p| {
         let mut branches = vec![chomp_branch(p, start)?];
         while p.is_aligned() {
@@ -654,8 +681,16 @@ fn let_problem(let_start: Position, stuck: Position) -> super::ParseError {
 fn let_(p: &mut Parser) -> PResult<Expr> {
     let start = p.position();
     p.keyword("let")?;
+    let let_kw_end = p.position();
     let defs = p.with_backset_indent(3, |p| {
-        p.chomp_and_check_indent("I was expecting a definition after `let`")?;
+        p.chomp_and_check_indent("I was expecting a definition after `let`")
+            .map_err(|_| {
+                crate::parse::ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::UnfinishedLet {
+                        region: crate::reporting::Region::new(let_kw_end, let_kw_end),
+                    },
+                )
+            })?;
         p.with_indent(|p| {
             let mut defs = vec![chomp_let_def(p)?];
             while p.is_aligned() {
@@ -722,12 +757,13 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
         }
         def_name = p.located(|p| p.lower_name("a definition name"))?;
         if def_name.value != name.value {
-            return Err(super::ParseError::new(
-                format!(
-                    "I just saw the type annotation for `{}`, but this definition is named `{}`. They must match!",
-                    name.value, def_name.value
-                ),
-                def_name.region,
+            return Err(super::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::NameMismatch {
+                    region: crate::reporting::Region::new(name.region.start, def_name.region.end),
+                    highlight: def_name.region,
+                    annotation: name.value.as_str().to_string(),
+                    definition: def_name.value.as_str().to_string(),
+                },
             ));
         }
         p.chomp_and_check_indent("I was expecting `=` or arguments after this name")?;
@@ -767,6 +803,17 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
             // real pattern error and must propagate.
             Err(e) => {
                 if p.position() == before {
+                    // A stray token that is neither a valid argument nor `=` (and
+                    // is indented as part of this definition) is a PROBLEM IN
+                    // DEFINITION; a dedent or end-of-input is UNFINISHED DEFINITION.
+                    if !p.is_at_end() && p.col > p.indent {
+                        return Err(crate::parse::ParseError::from_syntax(
+                            crate::reporting::syntax::SyntaxError::ProblemInDefinition {
+                                region: crate::reporting::Region::new(before, before),
+                                name: def_name.value.as_str().to_string(),
+                            },
+                        ));
+                    }
                     return Err(def_unfinished(&def_name, last_end, false));
                 }
                 return Err(e);

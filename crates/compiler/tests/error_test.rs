@@ -299,7 +299,7 @@ fn annotation_type_must_exist_in_let() {
 
 #[test]
 fn expression_parse_errors() {
-    expect("x = (+ \n", "closing `)` after this operator");
+    expect("x = (+ \n", "I was expecting a closing parenthesis here");
     expect(
         "x =\n    case 1 of\n        1 ->\n            2\n        oops~\n",
         "",
@@ -308,7 +308,7 @@ fn expression_parse_errors() {
     expect("x = ( 1, 2\ny = 3\n", "");
     expect("x = { a = 1 b = 2 }\n", "I was expecting to see a closing curly brace next");
     expect("x = { a 1 }\n", "I was expecting to see an equals sign next");
-    expect("x = .\n", "field name after this `.`");
+    expect("x = .\n", "I am trying to parse a record accessor here");
 }
 
 #[test]

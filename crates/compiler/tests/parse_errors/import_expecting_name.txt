@@ -1,0 +1,17 @@
+-- EXPECTING IMPORT NAME ------------------------------------------ src/Main.elm
+
+I was parsing an `import` until I got stuck here:
+
+2| import 5
+          ^
+I was expecting to see a module name next, like in these examples:
+
+    import Dict
+    import Maybe
+    import Html.Attributes as A
+    import Json.Decode exposing (..)
+
+Notice that the module names all start with capital letters. That is required!
+
+Read <https://elm-lang.org/0.19.1/imports> to learn more.
+

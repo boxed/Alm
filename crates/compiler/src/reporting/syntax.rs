@@ -70,6 +70,35 @@ pub enum SyntaxError {
     CustomBar { region: Region },
     /// A reserved word (`in`) used where a name was expected.
     ReservedWord { region: Region, word: String },
+    /// A `case` expression stuck expecting a pattern (e.g. `case x of` <eof>).
+    UnfinishedCase { region: Region },
+    /// A `let` expression stuck before any value is defined (e.g. `let` <eof>).
+    UnfinishedLet { region: Region },
+    /// A tuple stuck after a comma, expecting another expression.
+    UnfinishedTuple { region: Region },
+    /// An operator function `(+` with no closing `)`.
+    OperatorFunction { region: Region },
+    /// A record accessor `.` not followed by a lower-case field name.
+    RecordAccessor { region: Region },
+    /// An `import` whose module name is missing/invalid (a stray token present).
+    ExpectingImportName { region: Region },
+    /// An `import ... as` whose alias is missing/invalid (a stray token present).
+    ExpectingImportAlias { region: Region },
+    /// An `exposing (...)` list with an unparseable exposed value.
+    ProblemInExposing { region: Region },
+    /// `exposing (Type(x))` — trying to expose specific variants, not `(..)`.
+    ExposingTypePrivacy { region: Region },
+    /// A `port module` declaration missing the `module` keyword.
+    UnfinishedPortModule { region: Region },
+    /// A type annotation whose name differs from the following definition's name.
+    NameMismatch {
+        region: Region,
+        highlight: Region,
+        annotation: String,
+        definition: String,
+    },
+    /// A definition stuck on a stray token that is neither an argument nor `=`.
+    ProblemInDefinition { region: Region, name: String },
 }
 
 impl SyntaxError {
@@ -106,7 +135,19 @@ impl SyntaxError {
             | SyntaxError::TypeAliasEquals { region }
             | SyntaxError::CustomEquals { region }
             | SyntaxError::CustomBar { region }
-            | SyntaxError::ReservedWord { region, .. } => *region,
+            | SyntaxError::ReservedWord { region, .. }
+            | SyntaxError::UnfinishedCase { region }
+            | SyntaxError::UnfinishedLet { region }
+            | SyntaxError::UnfinishedTuple { region }
+            | SyntaxError::OperatorFunction { region }
+            | SyntaxError::RecordAccessor { region }
+            | SyntaxError::ExpectingImportName { region }
+            | SyntaxError::ExpectingImportAlias { region }
+            | SyntaxError::ProblemInExposing { region }
+            | SyntaxError::ExposingTypePrivacy { region }
+            | SyntaxError::UnfinishedPortModule { region }
+            | SyntaxError::NameMismatch { region, .. }
+            | SyntaxError::ProblemInDefinition { region, .. } => *region,
         }
     }
 
@@ -271,18 +312,7 @@ impl SyntaxError {
                 *region,
                 "I am parsing a `case` expression right now, but this arrow is confusing me:",
                 "Maybe the `of` keyword is missing on a previous line?",
-                vec![
-                    Section::Para(
-                        "Note: Here is an example of a valid `case` expression for reference."
-                            .to_string(),
-                    ),
-                    Section::Block(CASE_EXAMPLE.to_string()),
-                    Section::Para(
-                        "Notice the indentation. Each pattern is aligned, and each branch is \
-                         indented a bit more than the corresponding pattern. That is important!"
-                            .to_string(),
-                    ),
-                ],
+                case_notes(),
             ),
             SyntaxError::CaseArrow { region } => snippet_spanned(
                 "MISSING ARROW".to_string(),
@@ -551,8 +581,214 @@ impl SyntaxError {
                     ),
                 ],
             ),
+            SyntaxError::UnfinishedCase { region } => snippet(
+                "UNFINISHED CASE",
+                *region,
+                "I was partway through parsing a `case` expression, but I got stuck here:",
+                "I was expecting to see a pattern next.",
+                case_notes(),
+            ),
+            SyntaxError::UnfinishedLet { region } => snippet(
+                "UNFINISHED LET",
+                *region,
+                "I was partway through parsing a `let` expression, but I got stuck here:",
+                "I was expecting a value to be defined here.",
+                vec![
+                    Section::Para(
+                        "Note: Here is an example with a valid `let` expression for reference:"
+                            .to_string(),
+                    ),
+                    Section::Block(
+                        "    viewPerson person =\n      let\n        fullName =\n          \
+                         person.firstName ++ \" \" ++ person.lastName\n      in\n      div [] [ \
+                         text fullName ]"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Here we defined a `viewPerson` function that turns a person into some \
+                         HTML. We use a `let` expression to define the `fullName` we want to \
+                         show. Notice the indentation! The `fullName` is indented more than the \
+                         `let` keyword, and the actual value of `fullName` is indented a bit \
+                         more than that. That is important!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnfinishedTuple { region } => snippet(
+                "UNFINISHED TUPLE",
+                *region,
+                "I think I am in the middle of parsing a tuple. I just saw a comma, so I was \
+                 expecting to see an expression next.",
+                "A tuple looks like (3,4) or (\"Tom\",42), so I think there is an expression \
+                 missing here?",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe you \
+                     have an expression but it is not indented enough?"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::OperatorFunction { region } => snippet(
+                "UNFINISHED OPERATOR FUNCTION",
+                *region,
+                "I was expecting a closing parenthesis here:",
+                "Try adding a ) to see if that helps!",
+                vec![Section::Para(
+                    "Note: I think I am parsing an operator function right now, so I am \
+                     expecting to see something like (+) or (&&) where an operator is \
+                     surrounded by parentheses with no extra spaces."
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::RecordAccessor { region } => snippet(
+                "EXPECTING RECORD ACCESSOR",
+                *region,
+                "I am trying to parse a record accessor here:",
+                "Something like .name or .price that accesses a value from a record.",
+                vec![Section::Para(
+                    "Note: Record field names must start with a lower case letter!".to_string(),
+                )],
+            ),
+            SyntaxError::ExpectingImportName { region } => snippet(
+                "EXPECTING IMPORT NAME",
+                *region,
+                "I was parsing an `import` until I got stuck here:",
+                "I was expecting to see a module name next, like in these examples:",
+                vec![
+                    Section::Block(
+                        "    import Dict\n    import Maybe\n    import Html.Attributes as A\n    \
+                         import Json.Decode exposing (..)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Notice that the module names all start with capital letters. That is \
+                         required!"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Read <https://elm-lang.org/0.19.1/imports> to learn more.".to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::ExpectingImportAlias { region } => snippet(
+                "EXPECTING IMPORT ALIAS",
+                *region,
+                "I was parsing an `import` until I got stuck here:",
+                "I was expecting to see an alias next, like in these examples:",
+                vec![
+                    Section::Block(
+                        "    import Html.Attributes as Attr\n    import WebGL.Texture as \
+                         Texture\n    import Json.Decode as D"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Notice that the alias always starts with a capital letter. That is \
+                         required!"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Read <https://elm-lang.org/0.19.1/imports> to learn more.".to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::ProblemInExposing { region } => snippet(
+                "PROBLEM IN EXPOSING",
+                *region,
+                "I got stuck while parsing these exposed values:",
+                "I do not have an exact recommendation, so here are some valid examples of \
+                 `exposing` for reference:",
+                vec![
+                    Section::Block(
+                        "    import Html exposing (..)\n    import Basics exposing (Int, Float, \
+                         Bool(..), (+), not, sqrt)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "These examples show how to expose types, variants, operators, and \
+                         functions. Everything should be some permutation of these examples, \
+                         just with different names."
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::ExposingTypePrivacy { region } => snippet(
+                "PROBLEM EXPOSING CUSTOM TYPE VARIANTS",
+                *region,
+                "It looks like you are trying to expose the variants of a custom type:",
+                "You need to write something like Status(..) or Entity(..) though. It is all or \
+                 nothing, otherwise `case` expressions could miss a variant and crash!",
+                vec![Section::Para(
+                    "Note: It is often best to keep the variants hidden! If someone pattern \
+                     matches on the variants, it is a MAJOR change if any new variants are \
+                     added. Suddenly their `case` expressions do not cover all variants! So if \
+                     you do not need people to pattern match, keep the variants hidden and \
+                     expose functions to construct values of this type. This way you can add \
+                     new variants as a MINOR change!"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::UnfinishedPortModule { region } => snippet(
+                "UNFINISHED PORT MODULE DECLARATION",
+                *region,
+                "I am parsing an `port module` declaration, but I got stuck here:",
+                "Here are some examples of valid `port module` declarations:",
+                vec![
+                    Section::Block(
+                        "    port module WebSockets exposing (send, listen, keepAlive)\n    \
+                         port module Maps exposing (Location, goto)"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Note: Read <https://elm-lang.org/0.19.1/ports> for more help."
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::NameMismatch {
+                region,
+                highlight,
+                annotation,
+                definition,
+            } => snippet_spanned(
+                "NAME MISMATCH".to_string(),
+                *region,
+                *highlight,
+                format!(
+                    "I just saw a type annotation for `{annotation}`, but it is followed by a \
+                     definition for `{definition}`:"
+                ),
+                "These names do not match! Is there a typo?".to_string(),
+                vec![Section::Block(format!("    {definition} -> {annotation}"))],
+            ),
+            SyntaxError::ProblemInDefinition { region, name } => snippet_owned(
+                "PROBLEM IN DEFINITION".to_string(),
+                *region,
+                format!("I got stuck while parsing the `{name}` definition:"),
+                "I am not sure what is going wrong exactly, so here is a valid definition (with \
+                 an optional type annotation) for reference:"
+                    .to_string(),
+                vec![
+                    Section::Block(DEF_EXAMPLE.to_string()),
+                    Section::Para("Try to use that format!".to_string()),
+                ],
+            ),
         }
     }
+}
+
+/// The example + note shared by the `case` diagnostics (UNEXPECTED ARROW and
+/// UNFINISHED CASE).
+fn case_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Note: Here is an example of a valid `case` expression for reference.".to_string(),
+        ),
+        Section::Block(CASE_EXAMPLE.to_string()),
+        Section::Para(
+            "Notice the indentation. Each pattern is aligned, and each branch is indented a bit \
+             more than the corresponding pattern. That is important!"
+                .to_string(),
+        ),
+    ]
 }
 
 /// The multi-line record example elm shows in several record diagnostics.

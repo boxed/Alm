@@ -24,20 +24,26 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
     let mut is_port_module = false;
     // Region of the `module` keyword, for the UNEXPECTED PORTS diagnostic.
     let mut module_kw = Region::ZERO;
-    let (name, exports) = if p.src_from_here().starts_with(b"port module") {
+    let starts_port =
+        p.src_from_here().starts_with(b"port") && !p.peek_at(4).is_some_and(super::is_inner_char);
+    let (name, exports) = if starts_port {
         is_port_module = true;
         p.keyword("port")?;
-        p.chomp_and_check_indent("I was expecting `module` after `port`")?;
+        let after_port = p.position();
+        p.chomp_and_check_indent("").map_err(|_| unfinished_port_module(after_port))?;
+        let module_stuck = p.position();
+        if !p.peek_keyword("module") {
+            return Err(unfinished_port_module(module_stuck));
+        }
         chomp_header(p)?
     } else if p.src_from_here().starts_with(b"module") {
         let a = p.position();
         module_kw = Region::new(a, crate::reporting::Position::new(a.row, a.col + 6));
         chomp_header(p)?
     } else {
-        (
-            None,
-            Located::new(Region::ZERO, Exposing::Open),
-        )
+        // alm intentionally diverges from elm here: a headerless module is
+        // allowed and defaults to `Main` (see `headerless_module_defaults_to_main`).
+        (None, Located::new(Region::ZERO, Exposing::Open))
     };
 
     p.chomp_space()?;
@@ -107,8 +113,9 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
                 // Only a failure to even parse the definition name (error anchored
                 // at the start of the line) is a WEIRD DECLARATION; a failure
                 // further in — a missing body, a bad expression — keeps its own
-                // report.
-                if e.region.start == decl_start {
+                // report. A structured syntax error (e.g. NAME MISMATCH) already
+                // has its own exact report even when anchored at the line start.
+                if e.syntax.is_none() && e.region.start == decl_start {
                     ParseError::from_syntax(
                         crate::reporting::syntax::SyntaxError::WeirdDeclaration {
                             region: Region::new(decl_start, decl_start),
@@ -193,6 +200,13 @@ fn chomp_module_name(p: &mut Parser) -> PResult<Name> {
     }
 }
 
+/// A `port module` declaration that never reached its `module` keyword.
+fn unfinished_port_module(pos: crate::reporting::Position) -> ParseError {
+    ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedPortModule {
+        region: Region::new(pos, pos),
+    })
+}
+
 /// An `import` that got stuck, underlined at `pos`.
 fn import_stuck(pos: crate::reporting::Position) -> ParseError {
     ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedImport {
@@ -205,9 +219,12 @@ fn chomp_import(p: &mut Parser) -> PResult<Import> {
     let name_stuck = p.position();
     p.chomp_and_check_indent("")
         .map_err(|_| import_stuck(name_stuck))?;
-    let name = p
-        .located(|p| chomp_module_name(p))
-        .map_err(|_| import_stuck(name_stuck))?;
+    let name_pos = p.position();
+    let name = p.located(|p| chomp_module_name(p)).map_err(|_| {
+        ParseError::from_syntax(crate::reporting::syntax::SyntaxError::ExpectingImportName {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
 
     let mut alias = None;
     let mut exposing = Exposing::Explicit(vec![]);
@@ -218,10 +235,12 @@ fn chomp_import(p: &mut Parser) -> PResult<Import> {
         let as_stuck = p.position();
         p.chomp_and_check_indent("")
             .map_err(|_| import_stuck(as_stuck))?;
-        alias = Some(
-            p.upper_name("an alias like `JD`")
-                .map_err(|_| import_stuck(as_stuck))?,
-        );
+        let alias_pos = p.position();
+        alias = Some(p.upper_name("an alias like `JD`").map_err(|_| {
+            ParseError::from_syntax(crate::reporting::syntax::SyntaxError::ExpectingImportAlias {
+                region: Region::new(alias_pos, alias_pos),
+            })
+        })?);
     } else {
         p.restore(snapshot);
     }
@@ -319,12 +338,26 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
                     name,
                     Privacy::Public(Region::new(priv_start, end)),
                 ))
+            } else if p.peek() == Some(b'(') {
+                // `Type(` but not `Type(..)` — an attempt to expose specific
+                // variants, which Elm does not allow (it is `(..)` or nothing).
+                p.bump(1);
+                let inside = p.position();
+                Err(ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::ExposingTypePrivacy {
+                        region: Region::new(inside, inside),
+                    },
+                ))
             } else {
                 p.restore(snapshot);
                 Ok(Exposed::Upper(name, Privacy::Private))
             }
         }
-        _ => Err(p.error("I was expecting a name or operator to expose")),
+        _ => Err(ParseError::from_syntax(
+            crate::reporting::syntax::SyntaxError::ProblemInExposing {
+                region: p.region_here(),
+            },
+        )),
     }
 }
 

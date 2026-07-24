@@ -1,0 +1,12 @@
+-- UNFINISHED OPERATOR FUNCTION ----------------------------------- src/Main.elm
+
+I was expecting a closing parenthesis here:
+
+2| x = (+
+         ^
+Try adding a ) to see if that helps!
+
+Note: I think I am parsing an operator function right now, so I am expecting to
+see something like (+) or (&&) where an operator is surrounded by parentheses
+with no extra spaces.
+

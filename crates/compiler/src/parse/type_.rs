@@ -82,6 +82,7 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Type> {
         "I was expecting another type",
         |x| x.region.end,
         |r| ParseError::new("I was expecting a `,` or `)` in this type", r),
+        |r| ParseError::new("I was expecting another type", r),
     )?;
     if rest.is_empty() {
         Ok(first)

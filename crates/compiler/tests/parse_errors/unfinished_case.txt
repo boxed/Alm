@@ -1,0 +1,20 @@
+-- UNFINISHED CASE ------------------------------------------------ src/Main.elm
+
+I was partway through parsing a `case` expression, but I got stuck here:
+
+2| x = case y of
+                ^
+I was expecting to see a pattern next.
+
+Note: Here is an example of a valid `case` expression for reference.
+
+    case maybeWidth of
+      Just width ->
+        width + 200
+
+      Nothing ->
+        400
+
+Notice the indentation. Each pattern is aligned, and each branch is indented a
+bit more than the corresponding pattern. That is important!
+

@@ -118,6 +118,7 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Pattern> {
         "I was expecting another pattern",
         |x| x.region.end,
         |r| ParseError::new("I was expecting a `,` or `)` in this pattern", r),
+        |r| ParseError::new("I was expecting another pattern", r),
     )?;
     if rest.is_empty() {
         Ok(first)

@@ -1,0 +1,13 @@
+-- UNFINISHED TUPLE ----------------------------------------------- src/Main.elm
+
+I think I am in the middle of parsing a tuple. I just saw a comma, so I was
+expecting to see an expression next.
+
+2| x = (1,
+          ^
+A tuple looks like (3,4) or ("Tom",42), so I think there is an expression
+missing here?
+
+Note: I can get confused by indentation in cases like this, so maybe you have an
+expression but it is not indented enough?
+

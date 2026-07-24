@@ -1,0 +1,16 @@
+-- PROBLEM IN EXPOSING -------------------------------------------- src/Main.elm
+
+I got stuck while parsing these exposed values:
+
+1| module Main exposing (5)
+                         ^
+I do not have an exact recommendation, so here are some valid examples of
+`exposing` for reference:
+
+    import Html exposing (..)
+    import Basics exposing (Int, Float, Bool(..), (+), not, sqrt)
+
+These examples show how to expose types, variants, operators, and functions.
+Everything should be some permutation of these examples, just with different
+names.
+

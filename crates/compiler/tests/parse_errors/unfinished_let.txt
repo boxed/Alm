@@ -1,0 +1,22 @@
+-- UNFINISHED LET ------------------------------------------------- src/Main.elm
+
+I was partway through parsing a `let` expression, but I got stuck here:
+
+2| x = let
+          ^
+I was expecting a value to be defined here.
+
+Note: Here is an example with a valid `let` expression for reference:
+
+    viewPerson person =
+      let
+        fullName =
+          person.firstName ++ " " ++ person.lastName
+      in
+      div [] [ text fullName ]
+
+Here we defined a `viewPerson` function that turns a person into some HTML. We
+use a `let` expression to define the `fullName` we want to show. Notice the
+indentation! The `fullName` is indented more than the `let` keyword, and the
+actual value of `fullName` is indented a bit more than that. That is important!
+
