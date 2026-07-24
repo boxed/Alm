@@ -1,6 +1,6 @@
 //! Port of `Parse.Type`.
 
-use super::{IndentCheck, PResult, Parser};
+use super::{IndentCheck, PResult, ParseError, Parser};
 use crate::ast::source::{Type, Type_};
 use crate::reporting::{Located, Region};
 
@@ -117,9 +117,8 @@ fn record(p: &mut Parser) -> PResult<Type> {
             IndentCheck::Chomp,
             field,
             &mut fields,
-            "I was in the middle of a record type",
             "I was expecting another field",
-            "I was expecting a `,` or `}` in this record type",
+            |r| ParseError::new("I was expecting a `,` or `}` in this record type", r),
         )?;
         return Ok(Located::at(
             start,
@@ -138,9 +137,8 @@ fn record(p: &mut Parser) -> PResult<Type> {
         IndentCheck::Chomp,
         field,
         &mut fields,
-        "I was in the middle of a record type",
         "I was expecting another field",
-        "I was expecting a `,` or `}` in this record type",
+        |r| ParseError::new("I was expecting a `,` or `}` in this record type", r),
     )?;
     Ok(Located::at(start, p.position(), Type_::Record(fields, None)))
 }

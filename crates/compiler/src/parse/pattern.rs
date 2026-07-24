@@ -1,6 +1,6 @@
 //! Port of `Parse.Pattern`.
 
-use super::{IndentCheck, NumberLit, PResult, Parser};
+use super::{IndentCheck, NumberLit, PResult, ParseError, Parser};
 use crate::ast::source::{Pattern, Pattern_};
 use crate::reporting::{Located, Region};
 
@@ -75,9 +75,8 @@ fn record(p: &mut Parser) -> PResult<Pattern> {
         IndentCheck::Chomp,
         |p| p.located(|p| p.lower_name("a record field name")),
         &mut fields,
-        "I was in the middle of a record pattern",
         "I was expecting a field name",
-        "I was expecting a `,` or `}` in this record pattern",
+        |r| ParseError::new("I was expecting a `,` or `}` in this record pattern", r),
     )?;
     Ok(Located::at(start, p.position(), Pattern_::Record(fields)))
 }
@@ -96,9 +95,8 @@ fn list(p: &mut Parser) -> PResult<Pattern> {
         IndentCheck::Chomp,
         expression,
         &mut entries,
-        "I was in the middle of a list pattern",
         "I was expecting another pattern",
-        "I was expecting a `,` or `]` in this list pattern",
+        |r| ParseError::new("I was expecting a `,` or `]` in this list pattern", r),
     )?;
     Ok(Located::at(start, p.position(), Pattern_::List(entries)))
 }

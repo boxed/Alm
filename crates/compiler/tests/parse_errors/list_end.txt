@@ -1,0 +1,19 @@
+-- UNFINISHED LIST ------------------------------------------------ src/Main.elm
+
+I cannot find the end of this list:
+
+4|     [ 1, 2
+             ^
+You can just add a closing ] right here, and I will be all set!
+
+Note: I may be confused by indentation. For example, if you are trying to define
+a list across multiple lines, I recommend using this format:
+
+    [ "Alice"
+    , "Bob"
+    , "Chuck"
+    ]
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+

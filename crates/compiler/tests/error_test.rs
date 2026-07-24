@@ -304,7 +304,7 @@ fn expression_parse_errors() {
         "x =\n    case 1 of\n        1 ->\n            2\n        oops~\n",
         "",
     );
-    expect("x = [ 1, 2\ny = 3\n", "in the middle of a list");
+    expect("x = [ 1, 2\ny = 3\n", "I cannot find the end of this list");
     expect("x = ( 1, 2\ny = 3\n", "");
     expect("x = { a = 1 b = 2 }\n", "I was expecting a `,` or `}`");
     expect("x = { a 1 }\n", "I was expecting `=` or `|`");

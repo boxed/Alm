@@ -135,6 +135,22 @@ fn parse_glsl(src: &str) -> GlslInfo {
 
 // LISTS
 
+/// Repoint an `UNFINISHED LIST` error at the end of the last parsed entry (or
+/// the opening `[` if the list is empty), matching where elm places the caret —
+/// the entry parser chomps trailing whitespace, so the raw stuck position can
+/// land on a later line.
+fn unfinished_at_last(e: super::ParseError, entries: &[Expr], start: Position) -> super::ParseError {
+    match &e.syntax {
+        Some(crate::reporting::syntax::SyntaxError::UnfinishedList { .. }) => {
+            let end = entries.last().map(|x| x.region.end).unwrap_or(start);
+            super::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedList {
+                region: crate::reporting::Region::new(end, end),
+            })
+        }
+        _ => e,
+    }
+}
+
 fn list(p: &mut Parser) -> PResult<Expr> {
     let start = p.position();
     p.eat_byte(b'[', "a list")?;
@@ -149,10 +165,14 @@ fn list(p: &mut Parser) -> PResult<Expr> {
         IndentCheck::NoChomp,
         expression,
         &mut entries,
-        "I was in the middle of a list and need `,` or `]` to be indented",
         "I was expecting another list entry",
-        "I was expecting a `,` or `]` in this list",
-    )?;
+        |r| {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedList { region: r },
+            )
+        },
+    )
+    .map_err(|e| unfinished_at_last(e, &entries, start))?;
     Ok(Located::at(start, p.position(), Expr_::List(entries)))
 }
 
@@ -244,9 +264,8 @@ fn record(p: &mut Parser) -> PResult<Expr> {
                 IndentCheck::NoChomp,
                 field,
                 &mut fields,
-                "I was in the middle of a record update",
                 "I was expecting another field",
-                "I was expecting a `,` or `}` in this record",
+                |r| crate::parse::ParseError::new("I was expecting a `,` or `}` in this record", r),
             )?;
             Ok(Located::at(start, p.position(), Expr_::Update(starter, fields)))
         }

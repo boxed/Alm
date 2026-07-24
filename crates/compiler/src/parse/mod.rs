@@ -741,15 +741,18 @@ impl<'a> Parser<'a> {
         top_check: IndentCheck,
         mut item: impl FnMut(&mut Parser<'a>) -> PResult<T>,
         items: &mut Vec<T>,
-        middle_msg: &str,
         after_sep_msg: &str,
-        close_or_sep_err: &str,
+        stuck: impl Fn(Region) -> ParseError,
     ) -> PResult<()> {
         loop {
-            match top_check {
-                IndentCheck::Chomp => self.chomp_and_check_indent(middle_msg)?,
-                IndentCheck::NoChomp => self.check_indent(middle_msg)?,
-            }
+            let checked = match top_check {
+                IndentCheck::Chomp => self.chomp_and_check_indent(""),
+                IndentCheck::NoChomp => self.check_indent(""),
+            };
+            // A failure finding the next `,`/close (dedented or an unexpected
+            // token) is a "collection not finished" error, distinct from an
+            // error inside an item, which propagates unchanged.
+            checked.map_err(|_| stuck(self.region_here()))?;
             match self.peek() {
                 Some(b',') => {
                     self.bump(1);
@@ -760,7 +763,7 @@ impl<'a> Parser<'a> {
                     self.bump(1);
                     return Ok(());
                 }
-                _ => return Err(self.error(close_or_sep_err.to_string())),
+                _ => return Err(stuck(self.region_here())),
             }
         }
     }

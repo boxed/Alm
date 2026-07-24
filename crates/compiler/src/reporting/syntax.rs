@@ -18,6 +18,8 @@ pub enum SyntaxError {
     CharEnd { region: Region },
     /// An empty/single-quoted string (`''`) — elm wants double quotes.
     CharDoubleQuotes { region: Region },
+    /// A list literal with no closing `]`.
+    UnfinishedList { region: Region },
 }
 
 impl SyntaxError {
@@ -28,7 +30,8 @@ impl SyntaxError {
             | SyntaxError::IfElse { region }
             | SyntaxError::WeirdHex { region }
             | SyntaxError::CharEnd { region }
-            | SyntaxError::CharDoubleQuotes { region } => *region,
+            | SyntaxError::CharDoubleQuotes { region }
+            | SyntaxError::UnfinishedList { region } => *region,
         }
     }
 
@@ -78,6 +81,28 @@ impl SyntaxError {
                          uses single quotes for individual characters like 'a' and 'ø'. This \
                          distinction helps with code like (String.any (\\c -> c == 'X') \
                          \"90210\") where you are inspecting individual characters."
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnfinishedList { region } => snippet(
+                "UNFINISHED LIST",
+                *region,
+                "I cannot find the end of this list:",
+                "You can just add a closing ] right here, and I will be all set!",
+                vec![
+                    Section::Para(
+                        "Note: I may be confused by indentation. For example, if you are \
+                         trying to define a list across multiple lines, I recommend using \
+                         this format:"
+                            .to_string(),
+                    ),
+                    Section::Block(
+                        "    [ \"Alice\"\n    , \"Bob\"\n    , \"Chuck\"\n    ]".to_string(),
+                    ),
+                    Section::Para(
+                        "Notice that each line starts with some indentation. Usually two or \
+                         four spaces. This is the stylistic convention in the Elm ecosystem."
                             .to_string(),
                     ),
                 ],

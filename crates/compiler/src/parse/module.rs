@@ -205,9 +205,8 @@ fn chomp_exposing(p: &mut Parser) -> PResult<Exposing> {
         IndentCheck::Chomp,
         chomp_exposed,
         &mut exposed,
-        "I was in the middle of an exposing list",
         "I was expecting another name to expose",
-        "I was expecting a `,` or `)` in this exposing list",
+        |r| ParseError::new("I was expecting a `,` or `)` in this exposing list", r),
     )?;
     Ok(Exposing::Explicit(exposed))
 }
