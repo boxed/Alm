@@ -1,0 +1,8 @@
+-- UNEXPECTED SYMBOL ---------------------------------------------- src/Main.elm
+
+I got stuck on this symbol:
+
+2| x = 1 @ 2
+         ^
+It is not used for anything in Elm syntax. Try removing it?
+

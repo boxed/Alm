@@ -1,0 +1,13 @@
+-- UNEXPECTED COMMA ----------------------------------------------- src/Main.elm
+
+I got stuck on this comma:
+
+2| x = 1 , 2
+         ^
+I do not think I am parsing a list or tuple right now. Try deleting the comma?
+
+Note: If this is supposed to be part of a list, the problem may be a bit
+earlier. Perhaps the opening [ is missing? Or perhaps some value in the list has
+an extra closing ] that is making me think the list ended earlier? The same
+kinds of things could be going wrong if this is supposed to be a tuple.
+

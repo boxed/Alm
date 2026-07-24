@@ -63,9 +63,14 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
     let mut ports: Vec<Port> = Vec::new();
 
     while !p.is_at_end() {
-        p.check_fresh_line(
+        if let Err(e) = p.check_fresh_line(
             "I was expecting a new top-level definition here, starting at the beginning of the line.",
-        )?;
+        ) {
+            // A leftover token that is not at the start of a fresh line: classify
+            // the stuck character (`;`, `,`, `=`, `$`, backtick, or a stray
+            // symbol) into its specific report; otherwise keep the generic error.
+            return Err(classify_leftover(p, &values).unwrap_or(e));
+        }
         if p.peek_keyword("type") {
             let start = p.position();
             p.keyword("type")?;
@@ -109,18 +114,22 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
             ports.push(Port { name, tipe });
         } else {
             let decl_start = p.position();
+            // Classify the stuck token before parsing (the parser cursor moves as
+            // it fails): a capital letter or a stray symbol at the start of the
+            // line has its own report; otherwise it is a WEIRD DECLARATION.
+            let classified = classify_decl_start(p, decl_start);
             let def = expr::definition(p).map_err(|e| {
                 // Only a failure to even parse the definition name (error anchored
-                // at the start of the line) is a WEIRD DECLARATION; a failure
+                // at the start of the line) is a declaration-start error; a failure
                 // further in — a missing body, a bad expression — keeps its own
                 // report. A structured syntax error (e.g. NAME MISMATCH) already
                 // has its own exact report even when anchored at the line start.
                 if e.syntax.is_none() && e.region.start == decl_start {
-                    ParseError::from_syntax(
+                    ParseError::from_syntax(classified.unwrap_or(
                         crate::reporting::syntax::SyntaxError::WeirdDeclaration {
                             region: Region::new(decl_start, decl_start),
                         },
-                    )
+                    ))
                 } else {
                     e
                 }
@@ -464,6 +473,74 @@ fn chomp_ctor(p: &mut Parser) -> PResult<(Located<Name>, Vec<crate::ast::source:
     })?;
     let args = p.chomp_indented_terms(type_::term);
     Ok((name, args))
+}
+
+/// `toDeclStartReport`: classify a token stuck at the start of a declaration
+/// line (`decl_start`, always column 1). A capital letter suggests a lower-cased
+/// name; a stray non-binop symbol reports the offending character. Returns
+/// `None` when the token is neither (the caller falls back to WEIRD DECLARATION).
+fn classify_decl_start(
+    p: &Parser,
+    decl_start: crate::reporting::Position,
+) -> Option<crate::reporting::syntax::SyntaxError> {
+    use crate::reporting::syntax::SyntaxError;
+    let region = Region::new(decl_start, decl_start);
+    let c = p.peek()?;
+    if c.is_ascii_uppercase() {
+        // Build the lower-cased suggestion from the whole upper identifier
+        // (`Char.toLower c : takeWhile isInner cs`).
+        let mut lower_name = String::new();
+        lower_name.push((c as char).to_ascii_lowercase());
+        let mut i = 1;
+        while let Some(b) = p.peek_at(i) {
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                lower_name.push(b as char);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        return Some(SyntaxError::UnexpectedCapital { region, lower_name });
+    }
+    // `whatIsNext` classifies binop chars as `Operator` (which falls through to
+    // WEIRD DECLARATION), so only the remaining `Other`-category symbols in
+    // elm's declaration-start list report UNEXPECTED SYMBOL.
+    const DECL_SYMBOLS: &[u8] = b"({[+-*/^&|\"'!@#$%";
+    if DECL_SYMBOLS.contains(&c) && !super::is_binop_char(c) {
+        return Some(SyntaxError::UnexpectedSymbolDecl {
+            region,
+            symbol: c as char,
+        });
+    }
+    None
+}
+
+/// `toWeirdEndReport` (plus `BadEquals`): classify a leftover token that appears
+/// after a declaration but not at the start of a fresh line. Returns `None` for
+/// tokens elm does not classify here (the caller keeps the generic error).
+fn classify_leftover(p: &Parser, values: &[Located<Value>]) -> Option<ParseError> {
+    use crate::reporting::syntax::SyntaxError;
+    let region = p.region_here();
+    let c = p.peek()?;
+    let se = match c {
+        b';' => SyntaxError::UnexpectedSemicolon { region },
+        b',' => SyntaxError::UnexpectedComma { region },
+        b'`' => SyntaxError::UnexpectedBacktick { region },
+        b'$' => SyntaxError::UnexpectedDollar { region },
+        // `!` and `%` are binop chars (so `whatIsNext` makes them `Operator`);
+        // only `#`, `@`, `~` reach elm's "I got stuck on this symbol" branch.
+        b'#' | b'@' | b'~' => SyntaxError::UnexpectedSymbolMid { region },
+        // A lone `=` (not the start of `==` etc.) is `BadEquals`; carry the
+        // preceding definition's name for the indentation note.
+        b'=' if !p.peek_at(1).is_some_and(super::is_binop_char) => {
+            let name = values
+                .last()
+                .map(|v| v.value.name.value.as_str().to_string());
+            SyntaxError::UnexpectedEquals { region, name }
+        }
+        _ => return None,
+    };
+    Some(ParseError::from_syntax(se))
 }
 
 // INFIX DECLARATIONS

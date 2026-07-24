@@ -146,6 +146,25 @@ pub enum SyntaxError {
     BadUnicodeEscape { region: Region, problem: BadUnicode },
     /// A literal tab character (tabs are not allowed in Elm source).
     NoTabs { region: Region },
+    /// A declaration starting with a capital letter (`toDeclStartReport`'s
+    /// `Upper` branch); `lower_name` is the suggested lower-cased name.
+    UnexpectedCapital { region: Region, lower_name: String },
+    /// A declaration starting with a stray symbol (`toDeclStartReport`'s `Other`
+    /// branch); `symbol` is the offending character.
+    UnexpectedSymbolDecl { region: Region, symbol: char },
+    /// A leftover symbol (`#`, `@`, `~`) after a declaration.
+    UnexpectedSymbolMid { region: Region },
+    /// A leftover `$` after a declaration (`toWeirdEndReport`'s dollar branch).
+    UnexpectedDollar { region: Region },
+    /// A leftover backtick after a declaration (UNEXPECTED CHARACTER).
+    UnexpectedBacktick { region: Region },
+    /// A leftover `;` after a declaration.
+    UnexpectedSemicolon { region: Region },
+    /// A leftover `,` after a declaration.
+    UnexpectedComma { region: Region },
+    /// A leftover `=` after a declaration (`BadEquals`); `name` is the preceding
+    /// definition's name, if any, for the indentation note.
+    UnexpectedEquals { region: Region, name: Option<String> },
 }
 
 /// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
@@ -233,6 +252,14 @@ impl SyntaxError {
             | SyntaxError::UnknownEscape { region }
             | SyntaxError::BadUnicodeEscape { region, .. }
             | SyntaxError::NoTabs { region } => *region,
+            | SyntaxError::UnexpectedCapital { region, .. }
+            | SyntaxError::UnexpectedSymbolDecl { region, .. }
+            | SyntaxError::UnexpectedSymbolMid { region }
+            | SyntaxError::UnexpectedDollar { region }
+            | SyntaxError::UnexpectedBacktick { region }
+            | SyntaxError::UnexpectedSemicolon { region }
+            | SyntaxError::UnexpectedComma { region }
+            | SyntaxError::UnexpectedEquals { region, .. } => *region,
         }
     }
 
@@ -1116,6 +1143,136 @@ impl SyntaxError {
                         .to_string(),
                 )],
             ),
+            SyntaxError::UnexpectedCapital { region, lower_name } => snippet_owned(
+                "UNEXPECTED CAPITAL LETTER".to_string(),
+                *region,
+                "Declarations always start with a lower-case letter, so I am getting stuck \
+                 here:"
+                    .to_string(),
+                format!("Try a name like {lower_name} instead?"),
+                vec![
+                    Section::Para(
+                        "Note: Here are a couple valid declarations for reference:".to_string(),
+                    ),
+                    Section::Block(format!(
+                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
+                    )),
+                    Section::Para(
+                        "Notice that they always start with a lower-case letter. \
+                         Capitalization matters!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnexpectedSymbolDecl { region, symbol } => snippet_owned(
+                "UNEXPECTED SYMBOL".to_string(),
+                *region,
+                format!("I am getting stuck because this line starts with the {symbol} symbol:"),
+                "When a line has no spaces at the beginning, I expect it to be a declaration \
+                 like one of these:"
+                    .to_string(),
+                vec![
+                    Section::Block(format!(
+                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
+                    )),
+                    Section::Para(
+                        "If this is not supposed to be a declaration, try adding some spaces \
+                         before it?"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnexpectedSymbolMid { region } => snippet(
+                "UNEXPECTED SYMBOL",
+                *region,
+                "I got stuck on this symbol:",
+                "It is not used for anything in Elm syntax. Try removing it?",
+                vec![],
+            ),
+            SyntaxError::UnexpectedDollar { region } => snippet(
+                "UNEXPECTED SYMBOL",
+                *region,
+                "I got stuck on this dollar sign:",
+                "It is not used for anything in Elm syntax. Are you coming from a language \
+                 where dollar signs can be used in variable names? If so, try a name that (1) \
+                 starts with a letter and (2) only contains letters, numbers, and underscores.",
+                vec![],
+            ),
+            SyntaxError::UnexpectedBacktick { region } => snippet(
+                "UNEXPECTED CHARACTER",
+                *region,
+                "I got stuck on this character:",
+                "It is not used for anything in Elm syntax. It is used for multi-line strings \
+                 in some languages though, so if you want a string that spans multiple lines, \
+                 you can use Elm's multi-line string syntax like this:",
+                vec![
+                    Section::Block(
+                        "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
+                         double quotes\n    - write whatever you want\n    - no need to \
+                         escape newlines or double quotes\n    - end with triple double \
+                         quotes\n    \"\"\""
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Otherwise I do not know what is going on! Try removing the character?"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::UnexpectedSemicolon { region } => snippet(
+                "UNEXPECTED SEMICOLON",
+                *region,
+                "I got stuck on this semicolon:",
+                "Try removing it?",
+                vec![Section::Para(
+                    "Note: Some languages require semicolons at the end of each statement. \
+                     These are often called C-like languages, and they usually share a lot of \
+                     language design choices. (E.g. side-effects, for loops, etc.) Elm manages \
+                     effects with commands and subscriptions instead, so there is no special \
+                     syntax for \"statements\" and therefore no need to use semicolons to \
+                     separate them. I think this will make more sense as you work through \
+                     <https://guide.elm-lang.org> though!"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::UnexpectedComma { region } => snippet(
+                "UNEXPECTED COMMA",
+                *region,
+                "I got stuck on this comma:",
+                "I do not think I am parsing a list or tuple right now. Try deleting the comma?",
+                vec![Section::Para(
+                    "Note: If this is supposed to be part of a list, the problem may be a bit \
+                     earlier. Perhaps the opening [ is missing? Or perhaps some value in the \
+                     list has an extra closing ] that is making me think the list ended \
+                     earlier? The same kinds of things could be going wrong if this is \
+                     supposed to be a tuple."
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::UnexpectedEquals { region, name } => {
+                let note = match name {
+                    Some(n) => format!(
+                        "Note: I may be getting confused by your indentation. I think I am \
+                         still parsing the `{n}` definition. Is this supposed to be part of a \
+                         definition after that? If so, the problem may be a bit before the \
+                         equals sign. I need all definitions to be indented exactly the same \
+                         amount, so the problem may be that this new definition has too many \
+                         spaces in front of it."
+                    ),
+                    None => "Note: I may be getting confused by your indentation. I need all \
+                             definitions to be indented exactly the same amount, so if this is \
+                             meant to be a new definition, it may have too many spaces in \
+                             front of it."
+                        .to_string(),
+                };
+                snippet_owned(
+                    "UNEXPECTED EQUALS".to_string(),
+                    *region,
+                    "I was not expecting to see this equals sign:".to_string(),
+                    "Maybe you want == instead? To check if two values are equal?".to_string(),
+                    vec![Section::Para(note)],
+                )
+            }
         }
     }
 }

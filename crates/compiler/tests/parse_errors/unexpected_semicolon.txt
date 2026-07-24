@@ -1,0 +1,15 @@
+-- UNEXPECTED SEMICOLON ------------------------------------------- src/Main.elm
+
+I got stuck on this semicolon:
+
+2| x = 1 ; 2
+         ^
+Try removing it?
+
+Note: Some languages require semicolons at the end of each statement. These are
+often called C-like languages, and they usually share a lot of language design
+choices. (E.g. side-effects, for loops, etc.) Elm manages effects with commands
+and subscriptions instead, so there is no special syntax for "statements" and
+therefore no need to use semicolons to separate them. I think this will make
+more sense as you work through <https://guide.elm-lang.org> though!
+

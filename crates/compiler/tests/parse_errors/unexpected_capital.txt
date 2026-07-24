@@ -1,0 +1,18 @@
+-- UNEXPECTED CAPITAL LETTER -------------------------------------- src/Main.elm
+
+Declarations always start with a lower-case letter, so I am getting stuck here:
+
+2| Y = 2
+   ^
+Try a name like y instead?
+
+Note: Here are a couple valid declarations for reference:
+
+    greet : String -> String
+    greet name =
+      "Hello " ++ name ++ "!"
+    
+    type User = Anonymous | LoggedIn String
+
+Notice that they always start with a lower-case letter. Capitalization matters!
+

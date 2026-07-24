@@ -1,0 +1,10 @@
+-- UNEXPECTED SYMBOL ---------------------------------------------- src/Main.elm
+
+I got stuck on this dollar sign:
+
+2| x = 1 $ 2
+         ^
+It is not used for anything in Elm syntax. Are you coming from a language where
+dollar signs can be used in variable names? If so, try a name that (1) starts
+with a letter and (2) only contains letters, numbers, and underscores.
+

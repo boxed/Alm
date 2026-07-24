@@ -1,0 +1,21 @@
+-- UNEXPECTED CHARACTER ------------------------------------------- src/Main.elm
+
+I got stuck on this character:
+
+2| x = 1 ` 2
+         ^
+It is not used for anything in Elm syntax. It is used for multi-line strings in
+some languages though, so if you want a string that spans multiple lines, you
+can use Elm's multi-line string syntax like this:
+
+    """
+    # Multi-line Strings
+    
+    - start with triple double quotes
+    - write whatever you want
+    - no need to escape newlines or double quotes
+    - end with triple double quotes
+    """
+
+Otherwise I do not know what is going on! Try removing the character?
+
