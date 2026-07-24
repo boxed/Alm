@@ -82,7 +82,11 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Type> {
         "I was expecting another type",
         |x| x.region.end,
         |r| ParseError::new("I was expecting a `,` or `)` in this type", r),
-        |r| ParseError::new("I was expecting another type", r),
+        |r| {
+            ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedTupleType {
+                region: r,
+            })
+        },
     )?;
     if rest.is_empty() {
         Ok(first)
@@ -133,14 +137,46 @@ fn record(p: &mut Parser) -> PResult<Type> {
     p.chomp_and_check_indent("I was expecting a type after this `:`")?;
     let first_type = expression(p)?;
     let mut fields = vec![(first_name, first_type)];
+    // A bad token where a subsequent field name was expected (after a `,`) is a
+    // PROBLEM IN RECORD TYPE; only a failure at the field's very first token
+    // (the name) qualifies — deeper failures keep their own report.
+    let field_item = |p: &mut Parser| {
+        let fstart = p.position();
+        field(p).map_err(|e| {
+            if e.syntax.is_none() && e.region.start == fstart {
+                ParseError::from_syntax(
+                    crate::reporting::syntax::SyntaxError::ProblemInRecordType {
+                        region: Region::new(fstart, fstart),
+                    },
+                )
+            } else {
+                e
+            }
+        })
+    };
     p.sep_until(
         b'}',
         IndentCheck::Chomp,
-        field,
+        field_item,
         &mut fields,
         "I was expecting another field",
-        |r| ParseError::new("I was expecting a `,` or `}` in this record type", r),
-    )?;
+        |r| {
+            ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedRecordType {
+                region: r,
+            })
+        },
+    )
+    .map_err(|e| match &e.syntax {
+        // The close-not-found error is reported past any chomped newlines; repoint
+        // the caret to the end of the last parsed field type, matching elm.
+        Some(crate::reporting::syntax::SyntaxError::UnfinishedRecordType { .. }) => {
+            let end = fields.last().map(|(_, t)| t.region.end).unwrap();
+            ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedRecordType {
+                region: Region::new(end, end),
+            })
+        }
+        _ => e,
+    })?;
     Ok(Located::at(start, p.position(), Type_::Record(fields, None)))
 }
 

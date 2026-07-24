@@ -1,0 +1,13 @@
+-- UNFINISHED TUPLE TYPE ------------------------------------------ src/Main.elm
+
+I think I am in the middle of parsing a tuple type. I just saw a comma, so I was
+expecting to see a type next.
+
+2| x : (Int,
+            ^
+A tuple type looks like (Float,Float) or (String,Int), so I think there is a
+type missing here?
+
+Note: I can get confused by indentation in cases like this, so maybe you have an
+expression but it is not indented enough?
+

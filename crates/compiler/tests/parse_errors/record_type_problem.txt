@@ -1,0 +1,20 @@
+-- PROBLEM IN RECORD TYPE ----------------------------------------- src/Main.elm
+
+I am partway through parsing a record type, but I got stuck here:
+
+2| x : { a : Int, 5 }
+                  ^
+I was expecting to see another record field defined next, so I am looking for a
+name like userName or plantHeight.
+
+Note: If you are trying to define a record type across multiple lines, I
+recommend using this format:
+
+    { name : String
+    , age : Int
+    , height : Float
+    }
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+
