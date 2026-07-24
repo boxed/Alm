@@ -2,8 +2,8 @@
 
 use super::{expr, type_, IndentCheck, PResult, ParseError, Parser};
 use crate::ast::source::{
-    Alias, Associativity, Def, Exposed, Exposing, Import, Infix, Module, Port, Privacy, Union,
-    Value,
+    Alias, Associativity, Def, Exposed, Exposing, Import, Infix, Manager, Module, Port, Privacy,
+    Union, Value,
 };
 use crate::data::Name;
 use crate::reporting::{Located, Region};
@@ -25,25 +25,22 @@ pub fn parse_module_typed(source: &str, is_package: bool) -> Result<Module, Pars
 }
 
 fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
+    use crate::ast::source::Effects;
     use crate::reporting::syntax::SyntaxError;
     p.chomp_space()?;
 
-    // `effect module ...` — reserved for the @elm organization.
-    if p.peek_keyword("effect") {
-        let a = p.position();
+    let mut effects = Effects::None;
+
+    // `effect module Name where { ... } exposing (..)`. Stock elm restricts
+    // effect modules to the @elm organization (NoEffectsOutsideKernel); alm
+    // deliberately allows user-defined effect modules and runs them through the
+    // effect-manager protocol. We match the `effect module` header shape here.
+    let is_effect = p.peek_keyword("effect") && {
         let after = &p.src_from_here()[6..];
         let ws = after.iter().take_while(|&&b| b == b' ').count();
-        if after[ws..].starts_with(b"module")
+        after[ws..].starts_with(b"module")
             && !after.get(ws + 6).copied().is_some_and(super::is_inner_char)
-        {
-            let end = crate::reporting::Position::new(a.row, a.col + 6 + ws as u32 + 6);
-            return Err(ParseError::from_syntax(
-                crate::reporting::syntax::SyntaxError::InvalidEffectModule {
-                    region: Region::new(a, end),
-                },
-            ));
-        }
-    }
+    };
 
     // HEADER — `module Name exposing (..)` or `port module ...`
     let mut is_port_module = false;
@@ -54,7 +51,11 @@ fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
     let mut port_module_kw = Region::ZERO;
     let starts_port =
         p.src_from_here().starts_with(b"port") && !p.peek_at(4).is_some_and(super::is_inner_char);
-    let (name, exports) = if starts_port {
+    let (name, exports) = if is_effect {
+        let (name, exports, region, manager) = chomp_effect_header(p)?;
+        effects = Effects::Manager { region, manager };
+        (name, exports)
+    } else if starts_port {
         is_port_module = true;
         let port_start = p.position();
         p.keyword("port")?;
@@ -220,10 +221,90 @@ fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
         aliases,
         binops,
         ports,
+        effects,
     })
 }
 
 type Header = (Option<Located<Name>>, Located<Exposing>);
+
+/// Parse an `effect module Name where { command = MyCmd, subscription = MySub }
+/// exposing (..)` header. Returns the header region (`effect module`) used by
+/// canonicalization to point at manager problems, plus the manager itself.
+fn chomp_effect_header(
+    p: &mut Parser,
+) -> PResult<(Option<Located<Name>>, Located<Exposing>, Region, Manager)> {
+    use crate::reporting::syntax::SyntaxError;
+    let start = p.position();
+    p.keyword("effect")?;
+    p.chomp_and_check_indent("I was expecting the `module` keyword after `effect`")?;
+    p.keyword("module")?;
+    let effect_end = p.position();
+    p.chomp_and_check_indent("I was expecting the module name after `effect module`")?;
+    let name_pos = p.position();
+    let name = p.located(|p| chomp_module_name(p)).map_err(|_| {
+        ParseError::from_syntax(SyntaxError::ExpectingModuleName {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
+    p.chomp_and_check_indent("I was expecting `where` after the module name")?;
+    p.keyword("where")?;
+    p.chomp_and_check_indent("I was expecting `{` after `where`")?;
+    let manager = chomp_manager(p)?;
+    p.chomp_and_check_indent("I was expecting `exposing` after the effect manager")?;
+    p.keyword("exposing")?;
+    p.chomp_and_check_indent("I was expecting an exposing list after `exposing`")?;
+    let exports = p.located(chomp_exposing)?;
+    Ok((Some(name), exports, Region::new(start, effect_end), manager))
+}
+
+/// Parse the `{ command = MyCmd }` / `{ subscription = MySub }` / both block.
+fn chomp_manager(p: &mut Parser) -> PResult<Manager> {
+    p.eat_byte(b'{', "`{` to start the effect manager")?;
+    p.chomp_and_check_indent("")?;
+    if p.peek_keyword("command") {
+        let cmd = chomp_command(p)?;
+        p.chomp_and_check_indent("")?;
+        if p.peek() == Some(b'}') {
+            p.bump(1);
+            return Ok(Manager::Cmd(cmd));
+        }
+        p.eat_byte(b',', "`,` or `}` in the effect manager")?;
+        p.chomp_and_check_indent("")?;
+        let sub = chomp_subscription(p)?;
+        p.chomp_and_check_indent("")?;
+        p.eat_byte(b'}', "`}` to end the effect manager")?;
+        Ok(Manager::Fx(cmd, sub))
+    } else {
+        let sub = chomp_subscription(p)?;
+        p.chomp_and_check_indent("")?;
+        if p.peek() == Some(b'}') {
+            p.bump(1);
+            return Ok(Manager::Sub(sub));
+        }
+        p.eat_byte(b',', "`,` or `}` in the effect manager")?;
+        p.chomp_and_check_indent("")?;
+        let cmd = chomp_command(p)?;
+        p.chomp_and_check_indent("")?;
+        p.eat_byte(b'}', "`}` to end the effect manager")?;
+        Ok(Manager::Fx(cmd, sub))
+    }
+}
+
+fn chomp_command(p: &mut Parser) -> PResult<Located<Name>> {
+    p.keyword("command")?;
+    p.chomp_and_check_indent("I was expecting `=` after `command`")?;
+    p.eat_byte(b'=', "`=` after `command`")?;
+    p.chomp_and_check_indent("I was expecting a type name after `command =`")?;
+    p.located(|p| p.upper_name("a command type like `MyCmd`"))
+}
+
+fn chomp_subscription(p: &mut Parser) -> PResult<Located<Name>> {
+    p.keyword("subscription")?;
+    p.chomp_and_check_indent("I was expecting `=` after `subscription`")?;
+    p.eat_byte(b'=', "`=` after `subscription`")?;
+    p.chomp_and_check_indent("I was expecting a type name after `subscription =`")?;
+    p.located(|p| p.upper_name("a subscription type like `MySub`"))
+}
 
 fn chomp_header(p: &mut Parser) -> PResult<Header> {
     use crate::reporting::syntax::SyntaxError;

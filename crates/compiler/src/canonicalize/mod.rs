@@ -441,6 +441,24 @@ pub fn canonicalize_module(
         }
     }
 
+    // Effect module: `command`/`subscription` resolve as local top-level
+    // helpers that the code generator turns into effect leaves. Register them
+    // before canonicalizing values so the module body can reference them.
+    if let src::Effects::Manager { manager, .. } = &module.effects {
+        match manager {
+            src::Manager::Cmd(_) => {
+                top_level.insert(Name::from("command"));
+            }
+            src::Manager::Sub(_) => {
+                top_level.insert(Name::from("subscription"));
+            }
+            src::Manager::Fx(_, _) => {
+                top_level.insert(Name::from("command"));
+                top_level.insert(Name::from("subscription"));
+            }
+        }
+    }
+
     let mut env = Env {
         module_name: module_name.clone(),
         top_level,
@@ -485,6 +503,19 @@ pub fn canonicalize_module(
         }
     }
 
+    // Canonicalize the effect manager, verifying its command/subscription
+    // types are declared in this module.
+    let manager = match &module.effects {
+        src::Effects::None => None,
+        src::Effects::Manager { manager, .. } => match canonicalize_manager(manager, &unions) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                errors.push(e);
+                None
+            }
+        },
+    };
+
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -500,9 +531,33 @@ pub fn canonicalize_module(
         decls,
         unions,
         ports,
+        manager,
     };
     let interface = build_interface(&env, module, &canonical).map_err(|e| vec![e])?;
     Ok((canonical, interface))
+}
+
+/// Canonicalize an `effect module` manager: each `command`/`subscription` type
+/// name must be a custom type declared in this module.
+fn canonicalize_manager(m: &src::Manager, unions: &[can::Union]) -> CResult<can::Manager> {
+    let verify = |t: &Located<Name>| -> CResult<Name> {
+        if unions.iter().any(|u| u.name == t.value) {
+            Ok(t.value.clone())
+        } else {
+            Err(Error::new(
+                format!(
+                    "This effect manager names `{}` as its effect type, but I cannot find a `{}` custom type declared in this module.",
+                    t.value, t.value
+                ),
+                t.region,
+            ))
+        }
+    };
+    Ok(match m {
+        src::Manager::Cmd(c) => can::Manager::Cmd(verify(c)?),
+        src::Manager::Sub(s) => can::Manager::Sub(verify(s)?),
+        src::Manager::Fx(c, s) => can::Manager::Fx(verify(c)?, verify(s)?),
+    })
 }
 
 /// Compute what this module exposes, validating the `exposing` list.

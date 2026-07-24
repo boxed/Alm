@@ -121,12 +121,24 @@ pub struct Module {
     pub decls: Vec<DeclGroup>,
     pub unions: Vec<Union>,
     pub ports: Vec<PortDecl>,
+    /// `effect module` manager, if this is an effect module. The home is
+    /// `Module.name`.
+    pub manager: Option<Manager>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PortDecl {
     pub name: Name,
     pub tipe: Type,
+}
+
+/// A canonicalized effect manager: the user type name(s) it wraps into
+/// `Cmd`/`Sub` leaves. Home is the enclosing module's name.
+#[derive(Debug, Clone)]
+pub enum Manager {
+    Cmd(Name),
+    Sub(Name),
+    Fx(Name, Name),
 }
 
 #[derive(Debug, Clone)]

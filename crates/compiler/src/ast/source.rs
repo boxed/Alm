@@ -111,12 +111,35 @@ pub struct Module {
     pub aliases: Vec<Located<Alias>>,
     pub binops: Vec<Located<Infix>>,
     pub ports: Vec<Port>,
+    /// `effect module` manager declaration, if this is an effect module.
+    pub effects: Effects,
 }
 
 #[derive(Debug, Clone)]
 pub struct Port {
     pub name: Located<Name>,
     pub tipe: Type,
+}
+
+/// The `effect module ... where { ... }` declaration. Ordinary and `port`
+/// modules carry `Effects::None`; the `Ports` marker in elm is redundant here
+/// because ports live in `Module.ports`.
+#[derive(Debug, Clone)]
+pub enum Effects {
+    None,
+    Manager {
+        region: Region,
+        manager: Manager,
+    },
+}
+
+/// Which effect kind an `effect module` manages, with the user type name(s):
+/// `{ command = MyCmd }`, `{ subscription = MySub }`, or both.
+#[derive(Debug, Clone)]
+pub enum Manager {
+    Cmd(Located<Name>),
+    Sub(Located<Name>),
+    Fx(Located<Name>, Located<Name>),
 }
 
 impl Module {
