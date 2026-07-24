@@ -80,8 +80,8 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Type> {
         expression,
         IndentCheck::Chomp,
         "I was expecting another type",
-        "I was in the middle of a tuple type",
-        "I was expecting a `,` or `)` in this type",
+        |x| x.region.end,
+        |r| ParseError::new("I was expecting a `,` or `)` in this type", r),
     )?;
     if rest.is_empty() {
         Ok(first)

@@ -1,0 +1,11 @@
+-- UNFINISHED PARENTHESES ----------------------------------------- src/Main.elm
+
+I was expecting to see a closing parenthesis next:
+
+4|     ( 1
+          ^
+Try adding a ) to see if that helps!
+
+Note: I can get confused by indentation in cases like this, so maybe you have a
+closing parenthesis but it is not indented enough?
+

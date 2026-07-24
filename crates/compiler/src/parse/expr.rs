@@ -216,7 +216,15 @@ fn tuple(p: &mut Parser) -> PResult<Expr> {
     }
 
     let entry = expression(p)?;
-    p.check_indent("I was expecting the closing `)` to be indented")?;
+    let entry_end = entry.region.end;
+    p.check_indent("I was expecting the closing `)` to be indented")
+        .map_err(|_| {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedParens {
+                    region: crate::reporting::Region::new(entry_end, entry_end),
+                },
+            )
+        })?;
     chomp_tuple_end(p, start, entry)
 }
 
@@ -226,8 +234,12 @@ fn chomp_tuple_end(p: &mut Parser, start: Position, first: Expr) -> PResult<Expr
         expression,
         IndentCheck::NoChomp,
         "I was expecting another tuple entry",
-        "I was expecting the closing `)` to be indented",
-        "I was expecting a `,` or `)` here",
+        |x| x.region.end,
+        |r| {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::UnfinishedParens { region: r },
+            )
+        },
     )?;
     if rest.is_empty() {
         Ok(first)

@@ -20,6 +20,8 @@ pub enum SyntaxError {
     CharDoubleQuotes { region: Region },
     /// A list literal with no closing `]`.
     UnfinishedList { region: Region },
+    /// A parenthesized expression with no closing `)`.
+    UnfinishedParens { region: Region },
 }
 
 impl SyntaxError {
@@ -31,7 +33,8 @@ impl SyntaxError {
             | SyntaxError::WeirdHex { region }
             | SyntaxError::CharEnd { region }
             | SyntaxError::CharDoubleQuotes { region }
-            | SyntaxError::UnfinishedList { region } => *region,
+            | SyntaxError::UnfinishedList { region }
+            | SyntaxError::UnfinishedParens { region } => *region,
         }
     }
 
@@ -106,6 +109,17 @@ impl SyntaxError {
                             .to_string(),
                     ),
                 ],
+            ),
+            SyntaxError::UnfinishedParens { region } => snippet(
+                "UNFINISHED PARENTHESES",
+                *region,
+                "I was expecting to see a closing parenthesis next:",
+                "Try adding a ) to see if that helps!",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe \
+                     you have a closing parenthesis but it is not indented enough?"
+                        .to_string(),
+                )],
             ),
         }
     }

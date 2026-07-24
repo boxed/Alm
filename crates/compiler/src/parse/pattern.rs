@@ -116,8 +116,8 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Pattern> {
         expression,
         IndentCheck::Chomp,
         "I was expecting another pattern",
-        "I was in the middle of a tuple pattern",
-        "I was expecting a `,` or `)` in this pattern",
+        |x| x.region.end,
+        |r| ParseError::new("I was expecting a `,` or `)` in this pattern", r),
     )?;
     if rest.is_empty() {
         Ok(first)

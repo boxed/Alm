@@ -780,27 +780,33 @@ impl<'a> Parser<'a> {
         mut item: impl FnMut(&mut Parser<'a>) -> PResult<T>,
         after_item: IndentCheck,
         after_sep_msg: &str,
-        post_item_msg: &str,
-        close_or_sep_err: &str,
+        end_of: impl Fn(&T) -> Position,
+        stuck: impl Fn(Region) -> ParseError,
     ) -> PResult<(Position, T, Vec<T>)> {
+        // Track the end of the last value so a missing-close error points there
+        // (the item parser chomps trailing whitespace past it), matching elm.
+        let mut last_end = end_of(&first);
         let mut rest = Vec::new();
         loop {
             match self.peek() {
                 Some(b',') => {
                     self.bump(1);
                     self.chomp_and_check_indent(after_sep_msg)?;
-                    rest.push(item(self)?);
-                    match after_item {
-                        IndentCheck::Chomp => self.chomp_and_check_indent(post_item_msg)?,
-                        IndentCheck::NoChomp => self.check_indent(post_item_msg)?,
-                    }
+                    let it = item(self)?;
+                    last_end = end_of(&it);
+                    rest.push(it);
+                    let checked = match after_item {
+                        IndentCheck::Chomp => self.chomp_and_check_indent(""),
+                        IndentCheck::NoChomp => self.check_indent(""),
+                    };
+                    checked.map_err(|_| stuck(Region::new(last_end, last_end)))?;
                 }
                 Some(b')') => {
                     self.bump(1);
                     let end = self.position();
                     return Ok((end, first, rest));
                 }
-                _ => return Err(self.error(close_or_sep_err.to_string())),
+                _ => return Err(stuck(Region::new(last_end, last_end))),
             }
         }
     }
