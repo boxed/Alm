@@ -1,0 +1,9 @@
+-- UNEXPECTED PATTERN --------------------------------------------- src/Main.elm
+
+I cannot pattern match with floating point numbers:
+
+4|   1.5 -> 1
+     ^^^
+Equality on floats can be unreliable, so you usually want to check that they are
+nearby with some sort of (abs (actual - expected) < 0.001) check.
+

@@ -118,6 +118,8 @@ pub enum SyntaxError {
     PatternStart { region: Region },
     /// An `as` keyword in a pattern not followed by a variable name.
     PatternAlias { region: Region },
+    /// A floating point literal used as a pattern.
+    PatternFloat { region: Region },
 }
 
 impl SyntaxError {
@@ -176,7 +178,8 @@ impl SyntaxError {
             | SyntaxError::ProblemInCustomType { region } => *region,
             | SyntaxError::PatternStart { region } => *region,
             | SyntaxError::PatternStart { region }
-            | SyntaxError::PatternAlias { region } => *region,
+            | SyntaxError::PatternAlias { region }
+            | SyntaxError::PatternFloat { region } => *region,
         }
     }
 
@@ -881,6 +884,14 @@ impl SyntaxError {
                      using a different name in that case!"
                         .to_string(),
                 )],
+            ),
+            SyntaxError::PatternFloat { region } => snippet(
+                "UNEXPECTED PATTERN",
+                *region,
+                "I cannot pattern match with floating point numbers:",
+                "Equality on floats can be unreliable, so you usually want to check that they \
+                 are nearby with some sort of (abs (actual - expected) < 0.001) check.",
+                vec![],
             ),
         }
     }

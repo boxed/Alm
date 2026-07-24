@@ -247,7 +247,7 @@ fn pattern_parse_errors() {
     );
     expect(
         "f v =\n    case v of\n        1.5 ->\n            0\n\n        _ ->\n            1\n\nx = f 1.5\n",
-        "I cannot pattern match on floating point numbers",
+        "I cannot pattern match with floating point numbers",
     );
     expect(
         "f v =\n    case v of\n        [ a b ->\n            0\n\nx = 1\n",

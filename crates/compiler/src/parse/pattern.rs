@@ -39,9 +39,9 @@ pub fn term(p: &mut Parser) -> PResult<Pattern> {
         }
         Some(b) if b.is_ascii_digit() => match p.number()? {
             NumberLit::Int(n) => Ok(Located::at(start, p.position(), Pattern_::Int(n))),
-            NumberLit::Float(_) => Err(p.error(
-                "I cannot pattern match on floating point numbers. Equality on floats is unreliable.",
-            )),
+            NumberLit::Float(_) => Err(ParseError::from_syntax(SyntaxError::PatternFloat {
+                region: Region::new(start, p.position()),
+            })),
         },
         _ if p.starts_lower() => {
             let name = p.lower_name("a pattern")?;
