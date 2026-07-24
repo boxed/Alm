@@ -365,7 +365,12 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
 
 fn chomp_alias(p: &mut Parser) -> PResult<Alias> {
     use crate::reporting::syntax::SyntaxError;
-    let name = p.located(|p| p.upper_name("a type alias name"))?;
+    let name_pos = p.position();
+    let name = p.located(|p| p.upper_name("a type alias name")).map_err(|_| {
+        ParseError::from_syntax(SyntaxError::ExpectingTypeAliasName {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
     let mut vars = Vec::new();
     let mut last_end = name.region.end;
     loop {
@@ -392,19 +397,36 @@ fn chomp_alias(p: &mut Parser) -> PResult<Alias> {
             region: Region::new(eq_end, eq_end),
         })
     })?;
-    let tipe = type_::expression(p)?;
+    let body_start = p.position();
+    let tipe = type_::expression(p).map_err(|e| {
+        // A failure at the very first token of the body means no type could even
+        // begin here (`Type.TStart`), which in a `type alias` is a PROBLEM IN
+        // TYPE ALIAS. Anything deeper keeps its own, more specific report.
+        if e.syntax.is_none() && e.region.start == body_start {
+            ParseError::from_syntax(SyntaxError::ProblemInTypeAlias {
+                region: Region::new(body_start, body_start),
+            })
+        } else {
+            e
+        }
+    })?;
     Ok(Alias { name, vars, tipe })
 }
 
 fn chomp_union(p: &mut Parser) -> PResult<Union> {
-    let name = p.located(|p| p.upper_name("a type name"))?;
+    use crate::reporting::syntax::SyntaxError;
+    let name_pos = p.position();
+    let name = p.located(|p| p.upper_name("a type name")).map_err(|_| {
+        ParseError::from_syntax(SyntaxError::ExpectingTypeName {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
     p.chomp_and_check_indent("I was expecting `=` or type variables")?;
     let mut vars = Vec::new();
     while p.starts_lower() {
         vars.push(p.located(|p| p.lower_name("a type variable"))?);
         p.chomp_and_check_indent("I was expecting `=` or more type variables")?;
     }
-    use crate::reporting::syntax::SyntaxError;
     p.eat_byte(b'=', "an `=` in this type declaration")?;
     let eq_end = p.position();
     p.chomp_space()?;
@@ -434,7 +456,12 @@ fn chomp_union(p: &mut Parser) -> PResult<Union> {
 }
 
 fn chomp_ctor(p: &mut Parser) -> PResult<(Located<Name>, Vec<crate::ast::source::Type>)> {
-    let name = p.located(|p| p.upper_name("a constructor name"))?;
+    let name_pos = p.position();
+    let name = p.located(|p| p.upper_name("a constructor name")).map_err(|_| {
+        ParseError::from_syntax(crate::reporting::syntax::SyntaxError::ProblemInCustomType {
+            region: Region::new(name_pos, name_pos),
+        })
+    })?;
     let args = p.chomp_indented_terms(type_::term);
     Ok((name, args))
 }

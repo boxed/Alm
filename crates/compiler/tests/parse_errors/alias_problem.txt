@@ -1,0 +1,8 @@
+-- PROBLEM IN TYPE ALIAS ------------------------------------------ src/Main.elm
+
+I was partway through parsing a type alias, but I got stuck here:
+
+2| type alias X = @
+                  ^
+I was expecting to see a type next. Try putting Int or String for now?
+

@@ -99,6 +99,21 @@ pub enum SyntaxError {
     },
     /// A definition stuck on a stray token that is neither an argument nor `=`.
     ProblemInDefinition { region: Region, name: String },
+    /// A tuple type `(a,` with a comma but no following type (`TTupleIndentTypeN`).
+    UnfinishedTupleType { region: Region },
+    /// A record type that never reaches its closing `}` (`TRecordIndentEnd`).
+    UnfinishedRecordType { region: Region },
+    /// A record type expecting another field name after a `,` (`TRecordField`).
+    ProblemInRecordType { region: Region },
+    /// A custom `type` with a missing or lowercase name (`CT_Name`).
+    ExpectingTypeName { region: Region },
+    /// A `type alias` with a missing or lowercase name (`AliasName`).
+    ExpectingTypeAliasName { region: Region },
+    /// A `type alias` body where a type was expected but a bad token appeared
+    /// (`AliasBody` delegating to `TStart` in the `TC_TypeAlias` context).
+    ProblemInTypeAlias { region: Region },
+    /// A custom `type` where a variant name was expected (`CT_Variant`).
+    ProblemInCustomType { region: Region },
 }
 
 impl SyntaxError {
@@ -148,6 +163,13 @@ impl SyntaxError {
             | SyntaxError::UnfinishedPortModule { region }
             | SyntaxError::NameMismatch { region, .. }
             | SyntaxError::ProblemInDefinition { region, .. } => *region,
+            | SyntaxError::UnfinishedTupleType { region }
+            | SyntaxError::UnfinishedRecordType { region }
+            | SyntaxError::ProblemInRecordType { region }
+            | SyntaxError::ExpectingTypeName { region }
+            | SyntaxError::ExpectingTypeAliasName { region }
+            | SyntaxError::ProblemInTypeAlias { region }
+            | SyntaxError::ProblemInCustomType { region } => *region,
         }
     }
 
@@ -771,6 +793,66 @@ impl SyntaxError {
                     Section::Para("Try to use that format!".to_string()),
                 ],
             ),
+            SyntaxError::UnfinishedTupleType { region } => snippet(
+                "UNFINISHED TUPLE TYPE",
+                *region,
+                "I think I am in the middle of parsing a tuple type. I just saw a comma, so \
+                 I was expecting to see a type next.",
+                "A tuple type looks like (Float,Float) or (String,Int), so I think there is \
+                 a type missing here?",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe \
+                     you have an expression but it is not indented enough?"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::UnfinishedRecordType { region } => snippet(
+                "UNFINISHED RECORD TYPE",
+                *region,
+                "I was partway through parsing a record type, but I got stuck here:",
+                "I was expecting to see a closing curly brace next. Try putting a } next and \
+                 see if that helps?",
+                record_type_indent_notes(),
+            ),
+            SyntaxError::ProblemInRecordType { region } => snippet(
+                "PROBLEM IN RECORD TYPE",
+                *region,
+                "I am partway through parsing a record type, but I got stuck here:",
+                "I was expecting to see another record field defined next, so I am looking \
+                 for a name like userName or plantHeight.",
+                record_type_notes(),
+            ),
+            SyntaxError::ExpectingTypeName { region } => snippet(
+                "EXPECTING TYPE NAME",
+                *region,
+                "I think I am parsing a type declaration, but I got stuck here:",
+                "I was expecting a name like Status or Style next. Just make sure it is a \
+                 name that starts with a capital letter!",
+                custom_notes(),
+            ),
+            SyntaxError::ExpectingTypeAliasName { region } => snippet(
+                "EXPECTING TYPE ALIAS NAME",
+                *region,
+                "I am partway through parsing a type alias, but I got stuck here:",
+                "I was expecting a name like Person or Point next. Just make sure it is a \
+                 name that starts with a capital letter!",
+                alias_notes(),
+            ),
+            SyntaxError::ProblemInTypeAlias { region } => snippet(
+                "PROBLEM IN TYPE ALIAS",
+                *region,
+                "I was partway through parsing a type alias, but I got stuck here:",
+                "I was expecting to see a type next. Try putting Int or String for now?",
+                vec![],
+            ),
+            SyntaxError::ProblemInCustomType { region } => snippet(
+                "PROBLEM IN CUSTOM TYPE",
+                *region,
+                "I am partway through parsing a custom type, but I got stuck here:",
+                "I was expecting to see a variant name next. Something like Success or \
+                 Sandwich. Any name that starts with a capital letter really!",
+                custom_notes(),
+            ),
         }
     }
 }
@@ -857,6 +939,46 @@ fn def_notes() -> Vec<Section> {
              compiler-verified documentation, and they often improve error messages!"
                 .to_string(),
         ),
+    ]
+}
+
+/// The multi-line record-type example shown in the record-type diagnostics.
+const RECORD_TYPE_EXAMPLE: &str =
+    "    { name : String\n    , age : Int\n    , height : Float\n    }";
+
+/// The trailing "Notice that each line..." paragraph shared by both record-type
+/// notes.
+fn record_type_notice() -> Section {
+    Section::Para(
+        "Notice that each line starts with some indentation. Usually two or four spaces. \
+         This is the stylistic convention in the Elm ecosystem."
+            .to_string(),
+    )
+}
+
+/// `noteForRecordTypeError`: shown when the parser is stuck on a definite token.
+fn record_type_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Note: If you are trying to define a record type across multiple lines, I \
+             recommend using this format:"
+                .to_string(),
+        ),
+        Section::Block(RECORD_TYPE_EXAMPLE.to_string()),
+        record_type_notice(),
+    ]
+}
+
+/// `noteForRecordTypeIndentError`: shown when indentation may be the culprit.
+fn record_type_indent_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Note: I may be confused by indentation. For example, if you are trying to \
+             define a record type across multiple lines, I recommend using this format:"
+                .to_string(),
+        ),
+        Section::Block(RECORD_TYPE_EXAMPLE.to_string()),
+        record_type_notice(),
     ]
 }
 
