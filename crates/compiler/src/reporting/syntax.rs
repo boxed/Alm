@@ -30,6 +30,8 @@ pub enum SyntaxError {
     UnfinishedRecord { region: Region },
     /// A record field name not followed by `=`.
     RecordEquals { region: Region },
+    /// A binary operator with no expression after it.
+    MissingExpression { region: Region, op: String },
 }
 
 impl SyntaxError {
@@ -46,7 +48,8 @@ impl SyntaxError {
             | SyntaxError::EndlessString { region }
             | SyntaxError::UnfinishedLambda { region }
             | SyntaxError::UnfinishedRecord { region }
-            | SyntaxError::RecordEquals { region } => *region,
+            | SyntaxError::RecordEquals { region }
+            | SyntaxError::MissingExpression { region, .. } => *region,
         }
     }
 
@@ -193,6 +196,19 @@ impl SyntaxError {
                     ),
                 ],
             ),
+            SyntaxError::MissingExpression { region, op } => snippet_owned(
+                "MISSING EXPRESSION".to_string(),
+                *region,
+                format!("I was expecting to see an expression after this {op} operator:"),
+                "You can just put anything for now, like 42 or \"hello\". Once there is \
+                 something there, I can probably give a more specific hint!"
+                    .to_string(),
+                vec![Section::Para(format!(
+                    "Note: I may be getting confused by your indentation? The easiest way to \
+                     make sure this is not an indentation problem is to put the expression on \
+                     the right of the {op} operator on the same line."
+                ))],
+            ),
             SyntaxError::RecordEquals { region } => snippet(
                 "PROBLEM IN RECORD",
                 *region,
@@ -223,15 +239,33 @@ const RECORD_EXAMPLE: &str =
 
 /// Build a `Report` from an elm snippet-style body.
 fn snippet(title: &str, region: Region, before: &str, after: &str, notes: Vec<Section>) -> Report {
+    snippet_owned(
+        title.to_string(),
+        region,
+        before.to_string(),
+        after.to_string(),
+        notes,
+    )
+}
+
+/// As [`snippet`] but taking owned strings, for diagnostics whose text is built
+/// with runtime data (e.g. an operator name).
+fn snippet_owned(
+    title: String,
+    region: Region,
+    before: String,
+    after: String,
+    notes: Vec<Section>,
+) -> Report {
     Report {
-        title: title.to_string(),
+        title,
         region,
         // A searchable summary (used by substring-based diagnostics tests); the
         // byte-exact layout lives in `elm` below.
         message: format!("{before} {after}"),
         elm: Some(ElmBody {
-            before: before.to_string(),
-            after: after.to_string(),
+            before,
+            after,
             notes,
             highlight: region,
         }),

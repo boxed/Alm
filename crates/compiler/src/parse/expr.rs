@@ -417,10 +417,15 @@ fn chomp_expr_end(
         };
         let op_end = p.position();
         let op = Located::at(op_start, op_end, op_name.clone());
-        p.chomp_and_check_indent(&format!(
-            "I was expecting an expression after the `{}` operator",
-            op_name
-        ))?;
+        let missing_expr = || {
+            crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::MissingExpression {
+                    region: crate::reporting::Region::new(op_end, op_end),
+                    op: op_name.as_str().to_string(),
+                },
+            )
+        };
+        p.chomp_and_check_indent("").map_err(|_| missing_expr())?;
         let new_start = p.position();
 
         if op_name.as_str() == "-" && end != op_start && op_end == new_start {
@@ -456,11 +461,13 @@ fn chomp_expr_end(
                 &mut case_,
                 &mut if_,
                 &mut function,
-                &mut |p: &mut Parser| {
-                    Err(p.error(format!(
-                        "I was expecting an expression after the `{}` operator",
-                        op_name
-                    )))
+                &mut |_p: &mut Parser| {
+                    Err(crate::parse::ParseError::from_syntax(
+                        crate::reporting::syntax::SyntaxError::MissingExpression {
+                            region: crate::reporting::Region::new(op_end, op_end),
+                            op: op_name.as_str().to_string(),
+                        },
+                    ))
                 },
             ],
         )?;

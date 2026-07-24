@@ -1,0 +1,13 @@
+-- MISSING EXPRESSION --------------------------------------------- src/Main.elm
+
+I was expecting to see an expression after this + operator:
+
+4|     1 +
+          ^
+You can just put anything for now, like 42 or "hello". Once there is something
+there, I can probably give a more specific hint!
+
+Note: I may be getting confused by your indentation? The easiest way to make
+sure this is not an indentation problem is to put the expression on the right of
+the + operator on the same line.
+
