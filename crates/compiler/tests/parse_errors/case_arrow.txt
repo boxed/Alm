@@ -1,0 +1,23 @@
+-- MISSING ARROW -------------------------------------------------- src/Main.elm
+
+I am partway through parsing a `case` expression, but I got stuck here:
+
+4|     case y of
+5|         1 2
+             ^
+I was expecting to see an arrow next.
+
+Note: Sometimes I get confused by indentation, so try to make your `case` look
+something like this:
+
+    case maybeWidth of
+      Just width ->
+        width + 200
+
+      Nothing ->
+        400
+
+Notice the indentation! Patterns are aligned with each other. Same indentation.
+The expressions after each arrow are all indented a bit more than the patterns.
+That is important!
+

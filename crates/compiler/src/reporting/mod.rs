@@ -26,8 +26,10 @@ pub struct ElmBody {
     pub after: String,
     /// Extra sections after the snippet block, each separated by a blank line.
     pub notes: Vec<Section>,
-    /// The exact region to underline (may differ from `Report::region`, which is
-    /// used for ordering the "furthest" parse error).
+    /// The span whose source lines are shown (`Render.Code` `region`).
+    pub region: Region,
+    /// The sub-region underlined with carets (`Render.Code` highlight); drawn
+    /// only when single-line and on the last shown row, matching elm.
     pub highlight: Region,
 }
 
@@ -76,7 +78,7 @@ fn render_elm(title: &str, body: &ElmBody, path: &str, source: &str) -> String {
     out.push_str("\n\n");
     out.push_str(&reflow(&body.before));
     out.push_str("\n\n");
-    out.push_str(&render_snippet(source, body.highlight));
+    out.push_str(&render_snippet(source, body.region, body.highlight));
     out.push_str(&reflow(&body.after));
     for note in &body.notes {
         out.push_str("\n\n");
@@ -116,9 +118,11 @@ pub fn reflow(text: &str) -> String {
     paras.join("\n\n")
 }
 
-/// Render the source region as elm does: every line the region touches, with a
-/// `n| ` gutter, followed by a caret line underlining the highlighted columns.
-fn render_snippet(source: &str, region: Region) -> String {
+/// Render a source snippet as elm's `Render.Code` does: show every line in
+/// `region`, with an `n| ` gutter; underline `highlight` with carets, but only
+/// when it is single-line and sits on the last shown row (otherwise elm draws no
+/// caret line).
+fn render_snippet(source: &str, region: Region, highlight: Region) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let start_row = region.start.row.max(1);
     let end_row = region.end.row.max(start_row);
@@ -129,17 +133,13 @@ fn render_snippet(source: &str, region: Region) -> String {
         let text = lines.get(idx).copied().unwrap_or("");
         out.push_str(&format!("{:>gutter$}| {}\n", row, text, gutter = gutter));
     }
-    // Caret line under the final row.
-    let from = region.start.col.max(1) as usize;
-    let to = if region.end.row == region.start.row {
-        (region.end.col as usize).max(from + 1)
-    } else {
-        let last = lines.get((end_row - 1) as usize).copied().unwrap_or("");
-        last.chars().count() + 2
-    };
-    out.push_str(&" ".repeat(gutter + 2 + (from - 1)));
-    out.push_str(&"^".repeat((to - from).max(1)));
-    out.push('\n');
+    if highlight.start.row == highlight.end.row && highlight.end.row == end_row {
+        let from = highlight.start.col.max(1) as usize;
+        let to = (highlight.end.col as usize).max(from + 1);
+        out.push_str(&" ".repeat(gutter + 2 + (from - 1)));
+        out.push_str(&"^".repeat(to - from));
+        out.push('\n');
+    }
     out
 }
 

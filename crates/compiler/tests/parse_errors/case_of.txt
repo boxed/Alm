@@ -1,0 +1,20 @@
+-- UNEXPECTED ARROW ----------------------------------------------- src/Main.elm
+
+I am parsing a `case` expression right now, but this arrow is confusing me:
+
+4|     case y 1 -> 2
+                ^^
+Maybe the `of` keyword is missing on a previous line?
+
+Note: Here is an example of a valid `case` expression for reference.
+
+    case maybeWidth of
+      Just width ->
+        width + 200
+
+      Nothing ->
+        400
+
+Notice the indentation. Each pattern is aligned, and each branch is indented a
+bit more than the corresponding pattern. That is important!
+

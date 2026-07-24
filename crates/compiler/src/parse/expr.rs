@@ -583,13 +583,25 @@ fn case_(p: &mut Parser) -> PResult<Expr> {
     p.chomp_and_check_indent("I was expecting an expression after `case`")?;
     let scrutinee = expression(p)?;
     p.check_indent("I was expecting `of` to be indented")?;
-    p.keyword("of")?;
+    if p.keyword("of").is_err() {
+        // A `->` where `of` was expected: the `of` was probably forgotten.
+        if p.src_from_here().starts_with(b"->") {
+            let a = p.position();
+            let end = crate::reporting::Position::new(a.row, a.col + 2);
+            return Err(crate::parse::ParseError::from_syntax(
+                crate::reporting::syntax::SyntaxError::CaseOf {
+                    region: crate::reporting::Region::new(a, end),
+                },
+            ));
+        }
+        return Err(p.error("Expecting keyword `of` of this case expression"));
+    }
     p.chomp_and_check_indent("I was expecting a pattern after `of`")?;
     p.with_indent(|p| {
-        let mut branches = vec![chomp_branch(p)?];
+        let mut branches = vec![chomp_branch(p, start)?];
         while p.is_aligned() {
             let snapshot = p.save();
-            match chomp_branch(p) {
+            match chomp_branch(p, start) {
                 Ok(branch) => branches.push(branch),
                 Err(err) => {
                     // An aligned token that is not a valid branch is an error
@@ -614,16 +626,30 @@ fn case_(p: &mut Parser) -> PResult<Expr> {
     })
 }
 
-fn chomp_branch(p: &mut Parser) -> PResult<(crate::ast::source::Pattern, Expr)> {
+fn chomp_branch(
+    p: &mut Parser,
+    case_start: Position,
+) -> PResult<(crate::ast::source::Pattern, Expr)> {
     let pat = pattern::expression(p)?;
     p.chomp_and_check_indent("I was expecting `->` after this pattern")?;
-    p.eat_word("->", "an `->` arrow after this pattern")?;
+    p.eat_word("->", "an `->` arrow after this pattern").map_err(|_| {
+        crate::parse::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::CaseArrow {
+            region: crate::reporting::Region::new(case_start, p.position()),
+        })
+    })?;
     p.chomp_and_check_indent("I was expecting an expression after `->`")?;
     let branch = expression(p)?;
     Ok((pat, branch))
 }
 
 // LET EXPRESSIONS
+
+/// A `let` block that never reached its `in` keyword, underlined at `stuck`.
+fn let_problem(let_start: Position, stuck: Position) -> super::ParseError {
+    super::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::LetProblem {
+        region: crate::reporting::Region::new(let_start, stuck),
+    })
+}
 
 fn let_(p: &mut Parser) -> PResult<Expr> {
     let start = p.position();
@@ -636,20 +662,22 @@ fn let_(p: &mut Parser) -> PResult<Expr> {
                 let snapshot = p.save();
                 match chomp_let_def(p) {
                     Ok(def) => defs.push(def),
-                    Err(err) => {
+                    Err(_) => {
                         p.restore(snapshot);
                         if starts_keyword(p, "in") {
                             break;
                         }
-                        return Err(err);
+                        return Err(let_problem(start, p.position()));
                     }
                 }
             }
             Ok(defs)
         })
     })?;
-    p.check_indent("I was expecting `in` to be indented")?;
-    p.keyword("in")?;
+    let in_stuck = p.position();
+    p.check_indent("I was expecting `in` to be indented")
+        .map_err(|_| let_problem(start, in_stuck))?;
+    p.keyword("in").map_err(|_| let_problem(start, in_stuck))?;
     p.chomp_and_check_indent("I was expecting an expression after `in`")?;
     let body = expression(p)?;
     let end = body.region.end;

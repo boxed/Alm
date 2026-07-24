@@ -32,6 +32,12 @@ pub enum SyntaxError {
     RecordEquals { region: Region },
     /// A binary operator with no expression after it.
     MissingExpression { region: Region, op: String },
+    /// A `case` scrutinee followed by `->` instead of `of`.
+    CaseOf { region: Region },
+    /// A `case` branch pattern not followed by `->`.
+    CaseArrow { region: Region },
+    /// A `let` block with no `in` keyword.
+    LetProblem { region: Region },
 }
 
 impl SyntaxError {
@@ -49,7 +55,10 @@ impl SyntaxError {
             | SyntaxError::UnfinishedLambda { region }
             | SyntaxError::UnfinishedRecord { region }
             | SyntaxError::RecordEquals { region }
-            | SyntaxError::MissingExpression { region, .. } => *region,
+            | SyntaxError::MissingExpression { region, .. }
+            | SyntaxError::CaseOf { region }
+            | SyntaxError::CaseArrow { region }
+            | SyntaxError::LetProblem { region } => *region,
         }
     }
 
@@ -209,6 +218,63 @@ impl SyntaxError {
                      the right of the {op} operator on the same line."
                 ))],
             ),
+            SyntaxError::CaseOf { region } => snippet(
+                "UNEXPECTED ARROW",
+                *region,
+                "I am parsing a `case` expression right now, but this arrow is confusing me:",
+                "Maybe the `of` keyword is missing on a previous line?",
+                vec![
+                    Section::Para(
+                        "Note: Here is an example of a valid `case` expression for reference."
+                            .to_string(),
+                    ),
+                    Section::Block(CASE_EXAMPLE.to_string()),
+                    Section::Para(
+                        "Notice the indentation. Each pattern is aligned, and each branch is \
+                         indented a bit more than the corresponding pattern. That is important!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::CaseArrow { region } => snippet_spanned(
+                "MISSING ARROW".to_string(),
+                *region,
+                Region::new(region.end, region.end),
+                "I am partway through parsing a `case` expression, but I got stuck here:"
+                    .to_string(),
+                "I was expecting to see an arrow next.".to_string(),
+                vec![
+                    Section::Para(
+                        "Note: Sometimes I get confused by indentation, so try to make your \
+                         `case` look something like this:"
+                            .to_string(),
+                    ),
+                    Section::Block(CASE_EXAMPLE.to_string()),
+                    Section::Para(
+                        "Notice the indentation! Patterns are aligned with each other. Same \
+                         indentation. The expressions after each arrow are all indented a bit \
+                         more than the patterns. That is important!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::LetProblem { region } => snippet_spanned(
+                "LET PROBLEM".to_string(),
+                *region,
+                Region::new(region.end, region.end),
+                "I was partway through parsing a `let` expression, but I got stuck here:"
+                    .to_string(),
+                "Based on the indentation, I was expecting to see the in keyword next. Is \
+                 there a typo?"
+                    .to_string(),
+                vec![Section::Para(
+                    "Note: This can also happen if you are trying to define another value \
+                     within the `let` but it is not indented enough. Make sure each \
+                     definition has exactly the same amount of spaces before it. They should \
+                     line up exactly!"
+                        .to_string(),
+                )],
+            ),
             SyntaxError::RecordEquals { region } => snippet(
                 "PROBLEM IN RECORD",
                 *region,
@@ -237,6 +303,9 @@ impl SyntaxError {
 const RECORD_EXAMPLE: &str =
     "    { name = \"Alice\"\n    , age = 42\n    , height = 1.75\n    }";
 
+/// The multi-line `case` example elm shows in several case diagnostics.
+const CASE_EXAMPLE: &str = "    case maybeWidth of\n      Just width ->\n        width + 200\n\n      Nothing ->\n        400";
+
 /// Build a `Report` from an elm snippet-style body.
 fn snippet(title: &str, region: Region, before: &str, after: &str, notes: Vec<Section>) -> Report {
     snippet_owned(
@@ -257,6 +326,20 @@ fn snippet_owned(
     after: String,
     notes: Vec<Section>,
 ) -> Report {
+    // Single-line errors: the shown region and the underline coincide.
+    snippet_spanned(title, region, region, before, after, notes)
+}
+
+/// As [`snippet_owned`] but with a distinct `region` (lines to show) and
+/// `highlight` (sub-region to underline), for multi-line diagnostics.
+fn snippet_spanned(
+    title: String,
+    region: Region,
+    highlight: Region,
+    before: String,
+    after: String,
+    notes: Vec<Section>,
+) -> Report {
     Report {
         title,
         region,
@@ -267,7 +350,8 @@ fn snippet_owned(
             before,
             after,
             notes,
-            highlight: region,
+            region,
+            highlight,
         }),
     }
 }
