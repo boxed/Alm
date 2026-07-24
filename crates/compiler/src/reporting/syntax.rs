@@ -170,6 +170,8 @@ pub enum SyntaxError {
     /// A record whose closing `}` is on a later line but under-indented; `region`
     /// spans from the record start to the brace, `highlight` marks the brace.
     NeedMoreIndentationRecord { region: Region, highlight: Region },
+    /// A `[glsl| ... ` shader with no closing `|]`.
+    EndlessShader { region: Region },
 }
 
 /// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
@@ -266,7 +268,8 @@ impl SyntaxError {
             | SyntaxError::UnexpectedComma { region }
             | SyntaxError::UnexpectedEquals { region, .. }
             | SyntaxError::TooMuchIndentation { region, .. }
-            | SyntaxError::NeedMoreIndentationRecord { region, .. } => *region,
+            | SyntaxError::NeedMoreIndentationRecord { region, .. }
+            | SyntaxError::EndlessShader { region } => *region,
         }
     }
 
@@ -1285,6 +1288,13 @@ impl SyntaxError {
                 *region,
                 format!("This `{keyword}` should not have any spaces before it:"),
                 format!("Delete the spaces before `{keyword}` until there are none left!"),
+                vec![],
+            ),
+            SyntaxError::EndlessShader { region } => snippet(
+                "ENDLESS SHADER",
+                *region,
+                "I cannot find the end of this shader:",
+                "Add a |] somewhere after this to end the shader.",
                 vec![],
             ),
             SyntaxError::NeedMoreIndentationRecord { region, highlight } => snippet_spanned(

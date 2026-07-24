@@ -1,0 +1,8 @@
+-- ENDLESS SHADER ------------------------------------------------- src/Main.elm
+
+I cannot find the end of this shader:
+
+2| x = [glsl| void main() {}
+       ^^^^^^
+Add a |] somewhere after this to end the shader.
+

@@ -549,10 +549,10 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::new(
-                        "I got to the end of the file without seeing the closing `|]` of this GLSL block.",
-                        open,
-                    ))
+                    let o = open.start;
+                    return Err(ParseError::from_syntax(SyntaxError::EndlessShader {
+                        region: Region::new(o, Position::new(o.row, o.col + 6)),
+                    }));
                 }
                 Some(b'|') if self.peek_at(1) == Some(b']') => {
                     let src = std::str::from_utf8(&self.src[start..self.pos])
