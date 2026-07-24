@@ -182,6 +182,10 @@ pub enum SyntaxError {
     EndlessShader { region: Region },
     /// An application `port module` that declares no ports.
     NoPorts { region: Region },
+    /// A port declaration or `port module` in a package. `port_keyword` selects
+    /// the "remove the port keyword" wording (header) vs "remove this port
+    /// declaration" (a `port` value).
+    PackagesCannotHavePorts { region: Region, port_keyword: bool },
 }
 
 /// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
@@ -281,7 +285,8 @@ impl SyntaxError {
             | SyntaxError::ModuleNameMismatch { region, .. }
             | SyntaxError::InvalidEffectModule { region }
             | SyntaxError::EndlessShader { region }
-            | SyntaxError::NoPorts { region } => *region,
+            | SyntaxError::NoPorts { region }
+            | SyntaxError::PackagesCannotHavePorts { region, .. } => *region,
         }
     }
 
@@ -1355,6 +1360,20 @@ impl SyntaxError {
                 "Switch this to module and you should be all set!",
                 vec![],
             ),
+            SyntaxError::PackagesCannotHavePorts {
+                region,
+                port_keyword,
+            } => snippet(
+                "PACKAGES CANNOT HAVE PORTS",
+                *region,
+                "Packages cannot declare any ports, so I am getting stuck here:",
+                if *port_keyword {
+                    "Remove the port keyword and I should be able to continue."
+                } else {
+                    "Remove this port declaration."
+                },
+                vec![Section::Para(PORTS_IN_PACKAGE_NOTE.to_string())],
+            ),
             SyntaxError::NeedMoreIndentationRecord { region, highlight } => snippet_spanned(
                 "NEED MORE INDENTATION".to_string(),
                 *region,
@@ -1399,6 +1418,10 @@ fn case_notes() -> Vec<Section> {
 /// The hint shared by the UNFINISHED RECORD PATTERN errors.
 const RECORD_PATTERN_HINT: &str = "Hint: A record pattern looks like {x,y} or {name,age} \
      where you list the field names you want to access.";
+
+/// The note shared by both PACKAGES CANNOT HAVE PORTS diagnostics (two
+/// paragraphs; `reflow` wraps each independently).
+const PORTS_IN_PACKAGE_NOTE: &str = "Note: One of the major goals of the package ecosystem is to be completely written in Elm. This means when you install an Elm package, you can be sure you are safe from security issues on install and that you are not going to get any runtime exceptions coming from your new dependency. This design also sets the ecosystem up to target other platforms more easily (like mobile phones, WebAssembly, etc.) since no community code explicitly depends on JavaScript even existing.\n\nGiven that overall goal, allowing ports in packages would lead to some pretty surprising behavior. If ports were allowed in packages, you could install a package but not realize that it brings in an indirect dependency that defines a port. Now you have a program that does not work and the fix is to realize that some JavaScript needs to be added for a dependency you did not even know about. That would be extremely frustrating! \"So why not allow the package author to include the necessary JS code as well?\" Now we are back in conflict with our overall goal to keep all community packages free from runtime exceptions.";
 
 /// The multi-line record example elm shows in several record diagnostics.
 const RECORD_EXAMPLE: &str =

@@ -67,6 +67,12 @@ fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
         // `port module` spans 11 chars (`port` + space + `module`).
         port_module_kw =
             Region::new(port_start, crate::reporting::Position::new(port_start.row, port_start.col + 11));
+        if is_package {
+            return Err(ParseError::from_syntax(SyntaxError::PackagesCannotHavePorts {
+                region: port_module_kw,
+                port_keyword: true,
+            }));
+        }
         chomp_header(p)?
     } else if p.src_from_here().starts_with(b"module") {
         let a = p.position();
@@ -129,6 +135,14 @@ fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
             p.keyword("port")?;
             p.chomp_and_check_indent("I was expecting a port name after `port`")?;
             let name = p.located(|p| p.lower_name("a port name"))?;
+            if is_package {
+                // A port declaration in a package: PACKAGES CANNOT HAVE PORTS,
+                // pointing at the port name.
+                return Err(ParseError::from_syntax(SyntaxError::PackagesCannotHavePorts {
+                    region: name.region,
+                    port_keyword: false,
+                }));
+            }
             if !is_port_module {
                 return Err(ParseError::from_syntax(SyntaxError::UnexpectedPorts {
                     region: module_kw,
