@@ -161,8 +161,14 @@ fn cons_end(p: &mut Parser, start: crate::reporting::Position, first: Pattern) -
             ));
         }
         if p.keyword("as").is_ok() {
-            p.chomp_and_check_indent("I was expecting a name after `as`")?;
-            let alias = p.located(|p| p.lower_name("an alias name"))?;
+            let alias_err =
+                |region| ParseError::from_syntax(SyntaxError::PatternAlias { region });
+            let before = p.region_here();
+            p.chomp_and_check_indent("").map_err(|_| alias_err(before))?;
+            let at = p.region_here();
+            let alias = p
+                .located(|p| p.lower_name("an alias name"))
+                .map_err(|_| alias_err(at))?;
             let end = p.position();
             return Ok(Located::at(
                 start,

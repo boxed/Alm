@@ -1,0 +1,14 @@
+-- UNFINISHED PATTERN --------------------------------------------- src/Main.elm
+
+I was expecting to see a variable name after the `as` keyword:
+
+4|   a as -> 1
+          ^
+The `as` keyword lets you write patterns like ((x,y) as point) so you can refer
+to individual parts of the tuple with x and y or you refer to the whole thing
+with point.
+
+So I was expecting to see a variable name after the `as` keyword here. Sometimes
+people just want to use `as` as a variable name though. Try using a different
+name in that case!
+

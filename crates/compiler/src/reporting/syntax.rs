@@ -116,6 +116,8 @@ pub enum SyntaxError {
     ProblemInCustomType { region: Region },
     /// A pattern position that starts with something that is not a pattern.
     PatternStart { region: Region },
+    /// An `as` keyword in a pattern not followed by a variable name.
+    PatternAlias { region: Region },
 }
 
 impl SyntaxError {
@@ -173,6 +175,8 @@ impl SyntaxError {
             | SyntaxError::ProblemInTypeAlias { region }
             | SyntaxError::ProblemInCustomType { region } => *region,
             | SyntaxError::PatternStart { region } => *region,
+            | SyntaxError::PatternStart { region }
+            | SyntaxError::PatternAlias { region } => *region,
         }
     }
 
@@ -863,6 +867,20 @@ impl SyntaxError {
                 "I am not sure why I am getting stuck exactly. I just know that I want a \
                  pattern next. Something as simple as maybeHeight or result would work!",
                 vec![],
+            ),
+            SyntaxError::PatternAlias { region } => snippet(
+                "UNFINISHED PATTERN",
+                *region,
+                "I was expecting to see a variable name after the `as` keyword:",
+                "The `as` keyword lets you write patterns like ((x,y) as point) so you can \
+                 refer to individual parts of the tuple with x and y or you refer to the \
+                 whole thing with point.",
+                vec![Section::Para(
+                    "So I was expecting to see a variable name after the `as` keyword here. \
+                     Sometimes people just want to use `as` as a variable name though. Try \
+                     using a different name in that case!"
+                        .to_string(),
+                )],
             ),
         }
     }
