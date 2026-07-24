@@ -120,6 +120,14 @@ pub enum SyntaxError {
     PatternAlias { region: Region },
     /// A floating point literal used as a pattern.
     PatternFloat { region: Region },
+    /// A list pattern that got stuck right after the opening `[`.
+    ListPatternOpen { region: Region },
+    /// A list pattern whose closing `]` is missing (unexpected token).
+    ListPatternEnd { region: Region },
+    /// A list pattern whose closing `]` is missing (dedented / end of input).
+    ListPatternIndentEnd { region: Region },
+    /// A list pattern with a trailing `,` but no following pattern.
+    ListPatternExpr { region: Region },
 }
 
 impl SyntaxError {
@@ -179,7 +187,11 @@ impl SyntaxError {
             | SyntaxError::PatternStart { region } => *region,
             | SyntaxError::PatternStart { region }
             | SyntaxError::PatternAlias { region }
-            | SyntaxError::PatternFloat { region } => *region,
+            | SyntaxError::PatternFloat { region }
+            | SyntaxError::ListPatternOpen { region }
+            | SyntaxError::ListPatternEnd { region }
+            | SyntaxError::ListPatternIndentEnd { region }
+            | SyntaxError::ListPatternExpr { region } => *region,
         }
     }
 
@@ -892,6 +904,46 @@ impl SyntaxError {
                 "Equality on floats can be unreliable, so you usually want to check that they \
                  are nearby with some sort of (abs (actual - expected) < 0.001) check.",
                 vec![],
+            ),
+            SyntaxError::ListPatternOpen { region } => snippet(
+                "UNFINISHED LIST PATTERN",
+                *region,
+                "I just saw an open square bracket, but then I got stuck here:",
+                "Try adding a ] to see if that helps?",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe \
+                     there is something next, but it is not indented enough?"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::ListPatternEnd { region } => snippet(
+                "UNFINISHED LIST PATTERN",
+                *region,
+                "I was expecting a closing square bracket to end this list pattern:",
+                "Try adding a ] to see if that helps?",
+                vec![],
+            ),
+            SyntaxError::ListPatternIndentEnd { region } => snippet(
+                "UNFINISHED LIST PATTERN",
+                *region,
+                "I was expecting a closing square bracket to end this list pattern:",
+                "Try adding a ] to see if that helps?",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe \
+                     you have a closing square bracket but it is not indented enough?"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::ListPatternExpr { region } => snippet(
+                "UNFINISHED LIST PATTERN",
+                *region,
+                "I am partway through parsing a list pattern, but I got stuck here:",
+                "I was expecting to see another pattern next. Maybe a variable name.",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so maybe \
+                     there is more to this pattern but it is not indented enough?"
+                        .to_string(),
+                )],
             ),
         }
     }

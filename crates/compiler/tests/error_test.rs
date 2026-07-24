@@ -251,7 +251,7 @@ fn pattern_parse_errors() {
     );
     expect(
         "f v =\n    case v of\n        [ a b ->\n            0\n\nx = 1\n",
-        "I was expecting a `,` or `]` in this list pattern",
+        "I was expecting a closing square bracket to end this list pattern",
     );
     expect(
         "f { a b } = a\n\nx = 1\n",

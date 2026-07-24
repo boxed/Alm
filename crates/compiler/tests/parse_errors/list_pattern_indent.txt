@@ -1,0 +1,11 @@
+-- UNFINISHED LIST PATTERN ---------------------------------------- src/Main.elm
+
+I was expecting a closing square bracket to end this list pattern:
+
+4|   [a
+       ^
+Try adding a ] to see if that helps?
+
+Note: I can get confused by indentation in cases like this, so maybe you have a
+closing square bracket but it is not indented enough?
+

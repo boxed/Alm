@@ -87,20 +87,49 @@ fn record(p: &mut Parser) -> PResult<Pattern> {
 fn list(p: &mut Parser) -> PResult<Pattern> {
     let start = p.position();
     p.eat_byte(b'[', "a list pattern")?;
-    p.chomp_and_check_indent("I was expecting a pattern or `]`")?;
+    let open_end = p.position();
+    p.chomp_and_check_indent("").map_err(|_| {
+        ParseError::from_syntax(SyntaxError::ListPatternOpen {
+            region: Region::new(open_end, open_end),
+        })
+    })?;
     if p.peek() == Some(b']') {
         p.bump(1);
         return Ok(Located::at(start, p.position(), Pattern_::List(vec![])));
     }
     let mut entries = vec![expression(p)?];
-    p.sep_until(
-        b']',
-        IndentCheck::Chomp,
-        expression,
-        &mut entries,
-        "I was expecting another pattern",
-        |r| ParseError::new("I was expecting a `,` or `]` in this list pattern", r),
-    )?;
+    loop {
+        let last_end = entries.last().unwrap().region.end;
+        // After an element, elm chomps whitespace then expects `,` or `]`. A
+        // dedent/end-of-input here points back at the element's end.
+        p.chomp_and_check_indent("").map_err(|_| {
+            ParseError::from_syntax(SyntaxError::ListPatternIndentEnd {
+                region: Region::new(last_end, last_end),
+            })
+        })?;
+        match p.peek() {
+            Some(b',') => {
+                p.bump(1);
+                let comma_end = p.position();
+                p.chomp_and_check_indent("").map_err(|_| {
+                    ParseError::from_syntax(SyntaxError::ListPatternExpr {
+                        region: Region::new(comma_end, comma_end),
+                    })
+                })?;
+                entries.push(expression(p)?);
+            }
+            Some(b']') => {
+                p.bump(1);
+                break;
+            }
+            // An unexpected token (not `,`/`]`) points at the token itself.
+            _ => {
+                return Err(ParseError::from_syntax(SyntaxError::ListPatternEnd {
+                    region: p.region_here(),
+                }))
+            }
+        }
+    }
     Ok(Located::at(start, p.position(), Pattern_::List(entries)))
 }
 

@@ -1,0 +1,11 @@
+-- UNFINISHED LIST PATTERN ---------------------------------------- src/Main.elm
+
+I am partway through parsing a list pattern, but I got stuck here:
+
+4|   [a,
+        ^
+I was expecting to see another pattern next. Maybe a variable name.
+
+Note: I can get confused by indentation in cases like this, so maybe there is
+more to this pattern but it is not indented enough?
+
