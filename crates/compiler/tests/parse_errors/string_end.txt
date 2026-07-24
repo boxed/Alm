@@ -1,0 +1,21 @@
+-- ENDLESS STRING ------------------------------------------------- src/Main.elm
+
+I got to the end of the line without seeing the closing double quote:
+
+3| x = "abc
+           ^
+Strings look like "this" with double quotes on each end. Is the closing double
+quote missing in your code?
+
+Note: For a string that spans multiple lines, you can use the multi-line string
+syntax like this:
+
+    """
+    # Multi-line Strings
+    
+    - start with triple double quotes
+    - write whatever you want
+    - no need to escape newlines or double quotes
+    - end with triple double quotes
+    """
+

@@ -537,16 +537,14 @@ impl<'a> Parser<'a> {
         if self.peek_at(1) == Some(b'"') && self.peek_at(2) == Some(b'"') {
             return self.multiline_string();
         }
-        let open = self.region_here();
         self.bump(1);
         let mut out = String::new();
         loop {
             match self.peek() {
                 None | Some(b'\n') => {
-                    return Err(ParseError::new(
-                        "I got to the end of the line without seeing the closing double quote of this string.",
-                        open,
-                    ))
+                    return Err(ParseError::from_syntax(SyntaxError::EndlessString {
+                        region: self.region_here(),
+                    }));
                 }
                 Some(b'"') => {
                     self.bump(1);

@@ -22,6 +22,8 @@ pub enum SyntaxError {
     UnfinishedList { region: Region },
     /// A parenthesized expression with no closing `)`.
     UnfinishedParens { region: Region },
+    /// A single-line string with no closing double quote before end of line.
+    EndlessString { region: Region },
 }
 
 impl SyntaxError {
@@ -34,7 +36,8 @@ impl SyntaxError {
             | SyntaxError::CharEnd { region }
             | SyntaxError::CharDoubleQuotes { region }
             | SyntaxError::UnfinishedList { region }
-            | SyntaxError::UnfinishedParens { region } => *region,
+            | SyntaxError::UnfinishedParens { region }
+            | SyntaxError::EndlessString { region } => *region,
         }
     }
 
@@ -120,6 +123,27 @@ impl SyntaxError {
                      you have a closing parenthesis but it is not indented enough?"
                         .to_string(),
                 )],
+            ),
+            SyntaxError::EndlessString { region } => snippet(
+                "ENDLESS STRING",
+                *region,
+                "I got to the end of the line without seeing the closing double quote:",
+                "Strings look like \"this\" with double quotes on each end. Is the closing \
+                 double quote missing in your code?",
+                vec![
+                    Section::Para(
+                        "Note: For a string that spans multiple lines, you can use the \
+                         multi-line string syntax like this:"
+                            .to_string(),
+                    ),
+                    Section::Block(
+                        "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
+                         double quotes\n    - write whatever you want\n    - no need to \
+                         escape newlines or double quotes\n    - end with triple double \
+                         quotes\n    \"\"\""
+                            .to_string(),
+                    ),
+                ],
             ),
         }
     }
