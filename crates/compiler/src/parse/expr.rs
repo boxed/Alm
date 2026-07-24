@@ -79,8 +79,22 @@ fn accessible(p: &mut Parser, start: Position, expr: Expr) -> PResult<Expr> {
 // GLSL SHADERS
 
 fn shader(p: &mut Parser) -> PResult<Expr> {
+    use glsl::parser::Parse;
     let start = p.position();
     let src = p.shader()?;
+    // Validate the GLSL with a vendored parser (elm delegates to a 3rd-party
+    // parser too). The caret points at the `[glsl|` opener (6 chars).
+    if let Err(e) = glsl::syntax::ShaderStage::parse(&src) {
+        return Err(crate::parse::ParseError::from_syntax(
+            crate::reporting::syntax::SyntaxError::ShaderProblem {
+                region: crate::reporting::Region::new(
+                    start,
+                    crate::reporting::Position::new(start.row, start.col + 6),
+                ),
+                message: e.info,
+            },
+        ));
+    }
     let info = parse_glsl(&src);
     Ok(Located::at(start, p.position(), Expr_::Shader(info.with_src(src))))
 }

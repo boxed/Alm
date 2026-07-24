@@ -180,6 +180,9 @@ pub enum SyntaxError {
     InvalidEffectModule { region: Region },
     /// A `[glsl| ... ` shader with no closing `|]`.
     EndlessShader { region: Region },
+    /// A GLSL shader block that failed to parse; `message` is the vendored GLSL
+    /// parser's error (alm uses a Rust parser, so the text differs from elm's).
+    ShaderProblem { region: Region, message: String },
     /// An application `port module` that declares no ports.
     NoPorts { region: Region },
     /// A port declaration or `port module` in a package. `port_keyword` selects
@@ -285,6 +288,7 @@ impl SyntaxError {
             | SyntaxError::ModuleNameMismatch { region, .. }
             | SyntaxError::InvalidEffectModule { region }
             | SyntaxError::EndlessShader { region }
+            | SyntaxError::ShaderProblem { region, .. }
             | SyntaxError::NoPorts { region }
             | SyntaxError::PackagesCannotHavePorts { region, .. } => *region,
         }
@@ -1353,6 +1357,25 @@ impl SyntaxError {
                 "Add a |] somewhere after this to end the shader.",
                 vec![],
             ),
+            SyntaxError::ShaderProblem { region, message } => {
+                // Mirror elm's layout: the fixed wrapper text, then the vendored
+                // parser's message indented by four spaces (blank lines dropped).
+                let block = message
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| format!("    {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                snippet_owned(
+                    "SHADER PROBLEM".to_string(),
+                    *region,
+                    "I ran into a problem while parsing this GLSL block.".to_string(),
+                    "I use a 3rd party GLSL parser for now, and I did my best to extract \
+                     their error message:"
+                        .to_string(),
+                    vec![Section::Block(block)],
+                )
+            }
             SyntaxError::NoPorts { region } => snippet(
                 "NO PORTS",
                 *region,
