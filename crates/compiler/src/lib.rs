@@ -24,6 +24,33 @@ pub fn compile(source: &str) -> Result<String, Vec<Report>> {
     Ok(generate::generate(&check(source)?))
 }
 
+/// Like [`compile`], but first checks that the declared module name matches
+/// `expected` (the module's file path), reporting MODULE NAME MISMATCH if not.
+pub fn compile_named(source: &str, expected: &str) -> Result<String, Vec<Report>> {
+    if let Some(report) = module_name_mismatch(source, expected) {
+        return Err(vec![report]);
+    }
+    compile(source)
+}
+
+/// The MODULE NAME MISMATCH report if `source` parses to a module whose declared
+/// name differs from `expected`; otherwise `None`. Parse failures are left for
+/// the normal pipeline to surface.
+pub fn module_name_mismatch(source: &str, expected: &str) -> Option<Report> {
+    let name = parse::parse_module(source).ok()?.name?;
+    if name.value.as_str() == expected {
+        return None;
+    }
+    Some(
+        reporting::syntax::SyntaxError::ModuleNameMismatch {
+            region: name.region,
+            expected: expected.to_string(),
+            actual: name.value.as_str().to_string(),
+        }
+        .to_report(),
+    )
+}
+
 /// Like [`compile`], but without dead-code elimination — the whole runtime
 /// kernel is emitted. Only for tests that reach into kernel internals the app
 /// itself never references.

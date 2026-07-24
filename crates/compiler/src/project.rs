@@ -359,6 +359,11 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     let entry_key = load_module_file(entry, &scopes.app_search, &scopes, &mut modules)
         .map_err(|e| vec![e])?;
 
+    // The entry module's declared name must match its file path.
+    if let Some(e) = entry_name_mismatch(&modules[&entry_key], &scopes.app_search) {
+        return Err(vec![e]);
+    }
+
     // Topologically sort (dependencies first), detecting import cycles.
     let order = sort_modules(&modules, &entry_key).map_err(|cycle| {
         let module = &modules[&cycle];
@@ -849,6 +854,32 @@ fn module_file_name(name: &Name) -> String {
 
 /// Find `name` among `search_dirs`, returning the file and the source dir it
 /// was found in (so the caller can recurse with that dir's package scope).
+/// A MODULE NAME MISMATCH build error if the module's declared name differs from
+/// the name implied by its file path. The expected name is derived only when the
+/// path cleanly relativizes against a source directory; otherwise the check is
+/// skipped (so an unusual path form never produces a false positive).
+fn entry_name_mismatch(m: &LoadedModule, search_dirs: &[PathBuf]) -> Option<BuildError> {
+    let name = m.module.name.as_ref()?;
+    let expected = search_dirs.iter().find_map(|d| {
+        let rel = m.path.strip_prefix(d).ok()?;
+        rel.to_str()?.strip_suffix(".elm").map(|s| s.replace(['/', '\\'], "."))
+    })?;
+    if name.value.as_str() == expected {
+        return None;
+    }
+    let report = crate::reporting::syntax::SyntaxError::ModuleNameMismatch {
+        region: name.region,
+        expected,
+        actual: name.value.as_str().to_string(),
+    }
+    .to_report();
+    Some(BuildError::from_reports(
+        m.path.clone(),
+        m.source.clone(),
+        vec![report],
+    ))
+}
+
 fn find_module_file(name: &Name, search_dirs: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
     let relative = module_file_name(name);
     for dir in search_dirs {

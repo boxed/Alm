@@ -170,6 +170,12 @@ pub enum SyntaxError {
     /// A record whose closing `}` is on a later line but under-indented; `region`
     /// spans from the record start to the brace, `highlight` marks the brace.
     NeedMoreIndentationRecord { region: Region, highlight: Region },
+    /// A module whose declared name does not match its file path.
+    ModuleNameMismatch {
+        region: Region,
+        expected: String,
+        actual: String,
+    },
     /// An `effect module` declaration outside the @elm organization.
     InvalidEffectModule { region: Region },
     /// A `[glsl| ... ` shader with no closing `|]`.
@@ -271,6 +277,7 @@ impl SyntaxError {
             | SyntaxError::UnexpectedEquals { region, .. }
             | SyntaxError::TooMuchIndentation { region, .. }
             | SyntaxError::NeedMoreIndentationRecord { region, .. }
+            | SyntaxError::ModuleNameMismatch { region, .. }
             | SyntaxError::InvalidEffectModule { region }
             | SyntaxError::EndlessShader { region } => *region,
         }
@@ -1292,6 +1299,28 @@ impl SyntaxError {
                 format!("This `{keyword}` should not have any spaces before it:"),
                 format!("Delete the spaces before `{keyword}` until there are none left!"),
                 vec![],
+            ),
+            SyntaxError::ModuleNameMismatch {
+                region,
+                expected,
+                actual,
+            } => snippet_owned(
+                "MODULE NAME MISMATCH".to_string(),
+                *region,
+                "It looks like this module name is out of sync:".to_string(),
+                format!(
+                    "I need it to match the file path, so I was expecting to see `{expected}` \
+                     here. Make the following change, and you should be all set!"
+                ),
+                vec![
+                    Section::Block(format!("    {actual} -> {expected}")),
+                    Section::Para(
+                        "Note: I require that module names correspond to file paths. This \
+                         makes it much easier to explore unfamiliar codebases! So if you want \
+                         to keep the current module name, try renaming the file instead."
+                            .to_string(),
+                    ),
+                ],
             ),
             SyntaxError::InvalidEffectModule { region } => snippet(
                 "INVALID EFFECT MODULE",

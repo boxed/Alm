@@ -9,7 +9,9 @@ use std::path::Path;
 /// Compile a fixture source and render its diagnostics the way `elm make` does
 /// (path `src/Main.elm`), returning the exact report text.
 fn render(source: &str) -> String {
-    match alm_compiler::compile(source) {
+    // The fixtures live at `src/Main.elm`, so the expected module name is `Main`
+    // (this drives the MODULE NAME MISMATCH check, which needs the file path).
+    match alm_compiler::compile_named(source, "Main") {
         Ok(_) => panic!("expected a parse error, but compilation succeeded"),
         Err(reports) => reports
             .iter()

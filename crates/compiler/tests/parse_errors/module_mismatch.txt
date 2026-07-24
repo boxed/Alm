@@ -1,0 +1,15 @@
+-- MODULE NAME MISMATCH ------------------------------------------- src/Main.elm
+
+It looks like this module name is out of sync:
+
+1| module Wrong exposing (..)
+          ^^^^^
+I need it to match the file path, so I was expecting to see `Main` here. Make
+the following change, and you should be all set!
+
+    Wrong -> Main
+
+Note: I require that module names correspond to file paths. This makes it much
+easier to explore unfamiliar codebases! So if you want to keep the current
+module name, try renaming the file instead.
+
