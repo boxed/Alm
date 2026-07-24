@@ -295,6 +295,7 @@ fn gen_bundle(
                 }
             }
         }
+        gen.manager_decl(module);
         all_exports.push((module.name.clone(), exports));
     }
 
@@ -720,6 +721,46 @@ impl Generator {
                 .unwrap();
             }
         }
+    }
+
+    // EFFECT MANAGERS
+
+    /// Emit the `command`/`subscription` leaf helpers and register the effect
+    /// manager, mirroring elm's `generateManager`. `command`/`subscription`
+    /// wrap a user value into a `_Platform_leaf(home)` bag; `createManager`
+    /// stores the manager's `init`/`onEffects`/`onSelfMsg`/`cmdMap`/`subMap`.
+    fn manager_decl(&mut self, module: &can::Module) {
+        let Some(manager) = &module.manager else {
+            return;
+        };
+        let home = module.name.as_str();
+        let mv = mangle_module(&module.name);
+        let leaf = |out: &mut String, kind: &str| {
+            writeln!(out, "var {mv}${kind} = _Platform_leaf('{home}');").unwrap();
+        };
+        // createManager(init, onEffects, onSelfMsg, cmdMap, subMap). A Sub-only
+        // manager passes 0 for the absent cmdMap so the runtime's dispatch picks
+        // the subs argument (matches elm's generateManagerHelp).
+        let args = match manager {
+            can::Manager::Cmd(_) => {
+                leaf(&mut self.out, "command");
+                format!("{mv}$init, {mv}$onEffects, {mv}$onSelfMsg, {mv}$cmdMap")
+            }
+            can::Manager::Sub(_) => {
+                leaf(&mut self.out, "subscription");
+                format!("{mv}$init, {mv}$onEffects, {mv}$onSelfMsg, 0, {mv}$subMap")
+            }
+            can::Manager::Fx(_, _) => {
+                leaf(&mut self.out, "command");
+                leaf(&mut self.out, "subscription");
+                format!("{mv}$init, {mv}$onEffects, {mv}$onSelfMsg, {mv}$cmdMap, {mv}$subMap")
+            }
+        };
+        writeln!(
+            self.out,
+            "_Platform_effectManagers['{home}'] = _Platform_createManager({args});"
+        )
+        .unwrap();
     }
 
     // DEFINITIONS
