@@ -183,6 +183,37 @@ pub fn check_module(
         );
     }
 
+    // Effect module: `command`/`subscription` are compiler-provided helpers.
+    //   command      : home.CmdType a -> Platform.Cmd a
+    //   subscription : home.SubType a -> Platform.Sub a
+    // `a` is quantified (empty `free`), so each use instantiates a fresh msg.
+    if let Some(manager) = &module.manager {
+        use can::Type;
+        let var = || Type::Var(Name::from("a"));
+        let leaf = |type_name: &Name| {
+            Type::Type(module.name.clone(), type_name.clone(), Rc::new(vec![var()]))
+        };
+        let wrap = |home: &str, ctor: &str| {
+            Type::Type(Name::from(home), Name::from(ctor), Rc::new(vec![var()]))
+        };
+        let mut inject = |name: &str, arg: Type, result: Type| {
+            checker.globals.insert(
+                Name::from(name),
+                Binding::Scheme(Scheme::closed(Type::Lambda(Rc::new(arg), Rc::new(result)))),
+            );
+        };
+        match manager {
+            can::Manager::Cmd(c) => inject("command", leaf(c), wrap("Platform.Cmd", "Cmd")),
+            can::Manager::Sub(s) => {
+                inject("subscription", leaf(s), wrap("Platform.Sub", "Sub"))
+            }
+            can::Manager::Fx(c, s) => {
+                inject("command", leaf(c), wrap("Platform.Cmd", "Cmd"));
+                inject("subscription", leaf(s), wrap("Platform.Sub", "Sub"));
+            }
+        }
+    }
+
     for group in &module.decls {
         checker.check_decl_group(group);
     }
