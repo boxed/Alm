@@ -165,6 +165,33 @@ fn is_native_shunted_module(name: &str) -> bool {
     name == "Deque"
 }
 
+/// Effect managers are implemented on the JS and native (uniform) runtimes but
+/// not yet on the monomorphizing (typed) or WasmGC backends. Reject an effect
+/// module on those targets with a clear message rather than a cryptic
+/// codegen failure.
+fn reject_effect_modules(
+    entry: &Path,
+    modules: &[can::Module],
+    target: &str,
+    alternative: &str,
+) -> Result<(), Vec<BuildError>> {
+    if let Some(module) = modules.iter().find(|m| m.manager.is_some()) {
+        return Err(vec![BuildError::new(
+            entry.to_path_buf(),
+            String::new(),
+            "EFFECT MODULE UNSUPPORTED ON THIS TARGET",
+            Region::ZERO,
+            format!(
+                "The module `{}` is an `effect module`, but the {} backend does not \
+                 support effect managers yet. They run on the js and native targets, \
+                 so compile with {} instead.",
+                module.name, target, alternative
+            ),
+        )]);
+    }
+    Ok(())
+}
+
 pub fn compile_project_typed(
     entry: &Path,
     output: &Path,
@@ -172,6 +199,12 @@ pub fn compile_project_typed(
     opt: generate::native::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    let target_name = if target == generate::native::Target::Wasm {
+        "wasm (typed)"
+    } else {
+        "native-typed"
+    };
+    reject_effect_modules(entry, &checked.modules, target_name, "--target=native")?;
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
@@ -244,6 +277,7 @@ pub fn compile_project_wasmgc(
     source_maps: bool,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
+    reject_effect_modules(entry, &checked.modules, "wasm-gc", "--target=js or --target=native")?;
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
