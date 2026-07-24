@@ -1,9 +1,9 @@
 //! Port of `Parse.Pattern`.
 
-use super::{IndentCheck, NumberLit, PResult, ParseError, Parser};
+use super::{NumberLit, PResult, ParseError, Parser};
 use crate::ast::source::{Pattern, Pattern_};
 use crate::reporting::syntax::SyntaxError;
-use crate::reporting::{Located, Region};
+use crate::reporting::{Located, Position, Region};
 
 /// Port of `Pattern.term`: a pattern that needs no parentheses.
 pub fn term(p: &mut Parser) -> PResult<Pattern> {
@@ -163,21 +163,40 @@ fn parens_or_tuple(p: &mut Parser) -> PResult<Pattern> {
         p.bump(1);
         return Ok(Located::at(start, p.position(), Pattern_::Unit));
     }
-    let first = expression(p)?;
-    p.chomp_and_check_indent("I was in the middle of a parenthesized pattern")?;
-    let (end, first, rest) = p.chomp_tuple_items(
-        first,
-        expression,
-        IndentCheck::Chomp,
-        "I was expecting another pattern",
-        |x| x.region.end,
-        |r| ParseError::new("I was expecting a `,` or `)` in this pattern", r),
-        |r| ParseError::new("I was expecting another pattern", r),
-    )?;
-    if rest.is_empty() {
-        Ok(first)
+    let mut items = vec![expression(p)?];
+    let close_err = |end: Position| {
+        ParseError::new(
+            "I was expecting a `,` or `)` in this pattern",
+            Region::new(end, end),
+        )
+    };
+    loop {
+        let last_end = items.last().unwrap().region.end;
+        p.chomp_and_check_indent("").map_err(|_| close_err(last_end))?;
+        match p.peek() {
+            Some(b',') => {
+                p.bump(1);
+                let comma_end = p.position();
+                p.chomp_and_check_indent("").map_err(|_| {
+                    ParseError::from_syntax(SyntaxError::TuplePatternExpr {
+                        region: Region::new(comma_end, comma_end),
+                    })
+                })?;
+                items.push(expression(p)?);
+            }
+            Some(b')') => {
+                p.bump(1);
+                break;
+            }
+            _ => return Err(close_err(last_end)),
+        }
+    }
+    let end = p.position();
+    if items.len() == 1 {
+        Ok(items.into_iter().next().unwrap())
     } else {
-        let mut it = rest.into_iter();
+        let mut it = items.into_iter();
+        let first = it.next().unwrap();
         let second = it.next().unwrap();
         Ok(Located::at(
             start,

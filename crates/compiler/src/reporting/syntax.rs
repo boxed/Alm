@@ -132,6 +132,8 @@ pub enum SyntaxError {
     RecordPatternField { region: Region },
     /// A record pattern whose closing `}` is missing.
     RecordPatternEnd { region: Region },
+    /// A tuple pattern with a trailing `,` but no following pattern.
+    TuplePatternExpr { region: Region },
 }
 
 impl SyntaxError {
@@ -197,7 +199,8 @@ impl SyntaxError {
             | SyntaxError::ListPatternIndentEnd { region }
             | SyntaxError::ListPatternExpr { region }
             | SyntaxError::RecordPatternField { region }
-            | SyntaxError::RecordPatternEnd { region } => *region,
+            | SyntaxError::RecordPatternEnd { region }
+            | SyntaxError::TuplePatternExpr { region } => *region,
         }
     }
 
@@ -964,6 +967,18 @@ impl SyntaxError {
                 "I was partway through parsing a record pattern, but I got stuck here:",
                 "I was expecting to see a closing curly brace next. Try adding a } here?",
                 vec![Section::Para(RECORD_PATTERN_HINT.to_string())],
+            ),
+            SyntaxError::TuplePatternExpr { region } => snippet(
+                "UNFINISHED TUPLE PATTERN",
+                *region,
+                "I am partway through parsing a tuple pattern, but I got stuck here:",
+                "I was expecting to see a pattern next. I am expecting the final result to be \
+                 something like (x,y) or (name, _).",
+                vec![Section::Para(
+                    "Note: I can get confused by indentation in cases like this, so the \
+                     problem may be that the next part is not indented enough?"
+                        .to_string(),
+                )],
             ),
         }
     }

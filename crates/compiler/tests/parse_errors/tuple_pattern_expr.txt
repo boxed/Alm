@@ -1,0 +1,12 @@
+-- UNFINISHED TUPLE PATTERN --------------------------------------- src/Main.elm
+
+I am partway through parsing a tuple pattern, but I got stuck here:
+
+4|   (a,
+        ^
+I was expecting to see a pattern next. I am expecting the final result to be
+something like (x,y) or (name, _).
+
+Note: I can get confused by indentation in cases like this, so the problem may
+be that the next part is not indented enough?
+
