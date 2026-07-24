@@ -14,7 +14,7 @@ use crate::data::Name;
 use crate::reporting::syntax::{BadUnicode, SyntaxError};
 use crate::reporting::{Located, Position, Region};
 
-pub use module::parse_module;
+pub use module::{parse_module, parse_module_typed};
 
 #[derive(Debug, Clone)]
 pub struct ParseError {

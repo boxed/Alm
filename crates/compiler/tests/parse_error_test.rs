@@ -8,10 +8,11 @@ use std::path::Path;
 
 /// Compile a fixture source and render its diagnostics the way `elm make` does
 /// (path `src/Main.elm`), returning the exact report text.
-fn render(source: &str) -> String {
+fn render(source: &str, is_package: bool) -> String {
     // The fixtures live at `src/Main.elm`, so the expected module name is `Main`
     // (this drives the MODULE NAME MISMATCH check, which needs the file path).
-    match alm_compiler::compile_named(source, "Main") {
+    // `pkg_*` fixtures are compiled as a package (for PACKAGES CANNOT HAVE PORTS).
+    match alm_compiler::compile_named_typed(source, "Main", is_package) {
         Ok(_) => panic!("expected a parse error, but compilation succeeded"),
         Err(reports) => reports
             .iter()
@@ -37,7 +38,7 @@ fn parse_errors_match_elm() {
         let name = elm.file_stem().unwrap().to_string_lossy().to_string();
         let source = fs::read_to_string(elm).unwrap();
         let expected = fs::read_to_string(elm.with_extension("txt")).unwrap();
-        let got = render(&source);
+        let got = render(&source, name.starts_with("pkg_"));
         if got != expected {
             failures.push(format!(
                 "\n=== {} ===\n--- expected (elm) ---\n{}\n--- got (alm) ---\n{}",

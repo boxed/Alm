@@ -1,0 +1,8 @@
+-- NO PORTS ------------------------------------------------------- src/Main.elm
+
+This module does not declare any ports, but it says it will:
+
+1| port module Main exposing (..)
+   ^^^^^^^^^^^
+Switch this to module and you should be all set!
+

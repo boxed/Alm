@@ -27,10 +27,20 @@ pub fn compile(source: &str) -> Result<String, Vec<Report>> {
 /// Like [`compile`], but first checks that the declared module name matches
 /// `expected` (the module's file path), reporting MODULE NAME MISMATCH if not.
 pub fn compile_named(source: &str, expected: &str) -> Result<String, Vec<Report>> {
+    compile_named_typed(source, expected, false)
+}
+
+/// As [`compile_named`], but validating ports/effects against the project type
+/// (a package cannot declare ports).
+pub fn compile_named_typed(
+    source: &str,
+    expected: &str,
+    is_package: bool,
+) -> Result<String, Vec<Report>> {
     if let Some(report) = module_name_mismatch(source, expected) {
         return Err(vec![report]);
     }
-    compile(source)
+    Ok(generate::generate(&check_typed(source, is_package)?))
 }
 
 /// The MODULE NAME MISMATCH report if `source` parses to a module whose declared
@@ -77,7 +87,13 @@ pub fn compile_with_source_map(source: &str) -> Result<(String, String), Vec<Rep
 
 /// Parse, canonicalize, type-check and nitpick a single module.
 fn check(source: &str) -> Result<ast::canonical::Module, Vec<Report>> {
-    let module = parse::parse_module(source).map_err(|e| {
+    check_typed(source, false)
+}
+
+/// As [`check`], but validating ports/effects against the project type (a
+/// package cannot declare ports).
+fn check_typed(source: &str, is_package: bool) -> Result<ast::canonical::Module, Vec<Report>> {
+    let module = parse::parse_module_typed(source, is_package).map_err(|e| {
         vec![match e.syntax {
             Some(se) => se.to_report(),
             None => Report {

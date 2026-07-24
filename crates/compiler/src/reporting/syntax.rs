@@ -180,6 +180,8 @@ pub enum SyntaxError {
     InvalidEffectModule { region: Region },
     /// A `[glsl| ... ` shader with no closing `|]`.
     EndlessShader { region: Region },
+    /// An application `port module` that declares no ports.
+    NoPorts { region: Region },
 }
 
 /// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
@@ -250,7 +252,6 @@ impl SyntaxError {
             | SyntaxError::ExpectingTypeAliasName { region }
             | SyntaxError::ProblemInTypeAlias { region }
             | SyntaxError::ProblemInCustomType { region } => *region,
-            | SyntaxError::PatternStart { region } => *region,
             | SyntaxError::PatternStart { region }
             | SyntaxError::PatternAlias { region }
             | SyntaxError::PatternFloat { region }
@@ -279,7 +280,8 @@ impl SyntaxError {
             | SyntaxError::NeedMoreIndentationRecord { region, .. }
             | SyntaxError::ModuleNameMismatch { region, .. }
             | SyntaxError::InvalidEffectModule { region }
-            | SyntaxError::EndlessShader { region } => *region,
+            | SyntaxError::EndlessShader { region }
+            | SyntaxError::NoPorts { region } => *region,
         }
     }
 
@@ -1344,6 +1346,13 @@ impl SyntaxError {
                 *region,
                 "I cannot find the end of this shader:",
                 "Add a |] somewhere after this to end the shader.",
+                vec![],
+            ),
+            SyntaxError::NoPorts { region } => snippet(
+                "NO PORTS",
+                *region,
+                "This module does not declare any ports, but it says it will:",
+                "Switch this to module and you should be all set!",
                 vec![],
             ),
             SyntaxError::NeedMoreIndentationRecord { region, highlight } => snippet_spanned(

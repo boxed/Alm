@@ -484,6 +484,9 @@ struct Scopes {
     /// a package's imports see only its own `src` plus its declared
     /// dependencies' `src` dirs.
     dir_search: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Whether the project's `elm.json` declares `"type": "package"`. Packages
+    /// may not declare ports.
+    is_package: bool,
 }
 
 impl Scopes {
@@ -530,7 +533,19 @@ fn single_dir_scope(source: PathBuf) -> Scopes {
     Scopes {
         app_search,
         dir_search,
+        is_package: false,
     }
+}
+
+/// Whether an `elm.json` declares `"type": "package"`.
+fn is_package_project(elm_json: &str) -> bool {
+    if let Some(i) = elm_json.find("\"type\"") {
+        if let Some(colon) = elm_json[i..].find(':') {
+            let rest = elm_json[i + colon + 1..].trim_start();
+            return rest.starts_with("\"package\"");
+        }
+    }
+    false
 }
 
 /// Build the per-package search scopes from a project's elm.json.
@@ -578,6 +593,7 @@ fn build_scopes(project_dir: &Path, elm_json: &str) -> Scopes {
     Scopes {
         app_search,
         dir_search,
+        is_package: is_package_project(elm_json),
     }
 }
 
@@ -773,7 +789,7 @@ fn load_module_file(
         )
     })?;
 
-    let module = parse::parse_module(&source).map_err(|e| match e.syntax {
+    let module = parse::parse_module_typed(&source, scopes.is_package).map_err(|e| match e.syntax {
         Some(se) => {
             BuildError::from_reports(path.to_path_buf(), source.clone(), vec![se.to_report()])
         }

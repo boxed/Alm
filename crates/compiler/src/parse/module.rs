@@ -9,15 +9,23 @@ use crate::data::Name;
 use crate::reporting::{Located, Region};
 
 pub fn parse_module(source: &str) -> Result<Module, ParseError> {
+    parse_module_typed(source, false)
+}
+
+/// Parse a module, validating port/effect declarations against the project type:
+/// packages cannot declare ports at all (`PACKAGES CANNOT HAVE PORTS`), while an
+/// application `port module` with no ports is `NO PORTS`.
+pub fn parse_module_typed(source: &str, is_package: bool) -> Result<Module, ParseError> {
     let mut p = Parser::new(source);
-    let module = chomp_module(&mut p)?;
+    let module = chomp_module(&mut p, is_package)?;
     if !p.is_at_end() {
         return Err(p.error("I got stuck here. I was expecting a top-level definition, `type`, or `import`."));
     }
     Ok(module)
 }
 
-fn chomp_module(p: &mut Parser) -> PResult<Module> {
+fn chomp_module(p: &mut Parser, is_package: bool) -> PResult<Module> {
+    use crate::reporting::syntax::SyntaxError;
     p.chomp_space()?;
 
     // `effect module ...` — reserved for the @elm organization.
@@ -41,10 +49,14 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
     let mut is_port_module = false;
     // Region of the `module` keyword, for the UNEXPECTED PORTS diagnostic.
     let mut module_kw = Region::ZERO;
+    // Region of the `port module` keywords, for NO PORTS / PACKAGES CANNOT HAVE
+    // PORTS (set only for a `port module` header).
+    let mut port_module_kw = Region::ZERO;
     let starts_port =
         p.src_from_here().starts_with(b"port") && !p.peek_at(4).is_some_and(super::is_inner_char);
     let (name, exports) = if starts_port {
         is_port_module = true;
+        let port_start = p.position();
         p.keyword("port")?;
         let after_port = p.position();
         p.chomp_and_check_indent("").map_err(|_| unfinished_port_module(after_port))?;
@@ -52,6 +64,9 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
         if !p.peek_keyword("module") {
             return Err(unfinished_port_module(module_stuck));
         }
+        // `port module` spans 11 chars (`port` + space + `module`).
+        port_module_kw =
+            Region::new(port_start, crate::reporting::Position::new(port_start.row, port_start.col + 11));
         chomp_header(p)?
     } else if p.src_from_here().starts_with(b"module") {
         let a = p.position();
@@ -111,14 +126,14 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
         } else if p.src_from_here().starts_with(b"port")
             && !p.peek_at(4).is_some_and(super::is_inner_char)
         {
-            if !is_port_module {
-                return Err(ParseError::from_syntax(
-                    crate::reporting::syntax::SyntaxError::UnexpectedPorts { region: module_kw },
-                ));
-            }
             p.keyword("port")?;
             p.chomp_and_check_indent("I was expecting a port name after `port`")?;
             let name = p.located(|p| p.lower_name("a port name"))?;
+            if !is_port_module {
+                return Err(ParseError::from_syntax(SyntaxError::UnexpectedPorts {
+                    region: module_kw,
+                }));
+            }
             let port_stuck = || {
                 ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedPort {
                     region: Region::new(name.region.end, name.region.end),
@@ -173,6 +188,13 @@ fn chomp_module(p: &mut Parser) -> PResult<Module> {
             }
         }
         p.chomp_space()?;
+    }
+
+    // An application `port module` that declares no ports: NO PORTS.
+    if is_port_module && !is_package && ports.is_empty() {
+        return Err(ParseError::from_syntax(SyntaxError::NoPorts {
+            region: port_module_kw,
+        }));
     }
 
     Ok(Module {
