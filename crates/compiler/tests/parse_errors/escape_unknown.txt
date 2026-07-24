@@ -1,0 +1,22 @@
+-- UNKNOWN ESCAPE ------------------------------------------------- src/Main.elm
+
+Backslashes always start escaped characters, but I do not recognize this one:
+
+3| x = "\q"
+        ^^
+Valid escape characters include:
+
+    \n
+    \r
+    \t
+    \"
+    \'
+    \\
+    \u{003D}
+
+Do you want one of those instead? Maybe you need \\ to escape a backslash?
+
+Note: The last style lets encode ANY character by its Unicode code point. That
+means \u{0009} and \t are the same. You can use that style for anything not
+covered by the other six escapes!
+

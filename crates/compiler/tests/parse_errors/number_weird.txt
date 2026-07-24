@@ -1,0 +1,15 @@
+-- WEIRD NUMBER --------------------------------------------------- src/Main.elm
+
+I thought I was reading a number, but I ran into some weird stuff here:
+
+3| x = 3e
+         ^
+I recognize numbers in the following formats:
+
+    42
+    3.14
+    6.022e23
+    0x002B
+
+So is there a way to write it like one of those?
+

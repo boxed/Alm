@@ -1,0 +1,8 @@
+-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm
+
+This is not a valid code point:
+
+3| x = "\u{110000}"
+        ^^^^^^^^^^
+The valid code points are between 0 and 10FFFF inclusive.
+

@@ -1,0 +1,13 @@
+-- LEADING ZEROS -------------------------------------------------- src/Main.elm
+
+I do not accept numbers with leading zeros:
+
+3| x = 00
+        ^
+Just delete the leading zeros and it should work!
+
+Note: Some languages let you to specify octal numbers by adding a leading zero.
+So in C, writing 0111 is the same as writing 73. Some people are used to that,
+but others probably want it to equal 111. Either path is going to surprise
+people from certain backgrounds, so Elm tries to avoid this whole situation.
+

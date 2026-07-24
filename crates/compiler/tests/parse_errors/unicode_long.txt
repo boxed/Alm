@@ -1,0 +1,9 @@
+-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm
+
+This code point has too many digits:
+
+3| x = "\u{0000041}"
+        ^^^^^^^^^^^
+Valid code points are between \u{0000} and \u{10FFFF}, so try trimming any
+leading zeros until you have between four and six digits.
+

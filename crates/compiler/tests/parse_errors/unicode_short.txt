@@ -1,0 +1,8 @@
+-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm
+
+Every code point needs at least four digits:
+
+3| x = "\u{12}"
+        ^^^^^^
+Try \u{0012} instead?
+

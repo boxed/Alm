@@ -11,7 +11,7 @@ pub mod pattern;
 pub mod type_;
 
 use crate::data::Name;
-use crate::reporting::syntax::SyntaxError;
+use crate::reporting::syntax::{BadUnicode, SyntaxError};
 use crate::reporting::{Located, Position, Region};
 
 pub use module::parse_module;
@@ -237,9 +237,9 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                 }
                 Some(b'\t') => {
-                    return Err(self.error(
-                        "I ran into a tab. Elm files must use spaces for indentation.",
-                    ))
+                    return Err(ParseError::from_syntax(SyntaxError::NoTabs {
+                        region: self.region_here(),
+                    }))
                 }
                 Some(b'-') if self.peek_at(1) == Some(b'-') => {
                     self.bump(2);
@@ -439,6 +439,7 @@ impl<'a> Parser<'a> {
     // NUMBERS — port of Parse.Number
 
     pub fn number(&mut self) -> PResult<NumberLit> {
+        let num_start = self.position();
         let first = match self.peek() {
             Some(b) if b.is_ascii_digit() => b,
             _ => return Err(self.error("Expecting a number")),
@@ -460,30 +461,68 @@ impl<'a> Parser<'a> {
             return Ok(NumberLit::Int(n));
         }
 
+        // A leading zero followed by another decimal digit (`00`, `05`) is
+        // rejected: the caret points at the second digit.
+        if first == b'0' && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
+            let p = Position::new(num_start.row, num_start.col + 1);
+            return Err(ParseError::from_syntax(SyntaxError::LeadingZeros {
+                region: Region::new(p, p),
+            }));
+        }
+
         let start = self.pos;
         while self.peek().is_some_and(|b| b.is_ascii_digit()) {
             self.bump(1);
         }
         let mut is_float = false;
-        if self.peek() == Some(b'.') && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
-            is_float = true;
-            self.bump(1);
-            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
-                self.bump(1);
-            }
-        }
-        if self.peek() == Some(b'e') || self.peek() == Some(b'E') {
-            let mut ahead = 1;
-            if self.peek_at(ahead) == Some(b'+') || self.peek_at(ahead) == Some(b'-') {
-                ahead += 1;
-            }
-            if self.peek_at(ahead).is_some_and(|b| b.is_ascii_digit()) {
+        if self.peek() == Some(b'.') {
+            if self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
                 is_float = true;
-                self.bump(ahead);
+                self.bump(1);
                 while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                     self.bump(1);
                 }
+            } else {
+                // A dot with no fractional digit after it: `1.` -> WEIRD NUMBER,
+                // caret on the dot itself.
+                let p = self.position();
+                return Err(ParseError::from_syntax(SyntaxError::NumberDot {
+                    region: Region::new(p, p),
+                }));
             }
+        }
+        if self.peek() == Some(b'e') || self.peek() == Some(b'E') {
+            self.bump(1); // the `e`/`E`
+            let signed = matches!(self.peek(), Some(b'+') | Some(b'-'));
+            let digit_after = if signed { self.peek_at(1) } else { self.peek() };
+            if digit_after.is_some_and(|b| b.is_ascii_digit()) {
+                is_float = true;
+                if signed {
+                    self.bump(1);
+                }
+                while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                    self.bump(1);
+                }
+            } else {
+                // An `e` not followed by an exponent: caret just past the `e`.
+                let p = self.position();
+                return Err(ParseError::from_syntax(SyntaxError::NumberEnd {
+                    region: Region::new(p, p),
+                }));
+            }
+        }
+        // A number butted directly against an identifier character (`12x`,
+        // `12_000`) is a malformed number, with the caret on that character.
+        let dirty = match self.peek() {
+            Some(b) if b.is_ascii_alphanumeric() || b == b'_' => true,
+            Some(b) if b >= 0x80 => self.peek_char().is_some_and(|c| c.is_alphabetic()),
+            _ => false,
+        };
+        if dirty {
+            let p = self.position();
+            return Err(ParseError::from_syntax(SyntaxError::NumberEnd {
+                region: Region::new(p, p),
+            }));
         }
         let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
         if is_float {
@@ -636,6 +675,7 @@ impl<'a> Parser<'a> {
 
     fn escape(&mut self) -> PResult<char> {
         debug_assert_eq!(self.peek(), Some(b'\\'));
+        let bs = self.position();
         self.bump(1);
         match self.peek() {
             Some(b'n') => {
@@ -662,8 +702,8 @@ impl<'a> Parser<'a> {
                 self.bump(1);
                 Ok('\\')
             }
-            Some(b'u') if self.peek_at(1) == Some(b'{') => {
-                let code = self.unicode_escape_code()?;
+            Some(b'u') => {
+                let code = self.unicode_escape_code(bs)?;
                 // Elm sources may write astral-plane characters as UTF-16
                 // surrogate pairs: `\u{D835}\u{DD04}`. Combine a high surrogate
                 // with a following low one into a single scalar value.
@@ -673,8 +713,9 @@ impl<'a> Parser<'a> {
                     && self.peek_at(2) == Some(b'{')
                 {
                     let (save_pos, save_col) = (self.pos, self.col);
+                    let bs2 = self.position();
                     self.bump(1); // the backslash
-                    let low = self.unicode_escape_code()?;
+                    let low = self.unicode_escape_code(bs2)?;
                     if (0xDC00..=0xDFFF).contains(&low) {
                         let combined = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                         return char::from_u32(combined).ok_or_else(|| {
@@ -696,26 +737,55 @@ impl<'a> Parser<'a> {
                 char::from_u32(code)
                     .ok_or_else(|| self.error("This is not a valid unicode code point"))
             }
-            _ => Err(self.error(
-                "This is not a valid escape. Valid escapes are \\n, \\r, \\t, \\\", \\', \\\\, and \\u{003D}.",
-            )),
+            _ => Err(ParseError::from_syntax(SyntaxError::UnknownEscape {
+                region: Region::new(bs, Position::new(bs.row, bs.col + 2)),
+            })),
         }
     }
 
-    /// Parse `u{1F4A9}` (the parser is positioned at the `u`), returning
-    /// the raw code point without validating it.
-    fn unicode_escape_code(&mut self) -> PResult<u32> {
+    /// Parse `u{1F4A9}` (the parser is positioned at the `u`; `bs` is the
+    /// preceding backslash), returning the raw code point. Produces byte-exact
+    /// BAD UNICODE ESCAPE diagnostics for malformed escapes; the returned code
+    /// may be a lone surrogate (the caller handles those).
+    fn unicode_escape_code(&mut self, bs: Position) -> PResult<u32> {
         debug_assert_eq!(self.peek(), Some(b'u'));
-        self.bump(2); // `u{`
+        self.bump(1); // `u`
+        // Every BAD UNICODE region starts at the backslash; only the width
+        // varies. `Format` errors stop before the closing brace, so their width
+        // is however far chomping got; the others span the whole `\u{...}`.
+        if self.peek() != Some(b'{') {
+            return Err(bad_unicode(bs, 2, BadUnicode::Format));
+        }
+        self.bump(1); // `{`
         let start = self.pos;
         while self.peek().is_some_and(|b| b.is_ascii_hexdigit()) {
             self.bump(1);
         }
+        let num_digits = (self.pos - start) as u32;
+        if self.peek() != Some(b'}') {
+            return Err(bad_unicode(bs, 3 + num_digits, BadUnicode::Format));
+        }
         let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
-        let code = u32::from_str_radix(text, 16)
-            .map_err(|_| self.error("Expecting hex digits in a `\\u{...}` escape"))?;
-        self.eat_byte(b'}', "a closing `}` for this unicode escape")?;
-        Ok(code)
+        self.bump(1); // `}`
+        let full = 4 + num_digits;
+        match u32::from_str_radix(text, 16).ok() {
+            Some(code) if code <= 0x10FFFF => {
+                if num_digits < 4 {
+                    return Err(bad_unicode(
+                        bs,
+                        full,
+                        BadUnicode::TooShort {
+                            padded: format!("{code:04X}"),
+                        },
+                    ));
+                }
+                if num_digits > 6 {
+                    return Err(bad_unicode(bs, full, BadUnicode::TooLong));
+                }
+                Ok(code)
+            }
+            _ => Err(bad_unicode(bs, full, BadUnicode::Code)),
+        }
     }
 
     // LOCATED HELPERS
@@ -866,6 +936,15 @@ pub(crate) fn encode_lone_surrogate(code: u32) -> char {
 pub(crate) fn decode_lone_surrogate(c: char) -> Option<u32> {
     let v = c as u32;
     (SURROGATE_PUA_BASE..=SURROGATE_PUA_BASE + 0x7FF).contains(&v).then(|| 0xD800 + (v - SURROGATE_PUA_BASE))
+}
+
+/// Build a BAD UNICODE ESCAPE error whose caret starts at the backslash `bs`
+/// and spans `width` columns.
+fn bad_unicode(bs: Position, width: u32, problem: BadUnicode) -> ParseError {
+    ParseError::from_syntax(SyntaxError::BadUnicodeEscape {
+        region: Region::new(bs, Position::new(bs.row, bs.col + width)),
+        problem,
+    })
 }
 
 fn utf8_len(first_byte: u8) -> usize {

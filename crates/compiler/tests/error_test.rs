@@ -273,7 +273,7 @@ fn misc_parse_errors() {
     expect("x = \"unclosed\n", "closing double quote");
     expect("x = {- never closed\n", "I cannot find the end of this multi-line comment");
     expect("x = 99999999999999999999999\n", "out of the range");
-    expect("x = \"\\q\"\n", "not a valid escape");
+    expect("x = \"\\q\"\n", "I do not recognize this one");
     expect("x = 0x\n", "I thought I was reading a hexidecimal number");
 }
 
@@ -316,8 +316,8 @@ fn string_and_escape_errors() {
     expect("x = \"\"\"never closed\n", "closing `\"\"\"`");
     // Lone surrogate escapes are valid Elm (UTF-16 strings); see the e2e test
     // `lone_surrogate_escapes_round_trip_like_elm`.
-    expect("x = \"\\u{}\"\n", "hex digits");
-    expect("x = \"\\u{41\"\n", "closing `}`");
+    expect("x = \"\\u{}\"\n", "not a valid code point");
+    expect("x = \"\\u{41\"\n", "invalid Unicode escape");
     expect("x = ''\n", "Please switch to double quotes instead");
 }
 

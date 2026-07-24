@@ -1,0 +1,8 @@
+-- WEIRD NUMBER --------------------------------------------------- src/Main.elm
+
+Numbers cannot end with a dot like this:
+
+3| x = 1.
+        ^
+Switching to 1 or 1.0 will work though!
+

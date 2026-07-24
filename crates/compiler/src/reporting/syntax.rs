@@ -134,6 +134,32 @@ pub enum SyntaxError {
     RecordPatternEnd { region: Region },
     /// A tuple pattern with a trailing `,` but no following pattern.
     TuplePatternExpr { region: Region },
+    /// A number written with a leading zero (`00`, `05`).
+    LeadingZeros { region: Region },
+    /// A number ending with a dot and no fractional digits (`1.`).
+    NumberDot { region: Region },
+    /// A number that ran into unexpected trailing characters (`3e`, `12x`).
+    NumberEnd { region: Region },
+    /// A string/char escape that is not one of the recognised forms (`\q`).
+    UnknownEscape { region: Region },
+    /// A malformed `\u{...}` unicode escape.
+    BadUnicodeEscape { region: Region, problem: BadUnicode },
+    /// A literal tab character (tabs are not allowed in Elm source).
+    NoTabs { region: Region },
+}
+
+/// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
+/// distinct body under the shared "BAD UNICODE ESCAPE" title.
+#[derive(Debug, Clone)]
+pub enum BadUnicode {
+    /// Missing/misplaced curly braces around the code point.
+    Format,
+    /// The code point is empty or outside the `0..=0x10FFFF` range.
+    Code,
+    /// Fewer than four hex digits; `padded` is the 4-digit zero-padded form.
+    TooShort { padded: String },
+    /// More than six hex digits.
+    TooLong,
 }
 
 impl SyntaxError {
@@ -201,6 +227,12 @@ impl SyntaxError {
             | SyntaxError::RecordPatternField { region }
             | SyntaxError::RecordPatternEnd { region }
             | SyntaxError::TuplePatternExpr { region } => *region,
+            | SyntaxError::LeadingZeros { region }
+            | SyntaxError::NumberDot { region }
+            | SyntaxError::NumberEnd { region }
+            | SyntaxError::UnknownEscape { region }
+            | SyntaxError::BadUnicodeEscape { region, .. }
+            | SyntaxError::NoTabs { region } => *region,
         }
     }
 
@@ -613,6 +645,110 @@ impl SyntaxError {
                     "Note: The `{word}` keyword has a special meaning in Elm, so it can only \
                      be used in certain situations."
                 ))],
+            ),
+            SyntaxError::LeadingZeros { region } => snippet(
+                "LEADING ZEROS",
+                *region,
+                "I do not accept numbers with leading zeros:",
+                "Just delete the leading zeros and it should work!",
+                vec![Section::Para(
+                    "Note: Some languages let you to specify octal numbers by adding a leading \
+                     zero. So in C, writing 0111 is the same as writing 73. Some people are used \
+                     to that, but others probably want it to equal 111. Either path is going to \
+                     surprise people from certain backgrounds, so Elm tries to avoid this whole \
+                     situation."
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::NumberDot { region } => snippet(
+                "WEIRD NUMBER",
+                *region,
+                "Numbers cannot end with a dot like this:",
+                "Switching to 1 or 1.0 will work though!",
+                vec![],
+            ),
+            SyntaxError::NumberEnd { region } => snippet(
+                "WEIRD NUMBER",
+                *region,
+                "I thought I was reading a number, but I ran into some weird stuff here:",
+                "I recognize numbers in the following formats:",
+                vec![
+                    Section::Block("    42\n    3.14\n    6.022e23\n    0x002B".to_string()),
+                    Section::Para("So is there a way to write it like one of those?".to_string()),
+                ],
+            ),
+            SyntaxError::UnknownEscape { region } => snippet(
+                "UNKNOWN ESCAPE",
+                *region,
+                "Backslashes always start escaped characters, but I do not recognize this one:",
+                "Valid escape characters include:",
+                vec![
+                    Section::Block(
+                        "    \\n\n    \\r\n    \\t\n    \\\"\n    \\'\n    \\\\\n    \\u{003D}"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Do you want one of those instead? Maybe you need \\\\ to escape a \
+                         backslash?"
+                            .to_string(),
+                    ),
+                    Section::Para(
+                        "Note: The last style lets encode ANY character by its Unicode code \
+                         point. That means \\u{0009} and \\t are the same. You can use that style \
+                         for anything not covered by the other six escapes!"
+                            .to_string(),
+                    ),
+                ],
+            ),
+            SyntaxError::BadUnicodeEscape { region, problem } => {
+                let (before, after, notes): (&str, String, Vec<Section>) = match problem {
+                    BadUnicode::Format => (
+                        "I ran into an invalid Unicode escape:",
+                        "Here are some examples of valid Unicode escapes:".to_string(),
+                        vec![
+                            Section::Block(
+                                "    \\u{0041}\n    \\u{03BB}\n    \\u{6728}\n    \\u{1F60A}"
+                                    .to_string(),
+                            ),
+                            Section::Para(
+                                "Notice that the code point is always surrounded by curly braces. \
+                                 Maybe you are missing the opening or closing curly brace?"
+                                    .to_string(),
+                            ),
+                        ],
+                    ),
+                    BadUnicode::Code => (
+                        "This is not a valid code point:",
+                        "The valid code points are between 0 and 10FFFF inclusive.".to_string(),
+                        vec![],
+                    ),
+                    BadUnicode::TooShort { padded } => (
+                        "Every code point needs at least four digits:",
+                        format!("Try \\u{{{padded}}} instead?"),
+                        vec![],
+                    ),
+                    BadUnicode::TooLong => (
+                        "This code point has too many digits:",
+                        "Valid code points are between \\u{0000} and \\u{10FFFF}, so try trimming \
+                         any leading zeros until you have between four and six digits."
+                            .to_string(),
+                        vec![],
+                    ),
+                };
+                snippet_owned(
+                    "BAD UNICODE ESCAPE".to_string(),
+                    *region,
+                    before.to_string(),
+                    after,
+                    notes,
+                )
+            }
+            SyntaxError::NoTabs { region } => snippet(
+                "NO TABS",
+                *region,
+                "I ran into a tab, but tabs are not allowed in Elm files.",
+                "Replace the tab with spaces.",
+                vec![],
             ),
             SyntaxError::RecordEquals { region } => snippet(
                 "PROBLEM IN RECORD",
