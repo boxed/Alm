@@ -114,6 +114,8 @@ pub enum SyntaxError {
     ProblemInTypeAlias { region: Region },
     /// A custom `type` where a variant name was expected (`CT_Variant`).
     ProblemInCustomType { region: Region },
+    /// A pattern position that starts with something that is not a pattern.
+    PatternStart { region: Region },
 }
 
 impl SyntaxError {
@@ -170,6 +172,7 @@ impl SyntaxError {
             | SyntaxError::ExpectingTypeAliasName { region }
             | SyntaxError::ProblemInTypeAlias { region }
             | SyntaxError::ProblemInCustomType { region } => *region,
+            | SyntaxError::PatternStart { region } => *region,
         }
     }
 
@@ -852,6 +855,14 @@ impl SyntaxError {
                 "I was expecting to see a variant name next. Something like Success or \
                  Sandwich. Any name that starts with a capital letter really!",
                 custom_notes(),
+            ),
+            SyntaxError::PatternStart { region } => snippet(
+                "PROBLEM IN PATTERN",
+                *region,
+                "I wanted to parse a pattern next, but I got stuck here:",
+                "I am not sure why I am getting stuck exactly. I just know that I want a \
+                 pattern next. Something as simple as maybeHeight or result would work!",
+                vec![],
             ),
         }
     }

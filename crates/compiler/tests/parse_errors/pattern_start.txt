@@ -1,0 +1,9 @@
+-- PROBLEM IN PATTERN --------------------------------------------- src/Main.elm
+
+I wanted to parse a pattern next, but I got stuck here:
+
+4|   @ -> 1
+     ^
+I am not sure why I am getting stuck exactly. I just know that I want a pattern
+next. Something as simple as maybeHeight or result would work!
+

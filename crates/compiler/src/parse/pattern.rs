@@ -2,6 +2,7 @@
 
 use super::{IndentCheck, NumberLit, PResult, ParseError, Parser};
 use crate::ast::source::{Pattern, Pattern_};
+use crate::reporting::syntax::SyntaxError;
 use crate::reporting::{Located, Region};
 
 /// Port of `Pattern.term`: a pattern that needs no parentheses.
@@ -57,7 +58,9 @@ pub fn term(p: &mut Parser) -> PResult<Pattern> {
             };
             Ok(Located::at(start, p.position(), pattern_))
         }
-        _ => Err(p.error("Expecting a pattern")),
+        _ => Err(ParseError::from_syntax(SyntaxError::PatternStart {
+            region: p.region_here(),
+        })),
     }
 }
 
