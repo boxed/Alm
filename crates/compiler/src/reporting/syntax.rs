@@ -56,6 +56,20 @@ pub enum SyntaxError {
     UnfinishedPort { region: Region },
     /// A `port` declaration in a non-`port module`.
     UnexpectedPorts { region: Region },
+    /// A multi-line comment with no closing `-}`.
+    EndlessComment { region: Region },
+    /// A type annotation `name :` with no type after the colon.
+    DefType { region: Region, name: String },
+    /// A `type alias` with no type after `=`.
+    TypeAliasBody { region: Region },
+    /// A `type alias` name not followed by a type variable or `=`.
+    TypeAliasEquals { region: Region },
+    /// A custom `type` with no first variant after `=`.
+    CustomEquals { region: Region },
+    /// A custom `type` with no variant after `|`.
+    CustomBar { region: Region },
+    /// A reserved word (`in`) used where a name was expected.
+    ReservedWord { region: Region, word: String },
 }
 
 impl SyntaxError {
@@ -85,7 +99,14 @@ impl SyntaxError {
             | SyntaxError::UnfinishedExposing { region }
             | SyntaxError::UnfinishedImport { region }
             | SyntaxError::UnfinishedPort { region }
-            | SyntaxError::UnexpectedPorts { region } => *region,
+            | SyntaxError::UnexpectedPorts { region }
+            | SyntaxError::EndlessComment { region }
+            | SyntaxError::DefType { region, .. }
+            | SyntaxError::TypeAliasBody { region }
+            | SyntaxError::TypeAliasEquals { region }
+            | SyntaxError::CustomEquals { region }
+            | SyntaxError::CustomBar { region }
+            | SyntaxError::ReservedWord { region, .. } => *region,
         }
     }
 
@@ -446,6 +467,70 @@ impl SyntaxError {
                         .to_string(),
                 )],
             ),
+            SyntaxError::EndlessComment { region } => snippet(
+                "ENDLESS COMMENT",
+                *region,
+                "I cannot find the end of this multi-line comment:",
+                "Add a -} somewhere after this to end the comment.",
+                vec![Section::Para(
+                    "Hint: Multi-line comments can be nested in Elm, so {- {- -} -} is a \
+                     comment that happens to contain another comment. Like parentheses and \
+                     curly braces, the start and end markers must always be balanced. Maybe \
+                     that is the problem?"
+                        .to_string(),
+                )],
+            ),
+            SyntaxError::DefType { region, name } => snippet_owned(
+                "UNFINISHED DEFINITION".to_string(),
+                *region,
+                format!("I got stuck while parsing the `{name}` type annotation:"),
+                "I just saw a colon, so I am expecting to see a type next.".to_string(),
+                def_notes(),
+            ),
+            SyntaxError::TypeAliasBody { region } => snippet(
+                "UNFINISHED TYPE ALIAS",
+                *region,
+                "I am partway through parsing a type alias, but I got stuck here:",
+                "I was expecting to see a type next. Something as simple as Int or Float \
+                 would work!",
+                alias_notes(),
+            ),
+            SyntaxError::TypeAliasEquals { region } => snippet(
+                "UNFINISHED TYPE ALIAS",
+                *region,
+                "I am partway through parsing a type alias, but I got stuck here:",
+                "I was expecting to see a type variable or an equals sign next.",
+                alias_notes(),
+            ),
+            SyntaxError::CustomEquals { region } => snippet(
+                "UNFINISHED CUSTOM TYPE",
+                *region,
+                "I am partway through parsing a custom type, but I got stuck here:",
+                "I just saw an equals sign, so I was expecting to see the first variant \
+                 defined next.",
+                custom_notes(),
+            ),
+            SyntaxError::CustomBar { region } => snippet(
+                "UNFINISHED CUSTOM TYPE",
+                *region,
+                "I am partway through parsing a custom type, but I got stuck here:",
+                "I just saw a vertical bar, so I was expecting to see another variant defined \
+                 next.",
+                custom_notes(),
+            ),
+            SyntaxError::ReservedWord { region, word } => snippet_owned(
+                "RESERVED WORD".to_string(),
+                *region,
+                format!(
+                    "The name `{word}` is reserved in Elm, so it cannot be used as an \
+                     argument here:"
+                ),
+                "Try renaming it to something else.".to_string(),
+                vec![Section::Para(format!(
+                    "Note: The `{word}` keyword has a special meaning in Elm, so it can only \
+                     be used in certain situations."
+                ))],
+            ),
             SyntaxError::RecordEquals { region } => snippet(
                 "PROBLEM IN RECORD",
                 *region,
@@ -480,6 +565,47 @@ const CASE_EXAMPLE: &str = "    case maybeWidth of\n      Just width ->\n       
 /// The `greet` definition example elm shows in several declaration diagnostics.
 const DEF_EXAMPLE: &str =
     "    greet : String -> String\n    greet name =\n      \"Hello \" ++ name ++ \"!\"";
+
+/// The example + note shared by the UNFINISHED TYPE ALIAS errors.
+fn alias_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Note: Here is an example of a valid `type alias` for reference:".to_string(),
+        ),
+        Section::Block(
+            "    type alias Person =\n      { name : String\n      , age : Int\n      , height \
+             : Float\n      }"
+                .to_string(),
+        ),
+        Section::Para(
+            "This would let us use `Person` as a shorthand for that record type. Using this \
+             shorthand makes type annotations much easier to read, and makes changing code \
+             easier if you decide later that there is more to a person than age and height!"
+                .to_string(),
+        ),
+    ]
+}
+
+/// The example + note shared by the UNFINISHED CUSTOM TYPE errors.
+fn custom_notes() -> Vec<Section> {
+    vec![
+        Section::Para(
+            "Note: Here is an example of a valid `type` declaration for reference:".to_string(),
+        ),
+        Section::Block(
+            "    type Status\n      = Failure\n      | Waiting\n      | Success String"
+                .to_string(),
+        ),
+        Section::Para(
+            "This defines a new `Status` type with three variants. This could be useful if we \
+             are waiting for an HTTP request. Maybe we start with `Waiting` and then switch \
+             to `Failure` or `Success \"message from server\"` depending on how things go. \
+             Notice that the Success variant has some associated data, allowing us to store a \
+             String if the request goes well!"
+                .to_string(),
+        ),
+    ]
+}
 
 /// The example + type-annotation note shared by the UNFINISHED DEFINITION errors.
 fn def_notes() -> Vec<Section> {

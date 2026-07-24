@@ -703,7 +703,14 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
     let mut def_name = name.clone();
     if p.peek() == Some(b':') && p.peek_at(1) != Some(b':') {
         p.bump(1);
-        p.chomp_and_check_indent("I was expecting a type after this `:`")?;
+        let colon_end = p.position();
+        p.chomp_space()?;
+        p.check_indent("").map_err(|_| {
+            super::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::DefType {
+                region: crate::reporting::Region::new(colon_end, colon_end),
+                name: name.value.as_str().to_string(),
+            })
+        })?;
         let tipe = super::type_::expression(p)?;
         annotation = Some(tipe);
         p.chomp_space()?;

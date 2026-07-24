@@ -1,0 +1,19 @@
+-- UNFINISHED DEFINITION ------------------------------------------ src/Main.elm
+
+I got stuck while parsing the `x` type annotation:
+
+3| x : 
+      ^
+I just saw a colon, so I am expecting to see a type next.
+
+Here is a valid definition (with a type annotation) for reference:
+
+    greet : String -> String
+    greet name =
+      "Hello " ++ name ++ "!"
+
+The top line (called a "type annotation") is optional. You can leave it off if
+you want. As you get more comfortable with Elm and as your project grows, it
+becomes more and more valuable to add them though! They work great as
+compiler-verified documentation, and they often improve error messages!
+

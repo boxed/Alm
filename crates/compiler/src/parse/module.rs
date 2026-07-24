@@ -331,15 +331,34 @@ fn chomp_exposed(p: &mut Parser) -> PResult<Exposed> {
 // TYPE DECLARATIONS
 
 fn chomp_alias(p: &mut Parser) -> PResult<Alias> {
+    use crate::reporting::syntax::SyntaxError;
     let name = p.located(|p| p.upper_name("a type alias name"))?;
-    p.chomp_and_check_indent("I was expecting `=` or type variables")?;
     let mut vars = Vec::new();
-    while p.starts_lower() {
-        vars.push(p.located(|p| p.lower_name("a type variable"))?);
-        p.chomp_and_check_indent("I was expecting `=` or more type variables")?;
+    let mut last_end = name.region.end;
+    loop {
+        let eq_stuck = || {
+            ParseError::from_syntax(SyntaxError::TypeAliasEquals {
+                region: Region::new(last_end, last_end),
+            })
+        };
+        p.chomp_space()?;
+        p.check_indent("").map_err(|_| eq_stuck())?;
+        if p.starts_lower() {
+            let v = p.located(|p| p.lower_name("a type variable"))?;
+            last_end = v.region.end;
+            vars.push(v);
+            continue;
+        }
+        p.eat_byte(b'=', "").map_err(|_| eq_stuck())?;
+        break;
     }
-    p.eat_byte(b'=', "an `=` in this type alias")?;
-    p.chomp_and_check_indent("I was expecting a type after `=`")?;
+    let eq_end = p.position();
+    p.chomp_space()?;
+    p.check_indent("").map_err(|_| {
+        ParseError::from_syntax(SyntaxError::TypeAliasBody {
+            region: Region::new(eq_end, eq_end),
+        })
+    })?;
     let tipe = type_::expression(p)?;
     Ok(Alias { name, vars, tipe })
 }
@@ -352,8 +371,15 @@ fn chomp_union(p: &mut Parser) -> PResult<Union> {
         vars.push(p.located(|p| p.lower_name("a type variable"))?);
         p.chomp_and_check_indent("I was expecting `=` or more type variables")?;
     }
+    use crate::reporting::syntax::SyntaxError;
     p.eat_byte(b'=', "an `=` in this type declaration")?;
-    p.chomp_and_check_indent("I was expecting a constructor after `=`")?;
+    let eq_end = p.position();
+    p.chomp_space()?;
+    p.check_indent("").map_err(|_| {
+        ParseError::from_syntax(SyntaxError::CustomEquals {
+            region: Region::new(eq_end, eq_end),
+        })
+    })?;
     let mut ctors = vec![chomp_ctor(p)?];
     loop {
         let snapshot = p.save();
@@ -362,7 +388,13 @@ fn chomp_union(p: &mut Parser) -> PResult<Union> {
             break;
         }
         p.bump(1);
-        p.chomp_and_check_indent("I was expecting a constructor after `|`")?;
+        let bar_end = p.position();
+        p.chomp_space()?;
+        p.check_indent("").map_err(|_| {
+            ParseError::from_syntax(SyntaxError::CustomBar {
+                region: Region::new(bar_end, bar_end),
+            })
+        })?;
         ctors.push(chomp_ctor(p)?);
     }
     Ok(Union { name, vars, ctors })

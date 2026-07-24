@@ -263,7 +263,7 @@ fn pattern_parse_errors() {
     );
     expect(
         "f let = 1\n\nx = 2\n",
-        "reserved word",
+        "is reserved in Elm",
     );
 }
 
@@ -271,7 +271,7 @@ fn pattern_parse_errors() {
 fn misc_parse_errors() {
     expect("x = 'ab'\n", "closing single quote");
     expect("x = \"unclosed\n", "closing double quote");
-    expect("x = {- never closed\n", "closing `-}`");
+    expect("x = {- never closed\n", "I cannot find the end of this multi-line comment");
     expect("x = 99999999999999999999999\n", "out of the range");
     expect("x = \"\\q\"\n", "not a valid escape");
     expect("x = 0x\n", "I thought I was reading a hexidecimal number");

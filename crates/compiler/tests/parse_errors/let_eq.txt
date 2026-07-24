@@ -1,0 +1,11 @@
+-- RESERVED WORD -------------------------------------------------- src/Main.elm
+
+The name `in` is reserved in Elm, so it cannot be used as an argument here:
+
+4|     let a 1 in a
+               ^^
+Try renaming it to something else.
+
+Note: The `in` keyword has a special meaning in Elm, so it can only be used in
+certain situations.
+

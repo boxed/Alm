@@ -265,10 +265,10 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 None => {
-                    return Err(ParseError::new(
-                        "I got to the end of the file while looking for the closing `-}` of a multi-line comment.",
-                        start,
-                    ))
+                    let open = start.start;
+                    return Err(ParseError::from_syntax(SyntaxError::EndlessComment {
+                        region: Region::new(open, Position::new(open.row, open.col + 2)),
+                    }));
                 }
                 Some(b'\n') => self.bump_newline(),
                 Some(b'-') if self.peek_at(1) == Some(b'}') => {
@@ -346,10 +346,12 @@ impl<'a> Parser<'a> {
         if self.starts_lower() {
             let name = self.chomp_inner_chars();
             if is_reserved(&name) {
-                Err(self.error(format!(
-                    "It looks like you are trying to use `{}` as a variable name, but it is a reserved word.",
-                    name
-                )))
+                let end = self.position();
+                let start = Position::new(end.row, end.col - name.chars().count() as u32);
+                Err(ParseError::from_syntax(SyntaxError::ReservedWord {
+                    region: Region::new(start, end),
+                    word: name,
+                }))
             } else {
                 Ok(Name::from(name))
             }

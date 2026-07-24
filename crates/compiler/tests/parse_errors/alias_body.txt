@@ -1,0 +1,21 @@
+-- UNFINISHED TYPE ALIAS ------------------------------------------ src/Main.elm
+
+I am partway through parsing a type alias, but I got stuck here:
+
+3| type alias Foo = 
+                   ^
+I was expecting to see a type next. Something as simple as Int or Float would
+work!
+
+Note: Here is an example of a valid `type alias` for reference:
+
+    type alias Person =
+      { name : String
+      , age : Int
+      , height : Float
+      }
+
+This would let us use `Person` as a shorthand for that record type. Using this
+shorthand makes type annotations much easier to read, and makes changing code
+easier if you decide later that there is more to a person than age and height!
+
