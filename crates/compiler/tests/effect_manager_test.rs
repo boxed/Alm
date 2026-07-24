@@ -1,0 +1,186 @@
+//! User-defined `effect module`s run through alm's effect-manager protocol.
+//! Stock elm restricts effect modules to the @elm organization; alm allows
+//! them. Each program is a `Platform.worker` that observes the manager's
+//! callback through `Terminal.writeLine` (printed to stdout by node).
+//!
+//! Native/WasmGC coverage lives alongside this once those runtimes gain the
+//! protocol; for now this pins the JavaScript backend.
+
+mod common;
+
+use std::process::Command;
+
+use alm_compiler::{generate, project};
+
+/// Write the given modules into a scratch project, compile the whole thing to
+/// one JS bundle, run `Main.main.init({})` under node, and return stdout.
+fn run_js(test_name: &str, modules: &[(&str, &str)]) -> String {
+    let dir = common::test_dir("alm-effect-manager", test_name);
+    for (file, source) in modules {
+        std::fs::write(dir.join(file), source).expect("write module");
+    }
+    let entry = dir.join("Main.elm");
+    let checked = project::check_project(&entry).unwrap_or_else(|errors| {
+        panic!(
+            "check failed:\n{}",
+            errors
+                .iter()
+                .map(|e| e.render())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    });
+    let js = generate::generate_project(&checked.modules);
+    let bundle = dir.join("bundle.js");
+    std::fs::write(&bundle, &js).expect("write bundle");
+    let output = Command::new("node")
+        .arg("-e")
+        .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display()))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run node");
+    assert!(
+        output.status.success(),
+        "node failed:\nstderr: {}\n\nJS:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        js
+    );
+    String::from_utf8_lossy(&output.stdout).trim_end().to_string()
+}
+
+/// command -> onEffects -> sendToApp -> update.
+#[test]
+fn command_reaches_the_app() {
+    let toast = r#"effect module Toast where { command = MyCmd } exposing (say)
+
+import Task exposing (Task)
+
+type MyCmd msg = Say msg
+
+say : msg -> Cmd msg
+say m = command (Say m)
+
+cmdMap f (Say m) = Say (f m)
+
+init = Task.succeed ()
+
+onEffects router cmds state =
+    case cmds of
+        [] -> Task.succeed state
+        (Say m) :: rest ->
+            Task.andThen (\_ -> onEffects router rest state) (Platform.sendToApp router m)
+
+onSelfMsg router m state = Task.succeed state
+"#;
+    let main = r#"module Main exposing (main)
+
+import Toast
+
+type Msg = Got String
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Toast.say (Got "command-ok") )
+        , update = \(Got s) model -> ( model, Terminal.writeLine s )
+        , subscriptions = \_ -> Sub.none
+        }
+"#;
+    assert_eq!(
+        run_js("command", &[("Toast.elm", toast), ("Main.elm", main)]),
+        "command-ok"
+    );
+}
+
+/// command -> onEffects -> sendToSelf -> onSelfMsg -> sendToApp -> update.
+#[test]
+fn self_message_round_trip() {
+    let toast = r#"effect module Toast where { command = MyCmd } exposing (echo)
+
+import Task exposing (Task)
+
+type MyCmd msg = Echo msg
+
+echo : msg -> Cmd msg
+echo m = command (Echo m)
+
+cmdMap f (Echo m) = Echo (f m)
+
+init = Task.succeed 0
+
+onEffects router cmds count =
+    case cmds of
+        [] -> Task.succeed count
+        (Echo m) :: rest ->
+            Task.andThen (\_ -> onEffects router rest (count + 1)) (Platform.sendToSelf router m)
+
+onSelfMsg router m count =
+    Task.andThen (\_ -> Task.succeed (count + 1)) (Platform.sendToApp router m)
+"#;
+    let main = r#"module Main exposing (main)
+
+import Toast
+
+type Msg = Got String
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Toast.echo (Got "self-ok") )
+        , update = \(Got s) model -> ( model, Terminal.writeLine s )
+        , subscriptions = \_ -> Sub.none
+        }
+"#;
+    assert_eq!(
+        run_js("self", &[("Toast.elm", toast), ("Main.elm", main)]),
+        "self-ok"
+    );
+}
+
+/// subscription -> onEffects (with the current sub list) -> sendToApp. The
+/// manager fires once and remembers it, so the app does not loop.
+#[test]
+fn subscription_reaches_the_app() {
+    let ticker = r#"effect module Ticker where { subscription = MySub } exposing (listen)
+
+import Task exposing (Task)
+
+type MySub msg = Listen msg
+
+listen : msg -> Sub msg
+listen m = subscription (Listen m)
+
+subMap f (Listen m) = Listen (f m)
+
+init = Task.succeed False
+
+onEffects router subs fired =
+    case ( subs, fired ) of
+        ( (Listen m) :: _, False ) ->
+            Task.andThen (\_ -> Task.succeed True) (Platform.sendToApp router m)
+        _ ->
+            Task.succeed fired
+
+onSelfMsg router m fired = Task.succeed fired
+"#;
+    let main = r#"module Main exposing (main)
+
+import Ticker
+
+type Msg = Got String
+
+main : Program () () Msg
+main =
+    Platform.worker
+        { init = \_ -> ( (), Cmd.none )
+        , update = \(Got s) model -> ( model, Terminal.writeLine s )
+        , subscriptions = \_ -> Ticker.listen (Got "sub-ok")
+        }
+"#;
+    assert_eq!(
+        run_js("subscription", &[("Ticker.elm", ticker), ("Main.elm", main)]),
+        "sub-ok"
+    );
+}
