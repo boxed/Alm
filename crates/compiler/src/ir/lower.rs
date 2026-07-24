@@ -22,6 +22,21 @@ pub fn lower_project(modules: &[can::Module]) -> Program {
                 );
             }
         }
+        // Effect modules' synthetic `command`/`subscription` helpers (arity 1),
+        // so references in the module body resolve like any top-level function.
+        if let Some(manager) = &module.manager {
+            let (has_cmd, has_sub) = match manager {
+                can::Manager::Cmd(_) => (true, false),
+                can::Manager::Sub(_) => (false, true),
+                can::Manager::Fx(_, _) => (true, true),
+            };
+            if has_cmd {
+                arities.insert((module.name.clone(), Name::from("command")), 1);
+            }
+            if has_sub {
+                arities.insert((module.name.clone(), Name::from("subscription")), 1);
+            }
+        }
     }
 
     let mut lowerer = Lowerer {
@@ -41,6 +56,74 @@ pub fn lower_project(modules: &[can::Module]) -> Program {
                 lowerer.top_level_def(def);
             }
         }
+    }
+
+    // Effect modules: synthesize the `command`/`subscription` leaf helpers and
+    // a registration initializer, so the reified-task runtime can wire up each
+    // manager. (The JS backend does this directly from the canonical AST.)
+    for module in modules {
+        let manager = match &module.manager {
+            Some(m) => m,
+            None => continue,
+        };
+        let home = module.name.clone();
+        let home_str = home.as_str().to_string();
+
+        // `command v` / `subscription v` = alm_effect_leaf "Home" v.
+        let mut add_leaf = |kind: &str| {
+            lowerer.functions.push(Function {
+                name: global_name(&home, &Name::from(kind)),
+                params: vec!["v".to_string()],
+                captures: 0,
+                tail_recursive: false,
+                body: Expr::CallBuiltin {
+                    symbol: "alm_effect_leaf".to_string(),
+                    args: vec![Expr::Str(home_str.clone()), Expr::Local("v".to_string())],
+                },
+            });
+        };
+        let (has_cmd, has_sub) = match manager {
+            can::Manager::Cmd(_) => (true, false),
+            can::Manager::Sub(_) => (false, true),
+            can::Manager::Fx(_, _) => (true, true),
+        };
+        if has_cmd {
+            add_leaf("command");
+        }
+        if has_sub {
+            add_leaf("subscription");
+        }
+
+        // Reference a manager entry point: a plain value (init) as a global, a
+        // function (onEffects/cmdMap/...) as a zero-capture closure. Missing
+        // (a Cmd-only manager has no subMap) becomes unit.
+        let entry = |lowerer: &Lowerer, name: &str| -> Expr {
+            let n = Name::from(name);
+            match lowerer.arities.get(&(home.clone(), n.clone())) {
+                Some(0) | None => Expr::GlobalValue(global_name(&home, &n)),
+                Some(_) => Expr::Closure {
+                    function: global_name(&home, &n),
+                    captures: vec![],
+                },
+            }
+        };
+        let cmd_map = if has_cmd { entry(&lowerer, "cmdMap") } else { Expr::Unit };
+        let sub_map = if has_sub { entry(&lowerer, "subMap") } else { Expr::Unit };
+        let reg = Expr::CallBuiltin {
+            symbol: "alm_register_manager".to_string(),
+            args: vec![
+                Expr::Str(home_str.clone()),
+                entry(&lowerer, "init"),
+                entry(&lowerer, "onEffects"),
+                entry(&lowerer, "onSelfMsg"),
+                cmd_map,
+                sub_map,
+            ],
+        };
+        lowerer.values.push(GlobalValue {
+            name: format!("$manager${}", mangle_module(&home)),
+            body: reg,
+        });
     }
 
     // The entry module is last in dependency order; expose its `main`

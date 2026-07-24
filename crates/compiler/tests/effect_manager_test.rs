@@ -1,20 +1,19 @@
 //! User-defined `effect module`s run through alm's effect-manager protocol.
 //! Stock elm restricts effect modules to the @elm organization; alm allows
 //! them. Each program is a `Platform.worker` that observes the manager's
-//! callback through `Terminal.writeLine` (printed to stdout by node).
-//!
-//! Native/WasmGC coverage lives alongside this once those runtimes gain the
-//! protocol; for now this pins the JavaScript backend.
+//! callback through `Terminal.writeLine`. Each program is compiled and run on
+//! both the JS and native backends, and the two outputs must agree.
 
 mod common;
 
 use std::process::Command;
 
-use alm_compiler::{generate, project};
+use alm_compiler::{generate, ir, project};
 
-/// Write the given modules into a scratch project, compile the whole thing to
-/// one JS bundle, run `Main.main.init({})` under node, and return stdout.
-fn run_js(test_name: &str, modules: &[(&str, &str)]) -> String {
+/// Write the modules into a scratch project, compile through both the JS and
+/// native backends, run each `Main.main` (worker) to completion, and assert the
+/// two backends print the same thing. Returns that shared output.
+fn run(test_name: &str, modules: &[(&str, &str)]) -> String {
     let dir = common::test_dir("alm-effect-manager", test_name);
     for (file, source) in modules {
         std::fs::write(dir.join(file), source).expect("write module");
@@ -30,22 +29,48 @@ fn run_js(test_name: &str, modules: &[(&str, &str)]) -> String {
                 .join("\n")
         )
     });
+
+    // JS backend under node.
     let js = generate::generate_project(&checked.modules);
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, &js).expect("write bundle");
-    let output = Command::new("node")
-        .arg("-e")
-        .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display()))
+    let js_out = run_command(
+        Command::new("node")
+            .arg("-e")
+            .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display())),
+        "node",
+        &js,
+    );
+
+    // Native backend (a real binary driven by the C event loop).
+    let program = ir::lower::lower_project(&checked.modules);
+    let binary = dir.join("prog");
+    generate::native::build(
+        &program,
+        &binary,
+        generate::native::Target::Native,
+        generate::native::OptLevel::Release,
+    )
+    .unwrap_or_else(|e| panic!("native build failed: {}", e));
+    let native_out = run_command(&mut Command::new(&binary), "native binary", &js);
+
+    assert_eq!(js_out, native_out, "JS and native output differ");
+    js_out
+}
+
+fn run_command(command: &mut Command, what: &str, js_for_error: &str) -> String {
+    let output = command
         .env_remove("FORCE_COLOR")
         .env_remove("CLICOLOR_FORCE")
         .env("NO_COLOR", "1")
         .output()
-        .expect("run node");
+        .unwrap_or_else(|e| panic!("run {}: {}", what, e));
     assert!(
         output.status.success(),
-        "node failed:\nstderr: {}\n\nJS:\n{}",
+        "{} failed:\nstderr: {}\n\nJS:\n{}",
+        what,
         String::from_utf8_lossy(&output.stderr),
-        js
+        js_for_error
     );
     String::from_utf8_lossy(&output.stdout).trim_end().to_string()
 }
@@ -89,7 +114,7 @@ main =
         }
 "#;
     assert_eq!(
-        run_js("command", &[("Toast.elm", toast), ("Main.elm", main)]),
+        run("command", &[("Toast.elm", toast), ("Main.elm", main)]),
         "command-ok"
     );
 }
@@ -134,7 +159,7 @@ main =
         }
 "#;
     assert_eq!(
-        run_js("self", &[("Toast.elm", toast), ("Main.elm", main)]),
+        run("self", &[("Toast.elm", toast), ("Main.elm", main)]),
         "self-ok"
     );
 }
@@ -180,7 +205,7 @@ main =
         }
 "#;
     assert_eq!(
-        run_js("subscription", &[("Ticker.elm", ticker), ("Main.elm", main)]),
+        run("subscription", &[("Ticker.elm", ticker), ("Main.elm", main)]),
         "sub-ok"
     );
 }

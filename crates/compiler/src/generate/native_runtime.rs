@@ -3590,6 +3590,14 @@ const TT_AND_THEN: u32 = 2;
 const TT_ON_ERROR: u32 = 3;
 const TT_SLEEP: u32 = 4;
 const TT_NOW: u32 = 5;
+const TT_SEND_APP: u32 = 6;
+const TT_SEND_SELF: u32 = 7;
+const TT_SPAWN: u32 = 8;
+
+/// Effect-manager leaf (`command`/`subscription` value). A distinct ctor tag
+/// shared by the Cmd and Sub bag walkers so it never collides with a `CT_`/`ST_`
+/// or user-union index.
+const LEAF: u32 = 200;
 
 const CT_NONE: u32 = 0;
 const CT_BATCH: u32 = 1;
@@ -9791,6 +9799,10 @@ kernel_fns! {
     G_TIME_TOMILLIS "$Time$toMillis" time_to_millis, 2;
 
     G_PLATFORM_WORKER "$Platform$worker" platform_worker, 1;
+    G_PLATFORM_SEND_TO_APP "$Platform$sendToApp" platform_send_to_app, 2;
+    G_PLATFORM_SEND_TO_SELF "$Platform$sendToSelf" platform_send_to_self, 2;
+    G_PROCESS_SPAWN "$Process$spawn" process_spawn, 1;
+    G_PROCESS_KILL "$Process$kill" process_kill, 1;
     G_BROWSER_SANDBOX "$Browser$sandbox" browser_sandbox, 1;
     G_BROWSER_ELEMENT "$Browser$element" browser_element, 1;
     G_BROWSER_DOCUMENT "$Browser$document" browser_document, 1;
@@ -10148,7 +10160,17 @@ struct Pending {
     fire_at: f64,
     task: u64,
     frames: Vec<Frame>,
-    tagger: u64,
+    sink: Sink,
+}
+
+/// Where a completed task's value goes. Most tasks feed the app (through a
+/// tagger); effect-manager `init`/`onEffects`/`onSelfMsg` tasks produce the
+/// manager's next state; spawned background tasks discard their result.
+#[derive(Clone, Copy)]
+enum Sink {
+    App(u64),
+    Manager(usize),
+    Discard,
 }
 
 struct SubTimer {
@@ -10187,7 +10209,200 @@ unsafe fn identity() -> u64 {
     G_BASICS_IDENTITY.get()
 }
 
-unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, tagger: u64) {
+// EFFECT MANAGERS (native + thick-wasm) — the same protocol as runtime.js, on
+// the reified-task interpreter. `command`/`subscription` build `Leaf` values;
+// each registered manager becomes a process with private state and a mailbox;
+// `sendToApp`/`sendToSelf`/`spawn` are handled as task tags in run_task.
+
+struct ManagerInfo {
+    home: Vec<u8>,
+    init: u64,
+    on_effects: u64,
+    on_self_msg: u64,
+    cmd_map: u64,
+    sub_map: u64,
+}
+
+enum MMsg {
+    Fx(u64, u64), // (cmds list, subs list)
+    Self_(u64),
+}
+
+struct ManagerProc {
+    info: usize,
+    state: u64,
+    mailbox: Vec<MMsg>,
+    ready: bool,
+    running: bool,
+}
+
+static mut EFFECT_MANAGERS: Vec<ManagerInfo> = Vec::new();
+static mut MANAGER_PROCS: Vec<ManagerProc> = Vec::new();
+
+/// `command`/`subscription value` — build a leaf bag tagged with the manager home.
+#[no_mangle]
+pub unsafe extern "C" fn alm_effect_leaf(home: u64, value: u64) -> u64 {
+    ctor(b"Leaf\0".as_ptr(), LEAF, vec![home, value])
+}
+
+/// Register an effect manager. Called from a synthetic global initializer, so
+/// it runs during `alm_init` before the program starts. A `Cmd`-only manager
+/// passes unit for `sub_map` and vice versa.
+#[no_mangle]
+pub unsafe extern "C" fn alm_register_manager(
+    home: u64,
+    init: u64,
+    on_effects: u64,
+    on_self_msg: u64,
+    cmd_map: u64,
+    sub_map: u64,
+) -> u64 {
+    EFFECT_MANAGERS.push(ManagerInfo {
+        home: sbytes(home).to_vec(),
+        init,
+        on_effects,
+        on_self_msg,
+        cmd_map,
+        sub_map,
+    });
+    unit()
+}
+
+unsafe fn is_unit(v: u64) -> bool {
+    v == unit()
+}
+
+unsafe extern "C" fn platform_send_to_app(_router: u64, msg: u64) -> u64 {
+    ctor(b"SendApp\0".as_ptr(), TT_SEND_APP, vec![msg])
+}
+unsafe extern "C" fn platform_send_to_self(router: u64, msg: u64) -> u64 {
+    ctor(b"SendSelf\0".as_ptr(), TT_SEND_SELF, vec![router, msg])
+}
+unsafe extern "C" fn process_spawn(task: u64) -> u64 {
+    ctor(b"Spawn\0".as_ptr(), TT_SPAWN, vec![task])
+}
+unsafe extern "C" fn process_kill(_id: u64) -> u64 {
+    task_succeed(unit())
+}
+
+/// Create the manager processes and run each `init` to its initial state. Run
+/// once at program start, after `alm_init` has registered the managers.
+unsafe fn instantiate_managers() {
+    for i in 0..EFFECT_MANAGERS.len() {
+        MANAGER_PROCS.push(ManagerProc {
+            info: i,
+            state: unit(),
+            mailbox: Vec::new(),
+            ready: false,
+            running: false,
+        });
+        let init = EFFECT_MANAGERS[i].init;
+        run_task(init, Vec::new(), Sink::Manager(i));
+    }
+}
+
+unsafe fn manager_task_done(idx: usize, v: u64) {
+    MANAGER_PROCS[idx].state = v;
+    MANAGER_PROCS[idx].ready = true;
+    MANAGER_PROCS[idx].running = false;
+    step_manager(idx);
+}
+
+unsafe fn step_manager(idx: usize) {
+    if MANAGER_PROCS[idx].running
+        || !MANAGER_PROCS[idx].ready
+        || MANAGER_PROCS[idx].mailbox.is_empty()
+    {
+        return;
+    }
+    MANAGER_PROCS[idx].running = true;
+    let msg = MANAGER_PROCS[idx].mailbox.remove(0);
+    let info = &EFFECT_MANAGERS[MANAGER_PROCS[idx].info];
+    let (on_effects, on_self_msg, cmd_map, sub_map) =
+        (info.on_effects, info.on_self_msg, info.cmd_map, info.sub_map);
+    let state = MANAGER_PROCS[idx].state;
+    let router = mk_int(idx as i64);
+    let task = match msg {
+        MMsg::Self_(m) => ap3(on_self_msg, router, m, state),
+        MMsg::Fx(cmds, subs) => {
+            if !is_unit(cmd_map) && !is_unit(sub_map) {
+                ap4(on_effects, router, cmds, subs, state)
+            } else if !is_unit(cmd_map) {
+                ap3(on_effects, router, cmds, state)
+            } else {
+                ap3(on_effects, router, subs, state)
+            }
+        }
+    };
+    run_task(task, Vec::new(), Sink::Manager(idx));
+}
+
+unsafe fn manager_send(idx: usize, msg: MMsg) {
+    MANAGER_PROCS[idx].mailbox.push(msg);
+    step_manager(idx);
+}
+
+/// Walk a Cmd/Sub bag, applying accumulated taggers through each manager's
+/// cmdMap/subMap, and bucket the resulting effects per manager (parallel to
+/// `EFFECT_MANAGERS`). Concrete alm effects are ignored here.
+unsafe fn gather_effects(is_cmd: bool, bag: u64, tagger: u64, dict: &mut [(Vec<u64>, Vec<u64>)]) {
+    let idx = ctor_index(bag);
+    match (is_cmd, idx) {
+        (_, LEAF) => bucket_leaf(is_cmd, bag, tagger, dict),
+        (true, CT_BATCH) | (false, ST_BATCH) => {
+            for b in to_vec(rt_ctor_arg(bag, 0)) {
+                gather_effects(is_cmd, b, tagger, dict);
+            }
+        }
+        (true, CT_MAP) | (false, ST_MAP) => gather_effects(
+            is_cmd,
+            rt_ctor_arg(bag, 1),
+            tagger_compose(tagger, rt_ctor_arg(bag, 0)),
+            dict,
+        ),
+        _ => {}
+    }
+}
+
+unsafe fn bucket_leaf(is_cmd: bool, bag: u64, tagger: u64, dict: &mut [(Vec<u64>, Vec<u64>)]) {
+    let home = sbytes(rt_ctor_arg(bag, 0));
+    let value = rt_ctor_arg(bag, 1);
+    for i in 0..EFFECT_MANAGERS.len() {
+        if EFFECT_MANAGERS[i].home.as_slice() == home {
+            let map = if is_cmd {
+                EFFECT_MANAGERS[i].cmd_map
+            } else {
+                EFFECT_MANAGERS[i].sub_map
+            };
+            let effect = ap2(map, tagger, value);
+            if is_cmd {
+                dict[i].0.push(effect);
+            } else {
+                dict[i].1.push(effect);
+            }
+            return;
+        }
+    }
+}
+
+/// Gather the current Cmd/Sub leaves and deliver a batch to every manager.
+unsafe fn enqueue_manager_effects(cmd_bag: u64, sub_bag: u64) {
+    let n = EFFECT_MANAGERS.len();
+    if n == 0 {
+        return;
+    }
+    let mut dict: Vec<(Vec<u64>, Vec<u64>)> = (0..n).map(|_| (Vec::new(), Vec::new())).collect();
+    gather_effects(true, cmd_bag, identity(), &mut dict);
+    gather_effects(false, sub_bag, identity(), &mut dict);
+    for idx in 0..MANAGER_PROCS.len() {
+        let i = MANAGER_PROCS[idx].info;
+        let cmds = list_from_slice(&dict[i].0);
+        let subs = list_from_slice(&dict[i].1);
+        manager_send(idx, MMsg::Fx(cmds, subs));
+    }
+}
+
+unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, sink: Sink) {
     loop {
         match ctor_index(task) {
             TT_SUCCEED => {
@@ -10197,7 +10412,11 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, tagger: u64) {
                 }
                 match frames.pop() {
                     None => {
-                        tea_dispatch(ap1(tagger, v));
+                        match sink {
+                            Sink::App(tagger) => tea_dispatch(ap1(tagger, v)),
+                            Sink::Manager(idx) => manager_task_done(idx, v),
+                            Sink::Discard => {}
+                        }
                         return;
                     }
                     Some(frame) => task = ap1(frame.f, v),
@@ -10209,13 +10428,22 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, tagger: u64) {
                     frames.pop();
                 }
                 match frames.pop() {
-                    None => {
-                        let rendered = debug_to_string(e);
-                        let mut line = b"Task failed without an error handler: ".to_vec();
-                        line.extend_from_slice(sbytes(rendered));
-                        line.push(0);
-                        rt_crash(line.as_ptr());
-                    }
+                    None => match sink {
+                        Sink::App(_) => {
+                            let rendered = debug_to_string(e);
+                            let mut line = b"Task failed without an error handler: ".to_vec();
+                            line.extend_from_slice(sbytes(rendered));
+                            line.push(0);
+                            rt_crash(line.as_ptr());
+                        }
+                        // Manager tasks are `Task Never state`, so a failure is
+                        // unreachable; be defensive and just stop the process.
+                        Sink::Manager(idx) => {
+                            MANAGER_PROCS[idx].running = false;
+                            return;
+                        }
+                        Sink::Discard => return,
+                    },
                     Some(frame) => task = ap1(frame.f, e),
                 }
             }
@@ -10239,11 +10467,25 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, tagger: u64) {
                     fire_at: now_ms() + ms,
                     task: task_succeed(unit()),
                     frames,
-                    tagger,
+                    sink,
                 });
                 return;
             }
             TT_NOW => task = task_succeed(time_posix(now_ms())),
+            TT_SEND_APP => {
+                tea_dispatch(rt_ctor_arg(task, 0));
+                task = task_succeed(unit());
+            }
+            TT_SEND_SELF => {
+                let router = rt_ctor_arg(task, 0);
+                let m = rt_ctor_arg(task, 1);
+                manager_send(int_val(router) as usize, MMsg::Self_(m));
+                task = task_succeed(unit());
+            }
+            TT_SPAWN => {
+                run_task(rt_ctor_arg(task, 0), Vec::new(), Sink::Discard);
+                task = task_succeed(ctor(b"ProcessId\0".as_ptr(), 0, Vec::new()));
+            }
             _ => crash!("unknown task"),
         }
     }
@@ -10258,8 +10500,10 @@ unsafe fn run_cmd(cmd: u64, tagger: u64) {
             }
         }
         CT_MAP => run_cmd(rt_ctor_arg(cmd, 1), tagger_compose(tagger, rt_ctor_arg(cmd, 0))),
-        CT_TASK => run_task(rt_ctor_arg(cmd, 0), Vec::new(), tagger),
+        CT_TASK => run_task(rt_ctor_arg(cmd, 0), Vec::new(), Sink::App(tagger)),
         CT_WRITE => out_line(sbytes(rt_ctor_arg(cmd, 0))),
+        // Effect-manager leaves are handled by enqueue_manager_effects, not here.
+        LEAF => {}
         _ => crash!("unknown command"),
     }
 }
@@ -10282,6 +10526,8 @@ unsafe fn collect_subs(sub: u64, tagger: u64) {
                 tagger,
             });
         }
+        // Effect-manager leaves are handled by enqueue_manager_effects.
+        LEAF => {}
         _ => crash!("unknown subscription"),
     }
 }
@@ -10296,7 +10542,9 @@ unsafe fn update_subs() {
 unsafe fn tea_dispatch(msg: u64) {
     let next = ap2(TEA_UPDATE, msg, TEA_MODEL);
     TEA_MODEL = rt_tuple_item(next, 0);
-    run_cmd(rt_tuple_item(next, 1), identity());
+    let cmd = rt_tuple_item(next, 1);
+    run_cmd(cmd, identity());
+    enqueue_manager_effects(cmd, ap1(TEA_SUBSCRIPTIONS, TEA_MODEL));
     update_subs();
 }
 
@@ -10305,7 +10553,11 @@ unsafe fn tea_run(impl_: u64) {
     TEA_SUBSCRIPTIONS = rt_access(impl_, b"subscriptions\0".as_ptr());
     let init = ap1(rt_access(impl_, b"init\0".as_ptr()), unit());
     TEA_MODEL = rt_tuple_item(init, 0);
-    run_cmd(rt_tuple_item(init, 1), identity());
+    let initial_cmd = rt_tuple_item(init, 1);
+    run_cmd(initial_cmd, identity());
+    // Start the effect managers and deliver their first batch of effects.
+    instantiate_managers();
+    enqueue_manager_effects(initial_cmd, ap1(TEA_SUBSCRIPTIONS, TEA_MODEL));
     update_subs();
 
     loop {
@@ -10315,7 +10567,7 @@ unsafe fn tea_run(impl_: u64) {
         // timers).
         if let Some(i) = PENDING.iter().position(|p| p.fire_at <= now) {
             let p = PENDING.remove(i);
-            run_task(p.task, p.frames, p.tagger);
+            run_task(p.task, p.frames, p.sink);
             continue;
         }
         if let Some(i) = TIMERS.iter().position(|t| t.fire_at <= now) {
