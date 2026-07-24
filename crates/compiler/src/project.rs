@@ -199,12 +199,10 @@ pub fn compile_project_typed(
     opt: generate::native::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    let target_name = if target == generate::native::Target::Wasm {
-        "wasm (typed)"
-    } else {
-        "native-typed"
-    };
-    reject_effect_modules(entry, &checked.modules, target_name, "--target=native")?;
+    // The monomorphizing backend has no CLI target of its own (only js, native,
+    // and wasm-gc are exposed); it is reached through the API/tests. Guard it
+    // anyway so an effect module gives a clear message rather than a codegen error.
+    reject_effect_modules(entry, &checked.modules, "monomorphizing", "--target=native")?;
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();

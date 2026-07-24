@@ -21,7 +21,7 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm|wasm-uniform|native-typed] [--source-maps] [--dev]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc] [--source-maps] [--dev]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -37,9 +37,8 @@ fn make(args: &[String]) -> ExitCode {
     #[derive(PartialEq)]
     enum Backend {
         Js,
-        Native(Target),
-        /// The typed, monomorphized backend (unboxed native code).
-        Typed(Target),
+        /// LLVM native binary with the uniform (boxed) runtime.
+        Native,
         /// The from-scratch WebAssembly GC backend (engine-managed GC).
         WasmGc,
     }
@@ -60,19 +59,10 @@ fn make(args: &[String]) -> ExitCode {
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
-                "native" => backend = Backend::Native(Target::Native),
-                // `wasm` uses the monomorphized (typed) backend — unboxed, so
-                // allocation-heavy code is fast. `wasm-uniform` is the boxed
-                // fallback (broader coverage, the correctness substrate).
-                "wasm" | "wasm-typed" => backend = Backend::Typed(Target::Wasm),
-                "wasm-uniform" => backend = Backend::Native(Target::Wasm),
+                "native" => backend = Backend::Native,
                 "wasm-gc" | "wasmgc" => backend = Backend::WasmGc,
-                "native-typed" => backend = Backend::Typed(Target::Native),
                 other => {
-                    eprintln!(
-                        "Unknown target `{}`. I know js, native, wasm, wasm-uniform, wasm-gc, and native-typed.",
-                        other
-                    );
+                    eprintln!("Unknown target `{}`. I know js, native, and wasm-gc.", other);
                     return ExitCode::FAILURE;
                 }
             }
@@ -93,16 +83,9 @@ fn make(args: &[String]) -> ExitCode {
     };
 
     let result = match backend {
-        Backend::Native(target) => {
-            let ext = if target == Target::Wasm { "wasm" } else { "" };
-            let output = output.unwrap_or_else(|| input.with_extension(ext));
-            alm_compiler::project::compile_project_native(&input, &output, target, opt)
-                .map(|w| (output, w))
-        }
-        Backend::Typed(target) => {
-            let ext = if target == Target::Wasm { "wasm" } else { "" };
-            let output = output.unwrap_or_else(|| input.with_extension(ext));
-            alm_compiler::project::compile_project_typed(&input, &output, target, opt)
+        Backend::Native => {
+            let output = output.unwrap_or_else(|| input.with_extension(""));
+            alm_compiler::project::compile_project_native(&input, &output, Target::Native, opt)
                 .map(|w| (output, w))
         }
         Backend::WasmGc => {

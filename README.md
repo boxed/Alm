@@ -24,7 +24,7 @@ official compiler's output.
 alm make src/Main.elm --output=main.js
 ```
 
-`--target=js|native|wasm|wasm-gc` selects the backend (default `js`), and
+`--target=js|native|wasm-gc` selects the backend (default `js`), and
 `--source-maps` writes a `.map` beside the JavaScript or WasmGC output.
 
 Projects are discovered through `elm.json` (`source-directories`), and
@@ -150,11 +150,10 @@ organization — alm compiles and runs **user-defined effect modules**.
 stateful process with a mailbox, and `Platform.sendToApp`/`sendToSelf`
 plus `Process.spawn`/`kill` are wired up, mirroring elm's `_Platform`
 protocol. This runs on the **JavaScript** backend (on alm's CPS task
-model) and the **native** backend (on the reified-task interpreter,
-which also covers `--target=wasm-uniform`); a differential test runs the
-same effect programs on both and checks their output agrees. The
-monomorphizing (`--target=wasm`) and WasmGC backends don't implement the
-protocol yet and reject an effect module with a clear message.
+model) and the **native** backend (on the reified-task interpreter); a
+differential test runs the same effect programs on both and checks their
+output agrees. The WasmGC backend does not implement the protocol yet and
+rejects an effect module with a clear message.
 
 ## Not ported
 
