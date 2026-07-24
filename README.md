@@ -53,11 +53,14 @@ app.ports.somePort.subscribe(function (value) { ... });
 - **Exhaustiveness checking** (`Nitpick.PatternMatches`, Maranget's
   algorithm): missing case branches are compile errors listing example
   patterns; redundant branches are rejected.
-- **Byte-exact parse errors** (`Reporting.Error.Syntax`): syntax errors —
-  unfinished if/case/let/record/list, missing arrows, endless strings and
-  comments, module/import/port/type-declaration problems — render
-  identically to the official compiler, verified by a differential test
-  suite that diffs alm against `elm make` 0.19.1 output.
+- **Byte-exact parse errors** (`Reporting.Error.Syntax`): unfinished
+  if/case/let/lambda/record/list/tuple/parens, missing arrows and
+  expressions, endless strings and comments, weird numbers and bad
+  escapes, pattern and type-annotation problems, and module / import /
+  exposing / port / type-alias / custom-type declaration errors all
+  render identically to the official compiler — pinned by a differential
+  test suite of 70+ fixtures that diffs alm against `elm make` 0.19.1
+  output byte-for-byte.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
