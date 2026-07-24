@@ -3,3 +3,13 @@ target/
 examples/*.js
 tests/mutation/covered-lines.txt
 tests/mutation/__pycache__/
+
+# scratch build/bisect dirs
+target-bisect/
+target-dev/
+target-review/
+sweep/
+perftmp3/
+*.log
+run.err
+run.out
