@@ -142,12 +142,25 @@ headless Chrome:
 
 alm and elm 0.19.1 both pass 49/49.
 
+## Effect managers
+
+Unlike stock elm — which restricts `effect module` to the `@elm`
+organization — alm compiles and runs **user-defined effect modules**.
+`command`/`subscription` build effect leaves, each manager becomes a
+stateful process with a mailbox, and `Platform.sendToApp`/`sendToSelf`
+plus `Process.spawn`/`kill` are wired up, mirroring elm's `_Platform`
+protocol. This runs on the **JavaScript** backend (on alm's CPS task
+model) and the **native** backend (on the reified-task interpreter,
+which also covers `--target=wasm-uniform`); a differential test runs the
+same effect programs on both and checks their output agrees. The
+monomorphizing (`--target=wasm`) and WasmGC backends don't implement the
+protocol yet and reject an effect module with a clear message.
+
 ## Not ported
 
-- Effect managers (`effect module`) — Http/Time/Random are native
-  runtime implementations instead; third-party effect modules won't
-  compile. WebSockets, elm/bytes, GLSL shaders, and the optimizer pass
-  (`Optimize/*`, decision trees).
+- WebSockets, elm/bytes, GLSL shaders, and the optimizer pass
+  (`Optimize/*`, decision trees). Http/Time/Random remain native runtime
+  implementations (concrete effects) rather than effect modules.
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
 
