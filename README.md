@@ -53,6 +53,11 @@ app.ports.somePort.subscribe(function (value) { ... });
 - **Exhaustiveness checking** (`Nitpick.PatternMatches`, Maranget's
   algorithm): missing case branches are compile errors listing example
   patterns; redundant branches are rejected.
+- **Byte-exact parse errors** (`Reporting.Error.Syntax`): syntax errors —
+  unfinished if/case/let/record/list, missing arrows, endless strings and
+  comments, module/import/port/type-declaration problems — render
+  identically to the official compiler, verified by a differential test
+  suite that diffs alm against `elm make` 0.19.1 output.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
@@ -137,8 +142,6 @@ alm and elm 0.19.1 both pass 49/49.
   (`Optimize/*`, decision trees).
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
-- The 5,900-line syntax error catalogue of `Reporting.Error.Syntax` —
-  alm's parse errors are terser.
 
 ## Layout
 
