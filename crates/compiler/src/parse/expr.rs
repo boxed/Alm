@@ -275,6 +275,25 @@ fn chomp_tuple_end(p: &mut Parser, start: Position, first: Expr) -> PResult<Expr
 
 // RECORDS
 
+/// A record that never reached its closing `}`. If the brace is actually
+/// present on a later line but under-indented, elm reports NEED MORE INDENTATION
+/// (pointing at the brace); otherwise UNFINISHED RECORD (pointing at `end`).
+fn record_stuck(p: &Parser, start: Position, end: Position) -> super::ParseError {
+    if p.peek() == Some(b'}') {
+        let brace = p.position();
+        super::ParseError::from_syntax(
+            crate::reporting::syntax::SyntaxError::NeedMoreIndentationRecord {
+                region: crate::reporting::Region::new(start, brace),
+                highlight: crate::reporting::Region::new(brace, brace),
+            },
+        )
+    } else {
+        super::ParseError::from_syntax(crate::reporting::syntax::SyntaxError::UnfinishedRecord {
+            region: crate::reporting::Region::new(end, end),
+        })
+    }
+}
+
 fn record(p: &mut Parser) -> PResult<Expr> {
     let start = p.position();
     p.eat_byte(b'{', "a record")?;
@@ -305,14 +324,8 @@ fn record(p: &mut Parser) -> PResult<Expr> {
             p.chomp_and_check_indent("I was expecting an expression after this `=`")?;
             let value = expression(p)?;
             let mut last_end = value.region.end;
-            let rec_stuck = |end: Position| {
-                crate::parse::ParseError::from_syntax(
-                    crate::reporting::syntax::SyntaxError::UnfinishedRecord {
-                        region: crate::reporting::Region::new(end, end),
-                    },
-                )
-            };
-            p.check_indent("").map_err(|_| rec_stuck(last_end))?;
+            p.check_indent("")
+                .map_err(|_| record_stuck(p, start, last_end))?;
             let mut fields = vec![(starter, value)];
             loop {
                 match p.peek() {
@@ -322,13 +335,14 @@ fn record(p: &mut Parser) -> PResult<Expr> {
                         let f = field(p)?;
                         last_end = f.1.region.end;
                         fields.push(f);
-                        p.check_indent("").map_err(|_| rec_stuck(last_end))?;
+                        p.check_indent("")
+                            .map_err(|_| record_stuck(p, start, last_end))?;
                     }
                     Some(b'}') => {
                         p.bump(1);
                         return Ok(Located::at(start, p.position(), Expr_::Record(fields)));
                     }
-                    _ => return Err(rec_stuck(last_end)),
+                    _ => return Err(record_stuck(p, start, last_end)),
                 }
             }
         }

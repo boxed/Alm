@@ -1,0 +1,8 @@
+-- TOO MUCH INDENTATION ------------------------------------------- src/Main.elm
+
+This `import` should not have any spaces before it:
+
+3|   import String
+     ^
+Delete the spaces before `import` until there are none left!
+

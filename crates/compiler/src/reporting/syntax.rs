@@ -165,6 +165,11 @@ pub enum SyntaxError {
     /// A leftover `=` after a declaration (`BadEquals`); `name` is the preceding
     /// definition's name, if any, for the indentation note.
     UnexpectedEquals { region: Region, name: Option<String> },
+    /// A top-level keyword (`module`/`import`/`type`/`port`) with leading spaces.
+    TooMuchIndentation { region: Region, keyword: String },
+    /// A record whose closing `}` is on a later line but under-indented; `region`
+    /// spans from the record start to the brace, `highlight` marks the brace.
+    NeedMoreIndentationRecord { region: Region, highlight: Region },
 }
 
 /// The specific way a `\u{...}` unicode escape was malformed. Each maps to a
@@ -259,7 +264,9 @@ impl SyntaxError {
             | SyntaxError::UnexpectedBacktick { region }
             | SyntaxError::UnexpectedSemicolon { region }
             | SyntaxError::UnexpectedComma { region }
-            | SyntaxError::UnexpectedEquals { region, .. } => *region,
+            | SyntaxError::UnexpectedEquals { region, .. }
+            | SyntaxError::TooMuchIndentation { region, .. }
+            | SyntaxError::NeedMoreIndentationRecord { region, .. } => *region,
         }
     }
 
@@ -1273,6 +1280,35 @@ impl SyntaxError {
                     vec![Section::Para(note)],
                 )
             }
+            SyntaxError::TooMuchIndentation { region, keyword } => snippet_owned(
+                "TOO MUCH INDENTATION".to_string(),
+                *region,
+                format!("This `{keyword}` should not have any spaces before it:"),
+                format!("Delete the spaces before `{keyword}` until there are none left!"),
+                vec![],
+            ),
+            SyntaxError::NeedMoreIndentationRecord { region, highlight } => snippet_spanned(
+                "NEED MORE INDENTATION".to_string(),
+                *region,
+                *highlight,
+                "I was partway through parsing a record, but I got stuck here:".to_string(),
+                "I need this curly brace to be indented more. Try adding some spaces before \
+                 it!"
+                    .to_string(),
+                vec![
+                    Section::Para(
+                        "Note: If you are trying to define a record across multiple lines, I \
+                         recommend using this format:"
+                            .to_string(),
+                    ),
+                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    Section::Para(
+                        "Notice that each line starts with some indentation. Usually two or \
+                         four spaces. This is the stylistic convention in the Elm ecosystem."
+                            .to_string(),
+                    ),
+                ],
+            ),
         }
     }
 }

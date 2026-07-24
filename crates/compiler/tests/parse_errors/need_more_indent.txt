@@ -1,0 +1,20 @@
+-- NEED MORE INDENTATION ------------------------------------------ src/Main.elm
+
+I was partway through parsing a record, but I got stuck here:
+
+4|     { a = 1
+5| }
+   ^
+I need this curly brace to be indented more. Try adding some spaces before it!
+
+Note: If you are trying to define a record across multiple lines, I recommend
+using this format:
+
+    { name = "Alice"
+    , age = 42
+    , height = 1.75
+    }
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+

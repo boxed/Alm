@@ -538,7 +538,16 @@ fn classify_leftover(p: &Parser, values: &[Located<Value>]) -> Option<ParseError
                 .map(|v| v.value.name.value.as_str().to_string());
             SyntaxError::UnexpectedEquals { region, name }
         }
-        _ => return None,
+        // An indented top-level keyword: elm's `FreshLine` → TOO MUCH INDENTATION.
+        _ => {
+            let kw = ["module", "import", "type", "port"]
+                .into_iter()
+                .find(|k| p.peek_keyword(k))?;
+            SyntaxError::TooMuchIndentation {
+                region,
+                keyword: kw.to_string(),
+            }
+        }
     };
     Some(ParseError::from_syntax(se))
 }
