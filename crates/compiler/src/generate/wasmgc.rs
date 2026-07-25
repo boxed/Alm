@@ -5449,6 +5449,11 @@ impl<'a> Codegen<'a> {
         let app = self.str_append_idx;
         // locals: acc(1):eqref, i(2):i32, n(3):i32
         let mut f = Function::new([(1, eqref()), (2, ValType::I32)]);
+        // The value may arrive as an unboxed scalar list (`List Int`/`List
+        // Float`) — e.g. pulled raw from a constructor-arg slot (`Just xs`)
+        // rather than through `emit_expr`, which widens. Widen to the boxed
+        // backing the flatten/`list_elem` path below expects.
+        widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
         self.flatten_local(&mut f, 0, false);
         push_str_const(&mut f, "[");
         f.instruction(&Instruction::LocalSet(1));
@@ -6016,13 +6021,17 @@ impl<'a> Codegen<'a> {
             self.emit_copy_str(&mut f, 0, off, child, n, i);
             f.instruction(&Instruction::End);
         }
-        // Seq(8): iterate arg1 (List Encoder), thread offset via recursion
+        // Seq(8): iterate arg1 (List Encoder), thread offset via recursion.
+        // Flatten first: a `::`-built list is chunked/unrolled, and the raw
+        // `list_len`/`list_elem` accessors below need the dense backing (matches
+        // the Debug.toString list renderer).
         f.instruction(&Instruction::LocalGet(tag));
         f.instruction(&Instruction::I32Const(8));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         ctor_argn(&mut f, 2, 1);
         f.instruction(&Instruction::LocalSet(lst));
+        self.flatten_local(&mut f, lst, false);
         list_len(&mut f, lst);
         f.instruction(&Instruction::LocalSet(n));
         f.instruction(&Instruction::I32Const(0));

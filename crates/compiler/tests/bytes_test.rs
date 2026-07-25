@@ -1,18 +1,14 @@
-//! elm/bytes round-trips across backends. A compact, faithful `elm/bytes`
-//! package is resolved from a fake ELM_HOME.
+//! elm/bytes round-trips identically on all three backends (js, native,
+//! wasm-gc). A compact, faithful `elm/bytes` package is resolved from a fake
+//! ELM_HOME; each `main : String` is compiled and run on every backend and the
+//! outputs must agree. Covers unsigned/signed int 8/16/32 (both endiannesses),
+//! float64, multi-byte UTF-8 strings, `Bytes`, `Bytes.width`, `Decode.loop`/
+//! `map3`/`map5`/`andThen`, and a failed (out-of-bounds) decode.
 //!
-//! - `bytes_full_js_native`: the full program (unsigned/signed int 8/16/32 in
-//!   both endiannesses, float64, UTF-8 strings, `Bytes.width`, `Decode.loop`/
-//!   `map3`/`andThen`, a failed decode) on JS and native — both correct and
-//!   identical.
-//! - `bytes_scalars_all_backends`: a scalar+string subset (no list decode) on
-//!   JS, native, AND wasm-gc — all three agree.
-//!
-//! wasm-gc is excluded from the list-decode case: decoding into an unboxed
-//! scalar `List Int`/`List Float` currently yields zero elements (the generic
-//! decode kernel produces boxed values where the unboxed-scalar-list ABI
-//! expects unboxed). Scalars, strings, `Bytes`, and `Bytes.width` decode
-//! correctly on all three. Tracked as a known wasm-gc unboxed-ABI limitation.
+//! `bytes_value` builds its output by value; `bytes_debug_tostring` renders a
+//! deeply-nested result through `Debug.toString` — the two together guard the
+//! wasm-gc fixes for (a) encoding a `::`-built `List Encoder` and (b) rendering
+//! a decoded unboxed scalar `List Int` pulled from a constructor-arg slot.
 
 mod common;
 
@@ -22,7 +18,6 @@ use std::sync::Mutex;
 use alm_compiler::{generate, ir, project};
 
 static ELM_HOME_LOCK: Mutex<()> = Mutex::new(());
-
 const BYTES_ELM: &str = r#"module Bytes exposing (Bytes, width, Endianness(..), getHostEndianness)
 
 import Elm.Kernel.Bytes
@@ -427,7 +422,7 @@ loopHelp state callback bites offset =
                 Done result ->
                     ( newOffset, result )
 "#;
-const FULL_MAIN: &str = r#"module Main exposing (main)
+const VALUE_MAIN: &str = r#"module Main exposing (main)
 
 import Bytes exposing (Endianness(..))
 import Bytes.Encode as E
@@ -441,8 +436,44 @@ listDecoder =
 
 step : ( Int, List Int ) -> D.Decoder (D.Step ( Int, List Int ) (List Int))
 step ( n, xs ) =
+    if n <= 0 then D.succeed (D.Done (List.reverse xs))
+    else D.map (\x -> D.Loop ( n - 1, x :: xs )) D.unsignedInt8
+
+
+main : String
+main =
+    let
+        e = E.encode (E.sequence [ E.unsignedInt8 65, E.signedInt16 LE -3, E.signedInt32 BE 1000000, E.float64 LE 3.5, E.string "br\u{00f8}d" ])
+        r = D.decode (D.map5 (\a b c d s -> String.fromInt a ++ "," ++ String.fromInt b ++ "," ++ String.fromInt c ++ "," ++ String.fromFloat d ++ "," ++ s) D.unsignedInt8 (D.signedInt16 LE) (D.signedInt32 BE) (D.float64 LE) (D.string 5)) e
+        loopEnc = E.encode (E.sequence (E.unsignedInt8 3 :: List.map E.unsignedInt8 [ 7, 8, 9 ]))
+        loop = D.decode listDecoder loopEnc |> Maybe.map (\xs -> String.join "," (List.map String.fromInt xs)) |> Maybe.withDefault "?"
+        failed = case D.decode (D.unsignedInt32 BE) (E.encode (E.unsignedInt8 1)) of
+            Just _ -> "some"
+            Nothing -> "none"
+    in
+    String.join "|" [ String.fromInt (Bytes.width e), Maybe.withDefault "?" r, loop, failed ]
+"#;
+const TOSTRING_MAIN: &str = r#"module Main exposing (main)
+
+import Bytes exposing (Endianness(..))
+import Bytes.Encode as E
+import Bytes.Decode as D
+
+
+listDecoder : D.Decoder (List Int)
+listDecoder =
+    D.unsignedInt8 |> D.andThen (\n -> D.loop ( n, [] ) step)
+
+
+step : ( Int, List Int ) -> D.Decoder (D.Step ( Int, List Int ) (List Int))
+step pair =
+    let
+        ( n, xs ) =
+            pair
+    in
     if n <= 0 then
         D.succeed (D.Done (List.reverse xs))
+
     else
         D.map (\x -> D.Loop ( n - 1, x :: xs )) D.unsignedInt8
 
@@ -450,43 +481,39 @@ step ( n, xs ) =
 main : String
 main =
     let
-        e = E.encode (E.sequence [ E.unsignedInt8 65, E.signedInt32 BE 1000000, E.float64 LE 3.5, E.string "br\u{00f8}d" ])
-        triple = D.decode (D.map3 (\a b c -> String.fromInt a ++ "," ++ String.fromInt b ++ "," ++ String.fromFloat c) D.unsignedInt8 (D.signedInt32 BE) (D.float64 LE)) e
-        str = D.decode (D.string 5) (E.encode (E.string "br\u{00f8}d"))
-        loopEnc = E.encode (E.sequence (E.unsignedInt8 3 :: List.map E.unsignedInt8 [ 7, 8, 9 ]))
-        loopDec = D.decode listDecoder loopEnc
-        failed = case D.decode (D.unsignedInt32 BE) (E.encode (E.unsignedInt8 1)) of
-            Just _ -> "some"
-            Nothing -> "none"
+        e =
+            E.encode (E.sequence [ E.unsignedInt8 65, E.signedInt32 BE 1000000, E.float64 LE 3.5, E.string "brød" ])
+
+        d =
+            D.decode (D.map3 (\a b c -> ( a, b, c )) D.unsignedInt8 (D.signedInt32 BE) (D.float64 LE)) e
+
+        s =
+            D.decode (D.string 5) (E.encode (E.string "brød"))
+
+        loopEnc =
+            E.encode (E.sequence (E.unsignedInt8 3 :: List.map E.unsignedInt8 [ 7, 8, 9 ]))
+
+        loopDec =
+            D.decode listDecoder loopEnc
+
+        fail =
+            D.decode (D.unsignedInt32 BE) (E.encode (E.unsignedInt8 1))
+
+        -- A failed read must abort the decode non-locally (JS throws; native
+        -- longjmps): `map2`/`andThen` apply callbacks unconditionally, so a
+        -- sentinel return would hand the failure dummy to `pairSum`, which
+        -- destructures it as a tuple (pre-fix: SIGSEGV at 0x1).
+        pairSum =
+            D.map2 (\a b -> ( a, b )) D.unsignedInt8 D.unsignedInt8
+                |> D.andThen (\( a, b ) -> D.succeed (a + b))
+
+        failMid =
+            D.decode pairSum (E.encode (E.unsignedInt8 1))
+
+        okPair =
+            D.decode pairSum (E.encode (E.sequence [ E.unsignedInt8 1, E.unsignedInt8 2 ]))
     in
-    String.join "|"
-        [ String.fromInt (Bytes.width e)
-        , Maybe.withDefault "?" triple
-        , Maybe.withDefault "?" str
-        , loopDec |> Maybe.map (\xs -> String.join "," (List.map String.fromInt xs)) |> Maybe.withDefault "?"
-        , failed
-        ]
-"#;
-const SCALAR_MAIN: &str = r#"module Main exposing (main)
-
-import Bytes exposing (Endianness(..))
-import Bytes.Encode as E
-import Bytes.Decode as D
-
-
-main : String
-main =
-    let
-        e = E.encode (E.sequence [ E.unsignedInt8 65, E.signedInt16 LE -3, E.signedInt32 BE 1000000, E.float64 LE 3.5, E.string "br\u{00f8}d" ])
-        r = D.decode
-                (D.map5 (\a b c d s -> String.fromInt a ++ "," ++ String.fromInt b ++ "," ++ String.fromInt c ++ "," ++ String.fromFloat d ++ "," ++ s)
-                    D.unsignedInt8 (D.signedInt16 LE) (D.signedInt32 BE) (D.float64 LE) (D.string 5))
-                e
-        failed = case D.decode (D.unsignedInt32 BE) (E.encode (E.unsignedInt8 1)) of
-            Just _ -> "some"
-            Nothing -> "none"
-    in
-    String.join "|" [ String.fromInt (Bytes.width e), Maybe.withDefault "?" r, failed ]
+    Debug.toString ( Bytes.width e, d, ( s, loopDec, ( fail, failMid, okPair ) ) )
 "#;
 
 fn write_project(main: &str) -> common::TestDir {
@@ -512,63 +539,49 @@ fn run_cmd(command: &mut Command, what: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
-fn check(dir: &std::path::Path) -> alm_compiler::project::CheckedProject {
+/// Compile `main` on js, native, and wasm-gc; assert all three agree and equal
+/// `expected`; return that output.
+fn run_all(main: &str, expected: &str) {
+    let _g = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = write_project(main);
+    std::env::set_var("ELM_HOME", dir.join("elm-home"));
     let entry = dir.join("src/Main.elm");
-    project::check_project(&entry).unwrap_or_else(|errs| {
+    let checked = project::check_project(&entry).unwrap_or_else(|errs| {
         std::env::remove_var("ELM_HOME");
         panic!("check failed:\n{}", errs.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
-    })
-}
+    });
 
-fn js_out(dir: &std::path::Path, checked: &alm_compiler::project::CheckedProject) -> String {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).unwrap();
-    run_cmd(Command::new("node").arg("-e").arg(format!("process.stdout.write(require({:?}).Main.main)", bundle.display())), "node")
-}
+    let js = run_cmd(Command::new("node").arg("-e").arg(format!("process.stdout.write(require({:?}).Main.main)", bundle.display())), "node");
 
-fn native_out(dir: &std::path::Path, checked: &alm_compiler::project::CheckedProject) -> String {
     let program = ir::lower::lower_project(&checked.modules);
     let binary = dir.join("main");
     generate::native::build(&program, &binary, generate::native::OptLevel::Release)
         .unwrap_or_else(|e| { std::env::remove_var("ELM_HOME"); panic!("native build failed: {}", e) });
-    run_cmd(&mut Command::new(&binary), "native")
-}
+    let native = run_cmd(&mut Command::new(&binary), "native");
 
-fn wasmgc_out(dir: &std::path::Path) -> String {
     let wasm = dir.join("app.wasm");
-    project::compile_project_wasmgc(&dir.join("src/Main.elm"), &wasm, false)
-        .unwrap_or_else(|e| panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")));
+    let gc_res = project::compile_project_wasmgc(&entry, &wasm, false);
+    std::env::remove_var("ELM_HOME");
+    gc_res.unwrap_or_else(|e| panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")));
     let runner = dir.join("run_str.cjs");
     std::fs::write(&runner, format!("{HOST_ENV}{STR_RUNNER_TAIL}")).unwrap();
-    run_cmd(Command::new("node").arg(&runner).arg(&wasm), "wasm-gc")
-}
+    let gc = run_cmd(Command::new("node").arg(&runner).arg(&wasm), "wasm-gc");
 
-#[test]
-fn bytes_full_js_native() {
-    let _g = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = write_project(FULL_MAIN);
-    std::env::set_var("ELM_HOME", dir.join("elm-home"));
-    let checked = check(&dir);
-    let js = js_out(&dir, &checked);
-    let native = native_out(&dir, &checked);
-    std::env::remove_var("ELM_HOME");
-    assert_eq!(js, "18|65,1000000,3.5|br\u{00f8}d|7,8,9|none");
-    assert_eq!(js, native, "js vs native");
-}
-
-#[test]
-fn bytes_scalars_all_backends() {
-    let _g = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = write_project(SCALAR_MAIN);
-    std::env::set_var("ELM_HOME", dir.join("elm-home"));
-    let checked = check(&dir);
-    let js = js_out(&dir, &checked);
-    let native = native_out(&dir, &checked);
-    let gc = wasmgc_out(&dir);
-    std::env::remove_var("ELM_HOME");
-    assert_eq!(js, "20|65,-3,1000000,3.5,br\u{00f8}d|none");
+    assert_eq!(js, expected, "js output");
     assert_eq!(js, native, "js vs native");
     assert_eq!(js, gc, "js vs wasm-gc");
+}
+
+#[test]
+fn bytes_value() {
+    run_all(VALUE_MAIN, "20|65,-3,1000000,3.5,br\u{00f8}d|7,8,9|none");
+}
+
+#[test]
+fn bytes_debug_tostring() {
+    run_all(TOSTRING_MAIN, "(18,Just (65,1000000,3.5),(Just \"br\u{00f8}d\",Just [7,8,9],(Nothing,Nothing,Just 3)))");
 }
 
 const HOST_ENV: &str = r#"
