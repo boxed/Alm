@@ -962,6 +962,12 @@ impl Generator {
                     out.push(sw);
                     return out;
                 }
+                let patterns: Vec<can::Pattern> =
+                    branches.iter().map(|(p, _)| p.clone()).collect();
+                if let Some(tree) = crate::decision::compile(&patterns) {
+                    out.push(self.emit_decision(&tree, &temp, branches, tail));
+                    return out;
+                }
                 for (pattern, branch) in branches {
                     let mut tests = Vec::new();
                     let mut bindings = Vec::new();
@@ -1129,6 +1135,88 @@ impl Generator {
         }
         out.push_str(" } }");
         Some(out)
+    }
+
+    /// Emit a decision tree (see `crate::decision`) as nested `switch`es. Each
+    /// `Switch` tests one sub-path of the scrutinee once; leaves bind the
+    /// branch's variables to their paths and emit the branch body. Bodies are in
+    /// tail position, so cases end in `return`/`continue` and never fall through.
+    fn emit_decision(
+        &mut self,
+        tree: &crate::decision::Tree,
+        root: &str,
+        branches: &[(can::Pattern, can::Expr)],
+        tail: &Tail,
+    ) -> Mapped {
+        use crate::decision::{Test, Tree};
+        match tree {
+            Tree::Leaf { branch, binds } => {
+                let mut out = Mapped::default();
+                for (name, path) in binds {
+                    out.push_str(&format!(
+                        "var {} = {}; ",
+                        sanitize(name),
+                        path_expr(root, path)
+                    ));
+                }
+                out.push(self.stmts(&branches[*branch].1, tail));
+                out
+            }
+            Tree::Fail => Mapped::raw(
+                "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
+            ),
+            Tree::Switch { path, edges, default } => {
+                // Bind the tested sub-value to a temp — unless it is the
+                // scrutinee itself (empty path), already in `root`.
+                let (d, mut out) = if path.is_empty() {
+                    (root.to_string(), Mapped::default())
+                } else {
+                    let d = self.fresh_temp();
+                    (d.clone(), Mapped::raw(format!("var {} = {}; ", d, path_expr(root, path))))
+                };
+                // Bool dispatches on the raw value; everything else on a tag or a
+                // primitive, which a `switch` turns into a jump table.
+                let is_bool = matches!(
+                    edges.first(),
+                    Some((Test::Ctor { home, name, .. }, _))
+                        if home.as_str() == "Basics" && matches!(name.as_str(), "True" | "False")
+                );
+                if is_bool {
+                    // Exactly True/False — an if/else on the raw boolean.
+                    let (true_sub, false_sub) = bool_edges(edges, default);
+                    out.push_str(&format!("if ({}) {{ ", d));
+                    if let Some(t) = true_sub {
+                        out.push(self.emit_decision(t, root, branches, tail));
+                    }
+                    out.push_str(" } else { ");
+                    if let Some(fsub) = false_sub {
+                        out.push(self.emit_decision(fsub, root, branches, tail));
+                    }
+                    out.push_str(" }");
+                    return out;
+                }
+                let disc = match edges.first() {
+                    Some((Test::Chr(_), _)) => format!("{}.valueOf()", d),
+                    Some((Test::Int(_), _)) | Some((Test::Str(_), _)) => d.clone(),
+                    _ => format!("{}.$", d), // ctor tag, or list '::' / '[]'
+                };
+                out.push_str(&format!("switch ({}) {{ ", disc));
+                for (test, sub) in edges {
+                    out.push_str(&format!("case {}: {{ ", test_label(test)));
+                    out.push(self.emit_decision(sub, root, branches, tail));
+                    out.push_str(" } ");
+                }
+                out.push_str("default: { ");
+                match default {
+                    Some(d) => out.push(self.emit_decision(d, root, branches, tail)),
+                    None => out.push_str(
+                        "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
+                    ),
+                }
+                out.push_str(" } }");
+                out
+            }
+        }
     }
 
     fn let_decl_stmts(&mut self, decl: &can::LetDecl, out: &mut Mapped) {
@@ -1557,6 +1645,53 @@ fn emit_ctor(out: &mut String, module_var: &str, ctor_name: &str, arity: usize) 
     } else {
         writeln!(out, "var {} = F{}({});", var, arity, body).unwrap();
     }
+}
+
+/// The JS expression reaching `path` from the scrutinee bound in `root`.
+fn path_expr(root: &str, path: &[crate::decision::Step]) -> String {
+    use crate::decision::Step;
+    let mut s = root.to_string();
+    for step in path {
+        s = match step {
+            // Constructor args and tuple elements are both `.a`/`.b`/... slots.
+            Step::Arg(i) | Step::Elem(i) => format!("{}.{}", s, field_name(*i as usize)),
+            Step::Field(f) => format!("{}.{}", s, f),
+            Step::Head => format!("_List_head({})", s),
+            Step::Tail => format!("_List_tail({})", s),
+        };
+    }
+    s
+}
+
+/// The `case` label for a decision-tree test (constructor tag / list marker /
+/// literal). Not used for bools, which dispatch on the raw value.
+fn test_label(test: &crate::decision::Test) -> String {
+    use crate::decision::Test;
+    match test {
+        Test::Ctor { name, .. } => format!("'{}'", name),
+        Test::Cons => "'::'".to_string(),
+        Test::Nil => "'[]'".to_string(),
+        Test::Int(n) => n.to_string(),
+        Test::Str(s) => js_string(s),
+        Test::Chr(c) => js_string(&c.to_string()),
+    }
+}
+
+/// Split a bool `Switch`'s edges into its `True` and `False` subtrees, filling a
+/// missing side from the `default`.
+fn bool_edges<'a>(
+    edges: &'a [(crate::decision::Test, crate::decision::Tree)],
+    default: &'a Option<Box<crate::decision::Tree>>,
+) -> (Option<&'a crate::decision::Tree>, Option<&'a crate::decision::Tree>) {
+    use crate::decision::Test;
+    let find = |want: &str| {
+        edges
+            .iter()
+            .find(|(t, _)| matches!(t, Test::Ctor { name, .. } if name.as_str() == want))
+            .map(|(_, sub)| sub)
+    };
+    let dflt = default.as_deref();
+    (find("True").or(dflt), find("False").or(dflt))
 }
 
 fn field_name(index: usize) -> String {

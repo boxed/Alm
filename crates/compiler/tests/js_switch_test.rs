@@ -109,9 +109,10 @@ kind s =
 }
 
 #[test]
-fn repeated_tag_with_literal_arg_falls_back_but_is_correct() {
-    // `Just 0` and `Just n` share the `Just` tag with a refutable arg, so this
-    // cannot be a clean switch — it must fall back to the if-chain.
+fn repeated_tag_with_literal_arg_nests_via_decision_tree() {
+    // `Just 0` and `Just n` share the `Just` tag: the flat jump table declines,
+    // but the decision tree handles it by testing the outer tag once and then
+    // switching on the inner literal.
     let src = worker(
         r#"describe : Maybe Int -> String
 describe m =
@@ -122,7 +123,9 @@ describe m =
         r#"describe (Just 0) ++ "|" ++ describe (Just 7) ++ "|" ++ describe Nothing"#,
     );
     let (js, out) = compile_and_run("repeated", &src);
-    assert!(!js.contains("case 'Just':"), "should not switch on a repeated tag:\n{js}");
+    // Outer tag switched once (Just / Nothing), inner literal switched inside.
+    assert!(js.contains("case 'Just':") && js.contains("case 'Nothing':"), "expected an outer tag switch:\n{js}");
+    assert!(js.contains("case 0:"), "expected an inner literal switch:\n{js}");
     assert_eq!(out, "just zero|just 7|nothing");
 }
 
@@ -140,6 +143,75 @@ sum p =
     );
     let (_js, out) = compile_and_run("nested", &src);
     assert_eq!(out, "12");
+}
+
+#[test]
+fn nested_constructors_test_the_outer_tag_once() {
+    // The decision tree tests the outer `Just2` tag ONCE, then switches on the
+    // inner tag — the sequential form would re-test `Just2` for each inner arm.
+    let src = worker(
+        r#"type Inner = A Int | B | C Int
+type Outer = Wrap Inner | None2
+
+describe : Outer -> String
+describe o =
+    case o of
+        Wrap (A n) -> "A" ++ String.fromInt n
+        Wrap B -> "B"
+        Wrap (C n) -> "C" ++ String.fromInt n
+        None2 -> "none""#,
+        r#"String.join "," [ describe (Wrap (A 1)), describe (Wrap B), describe (Wrap (C 3)), describe None2 ]"#,
+    );
+    let (js, out) = compile_and_run("nested_ctor", &src);
+    // `describe`'s body tests the outer tag exactly once.
+    let describe = js
+        .split("var $Main$describe = ")
+        .nth(1)
+        .and_then(|s| s.split("; var ").next())
+        .unwrap_or(&js);
+    assert_eq!(
+        describe.matches("'Wrap'").count(),
+        1,
+        "outer tag should be tested once:\n{describe}"
+    );
+    assert_eq!(out, "A1,B,C3,none");
+}
+
+#[test]
+fn tuple_and_list_patterns_via_decision_tree() {
+    let src = worker(
+        r#"combine : ( Maybe Int, List Int ) -> String
+combine pair =
+    case pair of
+        ( Just x, [] ) -> "j-empty-" ++ String.fromInt x
+        ( Just x, y :: _ ) -> "j-" ++ String.fromInt x ++ "-" ++ String.fromInt y
+        ( Nothing, [] ) -> "n-empty"
+        ( Nothing, y :: _ ) -> "n-" ++ String.fromInt y"#,
+        r#"String.join "," [ combine (Just 5, []), combine (Just 6, [7]), combine (Nothing, []), combine (Nothing, [9]) ]"#,
+    );
+    let (_js, out) = compile_and_run("tuple_list", &src);
+    assert_eq!(out, "j-empty-5,j-6-7,n-empty,n-9");
+}
+
+#[test]
+fn duplicating_match_falls_back_but_is_correct() {
+    // The first column (A|B) is exhaustive, so the wildcard third row would be
+    // duplicated by a decision tree; it falls back to the if-chain and stays
+    // correct.
+    let src = worker(
+        r#"type T = A | B
+type S = C | D
+
+pick : ( T, S ) -> Int
+pick ts =
+    case ts of
+        ( A, C ) -> 1
+        ( B, C ) -> 2
+        ( _, D ) -> 3"#,
+        r#"String.join "," (List.map (String.fromInt << pick) [ (A, C), (B, C), (A, D), (B, D) ])"#,
+    );
+    let (_js, out) = compile_and_run("dup", &src);
+    assert_eq!(out, "1,2,3,3");
 }
 
 #[test]
