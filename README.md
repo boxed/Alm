@@ -81,6 +81,13 @@ app.ports.somePort.subscribe(function (value) { ... });
   generator). A differential test suite runs the same programs through
   the backends and checks their output agrees. Self tail calls compile
   to loops that run in constant stack space.
+- **Decision-tree pattern matching** (`Optimize/DecisionTree`): a `case`
+  compiles to a tree that tests each sub-path of the scrutinee once and
+  shares common prefixes — a jump table (`switch` on JS, `br_table` on
+  wasm-gc; LLVM switch-conversion on native) at each dense constructor
+  node, nested for deeper patterns. A branch reached from several leaves
+  is emitted once as a shared join point (a labeled-block `break` on JS)
+  rather than duplicated.
 - Standard library: Basics, List, String, Char, Maybe, Result, Tuple,
   Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
   Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
@@ -171,15 +178,6 @@ matching the JS backend value-for-value (checked by a differential test).
   kernel (`Math.Vector*`/`Matrix4`) is implemented — but `WebGL.entity`/
   `toHtml` build inert nodes instead of driving a real GPU context (node
   has none).
-- **Decision-tree pattern matching with shared join points**
-  (`Optimize/DecisionTree`): a `case` compiles to a decision tree that
-  tests each sub-path of the scrutinee once and shares common prefixes —
-  a jump table (`switch` on JS, `br_table` on wasm-gc) at each dense
-  constructor node, nested for deeper patterns. The one gap is the *fall
-  back*: a match that a decision tree can only compile by duplicating a
-  branch body (elm shares those via join points) reverts to the
-  sequential `if`-chain instead. Native leaves this to LLVM (CSE +
-  switch-conversion of the chain). (DCE tree-shaking is done.)
 - **WebSockets** — removed from Elm 0.19 core, so nothing to port.
 - Http/Time/Random are concrete runtime effects rather than real effect
   modules.
