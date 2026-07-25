@@ -191,6 +191,12 @@ const T_ARR: u32 = 3; // array (mut eqref) — records, tuples, ctor args, list 
 const T_BACK: u32 = 4; // struct { mut i32 head, (ref T_ARR) data } — head = frontmost used index
 const T_LIST: u32 = 5; // struct { i32 len, (ref null T_BACK) bk }
 const T_CTOR: u32 = 6; // struct { i32 tag, (ref null T_ARR) args }
+
+/// Minimum constructor-edge count for a `case` to dispatch via a `br_table`
+/// rather than an if-chain of tag tests. A br_table is an indirect branch that
+/// the CPU can mispredict; benchmarks show a predictable compare chain wins
+/// below a handful of edges, and br_table only pays off for larger dispatches.
+const BR_TABLE_MIN: usize = 8;
 const T_CLOS: u32 = 7; // struct { funcref, i32 arity, i32 applied, (ref null T_ARR) args }
 // Dict/Set = a persistent treap (BST by key, heap by (priority,key) where
 // priority = val_hash(key) — deterministic, so equal key-sets give identical
@@ -815,6 +821,25 @@ fn br_depth(labels: &[Lbl], target: &Lbl) -> u32 {
         .rposition(|l| l == target)
         .expect("decision-tree label must be on the stack");
     (labels.len() - 1 - pos) as u32
+}
+
+/// How a decision tree's leaf bodies are emitted, and hence the type its merge
+/// block carries. `Val` is a plain sub-expression (leaves an `eqref`); `Tail`
+/// and `Scalar` are tail positions where a body may `return_call` for TCO —
+/// `Scalar` additionally returns an unboxed value of rep `Rep`.
+#[derive(Clone, Copy)]
+enum DSink {
+    Val,
+    Tail,
+    Scalar(Rep),
+}
+
+/// The wasm result type a decision tree's merge block carries under `sink`.
+fn dsink_result(sink: DSink) -> ValType {
+    match sink {
+        DSink::Scalar(rep) => rep_valtype(rep),
+        DSink::Val | DSink::Tail => eqref(),
+    }
 }
 
 /// Reconstruct a minimal `can::Pattern` that performs just a decision-tree
@@ -21511,6 +21536,17 @@ impl<'a> Codegen<'a> {
                 let s = ctx.bind("$scrut");
                 self.emit_expr(scrut, ctx, f)?;
                 f.instruction(&Instruction::LocalSet(s));
+                if std::env::var("ALM_NO_CASE_OPT").is_err()
+                    && branches.iter().all(|(p, _)| !pattern_has_list(p))
+                {
+                    let patterns: Vec<can::Pattern> =
+                        branches.iter().map(|(p, _)| p.clone()).collect();
+                    if let Some(tree) = crate::decision::compile(&patterns) {
+                        return self.emit_decision(
+                            &tree, s, branches, Some(&scrut.tipe), DSink::Scalar(rep), ctx, f,
+                        );
+                    }
+                }
                 self.emit_branches_tail_scalar(branches, s, Some(&scrut.tipe), rep, ctx, f)
             }
             TypedKind::Let(decls, body) => {
@@ -22958,6 +22994,17 @@ impl<'a> Codegen<'a> {
                 let s = ctx.bind("$scrut");
                 self.emit_expr(scrut, ctx, f)?;
                 f.instruction(&Instruction::LocalSet(s));
+                if std::env::var("ALM_NO_CASE_OPT").is_err()
+                    && branches.iter().all(|(p, _)| !pattern_has_list(p))
+                {
+                    let patterns: Vec<can::Pattern> =
+                        branches.iter().map(|(p, _)| p.clone()).collect();
+                    if let Some(tree) = crate::decision::compile(&patterns) {
+                        return self.emit_decision(
+                            &tree, s, branches, Some(&scrut.tipe), DSink::Tail, ctx, f,
+                        );
+                    }
+                }
                 self.emit_branches_tail(branches, s, Some(&scrut.tipe), ctx, f)
             }
             TypedKind::Let(decls, body) => {
@@ -28473,33 +28520,55 @@ impl<'a> Codegen<'a> {
         let s = ctx.bind("$scrut");
         self.emit_expr(scrut, ctx, f)?;
         f.instruction(&Instruction::LocalSet(s));
-        if self.try_emit_jump_table(branches, s, Some(&scrut.tipe), ctx, f)? {
-            return Ok(());
-        }
-        // Nested patterns → a decision tree (shared prefix tests). Lists need
-        // type-directed extraction the tree does not carry, so skip them.
-        if branches.iter().all(|(p, _)| !pattern_has_list(p)) {
-            let patterns: Vec<can::Pattern> = branches.iter().map(|(p, _)| p.clone()).collect();
-            if let Some(tree) = crate::decision::compile(&patterns) {
-                return self.emit_decision(&tree, s, branches, Some(&scrut.tipe), ctx, f);
+        // `ALM_NO_CASE_OPT=1` forces the sequential path (jump tables + decision
+        // trees off) — a safety switch and the benchmark baseline.
+        if std::env::var("ALM_NO_CASE_OPT").is_err() {
+            if self.try_emit_jump_table(branches, s, Some(&scrut.tipe), ctx, f)? {
+                return Ok(());
+            }
+            // Nested patterns → a decision tree (shared prefix tests). Lists need
+            // type-directed extraction the tree does not carry, so skip them.
+            if branches.iter().all(|(p, _)| !pattern_has_list(p)) {
+                let patterns: Vec<can::Pattern> = branches.iter().map(|(p, _)| p.clone()).collect();
+                if let Some(tree) = crate::decision::compile(&patterns) {
+                    return self.emit_decision(&tree, s, branches, Some(&scrut.tipe), DSink::Val, ctx, f);
+                }
             }
         }
         self.emit_branches(branches, s, Some(&scrut.tipe), ctx, f)
     }
 
+    /// Emit a leaf/shared body under `sink`: a plain sub-expression (`Val`), or a
+    /// tail body that may `return_call` for TCO (`Tail` / `Scalar`).
+    fn emit_dsink_body(
+        &mut self,
+        sink: DSink,
+        body: &TypedExpr,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match sink {
+            DSink::Val => self.emit_expr(body, ctx, f),
+            DSink::Tail => self.emit_tail(body, ctx, f),
+            DSink::Scalar(rep) => self.emit_tail_scalar(body, rep, ctx, f),
+        }
+    }
+
     /// Emit a decision tree (see `crate::decision`). Uses a uniform
     /// *branch-to-merge* shape: everything is wrapped in an outer `block $merge
-    /// (result eqref)`, and every leaf ends in a `br` — to `$merge` for a leaf
-    /// reached from one place, or to a shared *join-point* block for a branch
-    /// reached from several. Each shared branch's body is emitted once, just
-    /// after its block. (A branch's variables bind to the same paths at every
-    /// leaf, so the single shared body is correct everywhere.)
+    /// (result R)` (R per `sink`), and every leaf ends in a `br` — to `$merge`
+    /// for a leaf reached from one place, or to a shared *join-point* block for a
+    /// branch reached from several. Each shared branch's body is emitted once,
+    /// just after its block. (A branch's variables bind to the same paths at
+    /// every leaf, so the single shared body is correct everywhere.) In a tail
+    /// `sink` a body may instead `return_call`, leaving the `br` unreachable.
     fn emit_decision(
         &mut self,
         tree: &crate::decision::Tree,
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        sink: DSink,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -28510,13 +28579,13 @@ impl<'a> Codegen<'a> {
         // (shared[0] innermost, so its body — emitted first below — sits nearest
         // the decider).
         let mut labels: Vec<Lbl> = vec![Lbl::Merge];
-        f.instruction(&Instruction::Block(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Block(BlockType::Result(dsink_result(sink))));
         for &b in shared.iter().rev() {
             f.instruction(&Instruction::Block(BlockType::Empty));
             labels.push(Lbl::Target(b));
         }
 
-        self.emit_dtree(tree, s, branches, scrut_ty, &shared, &mut labels, ctx, f)?;
+        self.emit_dtree(tree, s, branches, scrut_ty, sink, &shared, &mut labels, ctx, f)?;
 
         // Each shared branch's body: close its block, then bind + emit, then
         // carry the result to the merge. Bodies end in an unconditional `br`, so
@@ -28526,7 +28595,7 @@ impl<'a> Codegen<'a> {
             labels.pop();
             let mark = ctx.scope.len();
             self.bind_pat(&branches[b].0, s, scrut_ty, ctx, f)?;
-            self.emit_expr(&branches[b].1, ctx, f)?;
+            self.emit_dsink_body(sink, &branches[b].1, ctx, f)?;
             ctx.scope.truncate(mark);
             f.instruction(&Instruction::Br(br_depth(&labels, &Lbl::Merge)));
         }
@@ -28543,6 +28612,7 @@ impl<'a> Codegen<'a> {
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        sink: DSink,
         shared: &[usize],
         labels: &mut Vec<Lbl>,
         ctx: &mut FnCtx,
@@ -28562,7 +28632,7 @@ impl<'a> Codegen<'a> {
                     let (pat, body) = &branches[*branch];
                     let mark = ctx.scope.len();
                     self.bind_pat(pat, s, scrut_ty, ctx, f)?;
-                    self.emit_expr(body, ctx, f)?;
+                    self.emit_dsink_body(sink, body, ctx, f)?;
                     ctx.scope.truncate(mark);
                     f.instruction(&Instruction::Br(br_depth(labels, &Lbl::Merge)));
                 }
@@ -28570,16 +28640,25 @@ impl<'a> Codegen<'a> {
             }
             Tree::Switch { path, edges, default } => {
                 let dv = self.emit_path_local(s, path, ctx, f)?;
-                // A dense set (≥2) of non-bool constructor edges dispatches via a
-                // br_table; everything else (bools, literals) via an if-chain.
+                // A LARGE dense set of non-bool constructor edges dispatches via
+                // a br_table; smaller sets (and bools/literals) via an if-chain.
+                // Benchmarks show br_table's indirect branch only pays off past a
+                // handful of edges — below the threshold a predictable compare
+                // chain is as fast or faster, so avoid the misprediction.
                 let all_ctor_nonbool = edges.iter().all(|(t, _)| {
                     matches!(t, Test::Ctor { home, name, .. }
                         if !(home.as_str() == "Basics" && matches!(name.as_str(), "True" | "False")))
                 });
-                if all_ctor_nonbool && edges.len() >= 2 {
-                    self.emit_dtree_brtable(dv, edges, default, s, branches, scrut_ty, shared, labels, ctx, f)
+                if all_ctor_nonbool && edges.len() >= BR_TABLE_MIN {
+                    // A `br_table` is a terminator: control after it is dead.
+                    self.emit_dtree_brtable(dv, edges, default, s, branches, scrut_ty, sink, shared, labels, ctx, f)
                 } else {
-                    self.emit_dtree_ifchain(dv, edges, default, s, branches, scrut_ty, shared, labels, ctx, f)
+                    // The if-chain's outer `if` completes with a reachable but
+                    // empty fallthrough (all real paths `br` away). Mark it dead
+                    // so an enclosing merge block is only reached via `br`.
+                    self.emit_dtree_ifchain(dv, edges, default, s, branches, scrut_ty, sink, shared, labels, ctx, f)?;
+                    f.instruction(&Instruction::Unreachable);
+                    Ok(())
                 }
             }
         }
@@ -28622,6 +28701,7 @@ impl<'a> Codegen<'a> {
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        sink: DSink,
         shared: &[usize],
         labels: &mut Vec<Lbl>,
         ctx: &mut FnCtx,
@@ -28657,12 +28737,12 @@ impl<'a> Codegen<'a> {
         for (_, sub) in ordered.iter() {
             f.instruction(&Instruction::End); // close this (innermost) arm block
             labels.pop();
-            self.emit_dtree(sub, s, branches, scrut_ty, shared, labels, ctx, f)?;
+            self.emit_dtree(sub, s, branches, scrut_ty, sink, shared, labels, ctx, f)?;
         }
         f.instruction(&Instruction::End); // close default arm
         labels.pop();
         match default {
-            Some(d) => self.emit_dtree(d, s, branches, scrut_ty, shared, labels, ctx, f)?,
+            Some(d) => self.emit_dtree(d, s, branches, scrut_ty, sink, shared, labels, ctx, f)?,
             None => {
                 f.instruction(&Instruction::Unreachable);
             }
@@ -28681,6 +28761,7 @@ impl<'a> Codegen<'a> {
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        sink: DSink,
         shared: &[usize],
         labels: &mut Vec<Lbl>,
         ctx: &mut FnCtx,
@@ -28688,7 +28769,7 @@ impl<'a> Codegen<'a> {
     ) -> Result<(), String> {
         match edges.split_first() {
             None => match default {
-                Some(d) => self.emit_dtree(d, s, branches, scrut_ty, shared, labels, ctx, f),
+                Some(d) => self.emit_dtree(d, s, branches, scrut_ty, sink, shared, labels, ctx, f),
                 None => {
                     f.instruction(&Instruction::Unreachable);
                     Ok(())
@@ -28699,9 +28780,9 @@ impl<'a> Codegen<'a> {
                 self.emit_test(&pat, dv, None, ctx, f)?;
                 f.instruction(&Instruction::If(BlockType::Empty));
                 labels.push(Lbl::Inner);
-                self.emit_dtree(sub, s, branches, scrut_ty, shared, labels, ctx, f)?;
+                self.emit_dtree(sub, s, branches, scrut_ty, sink, shared, labels, ctx, f)?;
                 f.instruction(&Instruction::Else);
-                self.emit_dtree_ifchain(dv, rest, default, s, branches, scrut_ty, shared, labels, ctx, f)?;
+                self.emit_dtree_ifchain(dv, rest, default, s, branches, scrut_ty, sink, shared, labels, ctx, f)?;
                 f.instruction(&Instruction::End);
                 labels.pop();
                 Ok(())
@@ -28752,7 +28833,9 @@ impl<'a> Codegen<'a> {
                 _ => return Ok(false),
             }
         }
-        if cases.len() < 2 {
+        // Below the threshold an if-chain (or the decision tree) is as fast; a
+        // br_table only pays off for a large dense dispatch.
+        if cases.len() < BR_TABLE_MIN {
             return Ok(false);
         }
         // Need full coverage: every tag present, or a catch-all for the rest.

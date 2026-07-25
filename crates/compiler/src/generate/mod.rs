@@ -958,15 +958,20 @@ impl Generator {
                 let mut out = Mapped::raw(format!("var {} = ", temp));
                 out.push(self.expr(scrutinee));
                 out.push_str("; ");
-                if let Some(sw) = self.case_switch(&temp, branches, tail) {
-                    out.push(sw);
-                    return out;
-                }
-                let patterns: Vec<can::Pattern> =
-                    branches.iter().map(|(p, _)| p.clone()).collect();
-                if let Some(tree) = crate::decision::compile(&patterns) {
-                    out.push(self.emit_decision(&tree, &temp, branches, tail));
-                    return out;
+                // `ALM_NO_CASE_OPT=1` forces the plain sequential if-chain
+                // (jump tables + decision trees off) — a safety switch and the
+                // baseline for benchmarking the optimization.
+                if case_opt_enabled() {
+                    if let Some(sw) = self.case_switch(&temp, branches, tail) {
+                        out.push(sw);
+                        return out;
+                    }
+                    let patterns: Vec<can::Pattern> =
+                        branches.iter().map(|(p, _)| p.clone()).collect();
+                    if let Some(tree) = crate::decision::compile(&patterns) {
+                        out.push(self.emit_decision(&tree, &temp, branches, tail));
+                        return out;
+                    }
                 }
                 for (pattern, branch) in branches {
                     let mut tests = Vec::new();
@@ -1813,6 +1818,12 @@ fn top_discriminant(pattern: &can::Pattern) -> Option<Disc> {
         }
         _ => None,
     }
+}
+
+/// Whether `case` dispatch optimizations (jump tables, decision trees) are on.
+/// `ALM_NO_CASE_OPT=1` turns them off, falling back to a sequential if-chain.
+fn case_opt_enabled() -> bool {
+    std::env::var("ALM_NO_CASE_OPT").is_err()
 }
 
 /// A pattern that always matches — it binds variables but performs no test.
