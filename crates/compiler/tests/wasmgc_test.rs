@@ -322,6 +322,39 @@ fn case_jump_table_dispatch() {
 }
 
 #[test]
+fn case_nested_decision_tree() {
+    // Nested constructor patterns (a refutable inner ctor under an outer one),
+    // plus a repeated outer tag with an inner literal — compiled via the shared
+    // decision tree on wasm-gc (br_table + if-chain). Result must match js and
+    // native.
+    assert_str_prog(
+        "case_nested",
+        "module Test exposing (main)\n\n\
+         type Inner = A Int | B | C Int\n\
+         type Outer = Wrap Inner | None2\n\n\
+         describe : Outer -> String\n\
+         describe o =\n\
+         \x20   case o of\n\
+         \x20       Wrap (A n) -> \"A\" ++ String.fromInt n\n\
+         \x20       Wrap B -> \"B\"\n\
+         \x20       Wrap (C n) -> \"C\" ++ String.fromInt n\n\
+         \x20       None2 -> \"none\"\n\n\
+         score : ( Maybe Int, Int ) -> String\n\
+         score pair =\n\
+         \x20   case pair of\n\
+         \x20       ( Just 0, _ ) -> \"j0\"\n\
+         \x20       ( Just n, 1 ) -> \"j\" ++ String.fromInt n ++ \"-one\"\n\
+         \x20       ( Just n, _ ) -> \"j\" ++ String.fromInt n\n\
+         \x20       ( Nothing, _ ) -> \"no\"\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \"|\"\n\
+         \x20       [ describe (Wrap (A 1)), describe (Wrap B), describe (Wrap (C 3)), describe None2\n\
+         \x20       , score ( Just 0, 9 ), score ( Just 5, 1 ), score ( Just 5, 2 ), score ( Nothing, 0 ) ]\n",
+    );
+}
+
+#[test]
 fn maybe_result_combinators() {
     assert_str_prog(
         "maybe_result_combinators",

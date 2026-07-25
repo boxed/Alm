@@ -796,6 +796,53 @@ fn f64_elem(tipe: &can::Type) -> bool {
 /// Opaque kernel types with no exposed constructors — elm's `Debug.toString`
 /// renders these as `<internals>`. An allowlist (not "anything unregistered")
 /// so a real union missing from the registry still errors loudly.
+/// Reconstruct a minimal `can::Pattern` that performs just a decision-tree
+/// `Test`, so the existing `emit_test` can emit it. Constructor arguments are
+/// wildcards (the tree already extracts them separately). Lists never reach here
+/// (they are excluded from the tree on this backend).
+fn test_pattern(test: &crate::decision::Test) -> can::Pattern {
+    use crate::decision::Test;
+    use crate::reporting::{Located, Region};
+    let v = match test {
+        Test::Ctor { home, union, name, index, num_ctors, arity } => can::Pattern_::Ctor(
+            home.clone(),
+            union.clone(),
+            can::Ctor {
+                name: name.clone(),
+                index: *index,
+                arity: *arity,
+                num_ctors: *num_ctors,
+            },
+            vec![
+                Located { value: can::Pattern_::Anything, region: Region::ZERO };
+                *arity as usize
+            ],
+        ),
+        Test::Int(n) => can::Pattern_::Int(*n),
+        Test::Chr(c) => can::Pattern_::Chr(*c),
+        Test::Str(s) => can::Pattern_::Str(s.clone()),
+        Test::Cons | Test::Nil => can::Pattern_::Anything, // excluded upstream
+    };
+    Located { value: v, region: Region::ZERO }
+}
+
+/// Does this pattern match on a list anywhere? The decision-tree emitter here
+/// extracts sub-values without type information, but list head/tail extraction
+/// needs the list's rep hint (its type) — so a `case` touching lists falls back
+/// to the type-aware sequential path instead.
+fn pattern_has_list(pat: &can::Pattern) -> bool {
+    use can::Pattern_::*;
+    match &pat.value {
+        List(_) | Cons(..) => true,
+        Alias(inner, _) => pattern_has_list(inner),
+        Tuple(a, b, rest) => {
+            pattern_has_list(a) || pattern_has_list(b) || rest.iter().any(pattern_has_list)
+        }
+        Ctor(_, _, _, args) => args.iter().any(pattern_has_list),
+        _ => false,
+    }
+}
+
 /// A pattern that always matches — it binds variables but performs no test.
 /// Used to decide whether a `case` branch's only discriminant is its top-level
 /// constructor tag (so it can join a `br_table` jump table).
@@ -28408,7 +28455,173 @@ impl<'a> Codegen<'a> {
         if self.try_emit_jump_table(branches, s, Some(&scrut.tipe), ctx, f)? {
             return Ok(());
         }
+        // Nested patterns → a decision tree (shared prefix tests). Lists need
+        // type-directed extraction the tree does not carry, so skip them.
+        if branches.iter().all(|(p, _)| !pattern_has_list(p)) {
+            let patterns: Vec<can::Pattern> = branches.iter().map(|(p, _)| p.clone()).collect();
+            if let Some(tree) = crate::decision::compile(&patterns) {
+                return self.emit_decision(&tree, s, branches, Some(&scrut.tipe), ctx, f);
+            }
+        }
         self.emit_branches(branches, s, Some(&scrut.tipe), ctx, f)
+    }
+
+    /// Emit a decision tree (see `crate::decision`) as nested `br_table`s /
+    /// `if` chains. Each `Switch` tests one sub-path of the scrutinee once;
+    /// leaves rebind the branch's variables (via `bind_pat` on the original
+    /// pattern, which is type-correct) and emit the body, leaving an `eqref`.
+    fn emit_decision(
+        &mut self,
+        tree: &crate::decision::Tree,
+        s: u32,
+        branches: &[(can::Pattern, TypedExpr)],
+        scrut_ty: Option<&can::Type>,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        use crate::decision::Tree;
+        match tree {
+            Tree::Fail => {
+                f.instruction(&Instruction::Unreachable);
+                Ok(())
+            }
+            Tree::Leaf { branch, .. } => {
+                let (pat, body) = &branches[*branch];
+                let mark = ctx.scope.len();
+                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
+                self.emit_expr(body, ctx, f)?;
+                ctx.scope.truncate(mark);
+                Ok(())
+            }
+            Tree::Switch { path, edges, default } => {
+                let dv = self.emit_path_local(s, path, ctx, f)?;
+                // A dense set (≥2) of non-bool constructor edges dispatches via a
+                // br_table; everything else (bools, literals) via an if-chain.
+                let all_ctor_nonbool = edges.iter().all(|(t, _)| {
+                    matches!(t, crate::decision::Test::Ctor { home, name, .. }
+                        if !(home.as_str() == "Basics" && matches!(name.as_str(), "True" | "False")))
+                });
+                if all_ctor_nonbool && edges.len() >= 2 {
+                    self.emit_decision_brtable(dv, edges, default, s, branches, scrut_ty, ctx, f)
+                } else {
+                    self.emit_decision_ifchain(dv, edges, default, s, branches, scrut_ty, ctx, f)
+                }
+            }
+        }
+    }
+
+    /// Extract the value at `path` (from scrutinee local `s`) into a fresh local
+    /// and return it. Only `Arg`/`Elem` steps occur here (records expand to
+    /// bindings, lists are excluded), so no type information is needed.
+    fn emit_path_local(
+        &mut self,
+        s: u32,
+        path: &[crate::decision::Step],
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<u32, String> {
+        use crate::decision::Step;
+        let mut cur = s;
+        for step in path {
+            let nl = ctx.bind("$dt");
+            match step {
+                Step::Arg(i) => self.load_ctor_arg(cur, *i, f),
+                Step::Elem(i) => self.load_arr(cur, *i, f),
+                other => return Err(format!("wasmgc: decision path step {other:?} unsupported")),
+            }
+            f.instruction(&Instruction::LocalSet(nl));
+            cur = nl;
+        }
+        Ok(cur)
+    }
+
+    /// Constructor-tag dispatch over `dv` as a `br_table` (see
+    /// `try_emit_jump_table` for the block structure), recursing into subtrees.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_decision_brtable(
+        &mut self,
+        dv: u32,
+        edges: &[(crate::decision::Test, crate::decision::Tree)],
+        default: &Option<Box<crate::decision::Tree>>,
+        s: u32,
+        branches: &[(can::Pattern, TypedExpr)],
+        scrut_ty: Option<&can::Type>,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        use crate::decision::Test;
+        let mut ordered: Vec<(u32, &crate::decision::Tree)> = Vec::new();
+        let mut num_ctors = 0u32;
+        for (t, sub) in edges {
+            if let Test::Ctor { index, num_ctors: n, .. } = t {
+                num_ctors = *n;
+                ordered.push((*index, sub));
+            }
+        }
+        ordered.sort_by_key(|(i, _)| *i);
+        let m = ordered.len() as u32;
+        let mut targets = vec![m; num_ctors as usize];
+        for (j, (idx, _)) in ordered.iter().enumerate() {
+            targets[*idx as usize] = j as u32;
+        }
+        f.instruction(&Instruction::Block(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Block(BlockType::Empty)); // default
+        for _ in 0..m {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+        }
+        f.instruction(&Instruction::LocalGet(dv));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::BrTable(targets.into(), m));
+        for (j, (_, sub)) in ordered.iter().enumerate() {
+            f.instruction(&Instruction::End);
+            self.emit_decision(sub, s, branches, scrut_ty, ctx, f)?;
+            f.instruction(&Instruction::Br(m - j as u32));
+        }
+        f.instruction(&Instruction::End); // default
+        match default {
+            Some(d) => self.emit_decision(d, s, branches, scrut_ty, ctx, f)?,
+            None => {
+                f.instruction(&Instruction::Unreachable);
+            }
+        }
+        f.instruction(&Instruction::End); // merge
+        Ok(())
+    }
+
+    /// Dispatch over `dv` as a chain of `if`/`else` tests (literals, bools, or a
+    /// short constructor set), recursing into subtrees.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_decision_ifchain(
+        &mut self,
+        dv: u32,
+        edges: &[(crate::decision::Test, crate::decision::Tree)],
+        default: &Option<Box<crate::decision::Tree>>,
+        s: u32,
+        branches: &[(can::Pattern, TypedExpr)],
+        scrut_ty: Option<&can::Type>,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        match edges.split_first() {
+            None => match default {
+                Some(d) => self.emit_decision(d, s, branches, scrut_ty, ctx, f),
+                None => {
+                    f.instruction(&Instruction::Unreachable);
+                    Ok(())
+                }
+            },
+            Some(((test, sub), rest)) => {
+                let pat = test_pattern(test);
+                self.emit_test(&pat, dv, None, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                self.emit_decision(sub, s, branches, scrut_ty, ctx, f)?;
+                f.instruction(&Instruction::Else);
+                self.emit_decision_ifchain(dv, rest, default, s, branches, scrut_ty, ctx, f)?;
+                f.instruction(&Instruction::End);
+                Ok(())
+            }
+        }
     }
 
     /// A flat `case` whose branches all match distinct constructor tags of the
