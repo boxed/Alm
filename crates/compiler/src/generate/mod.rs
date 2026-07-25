@@ -1137,10 +1137,11 @@ impl Generator {
         Some(out)
     }
 
-    /// Emit a decision tree (see `crate::decision`) as nested `switch`es. Each
-    /// `Switch` tests one sub-path of the scrutinee once; leaves bind the
-    /// branch's variables to their paths and emit the branch body. Bodies are in
-    /// tail position, so cases end in `return`/`continue` and never fall through.
+    /// Emit a decision tree (see `crate::decision`). A branch reachable from
+    /// several leaves is emitted once as a shared *join point*: a labeled block
+    /// whose body sits just after it, entered by `break` from each of those
+    /// leaves. (A branch's variables bind to the same paths at every leaf, so the
+    /// shared body is identical.) Branches reached from a single leaf inline.
     fn emit_decision(
         &mut self,
         tree: &crate::decision::Tree,
@@ -1148,9 +1149,53 @@ impl Generator {
         branches: &[(can::Pattern, can::Expr)],
         tail: &Tail,
     ) -> Mapped {
+        let counts = crate::decision::leaf_counts(tree, branches.len());
+        let shared: Vec<usize> = (0..branches.len()).filter(|&b| counts[b] > 1).collect();
+        if shared.is_empty() {
+            return self.emit_dtree(tree, root, branches, tail, &std::collections::HashMap::new());
+        }
+        // A label per shared branch, plus its (identical) leaf bindings.
+        let mut labels: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+        let mut binds: std::collections::HashMap<usize, Vec<(crate::data::Name, crate::decision::Path)>> =
+            std::collections::HashMap::new();
+        for &b in &shared {
+            labels.insert(b, self.fresh_temp());
+            binds.insert(b, first_leaf_binds(tree, b).unwrap_or_default());
+        }
+        // Nested labeled blocks: shared[0] innermost (wraps the decider), each
+        // shared branch's body placed just after its block's `}`.
+        let mut out = Mapped::default();
+        for &b in shared.iter().rev() {
+            out.push_str(&format!("{}: {{ ", labels[&b]));
+        }
+        out.push(self.emit_dtree(tree, root, branches, tail, &labels));
+        for &b in &shared {
+            out.push_str(" } "); // close this branch's block; its body follows
+            for (name, path) in &binds[&b] {
+                out.push_str(&format!("var {} = {}; ", sanitize(name), path_expr(root, path)));
+            }
+            out.push(self.stmts(&branches[b].1, tail));
+        }
+        out
+    }
+
+    /// Recursive decision-tree walker. `labels` maps a shared branch to the block
+    /// it jumps to (via `break`); a leaf whose branch is not in `labels` inlines.
+    fn emit_dtree(
+        &mut self,
+        tree: &crate::decision::Tree,
+        root: &str,
+        branches: &[(can::Pattern, can::Expr)],
+        tail: &Tail,
+        labels: &std::collections::HashMap<usize, String>,
+    ) -> Mapped {
         use crate::decision::{Test, Tree};
         match tree {
             Tree::Leaf { branch, binds } => {
+                if let Some(label) = labels.get(branch) {
+                    // Shared: jump to the join point (bindings + body live there).
+                    return Mapped::raw(format!("break {};", label));
+                }
                 let mut out = Mapped::default();
                 for (name, path) in binds {
                     out.push_str(&format!(
@@ -1186,11 +1231,11 @@ impl Generator {
                     let (true_sub, false_sub) = bool_edges(edges, default);
                     out.push_str(&format!("if ({}) {{ ", d));
                     if let Some(t) = true_sub {
-                        out.push(self.emit_decision(t, root, branches, tail));
+                        out.push(self.emit_dtree(t, root, branches, tail, labels));
                     }
                     out.push_str(" } else { ");
                     if let Some(fsub) = false_sub {
-                        out.push(self.emit_decision(fsub, root, branches, tail));
+                        out.push(self.emit_dtree(fsub, root, branches, tail, labels));
                     }
                     out.push_str(" }");
                     return out;
@@ -1203,12 +1248,12 @@ impl Generator {
                 out.push_str(&format!("switch ({}) {{ ", disc));
                 for (test, sub) in edges {
                     out.push_str(&format!("case {}: {{ ", test_label(test)));
-                    out.push(self.emit_decision(sub, root, branches, tail));
+                    out.push(self.emit_dtree(sub, root, branches, tail, labels));
                     out.push_str(" } ");
                 }
                 out.push_str("default: { ");
                 match default {
-                    Some(d) => out.push(self.emit_decision(d, root, branches, tail)),
+                    Some(d) => out.push(self.emit_dtree(d, root, branches, tail, labels)),
                     None => out.push_str(
                         "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
                     ),
@@ -1644,6 +1689,24 @@ fn emit_ctor(out: &mut String, module_var: &str, ctor_name: &str, arity: usize) 
         writeln!(out, "var {} = {};", var, body).unwrap();
     } else {
         writeln!(out, "var {} = F{}({});", var, arity, body).unwrap();
+    }
+}
+
+/// The variable bindings of the first leaf for `branch` in `tree`. Every leaf
+/// for a given branch binds the same names to the same paths, so a shared join
+/// point can use these.
+fn first_leaf_binds(
+    tree: &crate::decision::Tree,
+    branch: usize,
+) -> Option<Vec<(crate::data::Name, crate::decision::Path)>> {
+    use crate::decision::Tree;
+    match tree {
+        Tree::Leaf { branch: b, binds } if *b == branch => Some(binds.clone()),
+        Tree::Leaf { .. } | Tree::Fail => None,
+        Tree::Switch { edges, default, .. } => edges
+            .iter()
+            .find_map(|(_, sub)| first_leaf_binds(sub, branch))
+            .or_else(|| default.as_deref().and_then(|d| first_leaf_binds(d, branch))),
     }
 }
 

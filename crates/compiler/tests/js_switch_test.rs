@@ -194,24 +194,27 @@ combine pair =
 }
 
 #[test]
-fn duplicating_match_falls_back_but_is_correct() {
-    // The first column (A|B) is exhaustive, so the wildcard third row would be
-    // duplicated by a decision tree; it falls back to the if-chain and stays
-    // correct.
+fn duplicating_match_shares_via_join_point() {
+    // The first column (A|B) is exhaustive, so the wildcard third row reaches two
+    // leaves. Instead of duplicating its body, it becomes a labeled join point
+    // that both leaves `break` to — so the body is emitted exactly once.
     let src = worker(
         r#"type T = A | B
-type S = C | D
+type S = C | D Int
 
-pick : ( T, S ) -> Int
+pick : ( T, S ) -> String
 pick ts =
     case ts of
-        ( A, C ) -> 1
-        ( B, C ) -> 2
-        ( _, D ) -> 3"#,
-        r#"String.join "," (List.map (String.fromInt << pick) [ (A, C), (B, C), (A, D), (B, D) ])"#,
+        ( A, C ) -> "ac"
+        ( B, C ) -> "bc"
+        ( _, D n ) -> "shared" ++ String.fromInt n"#,
+        r#"String.join "," [ pick (A, C), pick (B, C), pick (A, D 7), pick (B, D 9) ]"#,
     );
-    let (_js, out) = compile_and_run("dup", &src);
-    assert_eq!(out, "1,2,3,3");
+    let (js, out) = compile_and_run("dup", &src);
+    // The shared body is emitted once and jumped to by `break`.
+    assert_eq!(js.matches("'shared'").count(), 1, "shared body should not be duplicated:\n{js}");
+    assert!(js.contains("break "), "expected a labeled break to the join point:\n{js}");
+    assert_eq!(out, "ac,bc,shared7,shared9");
 }
 
 #[test]

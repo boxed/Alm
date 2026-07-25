@@ -6,14 +6,14 @@
 //! primitives (the branch *bodies* never appear here — leaves carry a branch
 //! index and the variable bindings that branch needs).
 //!
-//! We only build a tree when it needs **no branch-body duplication** — i.e.
-//! every branch ends up at exactly one leaf. Maranget's algorithm can copy a
-//! wildcard row into several sub-matrices; when that would duplicate a body the
-//! elegant fix is shared "join points", but those add real machinery and cost.
-//! Instead [`compile`] returns `None` in that case and the caller falls back to
-//! the existing sequential (`if`-chain) compilation, which is always correct.
-//! The common shapes — nested constructors, tuples of constructors — never
-//! duplicate, so they get the decision tree.
+//! Maranget's algorithm can copy a wildcard row into several sub-matrices, so a
+//! branch may end up at more than one leaf. A branch's variables always bind to
+//! the same absolute paths (their positions are fixed by the pattern), so such a
+//! branch's body — bindings included — is identical at every leaf; a backend can
+//! emit it once as a shared *join point* and jump to it from the other leaves
+//! ([`leaf_counts`] reports which branches repeat). The tree itself can still
+//! grow large, so [`compile`] bounds the node count and returns `None` (fall
+//! back to the sequential `if`-chain) only on genuine blow-up.
 
 use crate::ast::canonical as can;
 use crate::data::Name;
@@ -87,9 +87,16 @@ struct Row {
     branch: usize,
 }
 
+/// The largest decision tree we build before giving up (and falling back to the
+/// sequential `if`-chain). Duplication from wildcard rows can make a tree grow
+/// super-linearly; realistic matches stay far below this.
+const NODE_BUDGET: usize = 4000;
+
 /// Build a decision tree for a `case`'s branch patterns (in source order).
-/// Returns `None` when the tree would duplicate a branch body (fall back to
-/// sequential compilation) or the match is trivial/degenerate.
+/// Returns `None` when the match is trivial (one branch / no test) or the tree
+/// would exceed [`NODE_BUDGET`] nodes — in both cases the caller falls back to
+/// sequential compilation. A returned tree may reference a branch from several
+/// leaves; see [`leaf_counts`].
 pub fn compile(patterns: &[can::Pattern]) -> Option<Tree> {
     if patterns.len() < 2 {
         return None; // a single branch needs no dispatch
@@ -103,19 +110,22 @@ pub fn compile(patterns: &[can::Pattern]) -> Option<Tree> {
             branch,
         })
         .collect();
-    let tree = build(rows)?;
-    // Reject trees that duplicate a branch (would duplicate its body).
-    let mut counts = vec![0usize; patterns.len()];
-    count_leaves(&tree, &mut counts);
-    if counts.iter().any(|&c| c > 1) {
-        return None;
-    }
+    let mut budget = NODE_BUDGET;
+    let tree = build(rows, &mut budget)?;
     // A tree with no refutable test (single leaf) adds nothing over the
     // straight-line binding the caller already does.
     if matches!(tree, Tree::Leaf { .. }) {
         return None;
     }
     Some(tree)
+}
+
+/// How many times each branch (by index) appears as a leaf. A count above 1
+/// marks a branch a backend should emit once as a shared join point.
+pub fn leaf_counts(tree: &Tree, n_branches: usize) -> Vec<usize> {
+    let mut counts = vec![0usize; n_branches];
+    count_leaves(tree, &mut counts);
+    counts
 }
 
 fn count_leaves(tree: &Tree, counts: &mut [usize]) {
@@ -133,11 +143,11 @@ fn count_leaves(tree: &Tree, counts: &mut [usize]) {
     }
 }
 
-fn build(mut rows: Vec<Row>) -> Option<Tree> {
-    // Guard against pathological blow-up.
-    if rows.len() > 4096 {
-        return None;
+fn build(mut rows: Vec<Row>, budget: &mut usize) -> Option<Tree> {
+    if *budget == 0 {
+        return None; // tree too large — fall back to sequential
     }
+    *budget -= 1;
     let first = rows.first()?;
     // Normalize the first row: discharge every irrefutable obligation (binders,
     // tuples, records, newtypes), leaving only refutable ones.
@@ -181,7 +191,7 @@ fn build(mut rows: Vec<Row>) -> Option<Tree> {
     let mut edges: Vec<(Test, Tree)> = Vec::new();
     for t in &tests {
         let sub = specialize(&rows, &path, t);
-        edges.push((t.clone(), build(sub)?));
+        edges.push((t.clone(), build(sub, budget)?));
     }
 
     // Is the set of edges exhaustive? Then no default is needed.
@@ -202,7 +212,7 @@ fn build(mut rows: Vec<Row>) -> Option<Tree> {
         if sub.is_empty() {
             Some(Box::new(Tree::Fail))
         } else {
-            Some(Box::new(build(sub)?))
+            Some(Box::new(build(sub, budget)?))
         }
     };
 
@@ -456,18 +466,19 @@ mod tests {
     }
 
     #[test]
-    fn duplicating_match_falls_back() {
+    fn duplicating_match_repeats_a_branch() {
         // (A, C) -> 1 ; (B, C) -> 2 ; (_, D) -> 3
         // The first column (A|B) is exhaustive, so the wildcard row 3 flows into
-        // BOTH the A and B edges and becomes a `D -> 3` leaf in each — its body
-        // would be duplicated, so `compile` declines and the caller falls back.
+        // BOTH the A and B edges and becomes a `D -> 3` leaf in each. The tree is
+        // still built (no fall-back); branch 3 appears twice and a backend emits
+        // it once as a shared join point.
         let a = || ctor("A", 0, 2, vec![]);
         let b = || ctor("B", 1, 2, vec![]);
         let c = || ctor("C", 0, 2, vec![]);
         let d = || ctor("D", 1, 2, vec![]);
         let tuple = |x: Pattern, y: Pattern| p(Pattern_::Tuple(Box::new(x), Box::new(y), vec![]));
-        let tree = compile(&[tuple(a(), c()), tuple(b(), c()), tuple(wild(), d())]);
-        assert!(tree.is_none(), "duplicating match should fall back");
+        let tree = compile(&[tuple(a(), c()), tuple(b(), c()), tuple(wild(), d())]).unwrap();
+        assert_eq!(leaf_counts(&tree, 3), vec![1, 1, 2], "branch 3 should repeat");
     }
 
     #[test]
