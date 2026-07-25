@@ -180,7 +180,7 @@ pub fn compile_project_wasmgc(
             node_types: checked.node_types.get(&module.name).unwrap_or(&empty_nodes),
         })
         .collect();
-    let program = crate::ir::mono::specialize_project(&infos, &checked.entry);
+    let mut program = crate::ir::mono::specialize_project(&infos, &checked.entry);
     if let Some(message) = &program.error {
         return Err(vec![BuildError::new(
             entry.to_path_buf(),
@@ -190,6 +190,10 @@ pub fn compile_project_wasmgc(
             message.clone(),
         )]);
     }
+    // Function inlining (post-mono). OFF by default: benchmarking showed it
+    // regresses wasm-gc (defeats the scalar-unboxing ABI); opt in with
+    // ALM_INLINE=1. See crate::ir::inline.
+    crate::ir::inline::inline(&mut program);
     // Ports: name -> outgoing? (outgoing = `payload -> Cmd msg`). For outgoing
     // ports also record the payload type, so the WasmGC backend can convert the
     // `out payload` argument to a `Json.Value` before serializing it.
