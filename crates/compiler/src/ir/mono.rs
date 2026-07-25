@@ -51,6 +51,9 @@ struct ModuleCtx<'a> {
     defs: HashMap<Name, &'a can::Def>,
     types: &'a HashMap<Name, can::Type>,
     node_types: &'a HashMap<Region, can::Type>,
+    /// True for an `effect module`: its `command`/`subscription` are synthetic
+    /// top-level leaf-builders (no source def), resolved as globals.
+    is_effect: bool,
 }
 
 /// A use of a built-in/kernel function (`VarForeign`) at a concrete type.
@@ -205,6 +208,7 @@ fn build_ctxs<'a>(modules: &'a [ModuleInfo<'a>]) -> HashMap<Name, ModuleCtx<'a>>
                     defs: index_defs(m.module),
                     types: m.types,
                     node_types: m.node_types,
+                    is_effect: m.module.manager.is_some(),
                 },
             )
         })
@@ -526,6 +530,25 @@ pub struct MonoProgram {
     /// unbounded instantiation) — reported instead of hanging or blowing the
     /// compiler's stack.
     pub error: Option<String>,
+    /// Effect managers to register at program start (empty unless the project
+    /// has `effect module`s). Each names the mangled runtime entry points
+    /// (instantiated at the app's concrete message type) the WasmGC runtime
+    /// wires into a manager process.
+    pub managers: Vec<ManagerReg>,
+}
+
+/// One effect manager, ready for the backend to register. `index` is the
+/// small integer the `command`/`subscription` leaves carry (assigned in
+/// project order); the `*_mangled` names are the specialized entry points.
+#[derive(Debug, Clone)]
+pub struct ManagerReg {
+    pub home: Name,
+    pub index: u32,
+    pub init: Name,
+    pub on_effects: Name,
+    pub on_self_msg: Name,
+    pub cmd_map: Option<Name>,
+    pub sub_map: Option<Name>,
 }
 
 /// A specialized function: its mangled name, the source name and concrete
@@ -637,6 +660,50 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             worklist.push(inst);
         }
     }
+
+    // Effect managers: the runtime — not `main` — calls init/onEffects/
+    // onSelfMsg/cmdMap/subMap, so they're unreachable from the normal analysis.
+    // Seed them at the app's concrete message type (`msg`), taking state/selfMsg/
+    // err from the pinned entry-point types (typecheck::constrain_effect_manager).
+    // `command`/`subscription` are synthesized on demand below.
+    let app_msg = app_msg_type(&ctxs, entry);
+    let mut managers: Vec<ManagerReg> = Vec::new();
+    let mut mgr_by_home: HashMap<Name, u32> = HashMap::new();
+    for m in modules {
+        let Some(manager) = &m.module.manager else {
+            continue;
+        };
+        let home = m.module.name.clone();
+        let index = managers.len() as u32;
+        mgr_by_home.insert(home.clone(), index);
+        // Instantiate an entry point at its pinned type with `msg` etc. → app msg.
+        let mut concrete = |name: &str| -> Option<Name> {
+            let pinned = ctxs.get(&home)?.types.get(&Name::from(name))?;
+            let tipe = default_numbers(&subst_free_vars(pinned, &app_msg));
+            let inst = Instance { module: home.clone(), name: Name::from(name), tipe: tipe.clone() };
+            let mangled = mangle(&inst.module, &inst.name, &inst.tipe);
+            if seen.insert(mangled.to_string()) {
+                worklist.push(inst);
+            }
+            Some(mangled)
+        };
+        let (has_cmd, has_sub) = match manager {
+            can::Manager::Cmd(_) => (true, false),
+            can::Manager::Sub(_) => (false, true),
+            can::Manager::Fx(_, _) => (true, true),
+        };
+        let reg = ManagerReg {
+            home: home.clone(),
+            index,
+            init: concrete("init").unwrap_or_else(|| Name::from("")),
+            on_effects: concrete("onEffects").unwrap_or_else(|| Name::from("")),
+            on_self_msg: concrete("onSelfMsg").unwrap_or_else(|| Name::from("")),
+            cmd_map: has_cmd.then(|| concrete("cmdMap")).flatten(),
+            sub_map: has_sub.then(|| concrete("subMap")).flatten(),
+        };
+        managers.push(reg);
+    }
+
     let mut wi = 0;
     while wi < worklist.len() && error.is_none() {
         let mut instance = worklist[wi].clone();
@@ -663,6 +730,16 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
             continue;
         };
         let Some(def) = mctx.defs.get(&instance.name) else {
+            // Effect module: `command`/`subscription` have no source definition;
+            // synthesize a leaf-builder tagged with the module's manager index.
+            let nm = instance.name.as_str();
+            if (nm == "command" || nm == "subscription") {
+                if let Some(&idx) = mgr_by_home.get(&instance.module) {
+                    if let Some(f) = synth_leaf_fn(&instance, idx) {
+                        functions.push(f);
+                    }
+                }
+            }
             continue;
         };
         let mangled = mangle(&instance.module, &instance.name, &instance.tipe);
@@ -753,7 +830,103 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         }
     }
 
-    MonoProgram { functions, error }
+    MonoProgram { functions, error, managers }
+}
+
+/// The app's concrete message type, from the entry module's
+/// `main : Program flags model msg` (the 3rd type argument). Effect managers
+/// instantiate their runtime entry points at this `msg`. Falls back to Unit.
+fn app_msg_type(ctxs: &HashMap<Name, ModuleCtx>, entry: &Name) -> can::Type {
+    ctxs.get(entry)
+        .and_then(|c| c.types.get(&Name::from("main")))
+        .and_then(|t| match t {
+            can::Type::Type(_, n, args) if n.as_str() == "Program" && args.len() == 3 => {
+                Some(args[2].clone())
+            }
+            _ => None,
+        })
+        .unwrap_or(can::Type::Unit)
+}
+
+/// Replace every non-numeric free type variable with `target`. Numeric vars
+/// (`number*`/`comparable*`/`appendable*`) are left for `default_numbers`.
+/// Used to instantiate manager entry points: `msg`/`selfMsg`/`err` become the
+/// app msg (the runtime threads these as boxed values); a numeric `state`
+/// defaults to Int; a concrete `state` was already substitution-free.
+fn subst_free_vars(tipe: &can::Type, target: &can::Type) -> can::Type {
+    use can::Type::*;
+    match tipe {
+        Var(n)
+            if n.as_str().starts_with("number")
+                || n.as_str().starts_with("comparable")
+                || n.as_str().starts_with("appendable") =>
+        {
+            tipe.clone()
+        }
+        Var(_) => target.clone(),
+        Unit => Unit,
+        Lambda(a, b) => Lambda(
+            Rc::new(subst_free_vars(a, target)),
+            Rc::new(subst_free_vars(b, target)),
+        ),
+        Type(h, n, args) => Type(
+            h.clone(),
+            n.clone(),
+            Rc::new(args.iter().map(|a| subst_free_vars(a, target)).collect()),
+        ),
+        Record(fields, ext) => Record(
+            Rc::new(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), subst_free_vars(v, target)))
+                    .collect(),
+            ),
+            ext.clone(),
+        ),
+        Tuple(a, b, c) => Tuple(
+            Rc::new(subst_free_vars(a, target)),
+            Rc::new(subst_free_vars(b, target)),
+            c.as_ref().map(|c| Rc::new(subst_free_vars(c, target))),
+        ),
+    }
+}
+
+/// Synthesize `command`/`subscription value = Elm.Kernel.Platform.leaf idx
+/// value` for an effect module (they have no source definition). `instance.tipe`
+/// is the concrete `LeafType msg -> Cmd/Sub msg`.
+fn synth_leaf_fn(instance: &Instance, idx: u32) -> Option<TypedFn> {
+    let (arg_ty, res_ty) = match &instance.tipe {
+        can::Type::Lambda(a, b) => ((**a).clone(), (**b).clone()),
+        _ => return None,
+    };
+    let region = Region::ZERO;
+    let int_ty = can::Type::Type(Name::from("Basics"), Name::from("Int"), Rc::new(Vec::new()));
+    let vname = Name::from("v");
+    let leaf = TypedExpr {
+        tipe: res_ty.clone(),
+        region,
+        kind: TypedKind::Foreign(Name::from("Elm.Kernel.Platform"), Name::from("leaf")),
+    };
+    let body = TypedExpr {
+        tipe: res_ty,
+        region,
+        kind: TypedKind::Call(
+            Box::new(leaf),
+            vec![
+                TypedExpr { tipe: int_ty, region, kind: TypedKind::Int(idx as i64) },
+                TypedExpr { tipe: arg_ty.clone(), region, kind: TypedKind::Local(vname.clone()) },
+            ],
+        ),
+    };
+    Some(TypedFn {
+        mangled: mangle(&instance.module, &instance.name, &instance.tipe),
+        original: instance.name.clone(),
+        module: instance.module.clone(),
+        tipe: instance.tipe.clone(),
+        params: vec![(Located::new(region, can::Pattern_::Var(vname)), arg_ty)],
+        body,
+        region,
+    })
 }
 
 /// Beta-reduces statically-known applications so higher-order glue over
@@ -1115,9 +1288,13 @@ impl Specializer<'_> {
                         tipe
                     );
                 }
-                if self.ctx.defs.contains_key(name) {
+                let synthetic_leaf = self.ctx.is_effect
+                    && (name.as_str() == "command" || name.as_str() == "subscription");
+                if self.ctx.defs.contains_key(name) || synthetic_leaf {
                     // Resolve to the callee's specialization (this module) at
-                    // this node's concrete type.
+                    // this node's concrete type. Effect-module `command`/
+                    // `subscription` have no source def; they're synthesized as
+                    // leaf-builders when the instance is processed.
                     self.sink.borrow_mut().push(Instance {
                         module: self.module.clone(),
                         name: name.clone(),
