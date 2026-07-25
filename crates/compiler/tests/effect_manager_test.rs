@@ -45,13 +45,8 @@ fn run(test_name: &str, modules: &[(&str, &str)]) -> String {
     // Native backend (a real binary driven by the C event loop).
     let program = ir::lower::lower_project(&checked.modules);
     let binary = dir.join("prog");
-    generate::native::build(
-        &program,
-        &binary,
-        generate::native::Target::Native,
-        generate::native::OptLevel::Release,
-    )
-    .unwrap_or_else(|e| panic!("native build failed: {}", e));
+    generate::native::build(&program, &binary, generate::native::OptLevel::Release)
+        .unwrap_or_else(|e| panic!("native build failed: {}", e));
     let native_out = run_command(&mut Command::new(&binary), "native binary", &js);
 
     assert_eq!(js_out, native_out, "JS and native output differ");

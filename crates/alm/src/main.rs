@@ -33,7 +33,7 @@ fn print_help() {
 }
 
 fn make(args: &[String]) -> ExitCode {
-    use alm_compiler::generate::native::{OptLevel, Target};
+    use alm_compiler::generate::native::OptLevel;
     #[derive(PartialEq)]
     enum Backend {
         Js,
@@ -85,7 +85,7 @@ fn make(args: &[String]) -> ExitCode {
     let result = match backend {
         Backend::Native => {
             let output = output.unwrap_or_else(|| input.with_extension(""));
-            alm_compiler::project::compile_project_native(&input, &output, Target::Native, opt)
+            alm_compiler::project::compile_project_native(&input, &output, opt)
                 .map(|w| (output, w))
         }
         Backend::WasmGc => {

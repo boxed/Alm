@@ -20,7 +20,6 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
-    TargetTriple,
 };
 use inkwell::types::{FloatType, IntType, PointerType};
 use inkwell::values::{
@@ -54,21 +53,6 @@ pub const IMMIX_GC_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/immix_
 /// static library at link time.
 pub const RUNTIME_BC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alm_runtime.bc"));
 
-/// The same runtime and wasm link inputs, built for wasm32-wasi.
-pub const RUNTIME_LIB_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libalm_runtime_wasm.a"));
-pub const RUNTIME_BC_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alm_runtime_wasm.bc"));
-const WASM_CRT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crt1-command.o"));
-const WASM_LIBC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libc.a"));
-
-/// Which machine target to emit.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Target {
-    /// A native executable for the host.
-    Native,
-    /// A `wasm32-wasi` module (runnable with wasmtime or node's WASI).
-    Wasm,
-}
-
 /// How hard LLVM should optimize. The LLVM stage (a single-module `O2` pass over
 /// the whole monomorphized program) dominates native build time — ~98% of it on
 /// a real app — so `Debug` trades runtime speed for a much faster build, the way
@@ -97,8 +81,8 @@ impl OptLevel {
     }
 }
 
-/// Compile `program` into an executable (native) or `.wasm` module at `output`.
-pub fn build(program: &Program, output: &Path, target: Target, opt: OptLevel) -> Result<(), String> {
+/// Compile `program` into a native executable at `output`.
+pub fn build(program: &Program, output: &Path, opt: OptLevel) -> Result<(), String> {
     let context = Context::create();
     let mut cg = Codegen::new(&context);
     cg.emit_program(program);
@@ -107,67 +91,44 @@ pub fn build(program: &Program, output: &Path, target: Target, opt: OptLevel) ->
         .verify()
         .map_err(|e| format!("internal error: generated invalid LLVM IR:\n{}", e))?;
 
-    finish(&cg.module, &context, output, target, opt)
+    finish(&cg.module, &context, output, opt)
 }
 
-/// Shared back half of every native/wasm build: pick the target machine,
-/// merge the runtime bitcode for cross-module inlining, run the optimizer,
-/// emit an object, and link it against the runtime. Used by both the uniform
-/// backend above and the typed (monomorphized) backend.
+/// Shared back half of the native build: pick the host target machine, merge
+/// the runtime bitcode for cross-module inlining, run the optimizer, emit an
+/// object, and link it against the runtime.
 pub(crate) fn finish<'ctx>(
     module: &Module<'ctx>,
     context: &'ctx Context,
     output: &Path,
-    target: Target,
     opt: OptLevel,
 ) -> Result<(), String> {
-    let (triple, machine) = match target {
-        Target::Native => {
-            LlvmTarget::initialize_native(&InitializationConfig::default())?;
-            let triple = TargetMachine::get_default_triple();
-            let t = LlvmTarget::from_triple(&triple).map_err(|e| e.to_string())?;
-            // Host cpu/features so generated functions' target attributes
-            // match the runtime bitcode's (built with target-cpu=native),
-            // letting LLVM inline the runtime into generated code.
-            let cpu = TargetMachine::get_host_cpu_name();
-            let features = TargetMachine::get_host_cpu_features();
-            let m = t
-                .create_target_machine(
-                    &triple,
-                    cpu.to_str().unwrap(),
-                    features.to_str().unwrap(),
-                    opt.machine_level(),
-                    RelocMode::PIC,
-                    CodeModel::Default,
-                )
-                .ok_or("could not create target machine")?;
-            (triple, m)
-        }
-        Target::Wasm => {
-            LlvmTarget::initialize_webassembly(&InitializationConfig::default());
-            let triple = TargetTriple::create("wasm32-wasi");
-            let t = LlvmTarget::from_triple(&triple).map_err(|e| e.to_string())?;
-            let m = t
-                .create_target_machine(
-                    &triple,
-                    "generic",
-                    "",
-                    opt.machine_level(),
-                    RelocMode::Static,
-                    CodeModel::Default,
-                )
-                .ok_or("could not create wasm target machine")?;
-            (triple, m)
-        }
+    let (triple, machine) = {
+        LlvmTarget::initialize_native(&InitializationConfig::default())?;
+        let triple = TargetMachine::get_default_triple();
+        let t = LlvmTarget::from_triple(&triple).map_err(|e| e.to_string())?;
+        // Host cpu/features so generated functions' target attributes match the
+        // runtime bitcode's (built with target-cpu=native), letting LLVM inline
+        // the runtime into generated code.
+        let cpu = TargetMachine::get_host_cpu_name();
+        let features = TargetMachine::get_host_cpu_features();
+        let m = t
+            .create_target_machine(
+                &triple,
+                cpu.to_str().unwrap(),
+                features.to_str().unwrap(),
+                opt.machine_level(),
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .ok_or("could not create target machine")?;
+        (triple, m)
     };
     module.set_triple(&triple);
     module
         .set_data_layout(&machine.get_target_data().get_data_layout());
 
-    let (runtime_bc, runtime_lib) = match target {
-        Target::Native => (RUNTIME_BC, RUNTIME_LIB),
-        Target::Wasm => (RUNTIME_BC_WASM, RUNTIME_LIB_WASM),
-    };
+    let (runtime_bc, runtime_lib) = (RUNTIME_BC, RUNTIME_LIB);
 
     let build_dir = output.with_extension("build");
     std::fs::create_dir_all(&build_dir)
@@ -282,75 +243,21 @@ pub(crate) fn finish<'ctx>(
     let runtime = build_dir.join("runtime.a");
     std::fs::write(&runtime, runtime_lib).map_err(|e| e.to_string())?;
 
-    match target {
-        Target::Native => {
-            // The C compiler driver is used purely as a linker — no C is compiled.
-            // The regex glue object resolves the elm/regex kernels' engine.
-            let regex = build_dir.join("regex.o");
-            std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
-            let bytes_jmp = build_dir.join("bytes_jmp.o");
-            std::fs::write(&bytes_jmp, BYTES_JMP_OBJ).map_err(|e| e.to_string())?;
-            // The custom Immix-lite GC's register-spill trampoline; the runtime
-            // (immix_mark_and_sweep) does the collection. All allocation is the
-            // runtime's own immix heap — no external allocator to link.
-            let immix_gc = build_dir.join("immix_gc.o");
-            std::fs::write(&immix_gc, IMMIX_GC_OBJ).map_err(|e| e.to_string())?;
-            run_linker(
-                "cc",
-                &[&object, &runtime, &regex, &bytes_jmp, &immix_gc, Path::new("-o"), output],
-            )
-        }
-        Target::Wasm => {
-            // Link a WASI command module: crt + program + runtime + libc.
-            // The runtime and libc are mutually dependent (the runtime calls
-            // libc's fd_write/clock; libc's crt calls the runtime's `main`),
-            // so wrap them in a group so wasm-ld re-scans to resolve both.
-            let crt = build_dir.join("crt1-command.o");
-            let libc = build_dir.join("libc.a");
-            std::fs::write(&crt, WASM_CRT).map_err(|e| e.to_string())?;
-            std::fs::write(&libc, WASM_LIBC).map_err(|e| e.to_string())?;
-            // `--undefined=main` forces `main` to be pulled from the runtime
-            // archive during its scan, so libc's crt (`__main_void`, listed
-            // after) resolves it without needing archive re-scanning.
-            // Export the browser-runtime entry points so the JS shim can drive
-            // a Browser.* program (they live in the runtime archive and are
-            // otherwise unreferenced, so `--export` both pulls them in and
-            // exports them). Harmless for headless/worker programs.
-            let result = Command::new(env!("ALM_WASM_LD"))
-                .arg("--undefined=main")
-                .arg("--export=alm_browser_start")
-                .arg("--export=alm_alloc_in")
-                .arg("--export=alm_event")
-                .arg("--export=alm_on_timeout")
-                .arg("--export=alm_on_interval")
-                .arg("--export=alm_on_frame")
-                .arg("--export=alm_on_dom_event")
-                .arg("--export=alm_port_send")
-                .arg("--export=alm_browser_set_url")
-                .arg("--export=alm_on_url_change")
-                .arg("--export=alm_on_http")
-                .arg("--export=alm_browser_set_flags")
-                // The `dom_*` host ops are provided by the JS shim at
-                // instantiation; emit them as wasm imports (from module "env")
-                // rather than failing the link.
-                .arg("--allow-undefined")
-                .arg(&crt)
-                .arg(&object)
-                .arg(&runtime)
-                .arg(&libc)
-                .arg("-o")
-                .arg(output)
-                .output()
-                .map_err(|e| format!("could not run wasm-ld: {}", e))?;
-            if !result.status.success() {
-                return Err(format!(
-                    "linking failed:\n{}",
-                    String::from_utf8_lossy(&result.stderr)
-                ));
-            }
-            Ok(())
-        }
-    }
+    // The C compiler driver is used purely as a linker — no C is compiled.
+    // The regex glue object resolves the elm/regex kernels' engine.
+    let regex = build_dir.join("regex.o");
+    std::fs::write(&regex, REGEX_OBJ).map_err(|e| e.to_string())?;
+    let bytes_jmp = build_dir.join("bytes_jmp.o");
+    std::fs::write(&bytes_jmp, BYTES_JMP_OBJ).map_err(|e| e.to_string())?;
+    // The custom Immix-lite GC's register-spill trampoline; the runtime
+    // (immix_mark_and_sweep) does the collection. All allocation is the
+    // runtime's own immix heap — no external allocator to link.
+    let immix_gc = build_dir.join("immix_gc.o");
+    std::fs::write(&immix_gc, IMMIX_GC_OBJ).map_err(|e| e.to_string())?;
+    run_linker(
+        "cc",
+        &[&object, &runtime, &regex, &bytes_jmp, &immix_gc, Path::new("-o"), output],
+    )
 }
 
 /// Removes the transient build dir when the build ends (success or error),

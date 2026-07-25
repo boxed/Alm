@@ -30,34 +30,6 @@ fn main() {
         &["-C", "target-cpu=native"],
     );
 
-    // WebAssembly runtime, built for wasm32-wasi. No target-cpu (wasm has
-    // none). Only built when the wasm target is installed; the wasm backend
-    // needs it, the native backend does not.
-    build_runtime(
-        source,
-        &out_dir,
-        "alm_runtime_wasm",
-        &["--target", "wasm32-wasi"],
-    );
-
-    // Stage the wasm link inputs (WASI crt + libc from the Rust wasm32-wasi
-    // sysroot) into OUT_DIR so the wasm backend can embed them and link a
-    // self-contained module without needing the toolchain at `alm make`
-    // time. Also record the wasm-ld path from the pinned LLVM.
-    let libdir = run(
-        "rustc",
-        &[RUNTIME_TOOLCHAIN, "--target", "wasm32-wasi", "--print", "target-libdir"],
-    );
-    let self_contained = PathBuf::from(libdir.trim()).join("self-contained");
-    for f in ["crt1-command.o", "libc.a"] {
-        std::fs::copy(self_contained.join(f), out_dir.join(f))
-            .unwrap_or_else(|e| panic!("staging wasm link input {f}: {e}"));
-    }
-    let llvm_prefix = env::var("LLVM_SYS_160_PREFIX")
-        .unwrap_or_else(|_| "/opt/homebrew/opt/llvm@16".to_string());
-    println!("cargo:rustc-env=ALM_WASM_LD={}/bin/wasm-ld", llvm_prefix);
-    println!("cargo:rustc-env=ALM_DWARFDUMP={}/bin/llvm-dwarfdump", llvm_prefix);
-
     // Regex glue: a sibling crate that wraps `fancy-regex` behind a C ABI, so
     // the elm/regex kernels have a real engine without vendoring one into the
     // single-file runtime. It has crate dependencies, so it's built with cargo
@@ -155,15 +127,6 @@ fn build_regex_glue(out_dir: &PathBuf) {
     assert!(ld_ok, "ld -r merge of the regex glue failed");
 }
 
-fn run(cmd: &str, args: &[&str]) -> String {
-    let out = Command::new(cmd)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("running {cmd}: {e}"));
-    assert!(out.status.success(), "{cmd} {args:?} failed");
-    String::from_utf8(out.stdout).unwrap()
-}
-
 fn build_runtime(source: &str, out_dir: &PathBuf, crate_name: &str, extra: &[&str]) {
     let status = Command::new("rustc")
         .arg(RUNTIME_TOOLCHAIN)
@@ -194,13 +157,11 @@ fn build_runtime(source: &str, out_dir: &PathBuf, crate_name: &str, extra: &[&st
         .unwrap_or_else(|e| {
             panic!(
                 "failed to invoke `rustc {RUNTIME_TOOLCHAIN}` for {crate_name}: {e}\n\
-                 install it with: rustup toolchain install 1.72.1 --profile minimal \
-                 && rustup target add wasm32-wasi --toolchain 1.72.1"
+                 install it with: rustup toolchain install 1.72.1 --profile minimal"
             )
         });
     assert!(
         status.success(),
-        "building the {crate_name} runtime failed (needs the {RUNTIME_TOOLCHAIN} toolchain \
-         and the wasm32-wasi target)"
+        "building the {crate_name} runtime failed (needs the {RUNTIME_TOOLCHAIN} toolchain)"
     );
 }

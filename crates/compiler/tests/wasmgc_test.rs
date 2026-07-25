@@ -118,13 +118,13 @@ fn run(cmd: &mut Command) -> String {
     String::from_utf8_lossy(&out.stdout).trim_end().to_string()
 }
 
-/// Build the program with the native (typed, vector-List) backend and run it,
-/// returning its stdout. Returns `None` when the native toolchain isn't
-/// available so the JS/WasmGC diff still runs; a real backend error panics.
-/// The binary is run under `timeout` since native code is uncapped.
+/// Build the program with the native (uniform) backend and run it, returning
+/// its stdout. Returns `None` when the native toolchain isn't available so the
+/// JS/WasmGC diff still runs; a real backend error panics. The binary is run
+/// under `timeout` since native code is uncapped.
 fn native_out(entry: &std::path::Path, dir: &std::path::Path) -> Option<String> {
     let bin = dir.join("native_app");
-    match project::compile_project_typed(entry, &bin, generate::native::Target::Native, generate::native::OptLevel::Release) {
+    match project::compile_project_native(entry, &bin, generate::native::OptLevel::Release) {
         Ok(_) => {
             let out = Command::new("timeout")
                 .arg("30")

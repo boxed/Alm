@@ -134,13 +134,12 @@ pub fn compile_project_source_maps(
 pub fn compile_project_native(
     entry: &Path,
     output: &Path,
-    target: generate::native::Target,
     opt: generate::native::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let program = crate::ir::lower::lower_project(&checked.modules);
-    generate::native::build(&program, output, target, opt)
+    generate::native::build(&program, output, opt)
         .map(|()| warnings)
         .map_err(|message| {
             vec![BuildError::new(
@@ -153,9 +152,6 @@ pub fn compile_project_native(
         })
 }
 
-/// Compile a project to a native binary via the *typed* (monomorphized)
-/// backend, which emits unboxed code. Monomorphizes across all project
-/// modules starting from the entry module's `main`.
 /// Whether a module is implemented by a native runtime kernel rather than
 /// compiled from its `.elm` source. Its source still type-checks the program
 /// but is dropped before the backend, so references become kernel calls and its
@@ -190,80 +186,6 @@ fn reject_effect_modules(
         )]);
     }
     Ok(())
-}
-
-pub fn compile_project_typed(
-    entry: &Path,
-    output: &Path,
-    target: generate::native::Target,
-    opt: generate::native::OptLevel,
-) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
-    let checked = check_project(entry)?;
-    // The monomorphizing backend has no CLI target of its own (only js, native,
-    // and wasm-gc are exposed); it is reached through the API/tests. Guard it
-    // anyway so an effect module gives a clear message rather than a codegen error.
-    reject_effect_modules(entry, &checked.modules, "monomorphizing", "--target=native")?;
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
-    let empty_types = HashMap::new();
-    let empty_nodes = HashMap::new();
-    // Modules alm implements natively instead of compiling from source. Their
-    // `.elm` is used for type-checking (above) but omitted from the backend, so
-    // references to them resolve to kernels and their types lay out as opaque
-    // runtime words. robinheghan/elm-deque's chunked finger-tree is a
-    // non-regular datatype the monomorphizer cannot compile; alm ships a native
-    // double-ended queue instead (`Deque.*` -> `deque_*` kernels).
-    let infos: Vec<crate::ir::mono::ModuleInfo> = checked
-        .modules
-        .iter()
-        .filter(|module| !is_native_shunted_module(module.name.as_str()))
-        .map(|module| crate::ir::mono::ModuleInfo {
-            name: module.name.clone(),
-            module,
-            types: checked.types.get(&module.name).unwrap_or(&empty_types),
-            node_types: checked.node_types.get(&module.name).unwrap_or(&empty_nodes),
-        })
-        .collect();
-    let program = crate::ir::mono::specialize_project(&infos, &checked.entry);
-    if let Some(message) = &program.error {
-        return Err(vec![BuildError::new(
-            entry.to_path_buf(),
-            String::new(),
-            "NATIVE BACKEND LIMITATION",
-            Region::ZERO,
-            message.clone(),
-        )]);
-    }
-    let module_refs: Vec<&can::Module> = checked
-        .modules
-        .iter()
-        .filter(|module| !is_native_shunted_module(module.name.as_str()))
-        .collect();
-    let layouts = crate::ir::layout::LayoutCtx::for_modules(&module_refs);
-    // Ports have no definition; record each with whether it is outgoing
-    // (`payload -> Cmd msg`) or incoming (`(payload -> msg) -> Sub msg`) so the
-    // backend can resolve a reference to one into a `CmdPort`/`SubPort` kernel.
-    let mut ports: HashMap<String, bool> = HashMap::new();
-    for module in &module_refs {
-        for port in &module.ports {
-            let outgoing = matches!(
-                &port.tipe,
-                can::Type::Lambda(_, r)
-                    if matches!(&**r, can::Type::Type(_, n, _) if n.as_str() == "Cmd")
-            );
-            ports.insert(port.name.to_string(), outgoing);
-        }
-    }
-    generate::typed::build(&program, &layouts, output, target, ports, opt)
-        .map(|()| warnings)
-        .map_err(|message| {
-            vec![BuildError::new(
-                entry.to_path_buf(),
-                String::new(),
-                "TYPED BACKEND",
-                Region::ZERO,
-                message,
-            )]
-        })
 }
 
 /// Compile a project with the experimental WasmGC backend (see
@@ -305,7 +227,7 @@ pub fn compile_project_wasmgc(
             message.clone(),
         )]);
     }
-    // Ports: name -> outgoing? (matches compile_project_typed).
+    // Ports: name -> outgoing? (outgoing = `payload -> Cmd msg`).
     let mut ports: HashMap<String, bool> = HashMap::new();
     for module in &checked.modules {
         for port in &module.ports {

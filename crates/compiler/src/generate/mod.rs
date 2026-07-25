@@ -6,7 +6,6 @@
 
 pub mod native;
 pub mod sourcemap;
-pub mod typed;
 pub mod wasmgc;
 
 use std::collections::{HashMap, HashSet};

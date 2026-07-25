@@ -174,9 +174,8 @@ crates/compiler/src/
   nitpick.rs     Nitpick/PatternMatches.hs   exhaustiveness
   generate/      Generate/*.hs     code generation + runtime kernels:
                                    runtime.js (JS), native.rs +
-                                   native_runtime.rs (LLVM), wasmgc.rs
-                                   (WasmGC), typed.rs (monomorphized),
-                                   sourcemap.rs
+                                   native_runtime.rs (LLVM native),
+                                   wasmgc.rs (WasmGC), sourcemap.rs
   interface.rs   Elm/Interface.hs  module interfaces
   project.rs     builder/          elm.json, module discovery, packages
   builtins.rs                      core library signatures (parsed by alm)
