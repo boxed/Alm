@@ -218,12 +218,24 @@ pub fn check_module(
         checker.check_decl_group(group);
     }
 
+    // Effect module: unify the manager entry points so their `state`/`selfMsg`/
+    // `msg` are consistent, and pin their stored types (see
+    // `constrain_effect_manager`). A no-op for ordinary modules.
+    let manager_types = match &module.manager {
+        Some(manager) => checker.constrain_effect_manager(&module.name, manager),
+        None => Vec::new(),
+    };
+
     if checker.errors.is_empty() {
         let mut types = HashMap::new();
         for (name, binding) in &checker.globals {
             if let Binding::Scheme(scheme) = binding {
                 types.insert(name.clone(), scheme.tipe.clone());
             }
+        }
+        // Overwrite the entry points with their pinned (mutually-unified) types.
+        for (name, tipe) in manager_types {
+            types.insert(name, tipe);
         }
         Ok(Checked {
             types,
@@ -539,6 +551,104 @@ impl Checker<'_> {
     fn instantiate(&mut self, scheme: &Scheme) -> Variable {
         let mut substitutions = scheme.free.clone();
         self.type_to_variable(&scheme.tipe, &mut substitutions, false)
+    }
+
+    /// Effect-manager constraints (elm's `Type.Constrain.Module`
+    /// `constrainEffects`): unify `init`/`onEffects`/`onSelfMsg` so they share
+    /// one `state`, and `onEffects`/`onSelfMsg` share one `selfMsg` (and one
+    /// `msg`, tied to the manager's `command`/`subscription` type). js/native
+    /// don't need this — they call the entry points as boxed closures — but the
+    /// monomorphizing (wasm-gc) backend must instantiate them at concrete,
+    /// mutually-consistent types, or a `sendToSelf` value built at one type and
+    /// received at another would be laid out inconsistently. Returns the pinned
+    /// entry-point types to overwrite in the module's type map; also reports a
+    /// clear error for a missing or wrong-typed manager function.
+    fn constrain_effect_manager(
+        &mut self,
+        home: &Name,
+        manager: &can::Manager,
+    ) -> Vec<(Name, can::Type)> {
+        use can::Type;
+        let v = |n: &str| Type::Var(Name::from(n));
+        let app = |m: &str, n: &str, args: Vec<Type>| {
+            Type::Type(Name::from(m), Name::from(n), Rc::new(args))
+        };
+        let lam = |a: Type, b: Type| Type::Lambda(Rc::new(a), Rc::new(b));
+        let router = app("Platform", "Router", vec![v("msg"), v("selfMsg")]);
+        let task = || app("Task", "Task", vec![v("err"), v("state")]);
+        let list = |t: Type| app("List", "List", vec![t]);
+        let leaf = |name: &Name| Type::Type(home.clone(), name.clone(), Rc::new(vec![v("msg")]));
+
+        let (cmd_name, sub_name) = match manager {
+            can::Manager::Cmd(c) => (Some(c.clone()), None),
+            can::Manager::Sub(s) => (None, Some(s.clone())),
+            can::Manager::Fx(c, s) => (Some(c.clone()), Some(s.clone())),
+        };
+
+        // onEffects: Router -> [List cmds] -> [List subs] -> state -> Task err state
+        let mut on_effects = lam(v("state"), task());
+        if let Some(s) = &sub_name {
+            on_effects = lam(list(leaf(s)), on_effects);
+        }
+        if let Some(c) = &cmd_name {
+            on_effects = lam(list(leaf(c)), on_effects);
+        }
+        on_effects = lam(router.clone(), on_effects);
+        let on_self = lam(router, lam(v("selfMsg"), lam(v("state"), task())));
+
+        let templates = [
+            (Name::from("init"), task()),
+            (Name::from("onEffects"), on_effects),
+            (Name::from("onSelfMsg"), on_self),
+        ];
+
+        // One substitution shared across the templates so `msg`/`selfMsg`/
+        // `state`/`err` map to the SAME pool variables everywhere.
+        let mut subst: HashMap<Name, Variable> = HashMap::new();
+        let mut pinned = Vec::new();
+        for (name, template) in templates {
+            let scheme = match self.globals.get(&name) {
+                Some(Binding::Scheme(s)) => s.clone(),
+                _ => {
+                    self.errors.push(Error {
+                        message: format!(
+                            "This `effect module` is missing a `{}` definition (an effect \
+                             manager needs `init`, `onEffects`, and `onSelfMsg`).",
+                            name
+                        ),
+                        region: Region::ZERO,
+                    });
+                    continue;
+                }
+            };
+            let actual = self.instantiate(&scheme);
+            let expected = self.type_to_variable(&template, &mut subst, false);
+            if let Err(e) = self.unify(expected, actual, Region::ZERO, || {
+                format!("The `{name}` function does not have the type an effect manager requires")
+            }) {
+                self.errors.push(e);
+                continue;
+            }
+            pinned.push((name, expected));
+        }
+        // Also require the map function(s) exist.
+        for (present, fname) in [(cmd_name.is_some(), "cmdMap"), (sub_name.is_some(), "subMap")] {
+            if present && !self.globals.contains_key(&Name::from(fname)) {
+                self.errors.push(Error {
+                    message: format!("This `effect module` is missing a `{fname}` definition."),
+                    region: Region::ZERO,
+                });
+            }
+        }
+
+        // Zonk the (now mutually-unified) templates together so the shared
+        // variables get the SAME generated names in every entry point's type.
+        let env_free: HashSet<Variable> = HashSet::new();
+        let mut gstate = Self::fresh_generalize_state(HashSet::new());
+        pinned
+            .into_iter()
+            .map(|(name, var)| (name, self.variable_to_type(var, &env_free, &mut gstate)))
+            .collect()
     }
 
     fn type_to_variable(
