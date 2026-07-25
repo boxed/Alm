@@ -160,6 +160,12 @@ strings, and bytes, `Decode.loop`/`map`/`andThen`, and decode failures),
 verified byte-for-byte across js, native, and wasm-gc by a differential
 test.
 
+Outgoing **ports** carry any port-legal payload on all three backends. On
+wasm-gc — where the host boundary is a JSON string rather than a live JS
+value — a type-directed encoder converts the payload (scalars, `List`,
+`Array`, tuples, records, `Maybe`, `Json.Value`) to JSON before it crosses,
+matching the JS backend value-for-value (checked by a differential test).
+
 ## Not ported
 
 - WebSockets, GLSL shaders, and the optimizer pass (`Optimize/*`,
