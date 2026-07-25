@@ -13,6 +13,7 @@ pub mod interface;
 pub mod ir;
 pub mod lint;
 pub mod nitpick;
+pub mod optimize;
 pub mod parse;
 pub mod project;
 pub mod reporting;

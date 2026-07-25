@@ -18,7 +18,7 @@ use crate::ast::source as src;
 use crate::data::Name;
 use crate::interface::Interfaces;
 use crate::reporting::{Located, Region, Report};
-use crate::{builtins, canonicalize, generate, nitpick, parse, typecheck};
+use crate::{builtins, canonicalize, generate, nitpick, optimize, parse, typecheck};
 
 pub struct BuildError {
     pub path: PathBuf,
@@ -328,7 +328,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         // at the resolved, unique names. Downstream code is unchanged.
         let rewritten = rewrite_module(source_module, &unique_names);
 
-        let (canonical, mut interface) =
+        let (mut canonical, mut interface) =
             canonicalize::canonicalize_module(&rewritten, &interfaces).map_err(|errors| {
                 errors
                     .into_iter()
@@ -375,6 +375,10 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
                 })
                 .collect::<Vec<_>>()
         })?;
+
+        // Local constant folding / simplification (after nitpick so it sees the
+        // original patterns; before codegen so every backend benefits).
+        optimize::simplify_module(&mut canonical);
 
         for name in interface.value_names.clone() {
             if let Some(tipe) = types.get(&name) {
