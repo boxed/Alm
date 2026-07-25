@@ -9737,6 +9737,24 @@ kernel_fns! {
     G_PLATFORM_SUB_BATCH "$Platform$Sub$batch" sub_batch, 1;
     G_PLATFORM_SUB_MAP "$Platform$Sub$map" sub_map, 2;
 
+    // elm/bytes kernels (Elm.Kernel.Bytes.*).
+    G_BYTES_WIDTH "$Elm$Kernel$Bytes$width" bytes_width, 1;
+    G_BYTES_GETHOSTENDIANNESS "$Elm$Kernel$Bytes$getHostEndianness" bytes_get_host_endianness, 2;
+    G_BYTES_ENCODE "$Elm$Kernel$Bytes$encode" bytes_encode, 1;
+    G_BYTES_GETSTRINGWIDTH "$Elm$Kernel$Bytes$getStringWidth" bytes_get_string_width, 1;
+    G_BYTES_DECODE "$Elm$Kernel$Bytes$decode" bytes_decode, 2;
+    G_BYTES_DECODEFAILURE "$Elm$Kernel$Bytes$decodeFailure" bytes_decode_failure, 2;
+    G_BYTES_READ_I8 "$Elm$Kernel$Bytes$read_i8" bytes_read_i8, 2;
+    G_BYTES_READ_U8 "$Elm$Kernel$Bytes$read_u8" bytes_read_u8, 2;
+    G_BYTES_READ_I16 "$Elm$Kernel$Bytes$read_i16" bytes_read_i16, 3;
+    G_BYTES_READ_U16 "$Elm$Kernel$Bytes$read_u16" bytes_read_u16, 3;
+    G_BYTES_READ_I32 "$Elm$Kernel$Bytes$read_i32" bytes_read_i32, 3;
+    G_BYTES_READ_U32 "$Elm$Kernel$Bytes$read_u32" bytes_read_u32, 3;
+    G_BYTES_READ_F32 "$Elm$Kernel$Bytes$read_f32" bytes_read_f32, 3;
+    G_BYTES_READ_F64 "$Elm$Kernel$Bytes$read_f64" bytes_read_f64, 3;
+    G_BYTES_READ_BYTES "$Elm$Kernel$Bytes$read_bytes" bytes_read_bytes, 3;
+    G_BYTES_READ_STRING "$Elm$Kernel$Bytes$read_string" bytes_read_string, 3;
+
     G_TERMINAL_WRITELINE "$Terminal$writeLine" terminal_write_line, 1;
     G_BASICS_COS "$Basics$cos" basics_cos, 1;
     G_BASICS_SIN "$Basics$sin" basics_sin, 1;
