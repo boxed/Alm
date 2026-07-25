@@ -292,6 +292,36 @@ fn string_from_int() {
 }
 
 #[test]
+fn case_jump_table_dispatch() {
+    // A flat constructor `case` (compiled to a `br_table` on wasm-gc) with
+    // bound args and a mix of arities, exercised across every tag; the result
+    // must match js and native.
+    assert_str_prog(
+        "case_jump_table",
+        "module Test exposing (main)\n\n\
+         type Op = Add Int Int | Neg Int | Zero | Double Int\n\n\
+         eval : Op -> Int\n\
+         eval op =\n\
+         \x20   case op of\n\
+         \x20       Add a b -> a + b\n\
+         \x20       Neg n -> 0 - n\n\
+         \x20       Zero -> 0\n\
+         \x20       Double n -> n * 2\n\n\
+         classify : Int -> String\n\
+         classify n =\n\
+         \x20   case n of\n\
+         \x20       0 -> \"z\"\n\
+         \x20       1 -> \"o\"\n\
+         \x20       2 -> \"t\"\n\
+         \x20       _ -> \"m\"\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.fromInt (eval (Add 3 4) + eval (Neg 5) + eval Zero + eval (Double 6))\n\
+         \x20       ++ \"|\" ++ classify 0 ++ classify 2 ++ classify 9\n",
+    );
+}
+
+#[test]
 fn maybe_result_combinators() {
     assert_str_prog(
         "maybe_result_combinators",

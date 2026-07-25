@@ -796,6 +796,23 @@ fn f64_elem(tipe: &can::Type) -> bool {
 /// Opaque kernel types with no exposed constructors — elm's `Debug.toString`
 /// renders these as `<internals>`. An allowlist (not "anything unregistered")
 /// so a real union missing from the registry still errors loudly.
+/// A pattern that always matches — it binds variables but performs no test.
+/// Used to decide whether a `case` branch's only discriminant is its top-level
+/// constructor tag (so it can join a `br_table` jump table).
+fn is_irrefutable_pat(pat: &can::Pattern) -> bool {
+    use can::Pattern_::*;
+    match &pat.value {
+        Anything | Var(_) | Unit | Record(_) => true,
+        Alias(inner, _) => is_irrefutable_pat(inner),
+        Tuple(a, b, rest) => {
+            is_irrefutable_pat(a) && is_irrefutable_pat(b) && rest.iter().all(is_irrefutable_pat)
+        }
+        // A single-constructor union tests nothing but its arguments' shape.
+        Ctor(_, _, ctor, args) if ctor.num_ctors <= 1 => args.iter().all(is_irrefutable_pat),
+        _ => false,
+    }
+}
+
 fn is_opaque_kernel_type(home: &str, name: &str) -> bool {
     matches!(
         (home, name),
@@ -28388,7 +28405,113 @@ impl<'a> Codegen<'a> {
         let s = ctx.bind("$scrut");
         self.emit_expr(scrut, ctx, f)?;
         f.instruction(&Instruction::LocalSet(s));
+        if self.try_emit_jump_table(branches, s, Some(&scrut.tipe), ctx, f)? {
+            return Ok(());
+        }
         self.emit_branches(branches, s, Some(&scrut.tipe), ctx, f)
+    }
+
+    /// A flat `case` whose branches all match distinct constructor tags of the
+    /// scrutinee's union (arguments irrefutable), plus an optional trailing
+    /// catch-all, compiles to a `br_table` jump table on the tag rather than a
+    /// linear chain of tag tests. Constructor tags are dense (`0..num_ctors`),
+    /// so the table indexes directly; absent tags route to the default arm.
+    /// Returns `Ok(true)` when it emitted the table, `Ok(false)` to fall back to
+    /// `emit_branches`.
+    fn try_emit_jump_table(
+        &mut self,
+        branches: &[(can::Pattern, TypedExpr)],
+        s: u32,
+        scrut_ty: Option<&can::Type>,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<bool, String> {
+        use can::Pattern_::*;
+        let mut cases: Vec<(u32, &can::Pattern, &TypedExpr)> = Vec::new();
+        let mut num_ctors = 0u32;
+        let mut catch_all: Option<(&can::Pattern, &TypedExpr)> = None;
+        for (pat, body) in branches {
+            if catch_all.is_some() {
+                return Ok(false); // a catch-all must be the last branch
+            }
+            match &pat.value {
+                Ctor(_, _, ctor, args) => {
+                    // Bools compile to an i31 test, not a tag; single-ctor unions
+                    // have no tag. Neither benefits from a jump table.
+                    if matches!(ctor.name.as_str(), "True" | "False") || ctor.num_ctors <= 1 {
+                        return Ok(false);
+                    }
+                    if !args.iter().all(is_irrefutable_pat) {
+                        return Ok(false); // a refutable arg would need a residual test
+                    }
+                    if cases.iter().any(|(t, _, _)| *t == ctor.index) {
+                        return Ok(false); // repeated tag
+                    }
+                    num_ctors = ctor.num_ctors;
+                    cases.push((ctor.index, pat, body));
+                }
+                _ if is_irrefutable_pat(pat) => catch_all = Some((pat, body)),
+                _ => return Ok(false),
+            }
+        }
+        if cases.len() < 2 {
+            return Ok(false);
+        }
+        // Need full coverage: every tag present, or a catch-all for the rest.
+        // (Exhaustiveness guarantees one holds, but be defensive.)
+        if catch_all.is_none() && cases.len() != num_ctors as usize {
+            return Ok(false);
+        }
+
+        cases.sort_by_key(|(t, _, _)| *t);
+        let m = cases.len() as u32;
+        // targets[tag] = block index (0 = innermost) handling that tag; absent
+        // tags fall to the default (index `m`).
+        let mut targets = vec![m; num_ctors as usize];
+        for (j, (tag, _, _)) in cases.iter().enumerate() {
+            targets[*tag as usize] = j as u32;
+        }
+
+        // block $merge (result eqref) {
+        //   block $default {
+        //     block $B_{m-1} { ... block $B_0 {
+        //       <tag>; br_table targets default=m
+        //     } <body_0> br $merge } ... <body_{m-1}> br $merge }
+        //   <default body> }
+        f.instruction(&Instruction::Block(BlockType::Result(eqref())));
+        f.instruction(&Instruction::Block(BlockType::Empty)); // $default
+        for _ in 0..m {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+        }
+        // discriminant = the constructor tag
+        f.instruction(&Instruction::LocalGet(s));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::BrTable(targets.into(), m));
+        // one arm per case, in ascending-tag (block-nesting) order
+        for (j, (_, pat, body)) in cases.iter().enumerate() {
+            f.instruction(&Instruction::End); // close $B_j
+            let mark = ctx.scope.len();
+            self.bind_pat(pat, s, scrut_ty, ctx, f)?;
+            self.emit_expr(body, ctx, f)?;
+            ctx.scope.truncate(mark);
+            f.instruction(&Instruction::Br(m - j as u32)); // → $merge
+        }
+        f.instruction(&Instruction::End); // close $default
+        match catch_all {
+            Some((pat, body)) => {
+                let mark = ctx.scope.len();
+                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
+                self.emit_expr(body, ctx, f)?;
+                ctx.scope.truncate(mark);
+            }
+            // Exhaustive without a catch-all: the default is never reached.
+            None => {
+                f.instruction(&Instruction::Unreachable);
+            }
+        }
+        f.instruction(&Instruction::End); // close $merge
+        Ok(true)
     }
 
     fn emit_branches(
