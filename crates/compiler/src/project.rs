@@ -190,8 +190,11 @@ pub fn compile_project_wasmgc(
             message.clone(),
         )]);
     }
-    // Ports: name -> outgoing? (outgoing = `payload -> Cmd msg`).
+    // Ports: name -> outgoing? (outgoing = `payload -> Cmd msg`). For outgoing
+    // ports also record the payload type, so the WasmGC backend can convert the
+    // `out payload` argument to a `Json.Value` before serializing it.
     let mut ports: HashMap<String, bool> = HashMap::new();
+    let mut port_types: HashMap<String, can::Type> = HashMap::new();
     for module in &checked.modules {
         for port in &module.ports {
             let outgoing = matches!(
@@ -199,6 +202,11 @@ pub fn compile_project_wasmgc(
                 can::Type::Lambda(_, r)
                     if matches!(&**r, can::Type::Type(_, n, _) if n.as_str() == "Cmd")
             );
+            if outgoing {
+                if let can::Type::Lambda(payload, _) = &port.tipe {
+                    port_types.insert(port.name.to_string(), (**payload).clone());
+                }
+            }
             ports.insert(port.name.to_string(), outgoing);
         }
     }
@@ -248,6 +256,7 @@ pub fn compile_project_wasmgc(
         &program,
         output,
         &ports,
+        &port_types,
         &ctor_arg_types,
         &unions,
         sources.as_ref(),

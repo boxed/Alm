@@ -197,15 +197,15 @@ fn run_wasmgc(test_name: &str, modules: &[(&str, &str)]) -> String {
 }
 
 /// A port-observing `Main` for the wasm-gc backend. `effect_cmd` is the
-/// expression producing the initial command; `sub` the subscriptions body.
+/// expression producing the initial command; `sub` the subscriptions body. The
+/// `String` port also exercises the type-directed outgoing-port encoder.
 fn wasmgc_main(import: &str, effect_cmd: &str, sub: &str) -> String {
     format!(
         r#"port module Main exposing (main)
 
 {import}
-import Json.Encode as JE
 
-port out : JE.Value -> Cmd msg
+port out : String -> Cmd msg
 
 type Msg = Got String
 
@@ -213,7 +213,7 @@ main : Program () () Msg
 main =
     Platform.worker
         {{ init = \_ -> ( (), {effect_cmd} )
-        , update = \(Got s) model -> ( model, out (JE.string s) )
+        , update = \(Got s) model -> ( model, out s )
         , subscriptions = {sub}
         }}
 "#

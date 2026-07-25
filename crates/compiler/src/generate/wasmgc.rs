@@ -1259,6 +1259,18 @@ fn wrap1(f: &mut Function) {
     f.instruction(&Instruction::StructNew(T_CTOR));
 }
 
+/// A port encoder body wrapping the raw value in local 0 as a scalar
+/// `Json.Value` of ctor `tag` (2=int, 3=float, 1=bool, 4=string): the raw
+/// value's representation already matches what that `Json.Value` kind stores.
+fn port_scalar_wrap(tag: i32) -> Function {
+    let mut f = Function::new([]);
+    f.instruction(&Instruction::I32Const(tag));
+    f.instruction(&Instruction::LocalGet(0));
+    wrap1(&mut f);
+    f.instruction(&Instruction::End);
+    f
+}
+
 /// Unbox a boxed `Float` (`T_FLOAT`) on the stack to a raw `f64`.
 fn unbox_f64(f: &mut Function) {
     f.instruction(&cast_to(T_FLOAT));
@@ -1930,12 +1942,14 @@ pub fn build(
     mono: &MonoProgram,
     output: &Path,
     ports: &HashMap<String, bool>,
+    port_types: &HashMap<String, can::Type>,
     ctor_arg_types: &HashMap<(String, String, u32), Vec<can::Type>>,
     unions: &HashMap<(String, String), UnionInfo>,
     sources: Option<&HashMap<String, (String, String)>>,
 ) -> Result<(), String> {
     let mut cg = Codegen::new(mono);
     cg.ports = ports.clone();
+    cg.port_types = port_types.clone();
     cg.ctor_arg_types = ctor_arg_types.clone();
     cg.unions = unions.clone();
     let map_path = output.with_extension("wasm.map");
@@ -1987,6 +2001,10 @@ struct Codegen<'a> {
     mono: &'a MonoProgram,
     /// Port name -> outgoing? (for `Call(port, [arg])` → Cmd resolution).
     ports: HashMap<String, bool>,
+    /// Outgoing port name -> its payload type. Drives the type-directed
+    /// conversion of an `out payload` argument into a `Json.Value` (which the
+    /// runtime then serializes with `json_enc`), mirroring elm's port converter.
+    port_types: HashMap<String, can::Type>,
     /// (home, union, ctor-index) -> the constructor's declared argument types.
     /// Used to give a record sub-pattern (in a ctor-arg position) its type so
     /// its fields resolve to sorted `T_ARR` slots. Only field *names* matter for
@@ -1998,6 +2016,10 @@ struct Codegen<'a> {
     /// lazily-lifted `(eqref)->eqref` (value->String) function index. Registered
     /// before its body is built so recursive types resolve their own calls.
     debug_renderers: HashMap<String, u32>,
+    /// Type-directed outgoing-port encoders: canonical type key -> the lazily-
+    /// lifted `(eqref)->eqref` (value->`Json.Value`) function index. Registered
+    /// before its body is built so recursive types resolve their own calls.
+    port_encoders: HashMap<String, u32>,
     /// Lazily-lifted `Debug.toString` helpers (allocated on first use): the
     /// ctor-arg parenthesizer and the string/char escaper.
     debug_paren_idx: Option<u32>,
@@ -2579,6 +2601,8 @@ impl<'a> Codegen<'a> {
             list_flatten_f_idx: 0,
             list_flatten_i_idx: 0,
             ports: HashMap::new(),
+            port_types: HashMap::new(),
+            port_encoders: HashMap::new(),
             func_arity: HashMap::new(),
             spec_fns: HashMap::new(),
             const_int: HashMap::new(),
@@ -5231,6 +5255,216 @@ impl<'a> Codegen<'a> {
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, lf);
         Ok(lidx)
+    }
+
+    /// A type-directed outgoing-port encoder: a lazily-lifted `(eqref)->eqref`
+    /// turning a raw Elm value of the port's payload type into a `Json.Value`
+    /// ctor (the representation `json_enc`/`json_write` consume). Mirrors elm's
+    /// port converter, but produces alm's `Json.Value` rather than a live JS
+    /// value, since the wasm host boundary carries a JSON *string*.
+    fn port_encoder(&mut self, ty: &can::Type) -> Result<u32, String> {
+        let key = debug_type_key(ty);
+        if let Some(&idx) = self.port_encoders.get(&key) {
+            return Ok(idx);
+        }
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([]))); // reserve slot
+        self.port_encoders.insert(key, lidx); // register BEFORE body (recursion)
+        let lf = self.emit_port_encode_body(ty)?;
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, lf);
+        Ok(lidx)
+    }
+
+    /// Body of a `port_encoder`. Value in local 0; returns its `Json.Value`.
+    fn emit_port_encode_body(&mut self, ty: &can::Type) -> Result<Function, String> {
+        use can::Type::*;
+        match ty {
+            Type(_, name, args) => match name.as_str() {
+                // Scalars: the raw value already has the payload representation a
+                // `Json.Value` of this kind stores, so just tag it. Int(2)/
+                // Float(3) carry the boxed number, Bool(1) the i31, String(4) the
+                // `T_STR` — identical to what `json_write` reads back.
+                "Int" => Ok(port_scalar_wrap(2)),
+                "Float" => Ok(port_scalar_wrap(3)),
+                "Bool" => Ok(port_scalar_wrap(1)),
+                "String" => Ok(port_scalar_wrap(4)),
+                // Already a `Json.Value` — identity.
+                "Value" => {
+                    let mut f = Function::new([]);
+                    f.instruction(&Instruction::LocalGet(0));
+                    f.instruction(&Instruction::End);
+                    Ok(f)
+                }
+                // No JSON char type; render as a one-character string.
+                "Char" => {
+                    let mut f = Function::new([]);
+                    f.instruction(&Instruction::I32Const(4));
+                    f.instruction(&Instruction::LocalGet(0));
+                    f.instruction(&Instruction::Call(self.str_from_char_idx));
+                    wrap1(&mut f);
+                    f.instruction(&Instruction::End);
+                    Ok(f)
+                }
+                "List" => {
+                    let elem = args.first().ok_or("wasmgc: port List needs an arg")?.clone();
+                    let er = self.port_encoder(&elem)?;
+                    Ok(self.emit_port_array_body(er, false))
+                }
+                "Array" => {
+                    let elem = args.first().ok_or("wasmgc: port Array needs an arg")?.clone();
+                    let er = self.port_encoder(&elem)?;
+                    Ok(self.emit_port_array_body(er, true))
+                }
+                "Maybe" => {
+                    let inner = args.first().ok_or("wasmgc: port Maybe needs an arg")?.clone();
+                    let er = self.port_encoder(&inner)?;
+                    let mut f = Function::new([]);
+                    // Just = tag 0 -> encode arg0; Nothing = tag 1 -> null.
+                    ctor_tag(&mut f, 0);
+                    f.instruction(&Instruction::I32Eqz);
+                    f.instruction(&Instruction::If(BlockType::Result(eqref())));
+                    ctor_arg0(&mut f, 0);
+                    f.instruction(&Instruction::Call(er));
+                    f.instruction(&Instruction::Else);
+                    push_nullary_ctor(&mut f, 0);
+                    f.instruction(&Instruction::End);
+                    f.instruction(&Instruction::End);
+                    Ok(f)
+                }
+                // Any other payload (already a Json.Value, or a type the checker
+                // does not admit through a port): pass through, like elm's
+                // `_Port_id`.
+                _ => {
+                    let mut f = Function::new([]);
+                    f.instruction(&Instruction::LocalGet(0));
+                    f.instruction(&Instruction::End);
+                    Ok(f)
+                }
+            },
+            Unit => {
+                let mut f = Function::new([]);
+                push_nullary_ctor(&mut f, 0); // null
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            // Tuples encode as JSON arrays, in element order.
+            Tuple(a, b, c) => {
+                let ra = self.port_encoder(a)?;
+                let rb = self.port_encoder(b)?;
+                let rc = match c {
+                    Some(t) => Some(self.port_encoder(t)?),
+                    None => None,
+                };
+                let mut f = Function::new([(1, eqref())]); // local 1 = acc list
+                push_empty_list(&mut f);
+                f.instruction(&Instruction::LocalSet(1));
+                // cons in reverse so the list reads a, b, c.
+                if let Some(rc) = rc {
+                    self.port_cons_slot(&mut f, 2, rc, 1);
+                }
+                self.port_cons_slot(&mut f, 1, rb, 1);
+                self.port_cons_slot(&mut f, 0, ra, 1);
+                f.instruction(&Instruction::I32Const(5)); // array
+                f.instruction(&Instruction::LocalGet(1));
+                wrap1(&mut f);
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            // Records encode as JSON objects; fields sorted by name (the runtime
+            // `T_ARR` slot order), so slot j == sorted position.
+            Record(fields, _) => {
+                let mut fs: Vec<(String, can::Type)> =
+                    fields.iter().map(|(n, t)| (n.to_string(), t.clone())).collect();
+                fs.sort_by(|a, b| a.0.cmp(&b.0));
+                let encoders: Vec<u32> = fs
+                    .iter()
+                    .map(|(_, t)| self.port_encoder(t))
+                    .collect::<Result<_, _>>()?;
+                let mut f = Function::new([(1, eqref())]); // local 1 = acc list of pairs
+                push_empty_list(&mut f);
+                f.instruction(&Instruction::LocalSet(1));
+                // cons pairs in reverse so the object reads in sorted order.
+                for (j, ((nm, _), enc)) in fs.iter().zip(encoders).enumerate().rev() {
+                    // pair = T_ARR[ key(String), json(value) ]
+                    push_str_const(&mut f, nm);
+                    self.load_arr(0, j as u32, &mut f);
+                    f.instruction(&Instruction::Call(enc));
+                    f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                    f.instruction(&Instruction::LocalGet(1));
+                    f.instruction(&Instruction::Call(self.list_cons_idx));
+                    f.instruction(&Instruction::LocalSet(1));
+                }
+                f.instruction(&Instruction::I32Const(6)); // object
+                f.instruction(&Instruction::LocalGet(1));
+                wrap1(&mut f);
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+            _ => {
+                // A payload type the front end shouldn't allow through a port;
+                // pass through rather than crash the compile.
+                let mut f = Function::new([]);
+                f.instruction(&Instruction::LocalGet(0));
+                f.instruction(&Instruction::End);
+                Ok(f)
+            }
+        }
+    }
+
+    /// cons `enc(value.slot)` onto the list in local `acc` (for tuples): load the
+    /// element at `T_ARR` slot `slot` of local 0, encode it, prepend to `acc`.
+    fn port_cons_slot(&self, f: &mut Function, slot: u32, enc: u32, acc: u32) {
+        self.load_arr(0, slot, f);
+        f.instruction(&Instruction::Call(enc));
+        f.instruction(&Instruction::LocalGet(acc));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(acc));
+    }
+
+    /// Body for encoding a `List`/`Array` payload into a `Json.Value` array:
+    /// encode every element and cons them (back to front) into a fresh list,
+    /// then tag it `5`. `is_array` first tightens the Array into a list.
+    fn emit_port_array_body(&self, er: u32, is_array: bool) -> Function {
+        // locals: acc(1):eqref, i(2):i32, src(3):eqref
+        let mut f = Function::new([(1, eqref()), (1, ValType::I32), (1, eqref())]);
+        if is_array {
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::Call(self.array_tighten_idx));
+            f.instruction(&Instruction::LocalSet(3));
+        } else {
+            // A raw scalar list (`List Int`/`List Float`) must be widened to the
+            // boxed backing that flatten/`list_elem` expect.
+            widen_scalar_locals(&self.scalar_widen_idx, self.soa_widen_idx, 0, &mut f);
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::LocalSet(3));
+        }
+        self.flatten_local(&mut f, 3, false);
+        push_empty_list(&mut f);
+        f.instruction(&Instruction::LocalSet(1));
+        // i = len(src); while i > 0 { i -= 1; acc = cons(enc(src[i]), acc) }
+        list_len(&mut f, 3);
+        f.instruction(&Instruction::LocalSet(2));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        bump(&mut f, 2, -1);
+        list_elem(&mut f, 3, 2);
+        f.instruction(&Instruction::Call(er));
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::LocalSet(1));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        f.instruction(&Instruction::I32Const(5)); // array
+        f.instruction(&Instruction::LocalGet(1));
+        wrap1(&mut f);
+        f.instruction(&Instruction::End);
+        f
     }
 
     /// The lazily-lifted ctor-arg parenthesizer `(String)->String`.
@@ -22503,12 +22737,21 @@ impl<'a> Codegen<'a> {
                     f.instruction(&Instruction::I32Const(2));
                     push_str_const(f, name.as_str());
                     self.emit_expr(&args[0], ctx, f)?;
+                    // An outgoing payload is a raw Elm value; convert it to a
+                    // `Json.Value` (which `run_cmd`'s `json_enc` then serializes)
+                    // via the port's type-directed encoder. Incoming `toMsg`
+                    // functions pass through untouched.
+                    if outgoing {
+                        if let Some(pty) = self.port_types.get(name.as_str()).cloned() {
+                            let enc = self.port_encoder(&pty)?;
+                            f.instruction(&Instruction::Call(enc));
+                        }
+                    }
                     f.instruction(&Instruction::ArrayNewFixed {
                         array_type_index: T_ARR,
                         array_size: 2,
                     });
                     f.instruction(&Instruction::StructNew(T_CTOR));
-                    let _ = outgoing;
                     return Ok(());
                 }
             }
