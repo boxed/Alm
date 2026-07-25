@@ -166,9 +166,17 @@ matching the JS backend value-for-value (checked by a differential test).
 
 ## Not ported
 
-- WebSockets, GLSL shaders, and the optimizer pass (`Optimize/*`,
-  decision trees). Http/Time/Random remain native runtime
-  implementations (concrete effects) rather than effect modules.
+- **WebGL rendering**: `[glsl|…|]` blocks parse, type-check, and report
+  `SHADER PROBLEM` errors, and the `elm-explorations/linear-algebra` math
+  kernel (`Math.Vector*`/`Matrix4`) is implemented — but `WebGL.entity`/
+  `toHtml` build inert nodes instead of driving a real GPU context (node
+  has none).
+- **The case-of optimizer** (`Optimize/DecisionTree`): `case` compiles to
+  sequential pattern tests rather than decision trees. (DCE tree-shaking
+  *is* done.)
+- **WebSockets** — removed from Elm 0.19 core, so nothing to port.
+- Http/Time/Random are concrete runtime effects rather than real effect
+  modules.
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
 
