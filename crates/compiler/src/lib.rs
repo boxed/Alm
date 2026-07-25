@@ -7,6 +7,7 @@ pub mod ast;
 pub mod builtins;
 pub mod canonicalize;
 pub mod data;
+pub mod decision;
 pub mod generate;
 pub mod interface;
 pub mod ir;
