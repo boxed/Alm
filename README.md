@@ -157,9 +157,16 @@ rejects an effect module with a clear message.
 
 ## Not ported
 
-- WebSockets, elm/bytes, GLSL shaders, and the optimizer pass
-  (`Optimize/*`, decision trees). Http/Time/Random remain native runtime
+- WebSockets, GLSL shaders, and the optimizer pass (`Optimize/*`,
+  decision trees). Http/Time/Random remain native runtime
   implementations (concrete effects) rather than effect modules.
+- `elm/bytes` works on the **js** and **native** backends (encode/decode
+  of ints, floats, strings, and bytes, `Decode.loop`/`map`/`andThen`,
+  and decode failures, verified byte-for-byte against the JS output). On
+  **wasm-gc** the scalar, string, and `Bytes` cases work, but decoding
+  into an unboxed scalar list (`List Int`/`List Float`) currently yields
+  zeroed elements — the generic decode kernel hands back boxed values
+  where wasm-gc's unboxed-scalar-list ABI expects unboxed ones.
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
 
