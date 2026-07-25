@@ -2,21 +2,19 @@
 
 A port of the [Elm compiler](https://github.com/elm/compiler) from Haskell to Rust.
 
-alm runs Elm 0.19 applications through the same front-end pipeline as the
-original compiler, then hands off to one of several code generators:
+alm runs Elm 0.19 applications through the same front-end as the original
+compiler, then generates code for one of three targets:
 
-```
-parse → canonicalize → type check → exhaustiveness check → generate
-```
-
-The `generate` stage targets JavaScript (the default), native code via
-LLVM, or WebAssembly (a from-scratch WasmGC backend).
+- **JavaScript** (the default) — Elm kernel style, byte-identical to
+  `elm make` for pure code.
+- **Native** — a standalone binary via LLVM, with its own garbage
+  collector.
+- **WebAssembly** — a from-scratch WasmGC backend.
 
 It compiles real production applications: all 19 entry points of a
 ~40k-line production codebase (ports, Http, Json decoders, Svg, custom
 operators, elm/parser, two dozen package dependencies) compile, boot,
-and render. Pure code compiled to JavaScript is byte-identical to the
-official compiler's output.
+and render.
 
 ## Usage
 
