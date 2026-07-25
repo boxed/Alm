@@ -86,8 +86,9 @@ app.ports.somePort.subscribe(function (value) { ... });
   shares common prefixes — a jump table (`switch` on JS, `br_table` on
   wasm-gc; LLVM switch-conversion on native) at each dense constructor
   node, nested for deeper patterns. A branch reached from several leaves
-  is emitted once as a shared join point (a labeled-block `break` on JS)
-  rather than duplicated.
+  is emitted once as a shared join point — a labeled-block `break` on JS,
+  a `br` to a join block on wasm-gc — rather than duplicated, with tail
+  calls still compiling to constant-stack loops through it.
 - Standard library: Basics, List, String, Char, Maybe, Result, Tuple,
   Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
   Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
