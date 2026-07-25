@@ -171,12 +171,15 @@ matching the JS backend value-for-value (checked by a differential test).
   kernel (`Math.Vector*`/`Matrix4`) is implemented — but `WebGL.entity`/
   `toHtml` build inert nodes instead of driving a real GPU context (node
   has none).
-- **Nested-pattern decision trees** (`Optimize/DecisionTree`): a flat
-  `case` that dispatches on one discriminant (a constructor tag or a
-  literal) compiles to a jump table — a `switch` on the JS backend, a
-  `br_table` on wasm-gc, and LLVM's switch-conversion on native — but
-  deeply-nested patterns still fall back to sequential tests. (DCE
-  tree-shaking *is* done.)
+- **Decision-tree pattern matching with shared join points**
+  (`Optimize/DecisionTree`): a `case` compiles to a decision tree that
+  tests each sub-path of the scrutinee once and shares common prefixes —
+  a jump table (`switch` on JS, `br_table` on wasm-gc) at each dense
+  constructor node, nested for deeper patterns. The one gap is the *fall
+  back*: a match that a decision tree can only compile by duplicating a
+  branch body (elm shares those via join points) reverts to the
+  sequential `if`-chain instead. Native leaves this to LLVM (CSE +
+  switch-conversion of the chain). (DCE tree-shaking is done.)
 - **WebSockets** — removed from Elm 0.19 core, so nothing to port.
 - Http/Time/Random are concrete runtime effects rather than real effect
   modules.
