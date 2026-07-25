@@ -149,11 +149,11 @@ organization — alm compiles and runs **user-defined effect modules**.
 `command`/`subscription` build effect leaves, each manager becomes a
 stateful process with a mailbox, and `Platform.sendToApp`/`sendToSelf`
 plus `Process.spawn`/`kill` are wired up, mirroring elm's `_Platform`
-protocol. This runs on the **JavaScript** backend (on alm's CPS task
-model) and the **native** backend (on the reified-task interpreter); a
-differential test runs the same effect programs on both and checks their
-output agrees. The WasmGC backend does not implement the protocol yet and
-rejects an effect module with a clear message.
+protocol. This runs on **all three backends** — **JavaScript** (on alm's
+CPS task model), **native** (on the reified-task interpreter), and
+**WasmGC** (on a monomorphized raw-wasm port of the protocol). A
+differential test runs the same command / self-message / subscription
+programs on every backend and checks their output agrees.
 
 `elm/bytes` works on all three backends (encode/decode of ints, floats,
 strings, and bytes, `Decode.loop`/`map`/`andThen`, and decode failures),
