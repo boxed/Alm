@@ -958,6 +958,10 @@ impl Generator {
                 let mut out = Mapped::raw(format!("var {} = ", temp));
                 out.push(self.expr(scrutinee));
                 out.push_str("; ");
+                if let Some(sw) = self.case_switch(&temp, branches, tail) {
+                    out.push(sw);
+                    return out;
+                }
                 for (pattern, branch) in branches {
                     let mut tests = Vec::new();
                     let mut bindings = Vec::new();
@@ -1017,6 +1021,114 @@ impl Generator {
                 out
             }
         }
+    }
+
+    /// Compile a `case` as a `switch` when every branch dispatches on one shared
+    /// discriminant — a constructor tag or an int/string/char literal — with an
+    /// optional trailing catch-all. This gives V8 a jump table instead of a
+    /// linear `if`/`else if` chain. Returns `None` (fall back to the chain) for
+    /// anything else: mixed discriminant kinds, refutable sub-patterns, repeated
+    /// labels, a non-final catch-all, or fewer than two discriminant branches.
+    /// The scrutinee is already evaluated into `temp`.
+    fn case_switch(
+        &mut self,
+        temp: &str,
+        branches: &[(can::Pattern, can::Expr)],
+        tail: &Tail,
+    ) -> Option<Mapped> {
+        // Which kind of discriminant (all branches must agree), and the label +
+        // branch for each, plus at most one trailing catch-all.
+        #[derive(PartialEq)]
+        enum Kind {
+            Ctor,
+            Int,
+            Str,
+            Chr,
+        }
+        let kind_of = |d: &Disc| match d {
+            Disc::Ctor(_) => Kind::Ctor,
+            Disc::Int(_) => Kind::Int,
+            Disc::Str(_) => Kind::Str,
+            Disc::Chr(_) => Kind::Chr,
+        };
+        let label_of = |d: &Disc| match d {
+            Disc::Ctor(n) => format!("'{}'", n),
+            Disc::Int(n) => n.to_string(),
+            Disc::Str(s) => js_string(s),
+            Disc::Chr(c) => js_string(&c.to_string()),
+        };
+
+        let mut kind: Option<Kind> = None;
+        let mut labels: Vec<String> = Vec::new();
+        let mut cases: Vec<(String, &can::Pattern, &can::Expr)> = Vec::new();
+        let mut catch_all: Option<(&can::Pattern, &can::Expr)> = None;
+        for (i, (pattern, branch)) in branches.iter().enumerate() {
+            if catch_all.is_some() {
+                // A catch-all must be the last branch; anything after it means
+                // this is not a clean switch (and later branches are dead).
+                return None;
+            }
+            if let Some(disc) = top_discriminant(pattern) {
+                let k = kind_of(&disc);
+                match &kind {
+                    Some(existing) if *existing != k => return None,
+                    _ => kind = Some(k),
+                }
+                let label = label_of(&disc);
+                if labels.contains(&label) {
+                    return None; // repeated label — needs fall-through handling
+                }
+                labels.push(label.clone());
+                cases.push((label, pattern, branch));
+            } else if is_irrefutable(pattern) {
+                catch_all = Some((pattern, branch));
+            } else {
+                let _ = i;
+                return None; // a refutable non-discriminant pattern
+            }
+        }
+        if cases.len() < 2 {
+            return None;
+        }
+        let kind = kind?;
+
+        // `switch` on the discriminant expression.
+        let disc_expr = match kind {
+            Kind::Ctor => format!("{}.$", temp),
+            Kind::Int | Kind::Str => temp.to_string(),
+            Kind::Chr => format!("{}.valueOf()", temp),
+        };
+        let mut out = Mapped::raw(format!("switch ({}) {{ ", disc_expr));
+        for (label, pattern, branch) in cases {
+            out.push_str(&format!("case {}: {{ ", label));
+            let mut tests = Vec::new();
+            let mut bindings = Vec::new();
+            pattern_tests(pattern, temp, &mut tests, &mut bindings);
+            for (name, path) in bindings {
+                out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+            }
+            // Bodies are in tail position, so they end in `return`/`continue`;
+            // no `break` is needed and cases never fall through.
+            out.push(self.stmts(branch, tail));
+            out.push_str(" } ");
+        }
+        out.push_str("default: { ");
+        match catch_all {
+            Some((pattern, branch)) => {
+                let mut tests = Vec::new();
+                let mut bindings = Vec::new();
+                pattern_tests(pattern, temp, &mut tests, &mut bindings);
+                for (name, path) in bindings {
+                    out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+                }
+                out.push(self.stmts(branch, tail));
+            }
+            None => out.push_str(
+                "throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)');",
+            ),
+        }
+        out.push_str(" } }");
+        Some(out)
     }
 
     fn let_decl_stmts(&mut self, decl: &can::LetDecl, out: &mut Mapped) {
@@ -1467,6 +1579,60 @@ fn destructure(pattern: &can::Pattern, path: &str, bindings: &mut Vec<(String, S
 }
 
 /// Compute the tests and bindings for matching `pattern` against `path`.
+/// A single-value discriminant a `case` branch can be dispatched on with a
+/// `switch` — the constructor tag, or an int/string/char literal — when the rest
+/// of the branch's pattern is irrefutable (so the tag/literal is the only test).
+enum Disc {
+    Ctor(String),
+    Int(i64),
+    Str(String),
+    Chr(char),
+}
+
+/// If `pattern`'s only refutable test is a top-level discriminant (constructor
+/// tag or literal) with everything below it irrefutable, return that
+/// discriminant. Such branches can share a `switch` whose label is the
+/// discriminant and whose body needs no residual test.
+fn top_discriminant(pattern: &can::Pattern) -> Option<Disc> {
+    use can::Pattern_::*;
+    match &pattern.value {
+        Int(n) => Some(Disc::Int(*n)),
+        Str(s) => Some(Disc::Str(s.clone())),
+        Chr(c) => Some(Disc::Chr(*c)),
+        Ctor(home, _union, ctor, args) => {
+            // Bools compile to `=== true/false`, not a tag; single-ctor unions
+            // have no tag test at all. Neither benefits from a switch.
+            if (home.as_str() == "Basics" && matches!(ctor.name.as_str(), "True" | "False"))
+                || ctor.num_ctors <= 1
+            {
+                return None;
+            }
+            if args.iter().all(is_irrefutable) {
+                Some(Disc::Ctor(ctor.name.to_string()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A pattern that always matches — it binds variables but performs no test.
+fn is_irrefutable(pattern: &can::Pattern) -> bool {
+    use can::Pattern_::*;
+    match &pattern.value {
+        Anything | Var(_) | Unit | Record(_) => true,
+        Alias(inner, _) => is_irrefutable(inner),
+        Tuple(a, b, rest) => {
+            is_irrefutable(a) && is_irrefutable(b) && rest.iter().all(is_irrefutable)
+        }
+        // A single-constructor union has no tag to test, so it matches on shape
+        // alone as long as its arguments do.
+        Ctor(_, _, ctor, args) if ctor.num_ctors <= 1 => args.iter().all(is_irrefutable),
+        _ => false,
+    }
+}
+
 fn pattern_tests(
     pattern: &can::Pattern,
     path: &str,
