@@ -311,6 +311,9 @@ const G_EMPTY_LISTF: u32 = 30; // the shared empty `List Float` (T_LISTF) termin
 const G_EMPTY_LISTI: u32 = 31; // the shared empty `List Int` (T_LISTI) terminator
 const G_EMPTY_LISTC: u32 = 32; // the shared empty `List Char` (T_LISTC) terminator
 const G_EMPTY_LIST_SOA: u32 = 33; // the shared empty SoA list (T_LIST_SOA{0,null,null})
+const G_MGR_STATE: u32 = 34; // effect-manager states, indexed by manager index (ref null T_ARR)
+const G_MGR_MAIL: u32 = 35; // per-manager self-message queues (ref null T_ARR of List)
+const G_MGR_RUN: u32 = 36; // per-manager mailbox-pump reentrancy flags (ref null T_ARR of i31)
 
 /// How the merge sort orders elements. `Value`: `val_compare` on the element.
 /// `ByKey`: `val_compare` on `element[0]` (for Dict/Set pair lists). `Cmp`: the
@@ -2033,6 +2036,12 @@ struct Codegen<'a> {
     str_append_idx: u32,
     str_from_int_idx: u32,
     apply1_idx: u32,
+    /// Effect-manager runtime (only exercised when `mono.managers` is non-empty):
+    /// `mgr_collect(bag, boxedIdx)` gathers a manager's leaves from a Cmd/Sub
+    /// bag; `mgr_enqueue(cmdBag, subBag)` runs every manager's onEffects and
+    /// pumps its self-message mailbox.
+    mgr_collect_idx: u32,
+    mgr_enqueue_idx: u32,
     /// Lazily-lifted bridges between the boxed (`T_LIST`) and unboxed f64
     /// (`T_LISTF`) list reps, for `List Float` at unspecialized boundaries.
     /// Widen (`T_LIST{s}` -> boxed `T_LIST`) and narrow (inverse) bridges per
@@ -2337,6 +2346,8 @@ impl<'a> Codegen<'a> {
             str_append_idx: 0,
             str_from_int_idx: 0,
             apply1_idx: 0,
+            mgr_collect_idx: 0,
+            mgr_enqueue_idx: 0,
             scalar_widen_idx: [None; 3],
             scalar_narrow_idx: [None; 3],
             scalar_cons_idx: [None; 3],
@@ -2867,6 +2878,8 @@ impl<'a> Codegen<'a> {
         self.list_flatten_idx = next();
         self.list_flatten_f_idx = next();
         self.list_flatten_i_idx = next();
+        self.mgr_collect_idx = next();
+        self.mgr_enqueue_idx = next();
         // Lifted lambdas / local functions occupy indices after the helpers.
         self.lifted_base = s;
 
@@ -3209,6 +3222,8 @@ impl<'a> Codegen<'a> {
         let list_flatten = self.emit_list_flatten(None);
         let list_flatten_f = self.emit_list_flatten(Some(Scalar::F64));
         let list_flatten_i = self.emit_list_flatten(Some(Scalar::I64));
+        let mgr_collect = self.emit_mgr_collect();
+        let mgr_enqueue = self.emit_mgr_enqueue();
         let alm_browser_start = self.emit_alm_browser_start(main_idx);
         let mut mi = Function::new([]);
         mi.instruction(&Instruction::Call(main_idx));
@@ -3614,6 +3629,8 @@ impl<'a> Codegen<'a> {
             (ft1, &list_flatten),
             (ft1, &list_flatten_f),
             (ft1, &list_flatten_i),
+            (ee_eqref_ty, &mgr_collect),
+            (ee_eqref_ty, &mgr_enqueue),
         ];
         let mut funcs = FunctionSection::new();
         for &t in &func_type_idx {
@@ -3879,6 +3896,14 @@ impl<'a> Codegen<'a> {
                 Instruction::StructNew(T_LIST_SOA),
             ]),
         );
+        // 34-36: effect-manager state/mailbox/run-flag arrays (allocated at
+        // program start when there are managers; null otherwise).
+        for _ in 0..3 {
+            globals.global(
+                GlobalType { val_type: ref_null_to(T_ARR), mutable: true, shared: false },
+                &ConstExpr::ref_null(HeapType::Concrete(T_ARR)),
+            );
+        }
         // DOM host imports (function indices 0..N_IMPORTS).
         let mut imports = ImportSection::new();
         for (name, ty) in [
@@ -7730,6 +7755,287 @@ impl<'a> Codegen<'a> {
     /// 7 Map3 8 Sequence 9 Sleep. Async (Pending) propagates through the
     /// single-sub combinators (map/andThen/mapError/onError); map2/map3/sequence
     /// are synchronous-only (async there is unsupported — rare).
+    /// mgr_collect(bag, boxedIdx) : the list of `bag`'s leaf values whose
+    /// manager index equals `idx`, walking Cmd/Sub batches (tag 1). Leaves are
+    /// tag 20 `[boxedIdx, value]`. No `cmdMap`/`subMap` is applied — v1 does not
+    /// support `Cmd.map`/`Sub.map` over manager effects.
+    fn emit_mgr_collect(&mut self) -> Function {
+        // params: bag(0), boxedIdx(1). locals: tag(2):i32, acc(3),lst(4):eqref,
+        //   i(5),n(6):i32, child(7):eqref, idxv(8):i64
+        let mut f = Function::new([
+            (1, ValType::I32),
+            (2, eqref()),
+            (2, ValType::I32),
+            (1, eqref()),
+            (1, ValType::I64),
+        ]);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalSet(8));
+        ctor_tag(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(2));
+        // LEAF (20)
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(20));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::LocalGet(8));
+        f.instruction(&Instruction::I64Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Else);
+        // BATCH (1): concat children's collects
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::LocalSet(3));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::LocalSet(4));
+        self.flatten_local(&mut f, 4, false);
+        list_len(&mut f, 4);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I32GeS);
+        f.instruction(&Instruction::BrIf(1));
+        f.instruction(&Instruction::LocalGet(3));
+        list_elem(&mut f, 4, 5);
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.mgr_collect_idx));
+        f.instruction(&Instruction::Call(self.list_append_idx));
+        f.instruction(&Instruction::LocalSet(3));
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::LocalSet(5));
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(3));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::End); // END BATCH-if
+        f.instruction(&Instruction::End); // END LEAF-if
+        f.instruction(&Instruction::End); // function terminal
+        f
+    }
+
+    /// mgr_enqueue(cmdBag, subBag) : deliver one effect batch to every manager
+    /// — collect its Cmd/Sub leaves, call `onEffects`, store the new state, then
+    /// pump its self-message mailbox. Per-manager steps are unrolled from
+    /// `mono.managers`. Returns null (its uniform (e,e)->e slot is ignored).
+    /// mgr_enqueue(cmdBag, subBag) : enqueue one effect batch (this frame's Cmd
+    /// and Sub leaves, as an `fx` message) to every manager's mailbox, then pump.
+    /// Returns null (its uniform (e,e)->e slot is ignored).
+    fn emit_mgr_enqueue(&mut self) -> Function {
+        // params: cmdBag(0), subBag(1). locals: cmds(2),subs(3),r(4),mail(5),msg(6):eqref
+        let mut f = Function::new([(5, eqref())]);
+        let managers = self.mono.managers.clone();
+        for m in &managers {
+            let i = m.index as i32;
+            f.instruction(&Instruction::LocalGet(0));
+            f.instruction(&Instruction::I64Const(i as i64));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            f.instruction(&Instruction::Call(self.mgr_collect_idx));
+            f.instruction(&Instruction::LocalSet(2));
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&Instruction::I64Const(i as i64));
+            f.instruction(&Instruction::Call(self.box_int_idx));
+            f.instruction(&Instruction::Call(self.mgr_collect_idx));
+            f.instruction(&Instruction::LocalSet(3));
+            // mail[i] = append(mail[i], [ fx-msg = ctor(0,[cmds,subs]) ])
+            f.instruction(&Instruction::GlobalGet(G_MGR_MAIL));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::GlobalGet(G_MGR_MAIL));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(i));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::I32Const(0)); // fx message tag
+            f.instruction(&Instruction::LocalGet(2));
+            f.instruction(&Instruction::LocalGet(3));
+            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+            f.instruction(&Instruction::StructNew(T_CTOR));
+            f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+            f.instruction(&Instruction::Call(self.list_cons_idx));
+            f.instruction(&Instruction::Call(self.list_append_idx));
+            f.instruction(&Instruction::ArraySet(T_ARR));
+            self.emit_mgr_pump(&mut f, i);
+        }
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::End);
+        f
+    }
+
+    /// Pump manager `i`'s mailbox: unless already pumping (the `G_MGR_RUN[i]`
+    /// flag), process each queued message FIFO — fx (tag 0) → `onEffects`, self
+    /// (tag 1) → `onSelfMsg` — storing the returned state. The flag makes a
+    /// reentrant pump (from a `sendToApp` dispatch) a no-op, keeping effects and
+    /// state ordered.
+    fn emit_mgr_pump(&mut self, f: &mut Function, i: i32) {
+        let m = self.mono.managers[i as usize].clone();
+        let oe = m.on_effects.to_string();
+        let osm = m.on_self_msg.to_string();
+        let (Some(&oe_idx), Some(&osm_idx)) =
+            (self.func_index.get(&oe), self.func_index.get(&osm))
+        else {
+            return;
+        };
+        let oe_arity = self.func_arity[&oe];
+        let osm_arity = self.func_arity[&osm];
+        // if run[i] == 0 { set; loop; clear }
+        f.instruction(&Instruction::GlobalGet(G_MGR_RUN));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::RefCastNonNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::I31 }));
+        f.instruction(&Instruction::I31GetS);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_MGR_RUN));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::Block(BlockType::Empty));
+        f.instruction(&Instruction::Loop(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_MGR_MAIL));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::LocalSet(5));
+        list_len(f, 5);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::BrIf(1));
+        // msg = head(mail) ; mail[i] = tail(mail)
+        list_head(f, 5);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::GlobalGet(G_MGR_MAIL));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        list_tail(f, 5);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // task = msg.tag==0 ? onEffects(router, cmds[, subs]) : onSelfMsg(router, value)
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&cast_to(T_CTOR));
+        f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        self.emit_interned_closure(oe_idx, oe_arity, f);
+        f.instruction(&Instruction::I64Const(i as i64));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        if m.cmd_map.is_some() {
+            ctor_argn(f, 6, 0);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        if m.sub_map.is_some() {
+            ctor_argn(f, 6, 1);
+            f.instruction(&Instruction::Call(self.apply1_idx));
+        }
+        f.instruction(&Instruction::Else);
+        self.emit_interned_closure(osm_idx, osm_arity, f);
+        f.instruction(&Instruction::I64Const(i as i64));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        ctor_argn(f, 6, 0);
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::End);
+        // apply state (last arg), run, store
+        f.instruction(&Instruction::GlobalGet(G_MGR_STATE));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::LocalSet(4));
+        ctor_tag(f, 4);
+        f.instruction(&Instruction::I32Const(2));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_MGR_STATE));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        ctor_arg0(f, 4);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::Br(0));
+        f.instruction(&Instruction::End); // loop
+        f.instruction(&Instruction::End); // block
+        f.instruction(&Instruction::GlobalGet(G_MGR_RUN));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::I32Const(i));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End); // if not-running
+    }
+    /// Inline effect-manager instantiation into the program-start function:
+    /// allocate the state/mailbox/run-flag arrays and run each manager's `init`
+    /// (a synchronous `Task`) to its initial state.
+    fn emit_mgr_instantiate(&self, f: &mut Function) {
+        let managers = self.mono.managers.clone();
+        let n = managers.len() as i32;
+        f.instruction(&Instruction::I32Const(n));
+        f.instruction(&Instruction::ArrayNewDefault(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_MGR_STATE));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::I32Const(n));
+        f.instruction(&Instruction::ArrayNew(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_MGR_MAIL));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefI31);
+        f.instruction(&Instruction::I32Const(n));
+        f.instruction(&Instruction::ArrayNew(T_ARR));
+        f.instruction(&Instruction::GlobalSet(G_MGR_RUN));
+        for m in &managers {
+            let init = m.init.to_string();
+            let Some(&init_idx) = self.func_index.get(&init) else {
+                continue;
+            };
+            f.instruction(&Instruction::GlobalGet(G_MGR_STATE));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(m.index as i32));
+            f.instruction(&Instruction::Call(init_idx));
+            f.instruction(&Instruction::Call(self.task_run_idx));
+            f.instruction(&cast_to(T_CTOR));
+            f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
+            f.instruction(&Instruction::I32Const(0));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            f.instruction(&Instruction::ArraySet(T_ARR));
+        }
+    }
+
+    /// Push `subscriptions(model)` (a Sub bag), or `Sub.none` when there is no
+    /// subscriptions function — for feeding the manager gather.
+    fn emit_sub_bag(&self, f: &mut Function) {
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 0 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::GlobalGet(G_SUBS));
+        f.instruction(&Instruction::GlobalGet(G_MODEL));
+        f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::End);
+    }
+
     fn emit_task_run(&self) -> Function {
         // param t(0). locals: ra(1),rb(2),rc(3):eqref; arr(4):ref T_ARR;
         //   i(5),len(6):i32; lst(7):eqref
@@ -7980,6 +8286,71 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR)); // Posix
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR)); // Ok
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // Effect-manager task tags (13=sendToApp, 14=sendToSelf, 15=spawn), all
+        // producing `Ok`. Built by the Platform/Process kernels; run here.
+        // sendToApp (13) [msg]: dispatch the message to the app, then Ok(()).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(13));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // sendToSelf (14) [router, msg]: append `msg` to manager `idx`'s mailbox
+        // (router carries the boxed idx); pumped after the current step. Ok(()).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(14));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // arr = G_MGR_MAIL
+        f.instruction(&Instruction::GlobalGet(G_MGR_MAIL));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalSet(4));
+        // idx = i32(unbox(router))
+        ctor_argn(&mut f, 0, 0);
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(6));
+        // arr[idx] = list_append(arr[idx], cons(self-msg = ctor(1,[msg]), empty))
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::LocalGet(4));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::ArrayGet(T_ARR));
+        f.instruction(&Instruction::I32Const(1)); // self message tag
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::GlobalGet(G_EMPTY_LIST));
+        f.instruction(&Instruction::Call(self.list_cons_idx));
+        f.instruction(&Instruction::Call(self.list_append_idx));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // spawn (15) [task]: run the task now (fire-and-forget), Ok(processId).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(15));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::Drop);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // Sequence (8): run each; first Err short-circuits; else Ok(list of values)
@@ -16263,13 +16634,30 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::I32Const(1));
         f.instruction(&Instruction::ArrayGet(T_ARR));
         f.instruction(&Instruction::Call(self.run_cmd_idx));
+        // Deliver this frame's manager effects (the Cmd's leaves + subscriptions).
+        if !self.mono.managers.is_empty() {
+            f.instruction(&Instruction::LocalGet(1));
+            f.instruction(&cast_to(T_ARR));
+            f.instruction(&Instruction::I32Const(1));
+            f.instruction(&Instruction::ArrayGet(T_ARR));
+            self.emit_sub_bag(&mut f);
+            f.instruction(&Instruction::Call(self.mgr_enqueue_idx));
+            f.instruction(&Instruction::Drop);
+        }
         f.instruction(&Instruction::Else);
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::GlobalSet(G_MODEL));
         f.instruction(&Instruction::End);
-        // new = (document/application ? doc_vnode() : view model) ; patch
+        // Reset the marshalling bump pointer (ports/JSON use it) every dispatch.
         f.instruction(&Instruction::I32Const(BUMP_BASE));
         f.instruction(&Instruction::GlobalSet(G_BUMP));
+        // Render/patch — skipped for Platform.worker (kind 4): it is headless
+        // (no view), so `render_document`/`view` would cast on absent state.
+        f.instruction(&Instruction::GlobalGet(G_KIND));
+        f.instruction(&Instruction::I32Const(4));
+        f.instruction(&Instruction::I32Ne);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // new = (document/application ? doc_vnode() : view model) ; patch
         f.instruction(&Instruction::GlobalGet(G_KIND));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32GeS);
@@ -16288,6 +16676,7 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::GlobalSet(G_ROOT));
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::GlobalSet(G_PREV));
+        f.instruction(&Instruction::End);
         // subscriptions may have changed → re-register timers
         f.instruction(&Instruction::Call(self.reconcile_subs_idx));
         f.instruction(&Instruction::End);
@@ -20126,6 +20515,11 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End); // end: skip render/mount for worker
         // register initial timer subscriptions
         f.instruction(&Instruction::Call(self.reconcile_subs_idx));
+        // Instantiate effect managers before any Cmd runs, so a dispatch the
+        // initial Cmd triggers finds their state ready.
+        if !self.mono.managers.is_empty() {
+            self.emit_mgr_instantiate(&mut f);
+        }
         // Run the initial Cmd AFTER the first render/mount (element/document,
         // G_KIND != 0) so a synchronous dispatch it triggers (e.g. Task.perform
         // of a sync task like Time.now) patches against a mounted G_PREV/G_ROOT.
@@ -20134,6 +20528,13 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::Call(self.run_cmd_idx));
         f.instruction(&Instruction::End);
+        // Deliver the initial batch of manager effects (initial Cmd + subs).
+        if !self.mono.managers.is_empty() {
+            f.instruction(&Instruction::LocalGet(2));
+            self.emit_sub_bag(&mut f);
+            f.instruction(&Instruction::Call(self.mgr_enqueue_idx));
+            f.instruction(&Instruction::Drop);
+        }
         f.instruction(&Instruction::End);
         f
     }
@@ -26425,6 +26826,44 @@ impl<'a> Codegen<'a> {
             ("Elm.Kernel.Bytes", "getHostEndianness") => {
                 f.instruction(&Instruction::I32Const(0)); // Task.Succeed
                 self.emit_expr(&args[0], ctx, f)?; // le
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Effect managers. `command`/`subscription` build a LEAF (tag 20)
+            // carrying the manager index and the value.
+            ("Elm.Kernel.Platform", "leaf") => {
+                f.instruction(&Instruction::I32Const(20));
+                self.emit_expr(&args[0], ctx, f)?; // boxed manager index
+                self.emit_expr(&args[1], ctx, f)?; // value
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Platform.sendToApp router msg → task tag 13 [msg] (router unused).
+            ("Platform", "sendToApp") => {
+                f.instruction(&Instruction::I32Const(13));
+                self.emit_expr(&args[1], ctx, f)?; // msg
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Platform.sendToSelf router msg → task tag 14 [router, msg].
+            ("Platform", "sendToSelf") => {
+                f.instruction(&Instruction::I32Const(14));
+                self.emit_expr(&args[0], ctx, f)?; // router (boxed idx)
+                self.emit_expr(&args[1], ctx, f)?; // msg
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Process.spawn task → task tag 15 [task].
+            ("Process", "spawn") => {
+                f.instruction(&Instruction::I32Const(15));
+                self.emit_expr(&args[0], ctx, f)?; // task
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // Process.kill _ → Task.succeed () (alm's CPS-free tasks can't cancel).
+            ("Process", "kill") => {
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::RefNull(eq_heap()));
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }

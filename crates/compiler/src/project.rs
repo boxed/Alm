@@ -152,33 +152,6 @@ pub fn compile_project_native(
         })
 }
 
-/// Effect managers are implemented on the JS and native (uniform) runtimes but
-/// not yet on the monomorphizing (typed) or WasmGC backends. Reject an effect
-/// module on those targets with a clear message rather than a cryptic
-/// codegen failure.
-fn reject_effect_modules(
-    entry: &Path,
-    modules: &[can::Module],
-    target: &str,
-    alternative: &str,
-) -> Result<(), Vec<BuildError>> {
-    if let Some(module) = modules.iter().find(|m| m.manager.is_some()) {
-        return Err(vec![BuildError::new(
-            entry.to_path_buf(),
-            String::new(),
-            "EFFECT MODULE UNSUPPORTED ON THIS TARGET",
-            Region::ZERO,
-            format!(
-                "The module `{}` is an `effect module`, but the {} backend does not \
-                 support effect managers yet. They run on the js and native targets, \
-                 so compile with {} instead.",
-                module.name, target, alternative
-            ),
-        )]);
-    }
-    Ok(())
-}
-
 /// Compile a project with the experimental WasmGC backend (see
 /// `generate::wasmgc`). Shares the front end and monomorphizer (`ir::mono`)
 /// with the other backends; only code generation differs.
@@ -188,7 +161,6 @@ pub fn compile_project_wasmgc(
     source_maps: bool,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    reject_effect_modules(entry, &checked.modules, "wasm-gc", "--target=js or --target=native")?;
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
