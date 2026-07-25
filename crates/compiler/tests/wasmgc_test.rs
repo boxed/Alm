@@ -355,6 +355,32 @@ fn case_nested_decision_tree() {
 }
 
 #[test]
+fn case_shared_join_point() {
+    // The first column (P|Q|R|S2) is exhaustive, so the wildcard `(_, D n)` row
+    // reaches all four edges. wasm-gc emits that body once as a shared join-point
+    // block the other leaves `br` to. Result must match js and native.
+    assert_str_prog(
+        "case_shared",
+        "module Test exposing (main)\n\n\
+         type T = P | Q | R | S2\n\
+         type U = C | D Int\n\n\
+         pick : ( T, U ) -> Int\n\
+         pick pair =\n\
+         \x20   case pair of\n\
+         \x20       ( P, C ) -> 1\n\
+         \x20       ( Q, C ) -> 2\n\
+         \x20       ( R, C ) -> 3\n\
+         \x20       ( S2, C ) -> 4\n\
+         \x20       ( _, D n ) -> n + 100\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \",\"\n\
+         \x20       (List.map (String.fromInt << pick)\n\
+         \x20           [ ( P, C ), ( Q, C ), ( R, C ), ( S2, C ), ( P, D 5 ), ( R, D 9 ) ])\n",
+    );
+}
+
+#[test]
 fn maybe_result_combinators() {
     assert_str_prog(
         "maybe_result_combinators",

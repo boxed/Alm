@@ -796,6 +796,27 @@ fn f64_elem(tipe: &can::Type) -> bool {
 /// Opaque kernel types with no exposed constructors — elm's `Debug.toString`
 /// renders these as `<internals>`. An allowlist (not "anything unregistered")
 /// so a real union missing from the registry still errors loudly.
+/// A frame in the decision-tree emitter's block-nesting stack, used to compute
+/// `br` depths. `Merge` is the outermost block carrying the case result;
+/// `Target(branch)` is a shared join-point block; `Inner` is a block opened by
+/// the tree itself (a `br_table` arm or an `if`).
+#[derive(PartialEq)]
+enum Lbl {
+    Merge,
+    Target(usize),
+    Inner,
+}
+
+/// The `br` depth from the current (innermost) point to the block labeled
+/// `target`, given the full nesting `labels` (index 0 = outermost).
+fn br_depth(labels: &[Lbl], target: &Lbl) -> u32 {
+    let pos = labels
+        .iter()
+        .rposition(|l| l == target)
+        .expect("decision-tree label must be on the stack");
+    (labels.len() - 1 - pos) as u32
+}
+
 /// Reconstruct a minimal `can::Pattern` that performs just a decision-tree
 /// `Test`, so the existing `emit_test` can emit it. Constructor arguments are
 /// wildcards (the tree already extracts them separately). Lists never reach here
@@ -28466,10 +28487,13 @@ impl<'a> Codegen<'a> {
         self.emit_branches(branches, s, Some(&scrut.tipe), ctx, f)
     }
 
-    /// Emit a decision tree (see `crate::decision`) as nested `br_table`s /
-    /// `if` chains. Each `Switch` tests one sub-path of the scrutinee once;
-    /// leaves rebind the branch's variables (via `bind_pat` on the original
-    /// pattern, which is type-correct) and emit the body, leaving an `eqref`.
+    /// Emit a decision tree (see `crate::decision`). Uses a uniform
+    /// *branch-to-merge* shape: everything is wrapped in an outer `block $merge
+    /// (result eqref)`, and every leaf ends in a `br` — to `$merge` for a leaf
+    /// reached from one place, or to a shared *join-point* block for a branch
+    /// reached from several. Each shared branch's body is emitted once, just
+    /// after its block. (A branch's variables bind to the same paths at every
+    /// leaf, so the single shared body is correct everywhere.)
     fn emit_decision(
         &mut self,
         tree: &crate::decision::Tree,
@@ -28479,18 +28503,69 @@ impl<'a> Codegen<'a> {
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
-        use crate::decision::Tree;
+        let counts = crate::decision::leaf_counts(tree, branches.len());
+        let shared: Vec<usize> = (0..branches.len()).filter(|&b| counts[b] > 1).collect();
+
+        // Outer merge block, then one join-point block per shared branch
+        // (shared[0] innermost, so its body — emitted first below — sits nearest
+        // the decider).
+        let mut labels: Vec<Lbl> = vec![Lbl::Merge];
+        f.instruction(&Instruction::Block(BlockType::Result(eqref())));
+        for &b in shared.iter().rev() {
+            f.instruction(&Instruction::Block(BlockType::Empty));
+            labels.push(Lbl::Target(b));
+        }
+
+        self.emit_dtree(tree, s, branches, scrut_ty, &shared, &mut labels, ctx, f)?;
+
+        // Each shared branch's body: close its block, then bind + emit, then
+        // carry the result to the merge. Bodies end in an unconditional `br`, so
+        // control never falls from one into the next.
+        for &b in &shared {
+            f.instruction(&Instruction::End);
+            labels.pop();
+            let mark = ctx.scope.len();
+            self.bind_pat(&branches[b].0, s, scrut_ty, ctx, f)?;
+            self.emit_expr(&branches[b].1, ctx, f)?;
+            ctx.scope.truncate(mark);
+            f.instruction(&Instruction::Br(br_depth(&labels, &Lbl::Merge)));
+        }
+        f.instruction(&Instruction::End); // merge
+        Ok(())
+    }
+
+    /// Recursive branch-to-merge walker. `shared` lists branches emitted as join
+    /// points; `labels` is the live block nesting (for `br` depths).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_dtree(
+        &mut self,
+        tree: &crate::decision::Tree,
+        s: u32,
+        branches: &[(can::Pattern, TypedExpr)],
+        scrut_ty: Option<&can::Type>,
+        shared: &[usize],
+        labels: &mut Vec<Lbl>,
+        ctx: &mut FnCtx,
+        f: &mut Function,
+    ) -> Result<(), String> {
+        use crate::decision::{Test, Tree};
         match tree {
             Tree::Fail => {
                 f.instruction(&Instruction::Unreachable);
                 Ok(())
             }
             Tree::Leaf { branch, .. } => {
-                let (pat, body) = &branches[*branch];
-                let mark = ctx.scope.len();
-                self.bind_pat(pat, s, scrut_ty, ctx, f)?;
-                self.emit_expr(body, ctx, f)?;
-                ctx.scope.truncate(mark);
+                if shared.contains(branch) {
+                    // Jump to the shared join point (its body has the bindings).
+                    f.instruction(&Instruction::Br(br_depth(labels, &Lbl::Target(*branch))));
+                } else {
+                    let (pat, body) = &branches[*branch];
+                    let mark = ctx.scope.len();
+                    self.bind_pat(pat, s, scrut_ty, ctx, f)?;
+                    self.emit_expr(body, ctx, f)?;
+                    ctx.scope.truncate(mark);
+                    f.instruction(&Instruction::Br(br_depth(labels, &Lbl::Merge)));
+                }
                 Ok(())
             }
             Tree::Switch { path, edges, default } => {
@@ -28498,13 +28573,13 @@ impl<'a> Codegen<'a> {
                 // A dense set (≥2) of non-bool constructor edges dispatches via a
                 // br_table; everything else (bools, literals) via an if-chain.
                 let all_ctor_nonbool = edges.iter().all(|(t, _)| {
-                    matches!(t, crate::decision::Test::Ctor { home, name, .. }
+                    matches!(t, Test::Ctor { home, name, .. }
                         if !(home.as_str() == "Basics" && matches!(name.as_str(), "True" | "False")))
                 });
                 if all_ctor_nonbool && edges.len() >= 2 {
-                    self.emit_decision_brtable(dv, edges, default, s, branches, scrut_ty, ctx, f)
+                    self.emit_dtree_brtable(dv, edges, default, s, branches, scrut_ty, shared, labels, ctx, f)
                 } else {
-                    self.emit_decision_ifchain(dv, edges, default, s, branches, scrut_ty, ctx, f)
+                    self.emit_dtree_ifchain(dv, edges, default, s, branches, scrut_ty, shared, labels, ctx, f)
                 }
             }
         }
@@ -28535,10 +28610,11 @@ impl<'a> Codegen<'a> {
         Ok(cur)
     }
 
-    /// Constructor-tag dispatch over `dv` as a `br_table` (see
-    /// `try_emit_jump_table` for the block structure), recursing into subtrees.
+    /// Constructor-tag dispatch over `dv` via a `br_table`; each arm's subtree is
+    /// emitted branch-to-merge (ends in its own `br`), so the arm blocks carry no
+    /// result.
     #[allow(clippy::too_many_arguments)]
-    fn emit_decision_brtable(
+    fn emit_dtree_brtable(
         &mut self,
         dv: u32,
         edges: &[(crate::decision::Test, crate::decision::Tree)],
@@ -28546,6 +28622,8 @@ impl<'a> Codegen<'a> {
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        shared: &[usize],
+        labels: &mut Vec<Lbl>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
@@ -28560,39 +28638,42 @@ impl<'a> Codegen<'a> {
         }
         ordered.sort_by_key(|(i, _)| *i);
         let m = ordered.len() as u32;
+        // targets[tag] = arm-block depth (0 = innermost = ordered[0]); absent
+        // tags route to the default arm block (depth m).
         let mut targets = vec![m; num_ctors as usize];
         for (j, (idx, _)) in ordered.iter().enumerate() {
             targets[*idx as usize] = j as u32;
         }
-        f.instruction(&Instruction::Block(BlockType::Result(eqref())));
-        f.instruction(&Instruction::Block(BlockType::Empty)); // default
+        f.instruction(&Instruction::Block(BlockType::Empty)); // default arm
+        labels.push(Lbl::Inner);
         for _ in 0..m {
             f.instruction(&Instruction::Block(BlockType::Empty));
+            labels.push(Lbl::Inner);
         }
         f.instruction(&Instruction::LocalGet(dv));
         f.instruction(&cast_to(T_CTOR));
         f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 0 });
         f.instruction(&Instruction::BrTable(targets.into(), m));
-        for (j, (_, sub)) in ordered.iter().enumerate() {
-            f.instruction(&Instruction::End);
-            self.emit_decision(sub, s, branches, scrut_ty, ctx, f)?;
-            f.instruction(&Instruction::Br(m - j as u32));
+        for (_, sub) in ordered.iter() {
+            f.instruction(&Instruction::End); // close this (innermost) arm block
+            labels.pop();
+            self.emit_dtree(sub, s, branches, scrut_ty, shared, labels, ctx, f)?;
         }
-        f.instruction(&Instruction::End); // default
+        f.instruction(&Instruction::End); // close default arm
+        labels.pop();
         match default {
-            Some(d) => self.emit_decision(d, s, branches, scrut_ty, ctx, f)?,
+            Some(d) => self.emit_dtree(d, s, branches, scrut_ty, shared, labels, ctx, f)?,
             None => {
                 f.instruction(&Instruction::Unreachable);
             }
         }
-        f.instruction(&Instruction::End); // merge
         Ok(())
     }
 
     /// Dispatch over `dv` as a chain of `if`/`else` tests (literals, bools, or a
-    /// short constructor set), recursing into subtrees.
+    /// short constructor set); each arm's subtree is emitted branch-to-merge.
     #[allow(clippy::too_many_arguments)]
-    fn emit_decision_ifchain(
+    fn emit_dtree_ifchain(
         &mut self,
         dv: u32,
         edges: &[(crate::decision::Test, crate::decision::Tree)],
@@ -28600,12 +28681,14 @@ impl<'a> Codegen<'a> {
         s: u32,
         branches: &[(can::Pattern, TypedExpr)],
         scrut_ty: Option<&can::Type>,
+        shared: &[usize],
+        labels: &mut Vec<Lbl>,
         ctx: &mut FnCtx,
         f: &mut Function,
     ) -> Result<(), String> {
         match edges.split_first() {
             None => match default {
-                Some(d) => self.emit_decision(d, s, branches, scrut_ty, ctx, f),
+                Some(d) => self.emit_dtree(d, s, branches, scrut_ty, shared, labels, ctx, f),
                 None => {
                     f.instruction(&Instruction::Unreachable);
                     Ok(())
@@ -28614,11 +28697,13 @@ impl<'a> Codegen<'a> {
             Some(((test, sub), rest)) => {
                 let pat = test_pattern(test);
                 self.emit_test(&pat, dv, None, ctx, f)?;
-                f.instruction(&Instruction::If(BlockType::Result(eqref())));
-                self.emit_decision(sub, s, branches, scrut_ty, ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Empty));
+                labels.push(Lbl::Inner);
+                self.emit_dtree(sub, s, branches, scrut_ty, shared, labels, ctx, f)?;
                 f.instruction(&Instruction::Else);
-                self.emit_decision_ifchain(dv, rest, default, s, branches, scrut_ty, ctx, f)?;
+                self.emit_dtree_ifchain(dv, rest, default, s, branches, scrut_ty, shared, labels, ctx, f)?;
                 f.instruction(&Instruction::End);
+                labels.pop();
                 Ok(())
             }
         }
