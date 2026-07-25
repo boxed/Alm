@@ -152,15 +152,6 @@ pub fn compile_project_native(
         })
 }
 
-/// Whether a module is implemented by a native runtime kernel rather than
-/// compiled from its `.elm` source. Its source still type-checks the program
-/// but is dropped before the backend, so references become kernel calls and its
-/// types are opaque runtime words. Currently only robinheghan/elm-deque, whose
-/// non-regular finger-tree type the monomorphizer cannot compile.
-fn is_native_shunted_module(name: &str) -> bool {
-    name == "Deque"
-}
-
 /// Effect managers are implemented on the JS and native (uniform) runtimes but
 /// not yet on the monomorphizing (typed) or WasmGC backends. Reject an effect
 /// module on those targets with a clear message rather than a cryptic
@@ -189,8 +180,8 @@ fn reject_effect_modules(
 }
 
 /// Compile a project with the experimental WasmGC backend (see
-/// `generate::wasmgc`). Shares the front end and monomorphizer with the typed
-/// backend; only code generation differs.
+/// `generate::wasmgc`). Shares the front end and monomorphizer (`ir::mono`)
+/// with the other backends; only code generation differs.
 pub fn compile_project_wasmgc(
     entry: &Path,
     output: &Path,
@@ -201,8 +192,8 @@ pub fn compile_project_wasmgc(
     let warnings = crate::lint::lint(&checked.modules, &checked.sources);
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
-    // The native `Deque` shunt (see `is_native_shunted_module`) does NOT apply
-    // here: wasm-gc has no `deque_*` kernels, so shunting only turns every
+    // wasm-gc does NOT shunt any module to a native kernel: it has no
+    // `deque_*` kernels, so shunting would only turn every
     // `Deque.*` into an unsupported-kernel error. Compile the module from source
     // instead — folkertdev/elm-deque is a regular type that monomorphizes fine
     // (robinheghan/elm-deque's non-regular finger-tree still can't, but it failed

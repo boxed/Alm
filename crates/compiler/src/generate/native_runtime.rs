@@ -51,7 +51,6 @@ struct Bump;
 // free blocks with no survivors (recycled for bump). Non-moving (conservative:
 // can't relocate). Collects only past a heap threshold, so churn workloads
 // (tiny live set) rarely trigger it and stay near the bump ceiling.
-#[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
     fn pthread_self() -> *mut u8;
@@ -63,11 +62,9 @@ extern "C" {
     // with the current stack pointer. Defined in immix_gc.c.
     fn immix_collect_roots();
 }
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_INITED: bool = false;
 
 // The prefix of macOS `struct segment_command_64` we need (vmaddr/vmsize).
-#[cfg(not(target_arch = "wasm32"))]
 #[repr(C)]
 struct ImmixSegCmd64 {
     cmd: u32,
@@ -78,47 +75,27 @@ struct ImmixSegCmd64 {
     // (fileoff, filesize, maxprot, initprot, nsects, flags follow — unused)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 const IMMIX_HEAP_MAX: usize = 4 << 30;
-#[cfg(not(target_arch = "wasm32"))]
 const IMMIX_BLOCK: usize = 32 << 10; // 32 KiB
-#[cfg(not(target_arch = "wasm32"))]
 const IMMIX_N_BLOCKS: usize = IMMIX_HEAP_MAX / IMMIX_BLOCK;
 
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_BASE: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_CUR: usize = 0; // bump cursor in the current block
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_CUR_END: usize = 0; // end of the current block
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_NEXT_FRESH: usize = 0; // next never-used block index
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_OBJ_BM: *mut u8 = std::ptr::null_mut(); // object-start bits
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_MARK_BM: *mut u8 = std::ptr::null_mut(); // mark bits
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_BSTATE: *mut u8 = std::ptr::null_mut(); // 0 free,1 small,2 large-cont,3 large-head
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_FREE: *mut u32 = std::ptr::null_mut(); // reclaimed free-block stack
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_FREE_TOP: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_WL: *mut usize = std::ptr::null_mut(); // mark worklist (object addrs)
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_WL_TOP: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_STACK_BASE: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_DATA_LO: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_DATA_HI: usize = 0;
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_SINCE_GC: usize = 0; // bytes allocated since last GC
-#[cfg(not(target_arch = "wasm32"))]
 static mut IMMIX_THRESHOLD: usize = 256 << 20;
 
-#[cfg(not(target_arch = "wasm32"))]
 unsafe fn immix_mmap(len: usize) -> *mut u8 {
     const PROT_RW: i32 = 0x1 | 0x2;
     const MAP_PA: i32 = 0x1000 | 0x0002; // MAP_ANON | MAP_PRIVATE (macOS)
@@ -127,7 +104,6 @@ unsafe fn immix_mmap(len: usize) -> *mut u8 {
     p
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Initialize the immix heap on first use. MUST be allocation-free: it backs
 /// the global allocator, so any Rust allocation here (e.g. `std::env::var`,
 /// `String`) would re-enter this and recurse. Everything below is a raw libc/
@@ -180,7 +156,6 @@ unsafe fn immix_ensure_init() {
 }
 
 /// Grab a fresh/recycled block and point the bump cursor at it.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 unsafe fn immix_new_block() {
     if IMMIX_SINCE_GC >= IMMIX_THRESHOLD {
@@ -203,7 +178,6 @@ unsafe fn immix_new_block() {
 
 /// Objects larger than a block: a contiguous span of fresh blocks, kept (never
 /// reclaimed) but still scanned when reachable. Rare (big strings/arrays).
-#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 unsafe fn immix_large(total: usize) -> *mut u8 {
     let nblocks = (total + IMMIX_BLOCK - 1) / IMMIX_BLOCK;
@@ -217,7 +191,6 @@ unsafe fn immix_large(total: usize) -> *mut u8 {
     (IMMIX_BASE + head * IMMIX_BLOCK) as *mut u8
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_set_obj_bit(obj: usize) {
     let g = (obj - IMMIX_BASE) >> 3;
@@ -229,7 +202,6 @@ unsafe fn immix_set_obj_bit(obj: usize) {
 /// Bump within the current block; fall to a slow path at block boundaries and
 /// for large objects. This is the whole runtime's allocator — Elm objects and
 /// the Rust global allocator both route here.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_alloc(size: usize, align: usize) -> *mut u8 {
     immix_ensure_init();
@@ -247,7 +219,6 @@ unsafe fn immix_alloc(size: usize, align: usize) -> *mut u8 {
     immix_alloc_slow(size, align)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 unsafe fn immix_alloc_slow(size: usize, align: usize) -> *mut u8 {
     IMMIX_SINCE_GC += size + 8;
@@ -266,17 +237,14 @@ unsafe fn immix_alloc_slow(size: usize, align: usize) -> *mut u8 {
     obj as *mut u8
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_test_obj_bit(g: usize) -> bool {
     *IMMIX_OBJ_BM.add(g >> 3) & (1 << (g & 7)) != 0
 }
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_test_mark(g: usize) -> bool {
     *IMMIX_MARK_BM.add(g >> 3) & (1 << (g & 7)) != 0
 }
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_set_mark(g: usize) {
     *IMMIX_MARK_BM.add(g >> 3) |= 1 << (g & 7);
@@ -284,7 +252,6 @@ unsafe fn immix_set_mark(g: usize) {
 
 /// Conservatively consider a word: if it's an even in-heap pointer to a real
 /// object start not yet marked, mark it and push it for scanning.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn immix_try_mark(word: usize) {
     // Tagged ints are odd; real object pointers are 8-aligned and even.
@@ -306,7 +273,6 @@ unsafe fn immix_try_mark(word: usize) {
 }
 
 /// Conservatively scan a word range for heap pointers.
-#[cfg(not(target_arch = "wasm32"))]
 unsafe fn immix_scan_range(lo: usize, hi: usize) {
     let mut a = (lo + 7) & !7;
     while a + 8 <= hi {
@@ -319,7 +285,6 @@ unsafe fn immix_scan_range(lo: usize, hi: usize) {
 /// address. Marks from roots (stack + __DATA), drains the worklist scanning each
 /// live object's fields (extent from its size header), then sweeps.
 #[no_mangle]
-#[cfg(not(target_arch = "wasm32"))]
 pub unsafe extern "C" fn immix_mark_and_sweep(sp: *mut u8) {
     // Clear mark bits over the used range.
     let used_bytes = (IMMIX_NEXT_FRESH * IMMIX_BLOCK) / 8 / 8 + 1;
@@ -377,26 +342,18 @@ pub unsafe extern "C" fn immix_mark_and_sweep(sp: *mut u8) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[inline]
 unsafe fn gc_ensure_init() {
     immix_ensure_init();
 }
 
 // Wasm-only leak-everything bump allocator.
-#[cfg(target_arch = "wasm32")]
-static mut BUMP_CUR: usize = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BUMP_END: usize = 0;
-#[cfg(target_arch = "wasm32")]
-const BUMP_CHUNK: usize = 64 << 20; // 64 MiB
 
 unsafe impl GlobalAlloc for Bump {
     // Native: everything — Elm objects and the runtime's own Rust allocations —
     // goes through the immix GC heap, so it's a single conservatively-scanned
     // heap. `dealloc` is a no-op (the collector reclaims); the default
     // `realloc` (alloc + copy + dealloc) is therefore exactly right.
-    #[cfg(not(target_arch = "wasm32"))]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         immix_alloc(layout.size().max(1), layout.align())
     }
@@ -533,7 +490,6 @@ pub enum Value {
 // program. On wasm that glue is not linked, so provide aborting/empty stubs to
 // keep the wasm runtime self-contained — `fromStringWith` there yields `null`,
 // so regex degrades to "never compiles" (unsupported on wasm for now).
-#[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn alm_rx_compile(pat: *const u8, plen: usize, ci: bool, ml: bool) -> *const core::ffi::c_void;
     fn alm_rx_contains(re: *const core::ffi::c_void, txt: *const u8, tlen: usize) -> i32;
@@ -554,39 +510,6 @@ extern "C" {
     fn alm_rx_free(ptr: *mut i64, len: usize);
 }
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn alm_rx_compile(_: *const u8, _: usize, _: bool, _: bool) -> *const core::ffi::c_void {
-    core::ptr::null()
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn alm_rx_contains(_: *const core::ffi::c_void, _: *const u8, _: usize) -> i32 {
-    0
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn alm_rx_find(
-    _: *const core::ffi::c_void,
-    _: *const u8,
-    _: usize,
-    _: i64,
-    out_len: *mut usize,
-) -> *mut i64 {
-    *out_len = 0;
-    core::ptr::null_mut()
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn alm_rx_split(
-    re: *const core::ffi::c_void,
-    txt: *const u8,
-    tlen: usize,
-    limit: i64,
-    out_len: *mut usize,
-) -> *mut i64 {
-    let _ = (re, txt, tlen, limit);
-    *out_len = 0;
-    core::ptr::null_mut()
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn alm_rx_free(_: *mut i64, _: usize) {}
 
 /// A JSON value tree. Object fields keep insertion order (as `JSON.stringify`
 /// does), matching the JS runtime's object-key iteration.
@@ -641,7 +564,6 @@ pub enum Decoder {
 static mut FLAG_ARG_CHECK: bool = false;
 
 /// Allocate a `Value` on the immix heap and return it as a value word.
-#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 fn alloc(value: Value) -> u64 {
     unsafe {
@@ -651,10 +573,6 @@ fn alloc(value: Value) -> u64 {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn alloc(value: Value) -> u64 {
-    Box::into_raw(Box::new(value)) as u64
-}
 
 /// Raw 8-byte-aligned allocation for the typed backend's unboxed heap objects
 /// (tagged constructors, boxed recursive fields), never individually freed —
@@ -665,7 +583,6 @@ pub unsafe extern "C" fn alm_alloc(size: u64) -> *mut u8 {
     // declaration on every target — usize is 32-bit on wasm32, which would
     // otherwise make the linked call invalid.
     let size = (size as usize).max(1);
-    #[cfg(not(target_arch = "wasm32"))]
     {
         return immix_alloc(size, 8);
     }
@@ -5536,7 +5453,6 @@ unsafe fn read_result(off: i64, width: usize, value: u64) -> u64 {
 // Wasm has no shim linked (and no longjmp), so it keeps the sentinel encoding —
 // `(BYTES_FAIL_OFFSET, dummy)` — which is correct on the uniform (boxed) wasm
 // path where the dummy is never read at a concrete layout.
-#[cfg(not(target_arch = "wasm32"))]
 extern "C" {
     fn alm_bytes_try(
         run: unsafe extern "C" fn(u64, u64) -> u64,
@@ -5547,13 +5463,8 @@ extern "C" {
     fn alm_bytes_fail() -> !;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 unsafe fn bytes_fail(_dummy: impl FnOnce() -> u64) -> u64 {
     alm_bytes_fail()
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn bytes_fail(dummy: impl FnOnce() -> u64) -> u64 {
-    pair(mk_int(BYTES_FAIL_OFFSET), dummy())
 }
 
 #[no_mangle]
@@ -5700,7 +5611,6 @@ unsafe extern "C" fn bytes_run_decoder(decoder: u64, bytes: u64) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn bytes_decode(decoder: u64, bytes: u64) -> u64 {
-    #[cfg(not(target_arch = "wasm32"))]
     let result = {
         let mut failed: u64 = 0;
         let r = alm_bytes_try(bytes_run_decoder, decoder, bytes, &mut failed);
@@ -10611,1220 +10521,168 @@ unsafe fn tea_run(impl_: u64) {
 // imports the shim must supply.
 // ============================================================================
 
-#[cfg(target_arch = "wasm32")]
-extern "C" {
-    fn dom_create_element(tag: *const u8, tag_len: usize) -> u32;
-    fn dom_create_element_ns(ns: *const u8, ns_len: usize, tag: *const u8, tag_len: usize) -> u32;
-    fn dom_create_text(s: *const u8, s_len: usize) -> u32;
-    fn dom_set_text(node: u32, s: *const u8, s_len: usize);
-    fn dom_append_child(parent: u32, child: u32);
-    fn dom_insert_before(parent: u32, child: u32, reference: u32);
-    fn dom_remove_child(parent: u32, child: u32);
-    fn dom_replace_child(parent: u32, new_node: u32, old_node: u32);
-    fn dom_set_attribute(node: u32, k: *const u8, k_len: usize, v: *const u8, v_len: usize);
-    fn dom_set_attribute_ns(
-        node: u32,
-        ns: *const u8,
-        ns_len: usize,
-        k: *const u8,
-        k_len: usize,
-        v: *const u8,
-        v_len: usize,
-    );
-    fn dom_remove_attribute(node: u32, k: *const u8, k_len: usize);
-    fn dom_set_property(node: u32, k: *const u8, k_len: usize, json: *const u8, json_len: usize);
-    fn dom_remove_property(node: u32, k: *const u8, k_len: usize, was_bool: u32);
-    fn dom_set_style(node: u32, k: *const u8, k_len: usize, v: *const u8, v_len: usize);
-    fn dom_remove_style(node: u32, k: *const u8, k_len: usize);
-    fn dom_add_event_listener(node: u32, name: *const u8, name_len: usize, handler_id: u32);
-    fn dom_remove_event_listener(node: u32, name: *const u8, name_len: usize, handler_id: u32);
-    fn dom_mount(root: u32);
-    fn dom_replace_root(new_node: u32);
-    fn dom_set_title(s: *const u8, s_len: usize);
-
-    // Effect host ops (Browser.element/document/application). Each async op is
-    // keyed by an id the shim passes back to the matching `alm_*` export.
-    fn host_now() -> f64;
-    fn host_set_interval(sub_id: u32, ms: f64);
-    fn host_clear_interval(sub_id: u32);
-    fn host_request_frame();
-    fn host_set_timeout(task_id: u32, ms: f64);
-    fn host_http(
-        task_id: u32,
-        method: *const u8,
-        method_len: usize,
-        url: *const u8,
-        url_len: usize,
-        headers_json: *const u8,
-        headers_json_len: usize,
-        body: *const u8,
-        body_len: usize,
-    );
-    fn host_port_out(name: *const u8, name_len: usize, json: *const u8, json_len: usize);
-    fn host_add_dom_sub(sub_id: u32, name: *const u8, name_len: usize);
-    fn host_remove_dom_sub(sub_id: u32, name: *const u8, name_len: usize);
-    // Navigation: kind 0 push, 1 replace, 2 go(n), 3 load(url), 4 reload.
-    fn host_nav(kind: u32, url: *const u8, url_len: usize, n: i32);
-}
 
 /// The rendered DOM mirror, kept in parallel with the last Html value so the
 /// next `view` can be diffed against it. Children are positional (keyed nodes
 /// are reconciled by key but still stored in order here). `events` maps each
 /// attached DOM listener's event name to its handler-table id, so a patch can
 /// update the handler in place or detach it.
-#[cfg(target_arch = "wasm32")]
-struct RNode {
-    handle: u32,
-    kids: Vec<RNode>,
-    events: Vec<(Vec<u8>, u32)>,
-}
 
 /// One live event listener: the decoder to run against the event JSON, the
 /// handler options (0 normal, 1 mayStopPropagation, 2 mayPreventDefault, 3
 /// custom), and the `Html.map` tagger chain to apply to the decoded message.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy)]
-struct Handler {
-    decoder: u64,
-    opts: i64,
-    tagger: u64,
-}
 
-#[cfg(target_arch = "wasm32")]
-static mut HANDLERS: Vec<Handler> = Vec::new();
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_MODEL: u64 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_VIEW: u64 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_UPDATE: u64 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_SUBSCRIPTIONS: u64 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_KIND: u32 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_ROOT: Option<RNode> = None;
 /// The last rendered Html value, diffed against the next `view` result.
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_OLD_VIEW: u64 = 0;
 
 /// `onUrlRequest` / `onUrlChange` for a `Browser.application`.
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_ON_URL_REQUEST: u64 = 0;
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_ON_URL_CHANGE: u64 = 0;
 
 // Live subscription resources, rebuilt on each `br_update_subs` (matching
 // runtime.js, which clears and re-creates listeners/timers every dispatch).
-#[cfg(target_arch = "wasm32")]
-static mut NEXT_SUB_ID: u32 = 1;
 /// (sub_id, to_msg, tagger) per active `Time.every` interval.
-#[cfg(target_arch = "wasm32")]
-static mut ACTIVE_TIMERS: Vec<(u32, u64, u64)> = Vec::new();
 /// (delta?, to_msg, tagger) per active animation-frame subscription.
-#[cfg(target_arch = "wasm32")]
-static mut ACTIVE_ANIM: Vec<(bool, u64, u64)> = Vec::new();
-#[cfg(target_arch = "wasm32")]
-static mut ANIM_PENDING: bool = false;
-#[cfg(target_arch = "wasm32")]
-static mut ANIM_LAST: f64 = 0.0;
 /// (sub_id, event name, decoder, tagger) per active `Browser.Events` listener.
-#[cfg(target_arch = "wasm32")]
-static mut ACTIVE_DOM_SUBS: Vec<(u32, Vec<u8>, u64, u64)> = Vec::new();
 /// (port name, converter, to_msg, tagger) per active incoming-port subscriber.
-#[cfg(target_arch = "wasm32")]
-static mut ACTIVE_PORT_SUBS: Vec<(Vec<u8>, u64, u64, u64)> = Vec::new();
 /// Suspended tasks awaiting a host callback (sleep / http), indexed by task id.
-#[cfg(target_arch = "wasm32")]
-static mut PENDING_TASKS: Vec<Option<PendingTask>> = Vec::new();
 
-#[cfg(target_arch = "wasm32")]
-struct PendingTask {
-    frames: Vec<Frame>,
-    tagger: u64,
-}
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_next_sub_id() -> u32 {
-    let id = NEXT_SUB_ID;
-    NEXT_SUB_ID += 1;
-    id
-}
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_alloc_handler(h: Handler) -> u32 {
-    HANDLERS.push(h);
-    (HANDLERS.len() - 1) as u32
-}
 
 /// Attach a DOM event listener for `attr` (an AEvent) on `node`, reusing the
 /// handler id from `old_events` for the same event name if present (so the
 /// shim's listener stays valid and only its decoder/tagger update).
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_attach_event(
-    node: u32,
-    attr: u64,
-    tagger: u64,
-    old_events: &[(Vec<u8>, u32)],
-    out: &mut Vec<(Vec<u8>, u32)>,
-) {
-    let name = ctor_get(attr, 0);
-    let h = Handler { decoder: ctor_get(attr, 1), opts: int_val(ctor_get(attr, 2)), tagger };
-    let name_b = sbytes(name).to_vec();
-    if let Some(&(_, hid)) = old_events.iter().find(|(n, _)| *n == name_b) {
-        HANDLERS[hid as usize] = h; // same listener, new decoder/tagger
-        out.push((name_b, hid));
-    } else {
-        let hid = br_alloc_handler(h);
-        dom_add_event_listener(node, name_b.as_ptr(), name_b.len(), hid);
-        out.push((name_b, hid));
-    }
-}
 
 /// Apply one non-event Attribute (style / attribute / property) to a DOM node.
 /// Mirrors runtime.js `_VDom_applyAttr` (events are handled by `br_attach_event`).
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_set_attr(node: u32, attr: u64, index: u32, key: u64, rest: &[u64]) {
-    match index {
-        AI_STYLE => {
-            let k = sbytes(key);
-            let v = sbytes(rest[0]);
-            dom_set_style(node, k.as_ptr(), k.len(), v.as_ptr(), v.len());
-        }
-        AI_ATTR => {
-            let k = sbytes(key);
-            if rest[1] != nothing() {
-                let ns = sbytes(ctor_get(rest[1], 0));
-                let v = sbytes(rest[0]);
-                dom_set_attribute_ns(
-                    node, ns.as_ptr(), ns.len(), k.as_ptr(), k.len(), v.as_ptr(), v.len(),
-                );
-            } else {
-                let v = sbytes(rest[0]);
-                dom_set_attribute(node, k.as_ptr(), k.len(), v.as_ptr(), v.len());
-            }
-        }
-        AI_PROP => {
-            let k = sbytes(key);
-            // The property value crosses as JSON so the shim assigns the right
-            // JS type (string / bool / number), like `dom[key] = val` in JS.
-            let json = json_serialize(&val_to_json(rest[0]), 0).into_bytes();
-            dom_set_property(node, k.as_ptr(), k.len(), json.as_ptr(), json.len());
-        }
-        _ => {
-            let _ = attr;
-        }
-    }
-}
 
 /// Remove one non-event Attribute from a DOM node. Mirrors runtime.js
 /// `_VDom_unapplyAttr`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_unset_attr(node: u32, index: u32, key: u64, rest: &[u64]) {
-    match index {
-        AI_STYLE => {
-            let k = sbytes(key);
-            dom_remove_style(node, k.as_ptr(), k.len());
-        }
-        AI_ATTR => {
-            let k = sbytes(key);
-            dom_remove_attribute(node, k.as_ptr(), k.len());
-        }
-        AI_PROP => {
-            let k = sbytes(key);
-            // A boolean property resets to `false`, a string one to `''`
-            // (matching runtime.js) — the shim reads `was_bool` to pick.
-            let was_bool = matches!(deref(rest[0]), Value::Bool(_)) as u32;
-            dom_remove_property(node, k.as_ptr(), k.len(), was_bool);
-        }
-        _ => {}
-    }
-}
 
 /// A non-event attribute's identity (kind + key bytes), so a patch can tell
 /// whether the same fact is present in both the old and new attribute lists —
 /// runtime.js's `_VDom_attrKey`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn attr_ident(attr: u64) -> Option<(u32, Vec<u8>)> {
-    match deref(attr) {
-        Value::Ctor { index, arg0, .. } if *index != AI_EVENT => {
-            Some((*index, sbytes(*arg0).to_vec()))
-        }
-        _ => None,
-    }
-}
 
 /// Build a real DOM subtree from an Html value, returning its handle mirror.
 /// Mirrors runtime.js `_VDom_render`. `tagger` is the `Html.map` chain in force
 /// (applied to any event's decoded message).
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_render(html: u64, tagger: u64) -> RNode {
-    match ctor_index(html) {
-        VI_TEXT => {
-            let s = sbytes(ctor_get(html, 0));
-            RNode { handle: dom_create_text(s.as_ptr(), s.len()), kids: Vec::new(), events: Vec::new() }
-        }
-        // Html.map: push the tagger into the chain and render the child.
-        VI_MAP => br_render(ctor_get(html, 1), tagger_compose(tagger, ctor_get(html, 0))),
-        VI_NODE | VI_KEYED => {
-            let keyed = ctor_index(html) == VI_KEYED;
-            let tag = sbytes(ctor_get(html, 0));
-            let ns = ctor_get(html, 3);
-            let handle = if ns != nothing() {
-                let n = sbytes(ctor_get(ns, 0));
-                dom_create_element_ns(n.as_ptr(), n.len(), tag.as_ptr(), tag.len())
-            } else {
-                dom_create_element(tag.as_ptr(), tag.len())
-            };
-            let mut events = Vec::new();
-            for &a in &to_vec(ctor_get(html, 1)) {
-                if let Value::Ctor { index, arg0, rest, .. } = deref(a) {
-                    if *index == AI_EVENT {
-                        br_attach_event(handle, a, tagger, &[], &mut events);
-                    } else {
-                        br_set_attr(handle, a, *index, *arg0, rest);
-                    }
-                }
-            }
-            let mut kids = Vec::new();
-            for &kid in &to_vec(ctor_get(html, 2)) {
-                let child_html = if keyed { tuple_second(kid) } else { kid };
-                let child = br_render(child_html, tagger);
-                dom_append_child(handle, child.handle);
-                kids.push(child);
-            }
-            RNode { handle, kids, events }
-        }
-        // Unknown (e.g. VLazy, not yet supported): render an empty text node so
-        // the tree shape stays valid.
-        _ => RNode {
-            handle: dom_create_text([].as_ptr(), 0),
-            kids: Vec::new(),
-            events: Vec::new(),
-        },
-    }
-}
 
 /// Normalize past `Html.map` wrappers, composing their taggers, so the diff
 /// compares the underlying node. Returns (unwrapped html, tagger).
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_unwrap_map(mut html: u64, mut tagger: u64) -> (u64, u64) {
-    while ctor_index(html) == VI_MAP {
-        tagger = tagger_compose(tagger, ctor_get(html, 0));
-        html = ctor_get(html, 1);
-    }
-    (html, tagger)
-}
 
 /// Diff `old_html` against `new_html` (whose DOM is mirrored by `old_r`),
 /// mutating the DOM in place and returning the new mirror. `parent` is the
 /// handle of the enclosing element; when the root node itself is replaced,
 /// `is_root` routes to `dom_replace_root`. Mirrors runtime.js `_VDom_patch`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_patch(
-    parent: u32,
-    is_root: bool,
-    old_r: RNode,
-    old_html: u64,
-    new_html: u64,
-    tagger: u64,
-) -> RNode {
-    let (old_html, _old_tagger) = br_unwrap_map(old_html, identity());
-    let (new_html, tagger) = br_unwrap_map(new_html, tagger);
-    let (oi, ni) = (ctor_index(old_html), ctor_index(new_html));
-
-    // Text-to-text: update the text if it changed.
-    if oi == VI_TEXT && ni == VI_TEXT {
-        let (o, n) = (sbytes(ctor_get(old_html, 0)), sbytes(ctor_get(new_html, 0)));
-        if o != n {
-            dom_set_text(old_r.handle, n.as_ptr(), n.len());
-        }
-        return old_r;
-    }
-
-    // Same element kind, tag and namespace: patch facts, then children.
-    let same = (oi == VI_NODE || oi == VI_KEYED)
-        && oi == ni
-        && sbytes(ctor_get(old_html, 0)) == sbytes(ctor_get(new_html, 0))
-        && ns_eq(ctor_get(old_html, 3), ctor_get(new_html, 3));
-    if same {
-        let events = br_patch_facts(old_r.handle, old_html, new_html, tagger, &old_r.events);
-        let kids = br_patch_children(old_r.handle, oi == VI_KEYED, old_r.kids, old_html, new_html, tagger);
-        return RNode { handle: old_r.handle, kids, events };
-    }
-
-    // Otherwise replace the whole node.
-    br_detach_events(&old_r);
-    let new_r = br_render(new_html, tagger);
-    if is_root {
-        dom_replace_root(new_r.handle);
-    } else {
-        dom_replace_child(parent, new_r.handle, old_r.handle);
-    }
-    new_r
-}
 
 /// Two namespace Maybes are equal when both are Nothing, or both Just the same
 /// string.
-#[cfg(target_arch = "wasm32")]
-unsafe fn ns_eq(a: u64, b: u64) -> bool {
-    let (an, bn) = (a == nothing(), b == nothing());
-    if an || bn {
-        return an && bn;
-    }
-    sbytes(ctor_get(a, 0)) == sbytes(ctor_get(b, 0))
-}
 
 /// Detach every event listener under a node being removed, so the shim drops
 /// its DOM listeners.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_detach_events(r: &RNode) {
-    for (name, hid) in &r.events {
-        dom_remove_event_listener(r.handle, name.as_ptr(), name.len(), *hid);
-    }
-    for kid in &r.kids {
-        br_detach_events(kid);
-    }
-}
 
 /// Diff the facts (attributes / properties / styles / events) of one element:
 /// apply the new ones, unapply the old ones no longer present. Mirrors the
 /// attribute half of runtime.js `_VDom_patch`. Returns the new event list.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_patch_facts(
-    node: u32,
-    old_html: u64,
-    new_html: u64,
-    tagger: u64,
-    old_events: &[(Vec<u8>, u32)],
-) -> Vec<(Vec<u8>, u32)> {
-    let old_attrs = to_vec(ctor_get(old_html, 1));
-    let new_attrs = to_vec(ctor_get(new_html, 1));
-
-    // Non-event facts: apply all new, then remove old ones not in the new set.
-    let mut new_idents: Vec<(u32, Vec<u8>)> = Vec::new();
-    for &a in &new_attrs {
-        if let Value::Ctor { index, arg0, rest, .. } = deref(a) {
-            if *index != AI_EVENT {
-                br_set_attr(node, a, *index, *arg0, rest);
-                new_idents.push((*index, sbytes(*arg0).to_vec()));
-            }
-        }
-    }
-    for &a in &old_attrs {
-        if let Some(id) = attr_ident(a) {
-            if !new_idents.contains(&id) {
-                if let Value::Ctor { index, arg0, rest, .. } = deref(a) {
-                    br_unset_attr(node, *index, *arg0, rest);
-                }
-            }
-        }
-    }
-
-    // Events: update in place by name (keeping the listener), add new ones,
-    // detach removed ones.
-    let mut events = Vec::new();
-    for &a in &new_attrs {
-        if ctor_index(a) == AI_EVENT {
-            br_attach_event(node, a, tagger, old_events, &mut events);
-        }
-    }
-    for (name, hid) in old_events {
-        if !events.iter().any(|(n, _)| n == name) {
-            dom_remove_event_listener(node, name.as_ptr(), name.len(), *hid);
-        }
-    }
-    events
-}
 
 /// Diff the children of one element. Keyed nodes reconcile by key; plain nodes
 /// diff by index (extra old children removed, extra new children appended).
 /// Mirrors runtime.js `_VDom_patch`'s child loop / `_VDom_patchKeyed`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_patch_children(
-    parent: u32,
-    keyed: bool,
-    old_kids: Vec<RNode>,
-    old_html: u64,
-    new_html: u64,
-    tagger: u64,
-) -> Vec<RNode> {
-    let old_list = to_vec(ctor_get(old_html, 2));
-    let new_list = to_vec(ctor_get(new_html, 2));
-    if keyed {
-        return br_patch_keyed(parent, old_kids, &old_list, &new_list, tagger);
-    }
-
-    let mut old_kids = old_kids;
-    let mut out: Vec<RNode> = Vec::new();
-    let shared = old_kids.len().min(new_list.len());
-    // Drain shared prefix (moving each old mirror into the patch).
-    let mut drained = old_kids.drain(..shared);
-    for i in 0..shared {
-        let child = drained.next().unwrap();
-        out.push(br_patch(parent, false, child, old_list[i], new_list[i], tagger));
-    }
-    drop(drained);
-    // Remove extra old children (from the end).
-    for extra in old_kids {
-        br_detach_events(&extra);
-        dom_remove_child(parent, extra.handle);
-    }
-    // Append extra new children.
-    for i in shared..new_list.len() {
-        let child = br_render(new_list[i], tagger);
-        dom_append_child(parent, child.handle);
-        out.push(child);
-    }
-    out
-}
 
 /// Longest-increasing-subsequence over `source` (each new child's old index,
 /// or -1 for a freshly rendered node). Returns a mask marking the reused
 /// children already in the right relative order, so they can stay put while
 /// everything else is moved. Mirrors `_VDom_keyedStable` in runtime.js.
-#[cfg(target_arch = "wasm32")]
-fn br_keyed_stable(source: &[i32]) -> Vec<bool> {
-    let n = source.len();
-    let mut stay = vec![false; n];
-    let mut parent = vec![usize::MAX; n];
-    let mut tails: Vec<usize> = Vec::new(); // indices into source; source[] increasing
-    for i in 0..n {
-        if source[i] < 0 {
-            continue; // freshly rendered: never "stays"
-        }
-        match tails.last() {
-            None => tails.push(i),
-            Some(&last) if source[last] < source[i] => {
-                parent[i] = last;
-                tails.push(i);
-            }
-            _ => {
-                // first tail whose value is >= source[i]
-                let (mut lo, mut hi) = (0usize, tails.len() - 1);
-                while lo < hi {
-                    let mid = (lo + hi) / 2;
-                    if source[tails[mid]] < source[i] {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
-                }
-                if lo > 0 {
-                    parent[i] = tails[lo - 1];
-                }
-                tails[lo] = i;
-            }
-        }
-    }
-    let mut cur = tails.last().copied().unwrap_or(usize::MAX);
-    while cur != usize::MAX {
-        stay[cur] = true;
-        cur = parent[cur];
-    }
-    stay
-}
 
 /// Keyed child reconciliation: reuse the DOM node (and patch its subtree) for a
 /// matching key, and move only the nodes that actually changed position — the
 /// LIS of old indices stays put, everything else is inserted before the next
 /// already-placed sibling. Mirrors runtime.js `_VDom_patchKeyed`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_patch_keyed(
-    parent: u32,
-    old_kids: Vec<RNode>,
-    old_list: &[u64],
-    new_list: &[u64],
-    tagger: u64,
-) -> Vec<RNode> {
-    // Pair each old key with its child html and DOM mirror (old_list and
-    // old_kids are aligned by index, so an entry's position is its old index).
-    let mut old_kids = old_kids;
-    old_kids.reverse(); // pop() now yields index 0 first
-    let mut old_by_key: Vec<(Vec<u8>, u64, Option<RNode>)> = Vec::new();
-    for &pair in old_list {
-        let key = sbytes(tuple_first(pair)).to_vec();
-        old_by_key.push((key, tuple_second(pair), old_kids.pop()));
-    }
 
-    // Build the new mirror list, reusing DOM nodes for matching keys.
-    // `source[j]` is the old index of new child j, or -1 if freshly rendered.
-    let mut out: Vec<RNode> = Vec::with_capacity(new_list.len());
-    let mut source: Vec<i32> = Vec::with_capacity(new_list.len());
-    for &pair in new_list {
-        let key = sbytes(tuple_first(pair)).to_vec();
-        let new_child = tuple_second(pair);
-        let mut matched: Option<usize> = None;
-        for (idx, (k, _, m)) in old_by_key.iter().enumerate() {
-            if *k == key && m.is_some() {
-                matched = Some(idx);
-                break;
-            }
-        }
-        match matched {
-            Some(idx) => {
-                let m = old_by_key[idx].2.take().unwrap();
-                let old_child_html = old_by_key[idx].1;
-                source.push(idx as i32);
-                out.push(br_patch(parent, false, m, old_child_html, new_child, tagger));
-            }
-            None => {
-                source.push(-1);
-                out.push(br_render(new_child, tagger));
-            }
-        }
-    }
 
-    // Old children whose key disappeared: detach listeners and remove the node.
-    // Reused nodes stay attached and are repositioned below.
-    for (_, _, mirror) in &old_by_key {
-        if let Some(m) = mirror {
-            br_detach_events(m);
-            dom_remove_child(parent, m.handle);
-        }
-    }
-
-    // Insert/move from the end so `reference` is always an already-placed node
-    // (0 == null == append at end). Nodes in the LIS are already in order and
-    // left untouched; only moved or freshly-rendered nodes are inserted.
-    let stay = br_keyed_stable(&source);
-    let handles: Vec<u32> = out.iter().map(|m| m.handle).collect();
-    let mut reference: u32 = 0;
-    for m in (0..out.len()).rev() {
-        if source[m] < 0 || !stay[m] {
-            dom_insert_before(parent, handles[m], reference);
-        }
-        reference = handles[m];
-    }
-    out
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_now() -> f64 {
-    host_now()
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn ctor_name(v: u64) -> &'static str {
-    match deref(v) {
-        Value::Ctor { name, .. } => cname(*name),
-        _ => "",
-    }
-}
 
 /// Re-`view` the model and patch the DOM. For `Browser.document`/`application`
 /// the view is a `{ title, body }` record; the body list is wrapped in a single
 /// root element (matching runtime.js) and the title pushed to the host.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_render_update() {
-    let view_result = ap1(BROWSER_VIEW, BROWSER_MODEL);
-    let new_html = br_view_html(view_result);
-    if let Some(old_r) = BROWSER_ROOT.take() {
-        let new_r = br_patch(0, true, old_r, BROWSER_OLD_VIEW, new_html, identity());
-        BROWSER_ROOT = Some(new_r);
-    }
-    BROWSER_OLD_VIEW = new_html;
-}
 
 /// Turn a view result into the Html node to render. Html for sandbox/element;
 /// for document/application, set the title and wrap the body list in a `<div>`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_view_html(view_result: u64) -> u64 {
-    if BROWSER_KIND == PROG_DOCUMENT || BROWSER_KIND == PROG_APPLICATION {
-        let title = rt_access(view_result, b"title\0".as_ptr());
-        let t = sbytes(title);
-        dom_set_title(t.as_ptr(), t.len());
-        let body = rt_access(view_result, b"body\0".as_ptr());
-        vnode(mkstr(b"div".to_vec()), nil(), body, nothing())
-    } else {
-        view_result
-    }
-}
 
 /// Handle a dispatched message: run `update`, execute its command, re-`view`,
 /// patch the DOM, and reconcile subscriptions. Mirrors runtime.js `dispatch`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_dispatch(msg: u64) {
-    if BROWSER_KIND == PROG_SANDBOX {
-        BROWSER_MODEL = ap2(BROWSER_UPDATE, msg, BROWSER_MODEL);
-        br_render_update();
-    } else {
-        let pair = ap2(BROWSER_UPDATE, msg, BROWSER_MODEL);
-        BROWSER_MODEL = rt_tuple_item(pair, 0);
-        br_run_cmd(rt_tuple_item(pair, 1), identity());
-        br_render_update();
-        br_update_subs();
-    }
-}
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_alloc_pending(p: PendingTask) -> u32 {
-    PENDING_TASKS.push(Some(p));
-    (PENDING_TASKS.len() - 1) as u32
-}
 
 /// Run a command, applying `tagger` to any message it ultimately dispatches.
 /// Mirrors runtime.js `runCmd`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_run_cmd(cmd: u64, tagger: u64) {
-    match ctor_name(cmd) {
-        "CmdNone" => {}
-        "CmdBatch" => {
-            for c in to_vec(ctor_get(cmd, 0)) {
-                br_run_cmd(c, tagger);
-            }
-        }
-        "CmdMap" => br_run_cmd(ctor_get(cmd, 1), tagger_compose(tagger, ctor_get(cmd, 0))),
-        "CmdTask" => br_run_task(ctor_get(cmd, 0), Vec::new(), tagger),
-        "CmdWrite" => out_line(sbytes(ctor_get(cmd, 0))),
-        "CmdPort" => {
-            let name = sbytes(ctor_get(cmd, 0));
-            let json = json_serialize(&as_json(ctor_get(cmd, 1)).clone(), 0).into_bytes();
-            host_port_out(name.as_ptr(), name.len(), json.as_ptr(), json.len());
-        }
-        "CmdHttp" => br_run_http(ctor_get(cmd, 0), tagger),
-        "CmdNav" => br_run_nav(cmd),
-        "CmdLoad" => {
-            let url = sbytes(ctor_get(cmd, 0));
-            host_nav(3, url.as_ptr(), url.len(), 0);
-        }
-        "CmdReload" => host_nav(4, [].as_ptr(), 0, 0),
-        _ => {}
-    }
-}
 
 /// Drive a task until it suspends (sleep / http) or completes. On completion
 /// the message is dispatched; a suspend registers a `PendingTask` the host
 /// resumes via `alm_on_timeout` / `alm_on_http`. Mirrors the native
 /// `run_task`, but async instead of blocking.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_run_task(mut task: u64, mut frames: Vec<Frame>, tagger: u64) {
-    loop {
-        match ctor_index(task) {
-            TT_SUCCEED => {
-                let v = rt_ctor_arg(task, 0);
-                while frames.last().is_some_and(|f| f.kind != 0) {
-                    frames.pop();
-                }
-                match frames.pop() {
-                    None => {
-                        br_dispatch(ap1(tagger, v));
-                        return;
-                    }
-                    Some(frame) => task = ap1(frame.f, v),
-                }
-            }
-            TT_FAIL => {
-                let e = rt_ctor_arg(task, 0);
-                while frames.last().is_some_and(|f| f.kind != 1) {
-                    frames.pop();
-                }
-                match frames.pop() {
-                    // No error handler: drop it (a browser program has no
-                    // stdout to crash to). Matches "unhandled" being inert.
-                    None => return,
-                    Some(frame) => task = ap1(frame.f, e),
-                }
-            }
-            TT_AND_THEN => {
-                frames.push(Frame { kind: 0, f: rt_ctor_arg(task, 0) });
-                task = rt_ctor_arg(task, 1);
-            }
-            TT_ON_ERROR => {
-                frames.push(Frame { kind: 1, f: rt_ctor_arg(task, 0) });
-                task = rt_ctor_arg(task, 1);
-            }
-            TT_SLEEP => {
-                let ms = num(rt_ctor_arg(task, 0));
-                let id = br_alloc_pending(PendingTask { frames, tagger });
-                host_set_timeout(id, ms);
-                return;
-            }
-            TT_NOW => task = task_succeed(time_posix(br_now())),
-            _ => return,
-        }
-    }
-}
 
 /// The host fired a `Process.sleep` timeout: resume the suspended task.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_timeout(task_id: u32) {
-    if let Some(p) = PENDING_TASKS.get_mut(task_id as usize).and_then(Option::take) {
-        br_run_task(task_succeed(unit()), p.frames, p.tagger);
-    }
-}
 
 /// A subscription accumulator, filled by walking the `Sub` tree.
-#[cfg(target_arch = "wasm32")]
-#[derive(Default)]
-struct SubAcc {
-    timers: Vec<(u64, u64, u64)>, // (interval, to_msg, tagger)
-    anim: Vec<(bool, u64, u64)>,  // (delta?, to_msg, tagger)
-    dom: Vec<(Vec<u8>, u64, u64)>, // (event name, decoder, tagger)
-    port: Vec<(Vec<u8>, u64, u64, u64)>, // (name, converter, to_msg, tagger)
-}
 
 /// Walk a `Sub` tree into `acc`, composing `Sub.map` taggers. Mirrors
 /// runtime.js `collectSubs`.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_collect_subs(sub: u64, tagger: u64, acc: &mut SubAcc) {
-    match ctor_name(sub) {
-        "SubNone" => {}
-        "SubBatch" => {
-            for s in to_vec(ctor_get(sub, 0)) {
-                br_collect_subs(s, tagger, acc);
-            }
-        }
-        "SubMap" => {
-            br_collect_subs(ctor_get(sub, 1), tagger_compose(tagger, ctor_get(sub, 0)), acc)
-        }
-        "SubTime" => acc.timers.push((ctor_get(sub, 0), ctor_get(sub, 1), tagger)),
-        "SubAnimation" => {
-            // (delta?, to_msg): delta true for onAnimationFrameDelta.
-            let delta = rt_is_true(ctor_get(sub, 0));
-            acc.anim.push((delta, ctor_get(sub, 1), tagger));
-        }
-        "SubDom" => acc.dom.push((
-            sbytes(ctor_get(sub, 0)).to_vec(),
-            ctor_get(sub, 1),
-            tagger,
-        )),
-        "SubPort" => acc.port.push((
-            sbytes(ctor_get(sub, 0)).to_vec(),
-            ctor_get(sub, 1),
-            ctor_get(sub, 2),
-            tagger,
-        )),
-        _ => {}
-    }
-}
 
 /// Reconcile live subscriptions after a dispatch: tear down every host
 /// resource and rebuild from the current model, matching runtime.js
 /// `updateSubs` (which clears and re-creates each time).
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_update_subs() {
-    for (sub_id, _, _) in std::mem::take(&mut ACTIVE_TIMERS) {
-        host_clear_interval(sub_id);
-    }
-    for (sub_id, name, _, _) in std::mem::take(&mut ACTIVE_DOM_SUBS) {
-        host_remove_dom_sub(sub_id, name.as_ptr(), name.len());
-    }
-    ACTIVE_PORT_SUBS.clear();
-    ACTIVE_ANIM.clear();
-
-    let mut acc = SubAcc::default();
-    br_collect_subs(ap1(BROWSER_SUBSCRIPTIONS, BROWSER_MODEL), identity(), &mut acc);
-
-    for (interval, to_msg, tagger) in acc.timers {
-        let id = br_next_sub_id();
-        ACTIVE_TIMERS.push((id, to_msg, tagger));
-        host_set_interval(id, num(interval));
-    }
-    for (name, decoder, tagger) in acc.dom {
-        let id = br_next_sub_id();
-        host_add_dom_sub(id, name.as_ptr(), name.len());
-        ACTIVE_DOM_SUBS.push((id, name, decoder, tagger));
-    }
-    ACTIVE_PORT_SUBS = acc.port;
-    ACTIVE_ANIM = acc.anim;
-    if !ACTIVE_ANIM.is_empty() && !ANIM_PENDING {
-        ANIM_PENDING = true;
-        ANIM_LAST = br_now();
-        host_request_frame();
-    }
-}
 
 /// The host fired an interval tick for a `Time.every` subscription.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_interval(sub_id: u32) {
-    if let Some(&(_, to_msg, tagger)) = ACTIVE_TIMERS.iter().find(|(id, _, _)| *id == sub_id) {
-        br_dispatch(ap1(tagger, ap1(to_msg, time_posix(br_now()))));
-    }
-}
 
 /// The host delivered an animation frame: dispatch each animation subscription,
 /// then request the next frame if any remain.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_frame(now: f64) {
-    ANIM_PENDING = false;
-    let delta = now - ANIM_LAST;
-    ANIM_LAST = now;
-    for (is_delta, to_msg, tagger) in ACTIVE_ANIM.clone() {
-        let arg = if is_delta { rt_float(delta) } else { time_posix(now) };
-        br_dispatch(ap1(tagger, ap1(to_msg, arg)));
-    }
-    if !ACTIVE_ANIM.is_empty() && !ANIM_PENDING {
-        ANIM_PENDING = true;
-        host_request_frame();
-    }
-}
 
 /// The host fired a document-level `Browser.Events` listener.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_dom_event(sub_id: u32, json: *const u8, json_len: usize) {
-    let found = ACTIVE_DOM_SUBS.iter().find(|(id, _, _, _)| *id == sub_id);
-    if let Some(&(_, _, decoder, tagger)) = found {
-        let bytes = std::slice::from_raw_parts(json, json_len);
-        if let Ok(jv) = json_parse(bytes) {
-            if let Ok(v) = run_decoder(decoder, &jv) {
-                br_dispatch(ap1(tagger, v));
-            }
-        }
-    }
-}
 
 /// The host delivered a value on an incoming port.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_port_send(name: *const u8, name_len: usize, json: *const u8, json_len: usize) {
-    let nm = std::slice::from_raw_parts(name, name_len);
-    let bytes = std::slice::from_raw_parts(json, json_len);
-    let jv = match json_parse(bytes) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    let value = mk_json(jv);
-    // Snapshot matching subscribers first (dispatch may re-run updateSubs).
-    let subs: Vec<(u64, u64, u64)> = ACTIVE_PORT_SUBS
-        .iter()
-        .filter(|(n, _, _, _)| n == nm)
-        .map(|(_, converter, to_msg, tagger)| (*converter, *to_msg, *tagger))
-        .collect();
-    for (converter, to_msg, tagger) in subs {
-        // Incoming ports carry a converter (JSON -> Elm) then a toMsg.
-        let decoded = ap1(converter, value);
-        br_dispatch(ap1(tagger, ap1(to_msg, decoded)));
-    }
-}
 
 /// A suspended HTTP request awaiting the host's response callback.
-#[cfg(target_arch = "wasm32")]
-struct PendingHttp {
-    expect: u64,
-    tagger: u64,
-}
-#[cfg(target_arch = "wasm32")]
-static mut HTTP_PENDING: Vec<Option<PendingHttp>> = Vec::new();
 
 /// Fire an HTTP request through the host. The response arrives via
 /// `alm_on_http`, which builds the `Result` and dispatches.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_run_http(config: u64, tagger: u64) {
-    let method = sbytes(rt_access(config, b"method\0".as_ptr()));
-    let url = sbytes(rt_access(config, b"url\0".as_ptr()));
-    // Headers → a JSON array of [name, value] pairs.
-    let headers: Vec<JsonValue> = to_vec(rt_access(config, b"headers\0".as_ptr()))
-        .iter()
-        .map(|&h| {
-            JsonValue::JArray(vec![
-                JsonValue::JStr(sbytes(rt_access(h, b"name\0".as_ptr())).to_vec()),
-                JsonValue::JStr(sbytes(rt_access(h, b"value\0".as_ptr())).to_vec()),
-            ])
-        })
-        .collect();
-    let headers_json = json_serialize(&JsonValue::JArray(headers), 0).into_bytes();
-    // Body content: a string, or empty when null.
-    let content = rt_access(rt_access(config, b"body\0".as_ptr()), b"content\0".as_ptr());
-    let body: &[u8] = if is_str_value(content) { sbytes(content) } else { b"" };
 
-    let expect = rt_access(config, b"expect\0".as_ptr());
-    HTTP_PENDING.push(Some(PendingHttp { expect, tagger }));
-    let id = (HTTP_PENDING.len() - 1) as u32;
-    host_http(
-        id,
-        method.as_ptr(),
-        method.len(),
-        url.as_ptr(),
-        url.len(),
-        headers_json.as_ptr(),
-        headers_json.len(),
-        body.as_ptr(),
-        body.len(),
-    );
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn http_bad_status(status: i64) -> u64 {
-    ctor1(b"BadStatus\0".as_ptr(), 3, rt_int(status))
-}
-#[cfg(target_arch = "wasm32")]
-unsafe fn http_network_error() -> u64 {
-    ctor(b"NetworkError\0".as_ptr(), 2, Vec::new())
-}
 
 /// Build the `Http.Metadata` record for a response.
-#[cfg(target_arch = "wasm32")]
-unsafe fn http_metadata(url: &[u8], status: i64) -> u64 {
-    let rec = rt_record_new(4);
-    rt_record_set(rec, 0, b"url\0".as_ptr(), mkstr(url.to_vec()));
-    rt_record_set(rec, 1, b"statusCode\0".as_ptr(), rt_int(status));
-    rt_record_set(rec, 2, b"statusText\0".as_ptr(), mkstr(Vec::new()));
-    rt_record_set(rec, 3, b"headers\0".as_ptr(), alloc(Value::Dict(0)));
-    rec
-}
 
 /// Turn an expect + response into the `Result Error a` for `toMsg`. Mirrors
 /// elm/http's `expect*` handlers (see runtime.js `_Http_defaultHandle`).
-#[cfg(target_arch = "wasm32")]
-unsafe fn build_http_result(expect: u64, status: i64, body: &[u8]) -> u64 {
-    let kind = int_val(rt_access(expect, b"kind\0".as_ptr()));
-    let arg = rt_access(expect, b"arg\0".as_ptr());
-    let good = (200..300).contains(&status);
-
-    // Response-based expects hand the raw response to the resolver.
-    if kind == EXPECT_STRING_RESPONSE || kind == EXPECT_BYTES_RESPONSE {
-        let meta = http_metadata(b"", status);
-        let response = if status == 0 {
-            ctor(b"NetworkError_\0".as_ptr(), 2, Vec::new())
-        } else if good {
-            ctor(b"GoodStatus_\0".as_ptr(), 4, vec![meta, mkstr(body.to_vec())])
-        } else {
-            ctor(b"BadStatus_\0".as_ptr(), 3, vec![meta, mkstr(body.to_vec())])
-        };
-        return ap1(arg, response);
-    }
-
-    if status == 0 {
-        return res_err(http_network_error());
-    }
-    if !good {
-        return res_err(http_bad_status(status));
-    }
-    match kind {
-        EXPECT_WHATEVER => res_ok(unit()),
-        EXPECT_JSON => match json_parse(body) {
-            Ok(jv) => match run_decoder(arg, &jv) {
-                Ok(v) => res_ok(v),
-                Err(e) => res_err(ctor1(b"BadBody\0".as_ptr(), 4, json_error_to_string(e))),
-            },
-            Err(msg) => res_err(ctor1(
-                b"BadBody\0".as_ptr(),
-                4,
-                mkstr(msg.into_bytes()),
-            )),
-        },
-        // EXPECT_STRING and any unknown kind: hand back the body text.
-        _ => res_ok(mkstr(body.to_vec())),
-    }
-}
 
 /// The host delivered an HTTP response (status 0 == network error).
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_http(task_id: u32, status: i32, body: *const u8, body_len: usize) {
-    let p = match HTTP_PENDING.get_mut(task_id as usize).and_then(Option::take) {
-        Some(p) => p,
-        None => return,
-    };
-    let body = std::slice::from_raw_parts(body, body_len);
-    let result = build_http_result(p.expect, status as i64, body);
-    let to_msg = rt_access(p.expect, b"toMsg\0".as_ptr());
-    br_dispatch(ap1(p.tagger, ap1(to_msg, result)));
-}
 
 /// Run a `CmdNav` (push / replace / go), delegating to the host.
-#[cfg(target_arch = "wasm32")]
-unsafe fn br_run_nav(cmd: u64) {
-    match int_val(ctor_get(cmd, 0)) {
-        kind @ (0 | 1) => {
-            let url = sbytes(ctor_get(cmd, 1));
-            host_nav(kind as u32, url.as_ptr(), url.len(), 0);
-        }
-        2 => host_nav(2, [].as_ptr(), 0, int_val(ctor_get(cmd, 2)) as i32),
-        _ => {}
-    }
-}
 
 /// The JS shim calls this when a DOM event fires: decode the event JSON with
 /// the stored handler, dispatch the message, and return a flags bitmask
 /// (bit 0 = preventDefault, bit 1 = stopPropagation) for the shim to act on.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_event(hid: u32, json: *const u8, json_len: usize) -> u32 {
-    let h = match HANDLERS.get(hid as usize) {
-        Some(h) => *h,
-        None => return 0,
-    };
-    let bytes = std::slice::from_raw_parts(json, json_len);
-    let jv = match json_parse(bytes) {
-        Ok(j) => j,
-        Err(_) => return 0,
-    };
-    let decoded = match run_decoder(h.decoder, &jv) {
-        Ok(v) => v,
-        Err(_) => return 0, // a failed decoder is a no-op, as in the JS runtime
-    };
-    // Extract the message and any preventDefault / stopPropagation flags per
-    // the handler kind (see runtime.js `_VDom_applyAttr`).
-    let (msg, flags) = match h.opts {
-        1 => {
-            // MayStopPropagation: decoder yields ( msg, Bool ).
-            let stop = rt_is_true(rt_tuple_item(decoded, 1)) as u32;
-            (rt_tuple_item(decoded, 0), stop << 1)
-        }
-        2 => {
-            // MayPreventDefault: decoder yields ( msg, Bool ).
-            let prevent = rt_is_true(rt_tuple_item(decoded, 1)) as u32;
-            (rt_tuple_item(decoded, 0), prevent)
-        }
-        3 => {
-            // Custom: decoder yields { message, stopPropagation, preventDefault }.
-            let prevent = rt_is_true(rt_access(decoded, b"preventDefault\0".as_ptr())) as u32;
-            let stop = rt_is_true(rt_access(decoded, b"stopPropagation\0".as_ptr())) as u32;
-            (rt_access(decoded, b"message\0".as_ptr()), prevent | (stop << 1))
-        }
-        _ => (decoded, 0),
-    };
-    br_dispatch(ap1(h.tagger, msg));
-    flags
-}
 
 /// Entry point the JS shim calls (instead of WASI `_start`): load the program
 /// and render + mount the initial view. Phase 2 supports `Browser.sandbox`;
 /// other program kinds arrive in later phases.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_browser_start() {
-    // The runtime and program globals are already initialized: the shim runs
-    // the WASI `_start` first (which wires up memory so std's HashMap seeding
-    // etc. work), and for a Browser.* program `alm_entry` initializes then
-    // returns without running anything. So here we just load `main` and render.
-    let prog = alm_main();
-    if prog == 0 {
-        return;
-    }
-    let (kind, impl_) = match deref(prog) {
-        Value::Ctor { name, index, .. } if cname(*name) == "Program" => {
-            (*index, rt_ctor_arg(prog, 0))
-        }
-        _ => return,
-    };
-    BROWSER_KIND = kind;
-    let mut initial_cmd = 0u64;
-    match kind {
-        PROG_SANDBOX => {
-            BROWSER_VIEW = rt_access(impl_, b"view\0".as_ptr());
-            BROWSER_UPDATE = rt_access(impl_, b"update\0".as_ptr());
-            // sandbox `init` is the model itself (not `flags -> (model, cmd)`).
-            BROWSER_MODEL = rt_access(impl_, b"init\0".as_ptr());
-        }
-        PROG_ELEMENT | PROG_DOCUMENT => {
-            BROWSER_VIEW = rt_access(impl_, b"view\0".as_ptr());
-            BROWSER_UPDATE = rt_access(impl_, b"update\0".as_ptr());
-            BROWSER_SUBSCRIPTIONS = rt_access(impl_, b"subscriptions\0".as_ptr());
-            // `init : flags -> ( model, Cmd msg )`. Flags are `()` (ignored) or
-            // a `Json.Value`; other flag types are not decoded.
-            let pair = ap1(rt_access(impl_, b"init\0".as_ptr()), browser_flags());
-            BROWSER_MODEL = rt_tuple_item(pair, 0);
-            initial_cmd = rt_tuple_item(pair, 1);
-        }
-        PROG_APPLICATION => {
-            BROWSER_VIEW = rt_access(impl_, b"view\0".as_ptr());
-            BROWSER_UPDATE = rt_access(impl_, b"update\0".as_ptr());
-            BROWSER_SUBSCRIPTIONS = rt_access(impl_, b"subscriptions\0".as_ptr());
-            BROWSER_ON_URL_REQUEST = rt_access(impl_, b"onUrlRequest\0".as_ptr());
-            BROWSER_ON_URL_CHANGE = rt_access(impl_, b"onUrlChange\0".as_ptr());
-            // `init : flags -> Url -> Key -> ( model, Cmd msg )`. The nav Key is
-            // inert (nav goes through the host); pass unit.
-            let url = if BROWSER_URL != 0 { BROWSER_URL } else { default_url() };
-            let triple = ap3(rt_access(impl_, b"init\0".as_ptr()), browser_flags(), url, unit());
-            BROWSER_MODEL = rt_tuple_item(triple, 0);
-            initial_cmd = rt_tuple_item(triple, 1);
-        }
-        _ => return,
-    }
-
-    let html = br_view_html(ap1(BROWSER_VIEW, BROWSER_MODEL));
-    let root = br_render(html, identity());
-    dom_mount(root.handle);
-    BROWSER_OLD_VIEW = html;
-    BROWSER_ROOT = Some(root);
-
-    if kind != PROG_SANDBOX {
-        br_update_subs();
-        br_run_cmd(initial_cmd, identity());
-    }
-}
 
 /// Allocate a buffer inside wasm linear memory for the shim to write into
 /// (event JSON, incoming port payloads) before calling back. Leaked — the
 /// wasm allocator is bump-only and the browser process is short of a full GC.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_alloc_in(len: usize) -> *mut u8 {
-    alm_alloc(len as u64)
-}
 
 /// The current URL as a parsed `Url` record, for `Browser.application`. Set by
 /// the shim before start and on every navigation / popstate.
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_URL: u64 = 0;
 
 /// The program's flags as a `Json.Value` (set by the shim before start), or 0
 /// for none. Supports `()` flags (init ignores the value) and `Json.Value`
 /// flags; type-directed decoding of other flag types is not wired.
-#[cfg(target_arch = "wasm32")]
-static mut BROWSER_FLAGS: u64 = 0;
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn browser_flags() -> u64 {
-    if BROWSER_FLAGS != 0 {
-        BROWSER_FLAGS
-    } else {
-        unit()
-    }
-}
 
 /// The shim provides the program's flags (a JSON string) before start.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_browser_set_flags(json: *const u8, json_len: usize) {
-    let bytes = std::slice::from_raw_parts(json, json_len);
-    BROWSER_FLAGS = match json_parse(bytes) {
-        Ok(jv) => mk_json(jv),
-        Err(_) => unit(),
-    };
-}
 
 /// Parse a raw URL string into a `Url` record, or the localhost default when it
 /// doesn't parse (mirrors runtime.js `_Browser_currentUrl`).
-#[cfg(target_arch = "wasm32")]
-unsafe fn parse_url(raw: &[u8]) -> u64 {
-    let m = url_from_string(mkstr(raw.to_vec()));
-    if ctor_name(m) == "Just" {
-        rt_ctor_arg(m, 0)
-    } else {
-        default_url()
-    }
-}
 
-#[cfg(target_arch = "wasm32")]
-unsafe fn default_url() -> u64 {
-    rt_ctor_arg(url_from_string(mkstr(b"http://localhost/".to_vec())), 0)
-}
 
 /// The shim sets the current URL before start and whenever it changes.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_browser_set_url(url: *const u8, url_len: usize) {
-    BROWSER_URL = parse_url(std::slice::from_raw_parts(url, url_len));
-}
 
 /// The host reports a URL change (programmatic nav or popstate) for a
 /// `Browser.application`: update the current URL and dispatch `onUrlChange`.
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn alm_on_url_change(url: *const u8, url_len: usize) {
-    BROWSER_URL = parse_url(std::slice::from_raw_parts(url, url_len));
-    if BROWSER_ON_URL_CHANGE != 0 {
-        br_dispatch(ap1(BROWSER_ON_URL_CHANGE, BROWSER_URL));
-    }
-}
 
 // ENTRY — initialize the runtime and the program's globals, then either
 // run a `Platform.worker` program or print the entry module's `main`.
@@ -11838,7 +10696,6 @@ extern "C" {
 // `__main_argc_argv` (WebAssembly checks signatures strictly, so we provide
 // the exact symbol WASI expects rather than a plain `main`). Both just run
 // the shared body.
-#[cfg(not(target_arch = "wasm32"))]
 #[no_mangle]
 pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     // Run the program on a thread with a large stack. Elm code recurses on the
@@ -11884,11 +10741,6 @@ pub unsafe extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-#[no_mangle]
-pub unsafe extern "C" fn __main_argc_argv(_argc: i32, _argv: *const *const u8) -> i32 {
-    alm_entry()
-}
 
 /// GC-visible pins for allocations that std keeps reachable only through
 /// thread-local storage, which the conservative collector does not scan
