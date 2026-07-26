@@ -113,7 +113,7 @@ fn run(test_name: &str, modules: &[(&str, &str)]) -> String {
     let js_out = run_command(
         Command::new("node")
             .arg("-e")
-            .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display())),
+            .arg(format!("require({:?}).Elm['Main'].init({{}})", bundle.display())),
         "node",
         &js,
     );

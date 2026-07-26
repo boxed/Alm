@@ -33,7 +33,7 @@ function near(px, r, g, b) {
         window.requestAnimationFrame = function (cb) { window.__raf.push(cb); return window.__raf.length; };
     });
     await page.addScriptTag({ content: fs.readFileSync(appJs, 'utf8') });
-    await page.evaluate(() => window.Elm.Main.main.init({ node: document.getElementById('app') }));
+    await page.evaluate(() => window.Elm.Main.init({ node: document.getElementById('app') }));
     await new Promise((r) => setTimeout(r, 100));
     await page.evaluate(() => { for (let i = 0; i < 5; i++) { (window.__raf.splice(0)).forEach((cb) => cb(0)); } });
 

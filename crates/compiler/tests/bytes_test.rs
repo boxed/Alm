@@ -553,7 +553,7 @@ fn run_all(main: &str, expected: &str) {
 
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).unwrap();
-    let js = run_cmd(Command::new("node").arg("-e").arg(format!("process.stdout.write(require({:?}).Main.main)", bundle.display())), "node");
+    let js = run_cmd(Command::new("node").arg("-e").arg(format!("process.stdout.write(require({:?}).Elm.Main.main)", bundle.display())), "node");
 
     let program = ir::lower::lower_project(&checked.modules);
     let binary = dir.join("main");

@@ -5161,6 +5161,26 @@ function _Platform_wrap(value) {
     };
 }
 
+// One compiled module's public object. elm puts the program's initializer
+// directly on it (`Elm.Main.init(...)`); alm additionally exposes every
+// top-level binding, so `init` is layered on last and a binding of that name
+// never shadows the program.
+function _Platform_module(exports, main) {
+    if (main && main.$ === 'Program') { exports.init = _Platform_wrap(main).init; }
+    return exports;
+}
+
+// Publish the bundle as `Elm` in whatever scope loaded it — `module.exports`
+// under CommonJS, the global object in a browser. Two bundles loaded into one
+// scope merge, so several `alm make` outputs can share a page.
+function _Platform_export(scope, exports) {
+    if (scope.Elm) {
+        for (var name in exports) { scope.Elm[name] = exports[name]; }
+    } else {
+        scope.Elm = exports;
+    }
+}
+
 function _Platform_initialize(program, opts) {
     var impl = program.impl;
     var doc = (opts.node && opts.node.ownerDocument) ||

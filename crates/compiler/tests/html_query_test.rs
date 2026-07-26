@@ -17,13 +17,13 @@ fn to_json(body: &str) -> String {
     let source = format!("module Test exposing (..)\n\nimport Html\nimport Html.Attributes\nimport Html.Events\nimport Html.Keyed\n\n{}", body);
     let javascript = common::compile_single_no_dce("Test.elm", &source);
     let javascript = javascript.replace(
-        "if (typeof module !== 'undefined') { module.exports = Elm; }",
-        "Elm._toJson = $Elm$Kernel$HtmlAsJson$toJson; Elm._html = $Test$main;\nif (typeof module !== 'undefined') { module.exports = Elm; }",
+        "_Platform_export(this, Elm);",
+        "Elm._toJson = $Elm$Kernel$HtmlAsJson$toJson; Elm._html = $Test$main;\n_Platform_export(this, Elm);",
     );
     let js_path = common::write_js("html-query", &javascript);
     common::run_node(
         &format!(
-            "var Elm = require({:?});\nconsole.log(JSON.stringify(Elm._toJson(Elm._html)));",
+            "var Elm = require({:?}).Elm;\nconsole.log(JSON.stringify(Elm._toJson(Elm._html)));",
             js_path.to_str().unwrap()
         ),
         &javascript,

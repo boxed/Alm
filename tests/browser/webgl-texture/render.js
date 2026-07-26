@@ -34,7 +34,7 @@ function near(px, r, g, b) {
         window.requestAnimationFrame = function (cb) { window.__raf.push(cb); return window.__raf.length; };
     });
     await page.addScriptTag({ content: fs.readFileSync(appJs, 'utf8') });
-    await page.evaluate(() => window.Elm.Main.main.init({ node: document.getElementById('app') }));
+    await page.evaluate(() => window.Elm.Main.init({ node: document.getElementById('app') }));
     // Give the image load + Task.attempt time to resolve (mounts the canvas),
     // then drain rAF a few times to run the deferred first-frame draw.
     for (let i = 0; i < 6; i++) {

@@ -76,7 +76,7 @@ const PORTS: &str = r#"["outStr","outInt","outFloat","outBool","outUnit","outLis
 fn js_runner(bundle: &std::path::Path) -> String {
     format!(
         r#"{CANON}
-const app = require({:?}).Main.main.init({{}});
+const app = require({:?}).Elm.Main.init({{}});
 for (const p of {PORTS}) {{
   if (app.ports && app.ports[p]) app.ports[p].subscribe(v => console.log(p + " = " + JSON.stringify(canon(v))));
 }}

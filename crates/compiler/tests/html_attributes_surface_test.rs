@@ -178,7 +178,7 @@ view =
     let path = common::write_js("attrs-offpattern", &javascript);
     let out = common::run_node(
         &format!(
-            "var m = require({:?});\
+            "var m = require({:?}).Elm;\
              console.log(m.Attrs.view.attrs.map(function (a) {{ return a.$ + ' ' + a.key + '=' + JSON.stringify(a.val); }}).join('|'));",
             path.display()
         ),
@@ -218,7 +218,7 @@ view =
     let path = common::write_js("attrs-xss", &javascript);
     let out = common::run_node(
         &format!(
-            "var m = require({:?});\
+            "var m = require({:?}).Elm;\
              console.log(m.Xss.view.kids.map(function (k) {{ return k.tag + '[' + k.attrs.map(function (a) {{ return a.key + '=' + a.val; }}).join(',') + ']'; }}).join(' '));",
             path.display()
         ),

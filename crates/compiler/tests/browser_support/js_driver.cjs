@@ -57,7 +57,7 @@ function start(bundlePath, doc, clock, flags) {
   saved.fetch = globalThis.fetch;
   globalThis.fetch = (url) => new Promise((resolve, reject) => parkedFetch.push({ resolve, reject, url }));
 
-  const mod = require(bundlePath);
+  const mod = require(bundlePath).Elm;
   const program = mod.Test.main;
   const host = doc.createElement('div');
   doc.body.appendChild(host);

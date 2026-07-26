@@ -30,7 +30,7 @@ fn run_both(test_name: &str, source: &str) -> (String, String) {
     std::fs::write(&bundle, js).expect("write bundle");
     let js_out = run_command(
         Command::new("node").arg("-e").arg(format!(
-            "require({:?})['Test']['main'].init({{}})",
+            "require({:?}).Elm['Test'].init({{}})",
             bundle.display()
         )),
         "node",

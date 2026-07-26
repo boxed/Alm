@@ -56,7 +56,7 @@ fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("write bundle");
     let js = run(Command::new("node").arg("-e").arg(format!(
-        "process.stdout.write(require({:?}).Test.main)",
+        "process.stdout.write(require({:?}).Elm.Test.main)",
         bundle.display()
     )));
 
@@ -163,7 +163,7 @@ fn assert_int_prog(test_name: &str, source: &str) {
     let bundle = dir.join("bundle.js");
     std::fs::write(&bundle, generate::generate_project(&checked.modules)).expect("write bundle");
     let js = run(Command::new("node").arg("-e").arg(format!(
-        "console.log(require({:?}).Test.main)",
+        "console.log(require({:?}).Elm.Test.main)",
         bundle.display()
     )));
 
@@ -3708,7 +3708,7 @@ fn bench_wasmgc_vs_js() {
             };
             jc[ci] = best(&|| {
                 let mut c = Command::new("node");
-                c.arg("-e").arg(format!("require({:?}).Test.main", bundle.display()));
+                c.arg("-e").arg(format!("require({:?}).Elm.Test.main", bundle.display()));
                 c
             });
             wc[ci] = best(&|| {

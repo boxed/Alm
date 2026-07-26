@@ -32,12 +32,7 @@
             var mount = document.createElement('div');
             document.body.appendChild(mount);
             var ns = window.Elm.Main;
-            // alm exposes every top-level value, so prefer the Program
-            // wrapper at ns.main.init; official Elm has only ns.init.
-            var initFn = ns.main && ns.main.init
-                ? ns.main.init.bind(ns.main)
-                : ns.init.bind(ns);
-            app = initFn({ node: mount, flags: null });
+            app = ns.init({ node: mount, flags: null });
             app.ports.toJs.subscribe(function (s) { echoes.push(s); });
         },
         function initialRender() {

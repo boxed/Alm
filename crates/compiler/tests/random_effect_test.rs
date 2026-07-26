@@ -184,7 +184,7 @@ fn random_step_is_deterministic_and_matches_js_native() {
     std::fs::write(&bundle, &js).expect("write bundle");
     let js_output = Command::new("node")
         .arg("-e")
-        .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display()))
+        .arg(format!("require({:?}).Elm['Main'].init({{}})", bundle.display()))
         .env_remove("FORCE_COLOR")
         .env("NO_COLOR", "1")
         .output()
@@ -333,7 +333,7 @@ fn random_step_deterministic_matches_js_wasmgc() {
     let js_output = Command::new("node")
         .arg("-e")
         .arg(format!(
-            "const p=require({:?});p['Main']['main'].init({{}}).ports.out.subscribe(v=>process.stdout.write(v));",
+            "const p=require({:?}).Elm;p['Main']['main'].init({{}}).ports.out.subscribe(v=>process.stdout.write(v));",
             bundle.display()
         ))
         .env_remove("FORCE_COLOR")

@@ -31,7 +31,7 @@ const configs = {
   'elm-opt': page(`<script>${rdb('elm_lazy.js')}</script>`, `<div id="app"></div>`,
     `Elm.Main_lazy.init({node:document.getElementById('app')});`),
   'alm-js': page(`<script>${rdb('almjs.js')}</script>`, `<div id="app"></div>`,
-    `var M=(Elm.Main.main&&Elm.Main.main.init)?Elm.Main.main:Elm.Main;M.init({node:document.getElementById('app')});`),
+    `Elm.Main.init({node:document.getElementById('app')});`),
   'alm-wasm': page(`<script>${rd('shim.js')}</script>`, ``,
     `window.almStart(Uint8Array.from(atob(${JSON.stringify(wasmB64)}),c=>c.charCodeAt(0)));`),
   react: page(``, `<div id="app"></div><script>${rdb('react.bundle.js')}</script>`, ``),
@@ -40,7 +40,7 @@ const configs = {
   // Optimized (Html.Lazy) alm variants — Main_lazy.elm, so the JS entry is
   // Elm.Main_lazy; the wasm module is module-agnostic (almStart).
   'alm-js-opt': page(`<script>${rdb('almjs_lazy.js')}</script>`, `<div id="app"></div>`,
-    `var M=(Elm.Main_lazy.main&&Elm.Main_lazy.main.init)?Elm.Main_lazy.main:Elm.Main_lazy;M.init({node:document.getElementById('app')});`),
+    `Elm.Main_lazy.init({node:document.getElementById('app')});`),
   'alm-wasm-opt': page(`<script>${rd('shim.js')}</script>`, ``,
     `window.almStart(Uint8Array.from(atob(${JSON.stringify(fs.readFileSync(path.join(J, 'build', 'almwasm_lazy.wasm')).toString('base64'))}),c=>c.charCodeAt(0)));`),
 };

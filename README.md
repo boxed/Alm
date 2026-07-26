@@ -30,7 +30,7 @@ package dependencies compile directly from the `~/.elm` cache — pure Elm
 packages need no porting. In the browser or node:
 
 ```js
-var app = Elm.Main.main.init({ node: mountPoint, flags: {...} });
+var app = Elm.Main.init({ node: mountPoint, flags: {...} });
 app.ports.somePort.subscribe(function (value) { ... });
 ```
 

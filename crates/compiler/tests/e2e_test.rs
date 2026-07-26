@@ -10,7 +10,7 @@ fn run(body: &str) -> String {
     let js_path = common::write_js("e2e", &javascript);
     common::run_node(
         &format!(
-            "console.log(require({:?})['Test']['main']);",
+            "console.log(require({:?}).Elm['Test']['main']);",
             js_path.to_str().unwrap()
         ),
         &javascript,

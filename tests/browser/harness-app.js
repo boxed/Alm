@@ -23,9 +23,7 @@
 
     var steps = [
         function boot() {
-            var ns = window.Elm.App;
-            var initFn = ns.main && ns.main.init ? ns.main.init.bind(ns.main) : ns.init.bind(ns);
-            initFn({ flags: null });
+            window.Elm.App.init({ flags: null });
         },
         function initial() {
             assertEq('initial path rendered', textOf('path'), '/');

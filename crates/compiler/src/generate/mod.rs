@@ -288,17 +288,28 @@ fn gen_bundle(
             )
             .unwrap();
         }
-        write!(
-            module_objects,
-            "'{}': {{ {} }}",
-            module_name, export_fields
-        )
+        // elm publishes a module as `{init: …}` — the program's initializer
+        // sits directly on the module object. alm exports every top-level
+        // binding besides, so `_Platform_module` layers elm's `init` on top
+        // (last, so it wins over a binding that happens to be named `init`).
+        if exports.iter().any(|n| n.as_str() == "main") {
+            write!(
+                module_objects,
+                "'{}': _Platform_module({{ {} }}, {}$main)",
+                module_name, export_fields, module_var
+            )
+        } else {
+            write!(module_objects, "'{}': {{ {} }}", module_name, export_fields)
+        }
         .unwrap();
     }
+    // `.call(this)` makes `this` the CommonJS `module.exports` under node and
+    // the global object in a browser, so — exactly as in elm's output — the
+    // bundle publishes itself as `Elm` in whichever scope loaded it.
     write!(
         gen.out,
         "\nvar Elm = {{ {} }};\n\
-         if (typeof module !== 'undefined') {{ module.exports = Elm; }} else {{ this.Elm = Elm; }}\n\
+         _Platform_export(this, Elm);\n\
          }}).call(this);\n",
         module_objects
     )

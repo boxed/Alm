@@ -120,7 +120,7 @@ fn run_app(elm: &str, driver: &str) -> Vec<String> {
     let javascript = common::compile_single("Main.elm", elm);
     let js_path = common::write_js("tea", &javascript);
     let harness = format!(
-        "{shim}\nvar Elm = require({path:?});\nvar host = document.createElement('div');\nvar mount = document.createElement('div');\nhost.appendChild(mount);\nvar app = Elm.Main.main.init({{ node: mount }});\nvar root = host.childNodes[0];\n{driver}\n",
+        "{shim}\nvar Elm = require({path:?}).Elm;\nvar host = document.createElement('div');\nvar mount = document.createElement('div');\nhost.appendChild(mount);\nvar app = Elm.Main.main.init({{ node: mount }});\nvar root = host.childNodes[0];\n{driver}\n",
         shim = DOM_SHIM,
         path = js_path.to_str().unwrap(),
         driver = driver
@@ -544,7 +544,7 @@ fn run_app_document(elm: &str, driver: &str) -> Vec<String> {
     let javascript = common::compile_single("Main.elm", elm);
     let js_path = common::write_js("tea-doc", &javascript);
     let harness = format!(
-        "{shim}\ndocument.body = document.createElement('body');\ndocument.title = '';\nvar Elm = require({path:?});\nvar app = Elm.Main.main.init({{}});\n{driver}\n",
+        "{shim}\ndocument.body = document.createElement('body');\ndocument.title = '';\nvar Elm = require({path:?}).Elm;\nvar app = Elm.Main.main.init({{}});\n{driver}\n",
         shim = DOM_SHIM,
         path = js_path.to_str().unwrap(),
         driver = driver

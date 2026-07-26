@@ -11,7 +11,7 @@ fn run(body: &str) -> String {
     let js_path = common::write_js("runtime", &javascript);
     common::run_node(
         &format!(
-            "console.log(require({:?})['Test']['main']);",
+            "console.log(require({:?}).Elm['Test']['main']);",
             js_path.to_str().unwrap()
         ),
         &javascript,
@@ -27,7 +27,7 @@ fn run_proj(body: &str) -> String {
     let js_path = common::write_js("runtime", &javascript);
     common::run_node(
         &format!(
-            "console.log(require({:?})['Test']['main']);",
+            "console.log(require({:?}).Elm['Test']['main']);",
             js_path.to_str().unwrap()
         ),
         &javascript,
@@ -44,7 +44,7 @@ fn run_worker_proj(body: &str) -> Vec<String> {
     let javascript = common::compile_via_project("Test", &source);
     let js_path = common::write_js("runtime-worker", &javascript);
     let script = format!(
-        "var Elm = require({:?});\n\
+        "var Elm = require({:?}).Elm;\n\
          var app = Elm.Test.main.init({{}});\n\
          var out = [];\n\
          app.ports.answer.subscribe(function (s) {{ out.push(s); }});\n\
@@ -69,7 +69,7 @@ fn run_worker(body: &str) -> Vec<String> {
     let javascript = common::compile_single("Test.elm", &source);
     let js_path = common::write_js("runtime-worker", &javascript);
     let script = format!(
-        "var Elm = require({:?});\n\
+        "var Elm = require({:?}).Elm;\n\
          var app = Elm.Test.main.init({{}});\n\
          var out = [];\n\
          app.ports.answer.subscribe(function (s) {{ out.push(s); }});\n\
@@ -248,7 +248,7 @@ main =
     let javascript = common::compile_single("Test.elm", source);
     let js_path = common::write_js("runtime-ports", &javascript);
     let script = format!(
-        "var Elm = require({:?});\n\
+        "var Elm = require({:?}).Elm;\n\
          var app = Elm.Test.main.init({{}});\n\
          app.ports.answer.subscribe(function (s) {{ console.log(s); process.exit(0); }});\n\
          app.ports.askList.send(['a', 'b', 'c']);",
@@ -466,7 +466,7 @@ main =
     let javascript = common::compile_single("Test.elm", &source);
     let js_path = common::write_js("runtime-payloads", &javascript);
     let script = format!(
-        r#"var Elm = require({:?});
+        r#"var Elm = require({:?}).Elm;
 var app = Elm.Test.main.init({{}});
 var log = [];
 app.ports.sendRecord.subscribe(function (v) {{ log.push('record:' + JSON.stringify(v)); }});
@@ -524,7 +524,7 @@ main =
     let javascript = common::compile_single("Test.elm", source);
     let js_path = common::write_js("runtime-outarray", &javascript);
     let script = format!(
-        r#"var Elm = require({:?});
+        r#"var Elm = require({:?}).Elm;
 var app = Elm.Test.main.init({{}});
 var log = [];
 app.ports.sendArray.subscribe(function (v) {{ log.push('arr:' + JSON.stringify(v)); }});

@@ -69,7 +69,7 @@ fn compile_and_run(entry: &Path) -> Result<String, String> {
     std::fs::write(&js_path, &javascript).unwrap();
     Ok(common::run_node(
         &format!(
-            "console.log(require({:?})['Main']['main']);",
+            "console.log(require({:?}).Elm['Main']['main']);",
             js_path.to_str().unwrap()
         ),
         &javascript,

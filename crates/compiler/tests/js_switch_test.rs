@@ -23,7 +23,7 @@ fn compile_and_run(test_name: &str, source: &str) -> (String, String) {
     std::fs::write(&bundle, &js).expect("write bundle");
     let out = Command::new("node")
         .arg("-e")
-        .arg(format!("require({:?})['Main']['main'].init({{}})", bundle.display()))
+        .arg(format!("require({:?}).Elm['Main'].init({{}})", bundle.display()))
         .env_remove("FORCE_COLOR")
         .env("NO_COLOR", "1")
         .output()
