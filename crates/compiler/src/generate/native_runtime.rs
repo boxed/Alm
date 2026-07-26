@@ -5741,6 +5741,16 @@ unsafe extern "C" fn random_and_then_gen(f: u64, g: u64, seed: u64) -> u64 {
     ap1(rt_ctor_arg(g2, 0), rt_tuple_item(r, 1))
 }
 
+// `Random.lazy (\() -> gen)` — defer building the generator until stepping,
+// mirroring `_Random_gen(seed => thunk(unit).gen(seed))` in runtime.js.
+unsafe extern "C" fn random_lazy(thunk: u64) -> u64 {
+    mk_generator(closure(random_lazy_gen as *const (), 2, &[thunk]))
+}
+unsafe extern "C" fn random_lazy_gen(thunk: u64, seed: u64) -> u64 {
+    let g = ap1(thunk, unit());
+    ap1(rt_ctor_arg(g, 0), seed)
+}
+
 unsafe extern "C" fn random_pair(ga: u64, gb: u64) -> u64 {
     mk_generator(closure(random_pair_gen as *const (), 3, &[ga, gb]))
 }
@@ -5849,15 +5859,6 @@ unsafe extern "C" fn random_independent_seed_gen(seed0: u64) -> u64 {
     let b = (1i32 | ((r2_0 as i32) ^ (r3_0 as i32))) as u32;
     let new_seed = random_next_seed(mk_seed(r1_0, b));
     pair(new_seed, rt_tuple_item(r3, 1))
-}
-
-unsafe extern "C" fn random_generate(to_msg: u64, g: u64) -> u64 {
-    // Non-deterministic like JS's `Math.random()` seed; the result is a Cmd,
-    // never a printed value, so it need not be reproducible.
-    let seed = random_initial_seed(rt_int(to_uint32(now_ms()) as i64));
-    let r = ap1(rt_ctor_arg(g, 0), seed);
-    let msg = ap1(to_msg, rt_tuple_item(r, 0));
-    ctor(b"CmdTask\0".as_ptr(), CT_TASK, vec![task_succeed(msg)])
 }
 
 // TEST — elm-explorations/test's `Elm.Kernel.Test.runThunk`: run a `() -> a`
@@ -9623,22 +9624,25 @@ kernel_fns! {
     G_KERNEL_DEBUG_LOG "$Elm$Kernel$Debug$log" debug_log, 2;
     G_KERNEL_TEST_RUNTHUNK "$Elm$Kernel$Test$runThunk" test_run_thunk, 1;
 
-    G_RANDOM_INITIALSEED "$Random$initialSeed" random_initial_seed, 1;
-    G_RANDOM_INT "$Random$int" random_int, 2;
-    G_RANDOM_FLOAT "$Random$float" random_float, 2;
-    G_RANDOM_CONSTANT "$Random$constant" random_constant, 1;
-    G_RANDOM_WEIGHTED "$Random$weighted" random_weighted, 2;
-    G_RANDOM_UNIFORM "$Random$uniform" random_uniform, 2;
-    G_RANDOM_MAP "$Random$map" random_map, 2;
-    G_RANDOM_MAP2 "$Random$map2" random_map2, 3;
-    G_RANDOM_MAP3 "$Random$map3" random_map3, 4;
-    G_RANDOM_MAP4 "$Random$map4" random_map4, 5;
-    G_RANDOM_MAP5 "$Random$map5" random_map5, 6;
-    G_RANDOM_ANDTHEN "$Random$andThen" random_and_then, 2;
-    G_RANDOM_PAIR "$Random$pair" random_pair, 2;
-    G_RANDOM_LIST "$Random$list" random_list, 2;
-    G_RANDOM_STEP "$Random$step" random_step, 2;
-    G_RANDOM_GENERATE "$Random$generate" random_generate, 2;
+    // Random pure ops back the bundled `Random` effect module's delegating
+    // `Elm.Kernel.Random.*` calls (source in builtin_src/Random.elm). `generate`
+    // and the manager are real Elm now; only these primitives stay native.
+    G_RANDOM_INITIALSEED "$Elm$Kernel$Random$initialSeed" random_initial_seed, 1;
+    G_RANDOM_INT "$Elm$Kernel$Random$int" random_int, 2;
+    G_RANDOM_FLOAT "$Elm$Kernel$Random$float" random_float, 2;
+    G_RANDOM_CONSTANT "$Elm$Kernel$Random$constant" random_constant, 1;
+    G_RANDOM_WEIGHTED "$Elm$Kernel$Random$weighted" random_weighted, 2;
+    G_RANDOM_UNIFORM "$Elm$Kernel$Random$uniform" random_uniform, 2;
+    G_RANDOM_MAP "$Elm$Kernel$Random$map" random_map, 2;
+    G_RANDOM_MAP2 "$Elm$Kernel$Random$map2" random_map2, 3;
+    G_RANDOM_MAP3 "$Elm$Kernel$Random$map3" random_map3, 4;
+    G_RANDOM_MAP4 "$Elm$Kernel$Random$map4" random_map4, 5;
+    G_RANDOM_MAP5 "$Elm$Kernel$Random$map5" random_map5, 6;
+    G_RANDOM_ANDTHEN "$Elm$Kernel$Random$andThen" random_and_then, 2;
+    G_RANDOM_LAZY "$Elm$Kernel$Random$lazy" random_lazy, 1;
+    G_RANDOM_PAIR "$Elm$Kernel$Random$pair" random_pair, 2;
+    G_RANDOM_LIST "$Elm$Kernel$Random$list" random_list, 2;
+    G_RANDOM_STEP "$Elm$Kernel$Random$step" random_step, 2;
 
     G_TASK_SUCCEED "$Task$succeed" task_succeed, 1;
     G_TASK_FAIL "$Task$fail" task_fail, 1;
@@ -9852,9 +9856,7 @@ kernel_vals! {
     G_DICT_EMPTY "$Dict$empty";
     G_SET_EMPTY "$Set$empty";
     G_ARRAY_EMPTY "$Array$empty";
-    G_RANDOM_MININT "$Random$minInt";
-    G_RANDOM_MAXINT "$Random$maxInt";
-    G_RANDOM_INDEPENDENTSEED "$Random$independentSeed";
+    G_RANDOM_INDEPENDENTSEED "$Elm$Kernel$Random$independentSeed";
     G_JSOND_STRING "$Json$Decode$string";
     G_JSOND_INT "$Json$Decode$int";
     G_JSOND_FLOAT "$Json$Decode$float";
@@ -9987,8 +9989,6 @@ unsafe fn runtime_init() {
     G_DICT_EMPTY.set(alloc(Value::Dict(0)));
     G_SET_EMPTY.set(alloc(Value::Set(0)));
     G_ARRAY_EMPTY.set(alloc(Value::Array(0)));
-    G_RANDOM_MININT.set(rt_int(-2147483648));
-    G_RANDOM_MAXINT.set(rt_int(2147483647));
     G_RANDOM_INDEPENDENTSEED
         .set(mk_generator(closure(random_independent_seed_gen as *const (), 1, &[])));
     G_JSOND_STRING.set(mk_decoder(Decoder::Str));

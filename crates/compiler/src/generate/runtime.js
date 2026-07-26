@@ -4691,6 +4691,9 @@ var $Browser$Navigation$reloadAndSkipCache = { $: 'CmdReload' };
 // Elm's PCG-XSH-RR (from elm/random) — a Seed is { a: state, b: incr }, both
 // uint32. Ported op-for-op so generated random sequences (and thus fuzz-test
 // inputs) match elm bit-for-bit.
+// Random kernel primitives. Generator/Seed and the manager come from the
+// bundled Random effect module (builtin_src/Random.elm); these are the
+// pure-generator intrinsics it delegates to (representation unchanged).
 function _Random_peel(seed) {
     var state = seed.a;
     var word = (state ^ (state >>> (((state >>> 28) + 4) | 0))) * 277803737;
@@ -4700,14 +4703,12 @@ function _Random_nextSeed(seed) {
     return { $: 'Seed', a: (seed.a * 1664525 + seed.b) >>> 0, b: seed.b };
 }
 function _Random_gen(fn) { return { $: 'Generator', gen: fn }; }
-var $Random$minInt = -2147483648;
-var $Random$maxInt = 2147483647;
-var $Random$initialSeed = function (x) {
+var $Elm$Kernel$Random$initialSeed = function (x) {
     var seed1 = _Random_nextSeed({ $: 'Seed', a: 0, b: 1013904223 });
     var state2 = (seed1.a + x) >>> 0;
     return _Random_nextSeed({ $: 'Seed', a: state2, b: seed1.b });
 };
-var $Random$int = F2(function (a, b) {
+var $Elm$Kernel$Random$int = F2(function (a, b) {
     return _Random_gen(function (seed0) {
         var lo = a < b ? a : b;
         var hi = a < b ? b : a;
@@ -4725,7 +4726,7 @@ var $Random$int = F2(function (a, b) {
         }
     });
 });
-var $Random$float = F2(function (a, b) {
+var $Elm$Kernel$Random$float = F2(function (a, b) {
     return _Random_gen(function (seed0) {
         var seed1 = _Random_nextSeed(seed0);
         var n0 = _Random_peel(seed0);
@@ -4737,83 +4738,83 @@ var $Random$float = F2(function (a, b) {
         return [val * range + a, _Random_nextSeed(seed1)];
     });
 });
-var $Random$constant = function (x) {
+var $Elm$Kernel$Random$constant = function (x) {
     return _Random_gen(function (seed) { return [x, seed]; });
 };
-var $Random$map = F2(function (f, g) {
+var $Elm$Kernel$Random$map = F2(function (f, g) {
     return _Random_gen(function (seed) {
         var r = g.gen(seed);
         return [f(r[0]), r[1]];
     });
 });
-var $Random$map2 = F3(function (f, ga, gb) {
+var $Elm$Kernel$Random$map2 = F3(function (f, ga, gb) {
     return _Random_gen(function (seed) {
         var ra = ga.gen(seed);
         var rb = gb.gen(ra[1]);
         return [A2(f, ra[0], rb[0]), rb[1]];
     });
 });
-var $Random$map3 = F4(function (f, ga, gb, gc) {
+var $Elm$Kernel$Random$map3 = F4(function (f, ga, gb, gc) {
     return _Random_gen(function (seed) {
         var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]);
         return [A3(f, ra[0], rb[0], rc[0]), rc[1]];
     });
 });
-var $Random$map4 = F5(function (f, ga, gb, gc, gd) {
+var $Elm$Kernel$Random$map4 = F5(function (f, ga, gb, gc, gd) {
     return _Random_gen(function (seed) {
         var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]), rd = gd.gen(rc[1]);
         return [A4(f, ra[0], rb[0], rc[0], rd[0]), rd[1]];
     });
 });
-var $Random$map5 = F6(function (f, ga, gb, gc, gd, ge) {
+var $Elm$Kernel$Random$map5 = F6(function (f, ga, gb, gc, gd, ge) {
     return _Random_gen(function (seed) {
         var ra = ga.gen(seed), rb = gb.gen(ra[1]), rc = gc.gen(rb[1]), rd = gd.gen(rc[1]), re = ge.gen(rd[1]);
         return [A5(f, ra[0], rb[0], rc[0], rd[0], re[0]), re[1]];
     });
 });
-var $Random$andThen = F2(function (f, g) {
+var $Elm$Kernel$Random$andThen = F2(function (f, g) {
     return _Random_gen(function (seed) {
         var r = g.gen(seed);
         return f(r[0]).gen(r[1]);
     });
 });
-var $Random$lazy = function (thunk) {
+var $Elm$Kernel$Random$lazy = function (thunk) {
     return _Random_gen(function (seed) { return thunk(_Utils_Tuple0).gen(seed); });
 };
-var $Random$pair = F2(function (ga, gb) {
+var $Elm$Kernel$Random$pair = F2(function (ga, gb) {
     return _Random_gen(function (seed) {
         var ra = ga.gen(seed), rb = gb.gen(ra[1]);
         return [{ $: '#2', a: ra[0], b: rb[0] }, rb[1]];
     });
 });
-var $Random$weighted = F2(function (first, others) {
+var $Elm$Kernel$Random$weighted = F2(function (first, others) {
     var pairs = [first].concat(_List_toArray(others));
     var total = 0;
     for (var i = 0; i < pairs.length; i++) { total += Math.abs(pairs[i].a); }
-    return A2($Random$map, function (countdown) {
+    return A2($Elm$Kernel$Random$map, function (countdown) {
         var acc = 0;
         for (var j = 0; j < pairs.length; j++) {
             acc += Math.abs(pairs[j].a);
             if (countdown <= acc) { return pairs[j].b; }
         }
         return pairs[pairs.length - 1].b;
-    }, A2($Random$float, 0, total));
+    }, A2($Elm$Kernel$Random$float, 0, total));
 });
-var $Random$uniform = F2(function (head, rest) {
+var $Elm$Kernel$Random$uniform = F2(function (head, rest) {
     var vals = [head].concat(_List_toArray(rest));
-    return A2($Random$map, function (countdown) {
+    return A2($Elm$Kernel$Random$map, function (countdown) {
         var acc = 0;
         for (var j = 0; j < vals.length; j++) { acc += 1; if (countdown <= acc) { return vals[j]; } }
         return vals[vals.length - 1];
-    }, A2($Random$float, 0, vals.length));
+    }, A2($Elm$Kernel$Random$float, 0, vals.length));
 });
-var $Random$independentSeed = _Random_gen(function (seed0) {
-    var gen = A2($Random$int, 0, 0xFFFFFFFF);
+var $Elm$Kernel$Random$independentSeed = _Random_gen(function (seed0) {
+    var gen = A2($Elm$Kernel$Random$int, 0, 0xFFFFFFFF);
     var r1 = gen.gen(seed0), r2 = gen.gen(r1[1]), r3 = gen.gen(r2[1]);
     var newSeed = _Random_nextSeed({ $: 'Seed', a: r1[0], b: ((1 | (r2[0] ^ r3[0])) >>> 0) });
     return [newSeed, r3[1]];
 });
-var $Random$list = F2(function (n, g) {
+var $Elm$Kernel$Random$list = F2(function (n, g) {
     return _Random_gen(function (seed) {
         // elm's listHelp prepends each value, so the result is in reverse
         // generation order — match it (matters for reproducible fuzz inputs).
@@ -4826,18 +4827,9 @@ var $Random$list = F2(function (n, g) {
         return [_List_fromArray(out), seed];
     });
 });
-var $Random$step = F2(function (g, seed) {
+var $Elm$Kernel$Random$step = F2(function (g, seed) {
     var r = g.gen(seed);
     return { $: '#2', a: r[0], b: r[1] };
-});
-var $Random$generate = F2(function (toMsg, g) {
-    return {
-        $: 'CmdTask',
-        task: _Task(function (ok, _err) {
-            var seed = $Random$initialSeed((Math.random() * 0xFFFFFFFF) >>> 0);
-            ok(toMsg(g.gen(seed)[0]));
-        })
-    };
 });
 
 // ELM.KERNEL.PARSER — the primitives behind elm/parser, ported from

@@ -546,27 +546,7 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Browser.Navigation", "replaceUrl", "Browser.Navigation.Key -> String -> Cmd msg"),
             V("Browser.Navigation", "back", "Browser.Navigation.Key -> Int -> Cmd msg"),
             V("Browser.Navigation", "forward", "Browser.Navigation.Key -> Int -> Cmd msg"),
-            // Random (the effect-module parts reimplemented natively)
-            V("Random", "int", "Int -> Int -> Random.Generator Int"),
-            V("Random", "float", "Float -> Float -> Random.Generator Float"),
-            V("Random", "constant", "a -> Random.Generator a"),
-            V("Random", "map", "(a -> b) -> Random.Generator a -> Random.Generator b"),
-            V("Random", "map2", "(a -> b -> c) -> Random.Generator a -> Random.Generator b -> Random.Generator c"),
-            V("Random", "map3", "(a -> b -> c -> d) -> Random.Generator a -> Random.Generator b -> Random.Generator c -> Random.Generator d"),
-            V("Random", "map4", "(a -> b -> c -> d -> e) -> Random.Generator a -> Random.Generator b -> Random.Generator c -> Random.Generator d -> Random.Generator e"),
-            V("Random", "map5", "(a -> b -> c -> d -> e -> f) -> Random.Generator a -> Random.Generator b -> Random.Generator c -> Random.Generator d -> Random.Generator e -> Random.Generator f"),
-            V("Random", "andThen", "(a -> Random.Generator b) -> Random.Generator a -> Random.Generator b"),
-            V("Random", "lazy", "(() -> Random.Generator a) -> Random.Generator a"),
-            V("Random", "list", "Int -> Random.Generator a -> Random.Generator (List a)"),
-            V("Random", "pair", "Random.Generator a -> Random.Generator b -> Random.Generator ( a, b )"),
-            V("Random", "uniform", "a -> List a -> Random.Generator a"),
-            V("Random", "weighted", "( Float, a ) -> List ( Float, a ) -> Random.Generator a"),
-            V("Random", "step", "Random.Generator a -> Random.Seed -> ( a, Random.Seed )"),
-            V("Random", "initialSeed", "Int -> Random.Seed"),
-            V("Random", "independentSeed", "Random.Generator Random.Seed"),
-            V("Random", "generate", "(a -> msg) -> Random.Generator a -> Cmd msg"),
-            V("Random", "minInt", "Int"),
-            V("Random", "maxInt", "Int"),
+            // Random is a bundled effect-module source (builtin_src/Random.elm).
             // VirtualDom (the parts packages use directly)
             V("VirtualDom", "text", "String -> Html msg"),
             V("VirtualDom", "node", "String -> List (Attribute msg) -> List (Html msg) -> Html msg"),
@@ -1049,8 +1029,7 @@ pub const OPAQUE_TYPES: &[(&str, &str)] = &[
     ("Process", "Id"),
     ("Platform.Cmd", "Cmd"),
     ("Platform.Sub", "Sub"),
-    ("Random", "Generator"),
-    ("Random", "Seed"),
+    // Random.Generator/Seed come from the bundled Random effect module.
     ("Browser.Navigation", "Key"),
 ];
 
@@ -1089,7 +1068,7 @@ pub const MODULES: &[&str] = &[
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
     "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process",
-    "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "VirtualDom", "Terminal",
+    "Http", "File", "Url", "Svg", "Svg.Attributes", "VirtualDom", "Terminal",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

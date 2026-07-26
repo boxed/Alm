@@ -706,6 +706,7 @@ fn user_imports(module: &src::Module) -> Vec<Name> {
 fn bundled_source(name: &str) -> Option<&'static str> {
     match name {
         "Time" => Some(include_str!("builtin_src/Time.elm")),
+        "Random" => Some(include_str!("builtin_src/Random.elm")),
         _ => None,
     }
 }
