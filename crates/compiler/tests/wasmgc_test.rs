@@ -464,7 +464,7 @@ fn string_slice_pad() {
 #[test]
 fn basics_polar() {
     // js<->wasm (both use node Math); native libm can differ by an ulp on trig.
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "basics_polar",
         "module Test exposing (main)\n\n\
          main : String\n\
@@ -496,7 +496,7 @@ fn string_replace() {
 fn string_from_to_float() {
     // js<->wasm (both format via the host's String(x) / +s); native uses Rust
     // float formatting which can differ.
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "string_from_to_float",
         "module Test exposing (main)\n\n\
          main : String\n\
@@ -520,7 +520,7 @@ fn numeric_transcendentals() {
     // wasm-gc calls node's Math.* (same libm as the JS runner), so js==wasm is
     // exact; native uses system libm and can differ by an ulp on trig, so this
     // is a js<->wasm check. Integer/rational parts (^, logBase 2 8) are exact.
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "numeric_transcendentals",
         "module Test exposing (main)\n\n\
          main : String\n\
@@ -686,7 +686,7 @@ fn string_from_int_zero() {
 // Function composition (>> and <<) as first-class values, applied.
 #[test]
 fn compose_operators() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "compose_ops",
         "module Test exposing (main)\n\n\
          inc : Int -> Int\n\
@@ -699,7 +699,7 @@ fn compose_operators() {
 // Composition passed to a higher-order function (List.map).
 #[test]
 fn compose_in_map() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "compose_map",
         "module Test exposing (main)\n\n\
          main : String\n\
@@ -710,7 +710,7 @@ fn compose_in_map() {
 // String literals as case patterns.
 #[test]
 fn string_case_patterns() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "string_case",
         "module Test exposing (main)\n\n\
          classify : String -> String\n\
@@ -725,7 +725,7 @@ fn string_case_patterns() {
 // can't cross the lambda boundary, so `go` must be bound to a real closure.
 #[test]
 fn self_recursion_through_lambda() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "self_rec_lambda",
         "module Test exposing (main)\n\n\
          render : Int -> String\n\
@@ -743,7 +743,7 @@ fn self_recursion_through_lambda() {
 // reduce to.
 #[test]
 fn combinator_over_application() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "combinator_overapp",
         "module Test exposing (main)\n\n\
          add : Int -> Int -> Int\n\
@@ -757,7 +757,7 @@ fn combinator_over_application() {
 // toSecond/toMillis) under UTC and a fixed custom zone — civil-date math.
 #[test]
 fn time_calendar() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "time_calendar",
         "module Test exposing (main)\n\n\
          import Time\n\n\
@@ -789,7 +789,7 @@ fn string_trim_sides() {
 // types (Tree), Dict/Set. Diffed against the JS backend's `_Debug_toString`.
 #[test]
 fn debug_to_string() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "debug_to_string",
         r#"module Test exposing (main)
 
@@ -847,7 +847,7 @@ main =
 // path. (This is the shape json-schema's big validator `let` has.)
 #[test]
 fn recursion_group_value_use() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "rec_group_value",
         "module Test exposing (main)\n\n\
          run : Int -> Int\n\
@@ -861,7 +861,7 @@ fn recursion_group_value_use() {
 // they must share a capture set so each can call the other.
 #[test]
 fn mutual_let_recursion() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "mutual_let",
         "module Test exposing (main)\n\n\
          classify : Int -> String\n\
@@ -875,7 +875,7 @@ fn mutual_let_recursion() {
 // (the shared capture set must carry it to both).
 #[test]
 fn mutual_let_recursion_capture() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "mutual_let_cap",
         "module Test exposing (main)\n\n\
          run : Int -> Int\n\
@@ -902,7 +902,7 @@ fn maybe_map4_5() {
 // the scrutinee type threaded down to resolve sorted field positions.
 #[test]
 fn record_pattern_in_case_and_tuple() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "record_pat_nested",
         "module Test exposing (main)\n\n\
          type alias P = { name : String, age : Int }\n\n\
@@ -919,7 +919,7 @@ fn record_pattern_in_case_and_tuple() {
 // constructor's declared arg type supplies the record's field set.
 #[test]
 fn record_pattern_in_ctor_arg() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "record_pat_ctor",
         "module Test exposing (main)\n\n\
          type Msg\n    = Move { x : Int, y : Int }\n    | Reset\n\n\
@@ -934,7 +934,7 @@ fn record_pattern_in_ctor_arg() {
 // applied 2-arg kernel (modBy) passed to List.map.
 #[test]
 fn operators_first_class() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "ops_first_class",
         "module Test exposing (main)\n\n\
          main : String\n\
@@ -2074,7 +2074,7 @@ fn keyed_handler_table_grows() {
 // `Maximum call stack size exceeded`. Compared JS↔WasmGC only.
 #[test]
 fn deep_tail_recursion() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "deep_tail_recursion",
         "module Test exposing (main)\n\n\
          count : Int -> Int -> Int\n\
@@ -2089,7 +2089,7 @@ fn deep_tail_recursion() {
 // compiles this self-tail-call to a loop, so JS↔WasmGC agree.
 #[test]
 fn deep_tail_recursion_closure() {
-    assert_str_prog_js_wasm(
+    assert_str_prog(
         "deep_tail_closure",
         "module Test exposing (main)\n\n\
          sumTo : Int -> Int\n\
@@ -3805,7 +3805,7 @@ main =
         , f (getY (setY 9 a))
         ]
 "#;
-    assert_str_prog_js_wasm("mjs_linalg", src);
+    assert_str_prog("mjs_linalg", src);
 }
 
 #[test]
