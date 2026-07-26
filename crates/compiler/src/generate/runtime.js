@@ -3823,17 +3823,49 @@ var $Process$sleep = function (ms) {
     });
 };
 
-// WEBGL TEXTURE (elm-explorations/webgl Elm.Kernel.Texture). `size` is pure —
-// it reads a loaded texture's dimensions. `load` needs a real WebGL/DOM context
-// (`new Image()` + `gl.texImage2D`), which node does not have, so it cannot run
-// headlessly. These entry points exist only so modules that reference
-// `WebGL.Texture` in type/data positions (e.g. mikaxyz/elm-gltf) can load; a
-// forked `load` task fails, exactly as it would under stock elm in node.
+// WEBGL TEXTURE (elm-explorations/webgl Elm.Kernel.Texture). `load` fetches an
+// image (`new Image()`), and — on first use by the renderer — uploads it to a GL
+// texture (`createTexture`, stashed on the returned value; see the SAMPLER_2D
+// uniform setter above). It needs a browser (DOM Image + a WebGL context), like
+// stock elm. The magnify/minify/wrap args are GL enums; `flipY` a Bool. Non-
+// power-of-two sizes are rejected unless clamped + non-mipmapped (a SizeError).
 var $Elm$Kernel$Texture$size = function (texture) {
     return { $: '#2', a: texture.width, b: texture.height };
 };
 var $Elm$Kernel$Texture$load = F6(function (magnify, minify, hWrap, vWrap, flipY, url) {
-    return _Task(function (ok, err) { err(_Utils_Tuple0); });
+    var isMipmap = minify !== 9728 && minify !== 9729;
+    return _Task(function (ok, err) {
+        var img = new Image();
+        function createTexture(gl) {
+            var texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, flipY);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magnify);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minify);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, hWrap);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, vWrap);
+            if (isMipmap) { gl.generateMipmap(gl.TEXTURE_2D); }
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            return texture;
+        }
+        img.onload = function () {
+            var width = img.width;
+            var height = img.height;
+            var widthPot = (width & (width - 1)) === 0;
+            var heightPot = (height & (height - 1)) === 0;
+            var sizeValid = (widthPot && heightPot)
+                || (!isMipmap && hWrap === 33071 && vWrap === 33071);
+            if (sizeValid) {
+                ok({ $: 'Texture', createTexture: createTexture, width: width, height: height });
+            } else {
+                err(A2($WebGL$Texture$SizeError, width, height));
+            }
+        };
+        img.onerror = function () { err($WebGL$Texture$LoadError); };
+        if (url.slice(0, 5) !== 'data:') { img.crossOrigin = 'Anonymous'; }
+        img.src = url;
+    });
 });
 
 // WEBGL (elm-explorations/webgl Elm.Kernel.WebGL). A faithful port of the

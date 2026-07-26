@@ -139,3 +139,95 @@ fn webgl_program_compiles_with_real_kernel() {
     // The old inert stub must be gone.
     assert!(!js.contains("WebGLScene"), "found the old WebGL stub node `WebGLScene`");
 }
+
+const MAIN_TEX: &str = r#"module Main exposing (main)
+
+import Browser
+import Html exposing (Html)
+import Math.Vector2 exposing (Vec2, vec2)
+import Task
+import WebGL exposing (Mesh, Shader)
+import WebGL.Texture as Texture exposing (Texture)
+
+
+type alias Vertex = { position : Vec2 }
+type alias Model = { tex : Maybe Texture }
+type Msg = Loaded (Result Texture.Error Texture)
+
+
+mesh : Mesh Vertex
+mesh =
+    WebGL.triangleStrip [ { position = vec2 -1 -1 }, { position = vec2 1 1 } ]
+
+
+vert : Shader Vertex { tex : Texture } { vuv : Vec2 }
+vert =
+    [glsl| attribute vec2 position; varying vec2 vuv;
+           void main () { vuv = position; gl_Position = vec4(position, 0.0, 1.0); } |]
+
+
+frag : Shader {} { tex : Texture } { vuv : Vec2 }
+frag =
+    [glsl| precision mediump float; uniform sampler2D tex; varying vec2 vuv;
+           void main () { gl_FragColor = texture2D(tex, vuv); } |]
+
+
+view : Model -> Html Msg
+view model =
+    case model.tex of
+        Nothing -> Html.text "loading"
+        Just t -> WebGL.toHtml [] [ WebGL.entity vert frag mesh { tex = t } ]
+
+
+main : Program () Model Msg
+main =
+    Browser.element
+        { init = \_ -> ( { tex = Nothing }, Task.attempt Loaded (Texture.load "x.png") )
+        , update = \msg _ ->
+            case msg of
+                Loaded (Ok t) -> ( { tex = Just t }, Cmd.none )
+                Loaded (Err _) -> ( { tex = Nothing }, Cmd.none )
+        , view = view
+        , subscriptions = \_ -> Sub.none
+        }
+"#;
+
+/// A program that `Texture.load`s an image and samples it through a `sampler2D`
+/// uniform must reach the real texture kernel — the async image load, the GPU
+/// upload, and the SizeError/LoadError constructors (kept past DCE). Real pixel
+/// output is covered by tests/browser/webgl-texture.
+#[test]
+fn webgl_texture_compiles_with_real_kernel() {
+    let dir = common::test_dir("alm-webgl", "texture");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(dir.join("elm.json"), ELM_JSON).unwrap();
+    std::fs::write(src.join("Main.elm"), MAIN_TEX).unwrap();
+
+    let checked = match project::check_project(&src.join("Main.elm")) {
+        Ok(c) => c,
+        Err(errors) => {
+            let msg = errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n");
+            if msg.contains("webgl") || msg.contains("linear-algebra") || msg.contains("find") {
+                eprintln!("skipping webgl_texture test: package unavailable\n{msg}");
+                return;
+            }
+            panic!("WebGL texture program failed to compile:\n{msg}");
+        }
+    };
+
+    let js = generate::generate_project(&checked.modules);
+
+    for needle in [
+        "gl.texImage2D",            // image upload to GPU
+        "new Image()",              // async image fetch
+        "generateMipmap",           // mipmap path
+        "$WebGL$Texture$SizeError", // error ctors reachable (kept past DCE)
+        "$WebGL$Texture$LoadError",
+        "createTexture",            // per-texture upload closure
+    ] {
+        assert!(js.contains(needle), "generated JS is missing `{needle}` — texture kernel not wired");
+    }
+    // The old always-failing stub must be gone.
+    assert!(!js.contains("err(_Utils_Tuple0); });"), "found the old texture stub `load`");
+}
