@@ -8,13 +8,6 @@
 
 function F(arity, fun, wrapper) { wrapper.a = arity; wrapper.f = fun; return wrapper; }
 function F2(fun) { return F(2, fun, function (a) { return function (b) { return fun(a, b); }; }); }
-function F3(fun) { return F(3, fun, function (a) { return function (b) { return function (c) { return fun(a, b, c); }; }; }); }
-function F4(fun) { return F(4, fun, function (a) { return function (b) { return function (c) { return function (d) { return fun(a, b, c, d); }; }; }; }); }
-function F5(fun) { return F(5, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return fun(a, b, c, d, e); }; }; }; }; }); }
-function F6(fun) { return F(6, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return fun(a, b, c, d, e, f); }; }; }; }; }; }); }
-function F7(fun) { return F(7, fun, function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (f) { return function (g) { return fun(a, b, c, d, e, f, g); }; }; }; }; }; }; }); }
-// Generic builders for arities above 7 (record aliases can have dozens
-// of fields). F8..F24 and A8..A24 are emitted by the code generator.
 function _Fn(arity, fun) {
     function curried(args) {
         return function (x) {
@@ -27,45 +20,129 @@ function _Fn(arity, fun) {
     wrapper.f = fun;
     return wrapper;
 }
-function _An(f, args) {
-    if (f.a === args.length) { return f.f.apply(null, args); }
-    var result = f;
-    for (var i = 0; i < args.length; i++) { result = result(args[i]); }
-    return result;
+// Record type-alias constructors used as first-class values (e.g. `map Point xs`)
+// must be a single shared function so `(==)` on values built from them matches
+// elm (elm emits one top-level constructor; a fresh closure per use would make
+// two equal records compare unequal). Memoize by the comma-joined field list.
+var _Record_ctorCache = {};
+function _Record_ctor(fieldsCsv) {
+    var cached = _Record_ctorCache[fieldsCsv];
+    if (cached !== undefined) { return cached; }
+    var fields = fieldsCsv.length === 0 ? [] : fieldsCsv.split(',');
+    var n = fields.length;
+    var fn = _Fn(n, function () {
+        var rec = {};
+        for (var i = 0; i < n; i++) { rec[fields[i]] = arguments[i]; }
+        return rec;
+    });
+    _Record_ctorCache[fieldsCsv] = fn;
+    return fn;
 }
 function A2(f, a, b) { return f.a === 2 ? f.f(a, b) : f(a)(b); }
 function A3(f, a, b, c) { return f.a === 3 ? f.f(a, b, c) : f(a)(b)(c); }
 function A4(f, a, b, c, d) { return f.a === 4 ? f.f(a, b, c, d) : f(a)(b)(c)(d); }
-function A5(f, a, b, c, d, e) { return f.a === 5 ? f.f(a, b, c, d, e) : f(a)(b)(c)(d)(e); }
-function A6(f, a, b, c, d, e, g) { return f.a === 6 ? f.f(a, b, c, d, e, g) : f(a)(b)(c)(d)(e)(g); }
-function A7(f, a, b, c, d, e, g, h) { return f.a === 7 ? f.f(a, b, c, d, e, g, h) : f(a)(b)(c)(d)(e)(g)(h); }
-
-// UNIT AND TUPLES
-
 var _Utils_Tuple0 = { $: '#0' };
 
-// LISTS
+// LISTS — an unrolled linked list: a spine of chunks, each a dense array of up
+// to `_List_LIMIT` elements. `cons` prepends a singleton chunk (O(1), immutable,
+// no cons-after-tail copy), while bulk builders (fromArray/map/filter/range/...)
+// pack dense chunks so iteration runs contiguously through memory — most of a
+// vector's speed without a vector's O(n) cons. Chunk boundaries are NOT part of a
+// list's identity: equality, ordering and pattern matching compare the logical
+// element sequence, so `[1,2,3]` built by cons and by fromArray are equal.
+// A chunk node is `{ $: '::', d: <Array>, o: <first live index>, b: <tail> }`
+// with the invariant `o < d.length` (no empty chunks); `d` is never mutated once
+// the node is observable. Nil is `{ $: '[]' }`.
 
+var _List_LIMIT = 8192;
 var _List_Nil = { $: '[]' };
-function _List_Cons(hd, tl) { return { $: '::', a: hd, b: tl }; }
-function _List_fromArray(arr) {
-    var out = _List_Nil;
-    for (var i = arr.length; i--;) { out = _List_Cons(arr[i], out); }
-    return out;
+// cons prepends into the head chunk's front slack IN PLACE when this list owns
+// the frontmost slot (`d.hd` tracks it), so a run of conses shares one backing
+// — amortized O(1) allocation, one chunk per up-to-_List_LIMIT elements, rather
+// than an allocation per element. A cons onto a tail view (or a full/foreign
+// chunk) can't reuse the slack (it would clobber another list's element), so it
+// starts a fresh chunk — no O(n) copy either. Chunks grow geometrically.
+function _List_Cons(hd, tl) {
+    if (tl.$ === '::') {
+        var d = tl.d, o = tl.o;
+        if (o > 0 && d.hd === o) {
+            d[o - 1] = hd;
+            d.hd = o - 1;
+            return { $: '::', d: d, o: o - 1, b: tl.b };
+        }
+    }
+    var prev = tl.$ === '::' ? tl.d.length - tl.o : 0;
+    var cap = prev < 4 ? 8 : prev * 2;
+    if (cap > _List_LIMIT) { cap = _List_LIMIT; }
+    var nd = new Array(cap);
+    nd[cap - 1] = hd;
+    nd.hd = cap - 1;
+    return { $: '::', d: nd, o: cap - 1, b: tl };
 }
+function _List_fromArrayOnto(arr, tail) {
+    if (arr.length === 0) { return tail; }
+    return { $: '::', d: arr, o: 0, b: tail };
+}
+function _List_fromArray(arr) { return _List_fromArrayOnto(arr, _List_Nil); }
 function _List_toArray(xs) {
+    if (xs.$ !== '::') { return []; }
+    // Single dense chunk: copy it out directly. Callers such as `List.sort`
+    // mutate the result in place, so never return the shared backing.
+    if (xs.b.$ === '[]') { return xs.o === 0 ? xs.d.slice() : xs.d.slice(xs.o); }
     var out = [];
-    for (; xs.$ === '::'; xs = xs.b) { out.push(xs.a); }
+    for (; xs.$ === '::'; xs = xs.b) {
+        var d = xs.d;
+        for (var i = xs.o, n = d.length; i < n; i++) { out.push(d[i]); }
+    }
     return out;
 }
 
-// EQUALITY — structural, like _Utils_eq
-
-function _Utils_eq(x, y) {
+// CHAR — dev builds box every Char as a `new String(c)` object so `Debug.toString`
+// (and `instanceof String` checks) can tell a Char apart from a 1-char String.
+function _Utils_eqHelp(x, y, depth, stack) {
     if (x === y) { return true; }
-    if (typeof x !== 'object' || x === null || y === null) { return false; }
+    // A `y === undefined` here means x has a field/index that y lacks (a shape
+    // mismatch, e.g. comparing a non-empty array-backed Dict with Dict.empty):
+    // they are unequal — guard so we don't recurse into `undefined` and throw.
+    if (typeof x !== 'object' || x === null || y === null || y === undefined) { return false; }
+    // Boxed chars compare by value: two `new String('a')` are equal.
+    if (x instanceof String) { return x.valueOf() === y.valueOf(); }
+    // Json decoders are opaque closures in alm. elm represents them as data and
+    // compares structurally; `Json.succeed a == Json.succeed b` iff `a == b`.
+    // Compare `succeed` decoders by their value; others by identity (the `run`
+    // closures are functions, which are otherwise incomparable).
+    if (x.$ === 'Decoder' || y.$ === 'Decoder') {
+        if (!y || x.$ !== 'Decoder' || y.$ !== 'Decoder') { return false; }
+        if (x.succeed && y.succeed) { return _Utils_eqHelp(x.value, y.value, depth + 1, stack); }
+        return x.run === y.run;
+    }
+    // Lists compare by logical element sequence — chunk boundaries are not part
+    // of a list's identity, so two equal lists may be chunked differently.
+    if (x.$ === '::' || x.$ === '[]') {
+        if (y.$ !== '::' && y.$ !== '[]') { return false; }
+        var exi = x.$ === '::' ? x.o : 0;
+        var eyi = y.$ === '::' ? y.o : 0;
+        while (x.$ === '::' && y.$ === '::') {
+            if (!_Utils_eqHelp(x.d[exi], y.d[eyi], depth + 1, stack)) { return false; }
+            if (++exi >= x.d.length) { x = x.b; exi = x.$ === '::' ? x.o : 0; }
+            if (++eyi >= y.d.length) { y = y.b; eyi = y.$ === '::' ? y.o : 0; }
+        }
+        return x.$ === '[]' && y.$ === '[]';
+    }
+    if (depth > 100) {
+        stack.push({ $: '#2', a: x, b: y });
+        return true;
+    }
+    // Dict/Set are red-black trees: two trees with identical contents can have
+    // different shapes, so structural field comparison would wrongly disagree.
+    // Compare by their canonical sorted list instead (as elm's kernel does).
+    if (x.$ === 'Set_elm_builtin') {
+        x = $Set$toList(x); y = $Set$toList(y);
+    } else if (x.$ === 'RBNode_elm_builtin' || x.$ === 'RBEmpty_elm_builtin') {
+        x = $Dict$toList(x); y = $Dict$toList(y);
+    }
     for (var key in x) {
-        if (!_Utils_eq(x[key], y[key])) { return false; }
+        if (!_Utils_eqHelp(x[key], y[key], depth + 1, stack)) { return false; }
     }
     for (var key2 in y) {
         if (!(key2 in x)) { return false; }
@@ -75,34 +152,12 @@ function _Utils_eq(x, y) {
 
 // COMPARISON — only ever called on comparable values
 
-function _Utils_cmp(x, y) {
-    if (typeof x !== 'object') {
-        return x === y ? 0 : x < y ? -1 : 1;
-    }
-    if (x.$ === '#2' || x.$ === '#3') {
-        var n = _Utils_cmp(x.a, y.a);
-        if (n !== 0) { return n; }
-        n = _Utils_cmp(x.b, y.b);
-        if (n !== 0) { return n; }
-        return x.$ === '#3' ? _Utils_cmp(x.c, y.c) : 0;
-    }
-    // lists
-    for (; x.$ === '::' && y.$ === '::'; x = x.b, y = y.b) {
-        var m = _Utils_cmp(x.a, y.a);
-        if (m !== 0) { return m; }
-    }
-    return x.$ === '[]' ? (y.$ === '[]' ? 0 : -1) : 1;
-}
-
-// APPEND
-
 function _Utils_ap(x, y) {
     if (typeof x === 'string') { return x + y; }
     if (x.$ === '[]') { return y; }
-    var arr = _List_toArray(x);
-    var out = y;
-    for (var i = arr.length; i--;) { out = _List_Cons(arr[i], out); }
-    return out;
+    // Prepend x's elements onto y as dense chunks; the copy is bounded by |x|,
+    // and y's spine is shared (not copied).
+    return _List_fromArrayOnto(_List_toArray(x), y);
 }
 
 // RECORD UPDATE
@@ -116,335 +171,70 @@ function _Utils_update(oldRecord, updatedFields) {
 
 // BASICS
 
-var $Basics$add = F2(function (a, b) { return a + b; });
-var $Basics$sub = F2(function (a, b) { return a - b; });
-var $Basics$mul = F2(function (a, b) { return a * b; });
-var $Basics$fdiv = F2(function (a, b) { return a / b; });
-var $Basics$idiv = F2(function (a, b) { return (a / b) | 0; });
-var $Basics$pow = F2(function (a, b) { return Math.pow(a, b); });
-var $Basics$negate = function (n) { return -n; };
-var $Basics$abs = function (n) { return n < 0 ? -n : n; };
-var $Basics$clamp = F3(function (lo, hi, n) { return n < lo ? lo : n > hi ? hi : n; });
-var $Basics$sqrt = Math.sqrt;
-var $Basics$logBase = F2(function (base, n) { return Math.log(n) / Math.log(base); });
-var $Basics$e = Math.E;
-var $Basics$pi = Math.PI;
-var $Basics$cos = Math.cos;
-var $Basics$sin = Math.sin;
-var $Basics$tan = Math.tan;
-var $Basics$acos = Math.acos;
-var $Basics$asin = Math.asin;
-var $Basics$atan = Math.atan;
-var $Basics$atan2 = F2(function (y, x) { return Math.atan2(y, x); });
-var $Basics$modBy = F2(function (m, n) {
-    if (m === 0) { throw new Error('modBy 0 is undefined'); }
-    var r = n % m;
-    return (r > 0 && m < 0) || (r < 0 && m > 0) ? r + m : r;
-});
-var $Basics$remainderBy = F2(function (m, n) { return n % m; });
-var $Basics$toFloat = function (n) { return n; };
-var $Basics$round = Math.round;
-var $Basics$floor = Math.floor;
-var $Basics$ceiling = Math.ceil;
-var $Basics$truncate = function (n) { return n | 0; };
-var $Basics$eq = F2(_Utils_eq);
-var $Basics$neq = F2(function (a, b) { return !_Utils_eq(a, b); });
-var $Basics$lt = F2(function (a, b) { return _Utils_cmp(a, b) < 0; });
-var $Basics$gt = F2(function (a, b) { return _Utils_cmp(a, b) > 0; });
-var $Basics$le = F2(function (a, b) { return _Utils_cmp(a, b) < 1; });
-var $Basics$ge = F2(function (a, b) { return _Utils_cmp(a, b) > -1; });
-var $Basics$min = F2(function (a, b) { return _Utils_cmp(a, b) < 0 ? a : b; });
-var $Basics$max = F2(function (a, b) { return _Utils_cmp(a, b) > 0 ? a : b; });
-var $Basics$LT = { $: 'LT' };
-var $Basics$EQ = { $: 'EQ' };
-var $Basics$GT = { $: 'GT' };
-var $Basics$compare = F2(function (a, b) {
-    var n = _Utils_cmp(a, b);
-    return n < 0 ? $Basics$LT : n ? $Basics$GT : $Basics$EQ;
-});
 var $Basics$not = function (b) { return !b; };
-var $Basics$and = F2(function (a, b) { return a && b; });
-var $Basics$or = F2(function (a, b) { return a || b; });
-var $Basics$xor = F2(function (a, b) { return a !== b; });
-var $Basics$append = F2(_Utils_ap);
-var $Basics$identity = function (x) { return x; };
-var $Basics$never = function (_n) { throw new Error('Basics.never was called (this is impossible in well-typed code)'); };
-var $Basics$always = F2(function (x, _y) { return x; });
-var $Basics$apL = F2(function (f, x) { return f(x); });
-var $Basics$apR = F2(function (x, f) { return f(x); });
-var $Basics$composeL = F3(function (g, f, x) { return g(f(x)); });
-var $Basics$composeR = F3(function (f, g, x) { return g(f(x)); });
-
-// MAYBE
-
 var $Maybe$Nothing = { $: 'Nothing' };
 var $Maybe$Just = function (a) { return { $: 'Just', a: a }; };
-var $Maybe$withDefault = F2(function (fallback, maybe) {
-    return maybe.$ === 'Just' ? maybe.a : fallback;
-});
-var $Maybe$map = F2(function (f, maybe) {
-    return maybe.$ === 'Just' ? $Maybe$Just(f(maybe.a)) : maybe;
-});
-var $Maybe$map2 = F3(function (f, ma, mb) {
-    return ma.$ === 'Just' && mb.$ === 'Just' ? $Maybe$Just(A2(f, ma.a, mb.a)) : $Maybe$Nothing;
-});
-var $Maybe$andThen = F2(function (f, maybe) {
-    return maybe.$ === 'Just' ? f(maybe.a) : maybe;
-});
-
-// RESULT
-
-var $Result$Ok = function (a) { return { $: 'Ok', a: a }; };
-var $Result$Err = function (a) { return { $: 'Err', a: a }; };
-var $Result$withDefault = F2(function (fallback, result) {
-    return result.$ === 'Ok' ? result.a : fallback;
-});
-var $Result$map = F2(function (f, result) {
-    return result.$ === 'Ok' ? $Result$Ok(f(result.a)) : result;
-});
-var $Result$mapError = F2(function (f, result) {
-    return result.$ === 'Err' ? $Result$Err(f(result.a)) : result;
-});
-var $Result$andThen = F2(function (f, result) {
-    return result.$ === 'Ok' ? f(result.a) : result;
-});
-var $Result$toMaybe = function (result) {
-    return result.$ === 'Ok' ? $Maybe$Just(result.a) : $Maybe$Nothing;
-};
-var $Result$fromMaybe = F2(function (err, maybe) {
-    return maybe.$ === 'Just' ? $Result$Ok(maybe.a) : $Result$Err(err);
-});
-
-// LIST
-
-var $List$cons = F2(_List_Cons);
-var $List$singleton = function (x) { return _List_Cons(x, _List_Nil); };
-var $List$repeat = F2(function (n, x) {
-    var out = _List_Nil;
-    for (; n > 0; n--) { out = _List_Cons(x, out); }
-    return out;
-});
-var $List$range = F2(function (lo, hi) {
-    var out = _List_Nil;
-    for (; lo <= hi; hi--) { out = _List_Cons(hi, out); }
-    return out;
-});
 var $List$map = F2(function (f, xs) {
-    return _List_fromArray(_List_toArray(xs).map(function (x) { return f(x); }));
-});
-var $List$indexedMap = F2(function (f, xs) {
-    return _List_fromArray(_List_toArray(xs).map(function (x, i) { return A2(f, i, x); }));
-});
-var $List$foldl = F3(function (f, acc, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { acc = A2(f, xs.a, acc); }
-    return acc;
-});
-var $List$foldr = F3(function (f, acc, xs) {
-    var arr = _List_toArray(xs);
-    for (var i = arr.length; i--;) { acc = A2(f, arr[i], acc); }
-    return acc;
-});
-var $List$filter = F2(function (isGood, xs) {
-    return _List_fromArray(_List_toArray(xs).filter(function (x) { return isGood(x); }));
-});
-var $List$filterMap = F2(function (f, xs) {
     var out = [];
-    for (; xs.$ === '::'; xs = xs.b) {
-        var m = f(xs.a);
-        if (m.$ === 'Just') { out.push(m.a); }
-    }
+    for (; xs.$ === '::'; xs = xs.b) { var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) { out.push(f(d[i])); } }
     return _List_fromArray(out);
 });
-var $List$length = function (xs) {
-    var n = 0;
-    for (; xs.$ === '::'; xs = xs.b) { n++; }
-    return n;
-};
 var $List$reverse = function (xs) {
-    var out = _List_Nil;
-    for (; xs.$ === '::'; xs = xs.b) { out = _List_Cons(xs.a, out); }
-    return out;
-};
-var $List$member = F2(function (x, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (_Utils_eq(x, xs.a)) { return true; } }
-    return false;
-});
-var $List$all = F2(function (isGood, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (!isGood(xs.a)) { return false; } }
-    return true;
-});
-var $List$any = F2(function (isGood, xs) {
-    for (; xs.$ === '::'; xs = xs.b) { if (isGood(xs.a)) { return true; } }
-    return false;
-});
-var $List$maximum = function (xs) {
-    if (xs.$ !== '::') { return $Maybe$Nothing; }
-    var best = xs.a;
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { if (_Utils_cmp(xs.a, best) > 0) { best = xs.a; } }
-    return $Maybe$Just(best);
-};
-var $List$minimum = function (xs) {
-    if (xs.$ !== '::') { return $Maybe$Nothing; }
-    var best = xs.a;
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { if (_Utils_cmp(xs.a, best) < 0) { best = xs.a; } }
-    return $Maybe$Just(best);
-};
-var $List$sum = function (xs) {
-    var n = 0;
-    for (; xs.$ === '::'; xs = xs.b) { n += xs.a; }
-    return n;
-};
-var $List$product = function (xs) {
-    var n = 1;
-    for (; xs.$ === '::'; xs = xs.b) { n *= xs.a; }
-    return n;
-};
-var $List$append = F2(_Utils_ap);
-var $List$concat = function (xss) {
-    var out = [];
-    for (; xss.$ === '::'; xss = xss.b) {
-        out.push.apply(out, _List_toArray(xss.a));
-    }
+    var out = _List_toArray(xs);
+    out.reverse();
     return _List_fromArray(out);
-};
-var $List$concatMap = F2(function (f, xs) {
-    return $List$concat(A2($List$map, f, xs));
-});
-var $List$intersperse = F2(function (sep, xs) {
-    if (xs.$ !== '::') { return xs; }
-    var out = [xs.a];
-    for (xs = xs.b; xs.$ === '::'; xs = xs.b) { out.push(sep, xs.a); }
-    return _List_fromArray(out);
-});
-var $List$map2 = F3(function (f, xs, ys) {
-    var out = [];
-    for (; xs.$ === '::' && ys.$ === '::'; xs = xs.b, ys = ys.b) {
-        out.push(A2(f, xs.a, ys.a));
-    }
-    return _List_fromArray(out);
-});
-var $List$sort = function (xs) {
-    return _List_fromArray(_List_toArray(xs).sort(_Utils_cmp));
-};
-var $List$sortBy = F2(function (toComparable, xs) {
-    return _List_fromArray(_List_toArray(xs).sort(function (a, b) {
-        return _Utils_cmp(toComparable(a), toComparable(b));
-    }));
-});
-var $List$isEmpty = function (xs) { return xs.$ === '[]'; };
-var $List$head = function (xs) {
-    return xs.$ === '::' ? $Maybe$Just(xs.a) : $Maybe$Nothing;
-};
-var $List$tail = function (xs) {
-    return xs.$ === '::' ? $Maybe$Just(xs.b) : $Maybe$Nothing;
 };
 var $List$take = F2(function (n, xs) {
     var out = [];
-    for (; n > 0 && xs.$ === '::'; n--, xs = xs.b) { out.push(xs.a); }
+    for (; n > 0 && xs.$ === '::'; xs = xs.b) {
+        var d = xs.d;
+        for (var i = xs.o, m = d.length; i < m && n > 0; i++, n--) { out.push(d[i]); }
+    }
     return _List_fromArray(out);
 });
 var $List$drop = F2(function (n, xs) {
-    for (; n > 0 && xs.$ === '::'; n--) { xs = xs.b; }
+    while (n > 0 && xs.$ === '::') {
+        var avail = xs.d.length - xs.o;
+        if (n < avail) { return { $: '::', d: xs.d, o: xs.o + n, b: xs.b }; }
+        n -= avail;
+        xs = xs.b;
+    }
     return xs;
 });
-var $List$partition = F2(function (isGood, xs) {
-    var yes = [], no = [];
-    for (; xs.$ === '::'; xs = xs.b) { (isGood(xs.a) ? yes : no).push(xs.a); }
-    return { $: '#2', a: _List_fromArray(yes), b: _List_fromArray(no) };
-});
-var $List$unzip = function (pairs) {
-    var xs = [], ys = [];
-    for (; pairs.$ === '::'; pairs = pairs.b) { xs.push(pairs.a.a); ys.push(pairs.a.b); }
-    return { $: '#2', a: _List_fromArray(xs), b: _List_fromArray(ys) };
-};
-
-// STRING
-
-var $String$isEmpty = function (s) { return s === ''; };
-var $String$length = function (s) { return s.length; };
-var $String$reverse = function (s) { return s.split('').reverse().join(''); };
-var $String$repeat = F2(function (n, s) { return n < 1 ? '' : s.repeat(n); });
-var $String$replace = F3(function (before, after, s) { return s.split(before).join(after); });
-var $String$append = F2(function (a, b) { return a + b; });
-var $String$concat = function (xs) { return _List_toArray(xs).join(''); };
-var $String$split = F2(function (sep, s) { return _List_fromArray(s.split(sep)); });
+var $String$reverse = function (s) { return Array.from(s).reverse().join(''); };
 var $String$join = F2(function (sep, xs) { return _List_toArray(xs).join(sep); });
-var $String$words = function (s) {
-    var trimmed = s.trim();
-    return _List_fromArray(trimmed === '' ? [] : trimmed.split(/\s+/));
-};
-var $String$lines = function (s) { return _List_fromArray(s.split('\n')); };
-var $String$slice = F3(function (a, b, s) {
-    return s.slice(a < 0 ? Math.max(0, s.length + a) : a, b < 0 ? s.length + b : b);
-});
-var $String$left = F2(function (n, s) { return n < 1 ? '' : s.slice(0, n); });
-var $String$right = F2(function (n, s) { return n < 1 ? '' : s.slice(-n); });
-var $String$dropLeft = F2(function (n, s) { return n < 1 ? s : s.slice(n); });
-var $String$dropRight = F2(function (n, s) { return n < 1 ? s : s.slice(0, -n); });
-var $String$contains = F2(function (sub, s) { return s.indexOf(sub) > -1; });
-var $String$startsWith = F2(function (sub, s) { return s.indexOf(sub) === 0; });
-var $String$endsWith = F2(function (sub, s) {
-    return s.length >= sub.length && s.lastIndexOf(sub) === s.length - sub.length;
-});
 var $String$toInt = function (s) {
-    var n = parseInt(s, 10);
-    return isNaN(n) || String(n) !== s.replace(/^\+/, '') ? $Maybe$Nothing : $Maybe$Just(n);
+    // elm accepts an optional leading +/- and any run of digits (including
+    // leading zeros: "01" -> Just 1); rejects empty / non-digit / bare sign.
+    var total = 0;
+    var code0 = s.charCodeAt(0);
+    var start = code0 === 0x2B || code0 === 0x2D ? 1 : 0;
+    var i = start;
+    for (; i < s.length; ++i) {
+        var code = s.charCodeAt(i);
+        if (code < 0x30 || 0x39 < code) { return $Maybe$Nothing; }
+        total = 10 * total + code - 0x30;
+    }
+    return i === start ? $Maybe$Nothing : $Maybe$Just(code0 === 0x2D ? -total : total);
 };
 var $String$fromInt = function (n) { return String(n); };
-var $String$toFloat = function (s) {
-    if (s === '' || /[^0-9+\-.eE]/.test(s)) { return $Maybe$Nothing; }
-    var n = Number(s);
-    return isNaN(n) ? $Maybe$Nothing : $Maybe$Just(n);
-};
-var $String$fromFloat = function (n) { return String(n); };
-var $String$fromChar = function (c) { return c; };
-var $String$toList = function (s) { return _List_fromArray(Array.from(s)); };
-var $String$fromList = function (cs) { return _List_toArray(cs).join(''); };
-var $String$toUpper = function (s) { return s.toUpperCase(); };
-var $String$toLower = function (s) { return s.toLowerCase(); };
-var $String$trim = function (s) { return s.trim(); };
-var $String$trimLeft = function (s) { return s.replace(/^\s+/, ''); };
-var $String$trimRight = function (s) { return s.replace(/\s+$/, ''); };
-var $String$padLeft = F3(function (n, c, s) {
-    return c.repeat(Math.max(0, n - s.length)) + s;
-});
-var $String$padRight = F3(function (n, c, s) {
-    return s + c.repeat(Math.max(0, n - s.length));
-});
-var $String$filter = F2(function (isGood, s) {
-    return Array.from(s).filter(function (c) { return isGood(c); }).join('');
-});
-var $String$map = F2(function (f, s) {
-    return Array.from(s).map(function (c) { return f(c); }).join('');
-});
-
-// CHAR
-
-var $Char$toCode = function (c) { return c.codePointAt(0); };
-var $Char$fromCode = function (n) { return String.fromCodePoint(n); };
-var $Char$isDigit = function (c) { return c >= '0' && c <= '9'; };
-var $Char$isAlpha = function (c) { return /^[a-zA-Z]$/.test(c); };
-var $Char$isUpper = function (c) { return c >= 'A' && c <= 'Z'; };
-var $Char$isLower = function (c) { return c >= 'a' && c <= 'z'; };
-var $Char$toUpper = function (c) { return c.toUpperCase(); };
-var $Char$toLower = function (c) { return c.toLowerCase(); };
-
-// TUPLE
-
-var $Tuple$pair = F2(function (a, b) { return { $: '#2', a: a, b: b }; });
-var $Tuple$first = function (t) { return t.a; };
-var $Tuple$second = function (t) { return t.b; };
-var $Tuple$mapFirst = F2(function (f, t) { return { $: '#2', a: f(t.a), b: t.b }; });
-var $Tuple$mapSecond = F2(function (f, t) { return { $: '#2', a: t.a, b: f(t.b) }; });
-var $Tuple$mapBoth = F3(function (f, g, t) { return { $: '#2', a: f(t.a), b: g(t.b) }; });
-
-// DEBUG
-
+function _Debug_addSlashes(str, isChar) {
+    var s = String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/\n/g, '\\n')
+        .replace(/\t/g, '\\t')
+        .replace(/\r/g, '\\r')
+        .replace(/\v/g, '\\v')
+        .replace(/\0/g, '\\0');
+    return isChar ? s.replace(/'/g, "\\'") : s.replace(/"/g, '\\"');
+}
 function _Debug_toString(value) {
     if (value === true) { return 'True'; }
     if (value === false) { return 'False'; }
     if (typeof value === 'number') { return String(value); }
-    if (typeof value === 'string') { return JSON.stringify(value); }
+    // A boxed String object is elm's dev-build Char representation → single quotes.
+    if (value instanceof String) { return "'" + _Debug_addSlashes(value.valueOf(), true) + "'"; }
+    if (typeof value === 'string') { return '"' + _Debug_addSlashes(value, false) + '"'; }
     if (typeof value === 'function') { return '<function>'; }
     if (value === null || value === undefined) { return '<internal>'; }
     var tag = value.$;
@@ -456,14 +246,24 @@ function _Debug_toString(value) {
     if (tag === '[]' || tag === '::') {
         return '[' + _List_toArray(value).map(_Debug_toString).join(',') + ']';
     }
-    if (tag === 'Dict') {
+    // Builtin Dict/Set/Array carry collision-proof `_elm_builtin` tags (alm's
+    // parser forbids that suffix in user constructor names), so a user type
+    // named `Dict`/`Set`/`Array` has tag `'Dict'`/`'Set'`/`'Array'` and falls
+    // through to the generic custom-type rendering below.
+    if (tag === 'RBNode_elm_builtin' || tag === 'RBEmpty_elm_builtin') {
         return 'Dict.fromList ' + _Debug_toString($Dict$toList(value));
     }
-    if (tag === 'Set') {
+    if (tag === 'Set_elm_builtin') {
         return 'Set.fromList ' + _Debug_toString($Dict$keys(value.d));
     }
-    if (tag === 'Array') {
-        return 'Array.fromList ' + _Debug_toString(_List_fromArray(value.a));
+    if (tag === 'Array_elm_builtin') {
+        return 'Array.fromList ' + _Debug_toString($Array$toList(value));
+    }
+    // Internal scheduler values (Tasks) render as `<internals>`, like elm — its
+    // scheduler tags these with a number, ours with `'Task'` plus a `fork`
+    // closure or numeric `tag`, which a user `Task` constructor never carries.
+    if (tag === 'Task' && (typeof value.fork === 'function' || typeof value.tag === 'number')) {
+        return '<internals>';
     }
     if (tag !== undefined) {
         var out = tag;
@@ -474,379 +274,111 @@ function _Debug_toString(value) {
         }
         return out;
     }
-    // record
-    var fields = [];
-    for (var name in value) {
-        fields.push(name + ' = ' + _Debug_toString(value[name]));
-    }
+    // record — elm renders fields in alphabetical order, not definition order
+    var names = [];
+    for (var name in value) { names.push(name); }
+    names.sort();
+    var fields = names.map(function (n) { return n + ' = ' + _Debug_toString(value[n]); });
     return '{ ' + fields.join(', ') + ' }';
 }
-var $Debug$toString = _Debug_toString;
-var $Debug$log = F2(function (label, value) {
-    console.log(label + ': ' + _Debug_toString(value));
-    return value;
-});
-var $Debug$todo = function (message) {
-    throw new Error('TODO: ' + message);
-};
-
-// BASICS — extras
-
-var $Basics$isNaN = function (n) { return isNaN(n); };
-var $Basics$isInfinite = function (n) { return n === Infinity || n === -Infinity; };
-var $Basics$degrees = function (d) { return d * Math.PI / 180; };
-var $Basics$radians = function (r) { return r; };
-var $Basics$turns = function (t) { return t * 2 * Math.PI; };
-var $Basics$toPolar = function (p) {
-    return { $: '#2', a: Math.sqrt(p.a * p.a + p.b * p.b), b: Math.atan2(p.b, p.a) };
-};
-var $Basics$fromPolar = function (p) {
-    return { $: '#2', a: p.a * Math.cos(p.b), b: p.a * Math.sin(p.b) };
-};
-
-// LIST — extras
-
-var $List$sortWith = F2(function (compare, xs) {
-    return _List_fromArray(_List_toArray(xs).sort(function (a, b) {
-        var order = A2(compare, a, b);
-        return order.$ === 'LT' ? -1 : order.$ === 'EQ' ? 0 : 1;
-    }));
-});
-var $List$map3 = F4(function (f, xs, ys, zs) {
+function _Dict_toArray(dict) {
     var out = [];
-    for (; xs.$ === '::' && ys.$ === '::' && zs.$ === '::'; xs = xs.b, ys = ys.b, zs = zs.b) {
-        out.push(A3(f, xs.a, ys.a, zs.a));
+    var stack = [];
+    var node = dict;
+    while (node.$ === 'RBNode_elm_builtin' || stack.length) {
+        while (node.$ === 'RBNode_elm_builtin') { stack.push(node); node = node.left; }
+        node = stack.pop();
+        out.push(node);
+        node = node.right;
     }
-    return _List_fromArray(out);
-});
-
-// STRING — extras
-
-var $String$uncons = function (s) {
-    if (s === '') { return $Maybe$Nothing; }
-    var c = Array.from(s)[0];
-    return $Maybe$Just({ $: '#2', a: c, b: s.slice(c.length) });
-};
-var $String$cons = F2(function (c, s) { return c + s; });
-var $String$indexes = F2(function (sub, s) {
-    if (sub === '') { return _List_Nil; }
-    var out = [];
-    var i = s.indexOf(sub);
-    while (i > -1) { out.push(i); i = s.indexOf(sub, i + sub.length); }
-    return _List_fromArray(out);
-});
-var $String$any = F2(function (isGood, s) {
-    return Array.from(s).some(function (c) { return isGood(c); });
-});
-var $String$all = F2(function (isGood, s) {
-    return Array.from(s).every(function (c) { return isGood(c); });
-});
-var $String$foldl = F3(function (f, acc, s) {
-    var chars = Array.from(s);
-    for (var i = 0; i < chars.length; i++) { acc = A2(f, chars[i], acc); }
-    return acc;
-});
-var $String$foldr = F3(function (f, acc, s) {
-    var chars = Array.from(s);
-    for (var i = chars.length; i--;) { acc = A2(f, chars[i], acc); }
-    return acc;
-});
-
-// CHAR — extras
-
-var $Char$isAlphaNum = function (c) { return /^[a-zA-Z0-9]$/.test(c); };
-var $Char$isHexDigit = function (c) { return /^[0-9a-fA-F]$/.test(c); };
-
-// MAYBE — extras
-
-var $Maybe$map3 = F4(function (f, ma, mb, mc) {
-    return ma.$ === 'Just' && mb.$ === 'Just' && mc.$ === 'Just'
-        ? $Maybe$Just(A3(f, ma.a, mb.a, mc.a))
-        : $Maybe$Nothing;
-});
-var $Maybe$map4 = F5(function (f, ma, mb, mc, md) {
-    return ma.$ === 'Just' && mb.$ === 'Just' && mc.$ === 'Just' && md.$ === 'Just'
-        ? $Maybe$Just(A4(f, ma.a, mb.a, mc.a, md.a))
-        : $Maybe$Nothing;
-});
-
-// RESULT — extras
-
-var $Result$map2 = F3(function (f, ra, rb) {
-    if (ra.$ === 'Err') { return ra; }
-    if (rb.$ === 'Err') { return rb; }
-    return $Result$Ok(A2(f, ra.a, rb.a));
-});
-
-// DICT
-//
-// Elm's Dict is a red-black tree; alm uses an immutable sorted array of
-// keys with a parallel array of values. Same observable behavior;
-// insert/remove are O(n) copies rather than O(log n).
-
-var $Dict$empty = { $: 'Dict', keys: [], vals: [] };
-
-function _Dict_search(dict, key) {
-    // Binary search: returns index if found, otherwise ~insertionPoint.
-    var lo = 0, hi = dict.keys.length - 1;
-    while (lo <= hi) {
-        var mid = (lo + hi) >> 1;
-        var cmp = _Utils_cmp(dict.keys[mid], key);
-        if (cmp === 0) { return mid; }
-        if (cmp < 0) { lo = mid + 1; } else { hi = mid - 1; }
-    }
-    return ~lo;
+    return out;
 }
-
-var $Dict$singleton = F2(function (key, value) {
-    return { $: 'Dict', keys: [key], vals: [value] };
-});
-var $Dict$insert = F3(function (key, value, dict) {
-    var i = _Dict_search(dict, key);
-    var keys = dict.keys.slice();
-    var vals = dict.vals.slice();
-    if (i >= 0) {
-        vals[i] = value;
-    } else {
-        keys.splice(~i, 0, key);
-        vals.splice(~i, 0, value);
-    }
-    return { $: 'Dict', keys: keys, vals: vals };
-});
-var $Dict$remove = F2(function (key, dict) {
-    var i = _Dict_search(dict, key);
-    if (i < 0) { return dict; }
-    var keys = dict.keys.slice();
-    var vals = dict.vals.slice();
-    keys.splice(i, 1);
-    vals.splice(i, 1);
-    return { $: 'Dict', keys: keys, vals: vals };
-});
-var $Dict$update = F3(function (key, alter, dict) {
-    var i = _Dict_search(dict, key);
-    var current = i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
-    var next = alter(current);
-    return next.$ === 'Just'
-        ? A3($Dict$insert, key, next.a, dict)
-        : A2($Dict$remove, key, dict);
-});
-var $Dict$isEmpty = function (dict) { return dict.keys.length === 0; };
-var $Dict$member = F2(function (key, dict) { return _Dict_search(dict, key) >= 0; });
-var $Dict$get = F2(function (key, dict) {
-    var i = _Dict_search(dict, key);
-    return i >= 0 ? $Maybe$Just(dict.vals[i]) : $Maybe$Nothing;
-});
-var $Dict$size = function (dict) { return dict.keys.length; };
-var $Dict$keys = function (dict) { return _List_fromArray(dict.keys); };
-var $Dict$values = function (dict) { return _List_fromArray(dict.vals); };
+var $Dict$keys = function (dict) {
+    return _List_fromArray(_Dict_toArray(dict).map(function (n) { return n.key; }));
+};
 var $Dict$toList = function (dict) {
-    return _List_fromArray(dict.keys.map(function (k, i) {
-        return { $: '#2', a: k, b: dict.vals[i] };
-    }));
+    return _List_fromArray(_Dict_toArray(dict).map(function (n) { return { $: '#2', a: n.key, b: n.val }; }));
 };
-var $Dict$fromList = function (pairs) {
-    var dict = $Dict$empty;
-    for (; pairs.$ === '::'; pairs = pairs.b) {
-        dict = A3($Dict$insert, pairs.a.a, pairs.a.b, dict);
-    }
-    return dict;
-};
-var $Dict$map = F2(function (f, dict) {
-    return {
-        $: 'Dict',
-        keys: dict.keys.slice(),
-        vals: dict.vals.map(function (v, i) { return A2(f, dict.keys[i], v); })
-    };
-});
-var $Dict$foldl = F3(function (f, acc, dict) {
-    for (var i = 0; i < dict.keys.length; i++) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
-    return acc;
-});
-var $Dict$foldr = F3(function (f, acc, dict) {
-    for (var i = dict.keys.length; i--;) { acc = A3(f, dict.keys[i], dict.vals[i], acc); }
-    return acc;
-});
-var $Dict$filter = F2(function (isGood, dict) {
-    var keys = [], vals = [];
-    for (var i = 0; i < dict.keys.length; i++) {
-        if (A2(isGood, dict.keys[i], dict.vals[i])) {
-            keys.push(dict.keys[i]);
-            vals.push(dict.vals[i]);
-        }
-    }
-    return { $: 'Dict', keys: keys, vals: vals };
-});
-var $Dict$partition = F2(function (isGood, dict) {
-    var yes = { $: 'Dict', keys: [], vals: [] };
-    var no = { $: 'Dict', keys: [], vals: [] };
-    for (var i = 0; i < dict.keys.length; i++) {
-        var target = A2(isGood, dict.keys[i], dict.vals[i]) ? yes : no;
-        target.keys.push(dict.keys[i]);
-        target.vals.push(dict.vals[i]);
-    }
-    return { $: '#2', a: yes, b: no };
-});
-var $Dict$union = F2(function (left, right) {
-    var result = right;
-    for (var i = 0; i < left.keys.length; i++) {
-        result = A3($Dict$insert, left.keys[i], left.vals[i], result);
-    }
-    return result;
-});
-var $Dict$intersect = F2(function (left, right) {
-    return A2($Dict$filter, F2(function (k, _v) { return A2($Dict$member, k, right); }), left);
-});
-var $Dict$diff = F2(function (left, right) {
-    return A2($Dict$filter, F2(function (k, _v) { return !A2($Dict$member, k, right); }), left);
-});
-
-// SET — a Dict with unit values.
-
-var $Set$empty = { $: 'Set', d: $Dict$empty };
-var $Set$singleton = function (key) { return { $: 'Set', d: A2($Dict$singleton, key, 0) }; };
-var $Set$insert = F2(function (key, set) { return { $: 'Set', d: A3($Dict$insert, key, 0, set.d) }; });
-var $Set$remove = F2(function (key, set) { return { $: 'Set', d: A2($Dict$remove, key, set.d) }; });
-var $Set$isEmpty = function (set) { return $Dict$isEmpty(set.d); };
-var $Set$member = F2(function (key, set) { return A2($Dict$member, key, set.d); });
-var $Set$size = function (set) { return $Dict$size(set.d); };
 var $Set$toList = function (set) { return $Dict$keys(set.d); };
-var $Set$fromList = function (xs) {
-    var set = $Set$empty;
-    for (; xs.$ === '::'; xs = xs.b) { set = A2($Set$insert, xs.a, set); }
-    return set;
-};
-var $Set$map = F2(function (f, set) {
-    return $Set$fromList(A2($List$map, f, $Set$toList(set)));
-});
-var $Set$foldl = F3(function (f, acc, set) {
-    return A3($Dict$foldl, F3(function (k, _v, a) { return A2(f, k, a); }), acc, set.d);
-});
-var $Set$foldr = F3(function (f, acc, set) {
-    return A3($Dict$foldr, F3(function (k, _v, a) { return A2(f, k, a); }), acc, set.d);
-});
-var $Set$filter = F2(function (isGood, set) {
-    return { $: 'Set', d: A2($Dict$filter, F2(function (k, _v) { return isGood(k); }), set.d) };
-});
-var $Set$partition = F2(function (isGood, set) {
-    var pair = A2($Dict$partition, F2(function (k, _v) { return isGood(k); }), set.d);
-    return { $: '#2', a: { $: 'Set', d: pair.a }, b: { $: 'Set', d: pair.b } };
-});
-var $Set$union = F2(function (a, b) { return { $: 'Set', d: A2($Dict$union, a.d, b.d) }; });
-var $Set$intersect = F2(function (a, b) { return { $: 'Set', d: A2($Dict$intersect, a.d, b.d) }; });
-var $Set$diff = F2(function (a, b) { return { $: 'Set', d: A2($Dict$diff, a.d, b.d) }; });
-
-// ARRAY — immutable JS array copies (Elm uses a Hickey trie).
-
-var $Array$empty = { $: 'Array', a: [] };
-var $Array$initialize = F2(function (n, f) {
+function _Array_toJsArray(array) {
     var out = [];
-    for (var i = 0; i < n; i++) { out.push(f(i)); }
-    return { $: 'Array', a: out };
-});
-var $Array$repeat = F2(function (n, x) {
-    var out = [];
-    for (var i = 0; i < n; i++) { out.push(x); }
-    return { $: 'Array', a: out };
-});
-var $Array$fromList = function (xs) { return { $: 'Array', a: _List_toArray(xs) }; };
-var $Array$isEmpty = function (arr) { return arr.a.length === 0; };
-var $Array$length = function (arr) { return arr.a.length; };
-var $Array$get = F2(function (i, arr) {
-    return i >= 0 && i < arr.a.length ? $Maybe$Just(arr.a[i]) : $Maybe$Nothing;
-});
-var $Array$set = F3(function (i, x, arr) {
-    if (i < 0 || i >= arr.a.length) { return arr; }
-    var out = arr.a.slice();
-    out[i] = x;
-    return { $: 'Array', a: out };
-});
-var $Array$push = F2(function (x, arr) {
-    var out = arr.a.slice();
-    out.push(x);
-    return { $: 'Array', a: out };
-});
-var $Array$toList = function (arr) { return _List_fromArray(arr.a); };
-var $Array$toIndexedList = function (arr) {
-    return _List_fromArray(arr.a.map(function (x, i) { return { $: '#2', a: i, b: x }; }));
+    var tree = array.c;
+    function go(node) {
+        if (node.$ === 'SubTree') { var t = node.a; for (var i = 0; i < t.length; i++) { go(t[i]); } }
+        else { var v = node.a; for (var j = 0; j < v.length; j++) { out.push(v[j]); } }
+    }
+    for (var i = 0; i < tree.length; i++) { go(tree[i]); }
+    var tail = array.d;
+    for (var k = 0; k < tail.length; k++) { out.push(tail[k]); }
+    return out;
+}
+// Build a (canonical) array from a plain JS array via repeated push.
+var $Array$toList = function (array) {
+    return _List_fromArray(_Array_toJsArray(array));
 };
-var $Array$map = F2(function (f, arr) {
-    return { $: 'Array', a: arr.a.map(function (x) { return f(x); }) };
-});
-var $Array$indexedMap = F2(function (f, arr) {
-    return { $: 'Array', a: arr.a.map(function (x, i) { return A2(f, i, x); }) };
-});
-var $Array$foldl = F3(function (f, acc, arr) {
-    for (var i = 0; i < arr.a.length; i++) { acc = A2(f, arr.a[i], acc); }
-    return acc;
-});
-var $Array$foldr = F3(function (f, acc, arr) {
-    for (var i = arr.a.length; i--;) { acc = A2(f, arr.a[i], acc); }
-    return acc;
-});
-var $Array$filter = F2(function (isGood, arr) {
-    return { $: 'Array', a: arr.a.filter(function (x) { return isGood(x); }) };
-});
-var $Array$append = F2(function (a, b) { return { $: 'Array', a: a.a.concat(b.a) }; });
-var $Array$slice = F3(function (from, to, arr) {
-    var len = arr.a.length;
-    if (from < 0) { from = Math.max(0, len + from); }
-    if (to < 0) { to = len + to; }
-    return { $: 'Array', a: arr.a.slice(from, to) };
-});
-
-// BITWISE
-
-var $Bitwise$and = F2(function (a, b) { return a & b; });
-var $Bitwise$or = F2(function (a, b) { return a | b; });
-var $Bitwise$xor = F2(function (a, b) { return a ^ b; });
-var $Bitwise$complement = function (a) { return ~a; };
-var $Bitwise$shiftLeftBy = F2(function (offset, a) { return a << offset; });
-var $Bitwise$shiftRightBy = F2(function (offset, a) { return a >> offset; });
-var $Bitwise$shiftRightZfBy = F2(function (offset, a) { return a >>> offset; });
-
-// VIRTUAL DOM
-
 function _VDom_text(text) { return { $: 'VText', text: text }; }
+// elm/virtual-dom's `_VirtualDom_organizeFacts` merges repeated `className`
+// (and `class`) declarations into a single space-joined value (see
+// `_VirtualDom_addClass`). alm keeps facts as an attribute list, so mirror that
+// merge here — otherwise `Html.div [ class "a", class "b" ]` would not be
+// structurally equal to a node built with a single `class "a b"`.
+function _VDom_organize(attrs) {
+    var classNames = 0;
+    var classes = 0;
+    for (var i = 0; i < attrs.length; i++) {
+        var a = attrs[i];
+        if (a.$ === 'AProp' && a.key === 'className') { classNames++; }
+        else if (a.$ === 'AAttr' && a.key === 'class' && !a.ns) { classes++; }
+    }
+    if (classNames < 2 && classes < 2) { return attrs; }
+    var out = [];
+    var cnIdx = -1;
+    var cIdx = -1;
+    for (var j = 0; j < attrs.length; j++) {
+        var b = attrs[j];
+        if (b.$ === 'AProp' && b.key === 'className') {
+            if (cnIdx === -1) { cnIdx = out.length; out.push(b); }
+            else { var p = out[cnIdx]; out[cnIdx] = { $: 'AProp', key: 'className', val: p.val ? p.val + ' ' + b.val : b.val }; }
+        } else if (b.$ === 'AAttr' && b.key === 'class' && !b.ns) {
+            if (cIdx === -1) { cIdx = out.length; out.push(b); }
+            else { var q = out[cIdx]; out[cIdx] = { $: 'AAttr', key: 'class', val: q.val ? q.val + ' ' + b.val : b.val }; }
+        } else { out.push(b); }
+    }
+    return out;
+}
+// XSS ATTACK VECTOR CHECKS — elm/virtual-dom screens every tag, attribute key
+// and URI that a program can build dynamically. The regexes look freaky
+// because tabs may appear inside a href protocol and it still works, so
+// '\tjava\tSCRIPT:alert(1)' and 'javascript:alert(1)' are the same in practice.
+var _VDom_RE_script = /^script$/i;
+function _VDom_noScript(tag) { return _VDom_RE_script.test(tag) ? 'p' : tag; }
 function _VDom_node(tag) {
     return F2(function (attrs, kids) {
-        return { $: 'VNode', tag: tag, attrs: _List_toArray(attrs), kids: _List_toArray(kids) };
+        return { $: 'VNode', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids) };
     });
 }
 function _VDom_nodeNS(tag) {
     return F2(function (attrs, kids) {
         return {
             $: 'VNode', tag: tag, ns: 'http://www.w3.org/2000/svg',
-            attrs: _List_toArray(attrs), kids: _List_toArray(kids)
+            attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids)
         };
     });
 }
 
 var $Html$text = _VDom_text;
-var $VirtualDom$text = _VDom_text;
-var $VirtualDom$node = function (tag) { return _VDom_node(tag); };
-var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
-var $VirtualDom$property = F2(function (key, val) { return { $: 'AProp', key: key, val: val }; });
-var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
-var $VirtualDom$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
-var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
-
 var $Html$Keyed$node = function (tag) {
+    tag = _VDom_noScript(tag);
     return F2(function (attrs, keyedKids) {
         return {
-            $: 'VKeyed', tag: tag, attrs: _List_toArray(attrs),
+            $: 'VKeyed', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)),
             kids: _List_toArray(keyedKids) // (key, node) tuples
         };
     });
 };
 var $Html$Keyed$ul = $Html$Keyed$node('ul');
-var $Html$Keyed$ol = $Html$Keyed$node('ol');
-
 var $Html$Lazy$lazy = F2(function (f, a) { return { $: 'VLazy', f: f, args: [a] }; });
-var $Html$Lazy$lazy2 = F3(function (f, a, b) { return { $: 'VLazy', f: f, args: [a, b] }; });
-var $Html$Lazy$lazy3 = F4(function (f, a, b, c) { return { $: 'VLazy', f: f, args: [a, b, c] }; });
-var $Html$Lazy$lazy4 = F5(function (f, a, b, c, d) { return { $: 'VLazy', f: f, args: [a, b, c, d] }; });
-
 function _VDom_forceLazy(vnode) {
     if (!vnode.forced) {
         var result = vnode.f;
@@ -866,56 +398,29 @@ function _VDom_sameLazy(a, b) {
 
 // Attributes are tagged with how they apply to a DOM node.
 var $Html$Attributes$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
-var $Html$Attributes$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
-var $Html$Attributes$map = F2(function (f, attr) {
-    return attr.$ === 'AEvent' ? { $: 'AEvent', name: attr.name, toMsg: function (e) { return f(attr.toMsg(e)); }, opts: attr.opts } : attr;
-});
 function _VDom_prop(key) {
     return function (val) { return { $: 'AProp', key: key, val: val }; };
 }
 // Events carry a Json decoder run against the DOM event, like real Elm.
 // The decoder yields the message; `stop`/`prevent` control propagation.
 function _VDom_on(name, decoder, opts) {
-    return { $: 'AEvent', name: name, decoder: decoder, opts: opts || {} };
+    return { $: 'AEvent', name: name, decoder: decoder, opts: opts };
 }
 
 function _Json_succeedDecoder(msg) {
-    return { $: 'Decoder', run: function (_v) { return { ok: true, value: msg }; } };
+    // `succeed`/`value` let structural equality compare two `succeed` decoders
+    // by their produced value (elm represents decoders as data, so `==` works;
+    // alm uses closures, so record the value for comparison — see _Utils_eqHelp).
+    return { $: 'Decoder', run: function (_v) { return { ok: true, value: msg }; }, succeed: true, value: msg };
 }
 
-var $Html$Events$on = F2(function (name, decoder) { return _VDom_on(name, decoder); });
 var $Html$Events$stopPropagationOn = F2(function (name, decoder) {
     return _VDom_on(name, decoder, { pair: true, stopField: true });
 });
-var $Html$Events$preventDefaultOn = F2(function (name, decoder) {
-    return _VDom_on(name, decoder, { pair: true, preventField: true });
-});
 var $Html$Events$onClick = function (msg) { return _VDom_on('click', _Json_succeedDecoder(msg)); };
-var $Html$Events$onDoubleClick = function (msg) { return _VDom_on('dblclick', _Json_succeedDecoder(msg)); };
-var $Html$Events$onMouseDown = function (msg) { return _VDom_on('mousedown', _Json_succeedDecoder(msg)); };
-var $Html$Events$onMouseUp = function (msg) { return _VDom_on('mouseup', _Json_succeedDecoder(msg)); };
-var $Html$Events$onMouseEnter = function (msg) { return _VDom_on('mouseenter', _Json_succeedDecoder(msg)); };
-var $Html$Events$onMouseLeave = function (msg) { return _VDom_on('mouseleave', _Json_succeedDecoder(msg)); };
 var $Html$Events$custom = F2(function (name, decoder) {
     return _VDom_on(name, decoder, { custom: true });
 });
-var $Html$Events$targetValue = _Json_decoder(function (e) {
-    return e && e.target && typeof e.target.value === 'string'
-        ? _Json_ok(e.target.value)
-        : _Json_expecting('an event with target.value', e);
-});
-var $Html$Events$targetChecked = _Json_decoder(function (e) {
-    return e && e.target && typeof e.target.checked === 'boolean'
-        ? _Json_ok(e.target.checked)
-        : _Json_expecting('an event with target.checked', e);
-});
-var $Html$Events$keyCode = _Json_decoder(function (e) {
-    return e && typeof e.keyCode === 'number'
-        ? _Json_ok(e.keyCode)
-        : _Json_expecting('an event with keyCode', e);
-});
-var $Html$Events$onBlur = function (msg) { return _VDom_on('blur', _Json_succeedDecoder(msg)); };
-var $Html$Events$onFocus = function (msg) { return _VDom_on('focus', _Json_succeedDecoder(msg)); };
 var $Html$Events$onInput = function (toMsg) {
     return _VDom_on('input', {
         $: 'Decoder',
@@ -944,6 +449,16 @@ function _VDom_render(vnode, dispatch, doc) {
         }
         case 'VLazy':
             return _VDom_render(_VDom_forceLazy(vnode), dispatch, doc);
+        case 'VCustom': {
+            // A managed widget (e.g. WebGL): `render(model)` builds the DOM
+            // element; `attrs` are ordinary facts applied on top.
+            var cdom = vnode.render(vnode.model);
+            cdom._almListeners = {};
+            for (var ci = 0; ci < vnode.attrs.length; ci++) {
+                _VDom_applyAttr(cdom, vnode.attrs[ci], dispatch);
+            }
+            return cdom;
+        }
         default: {
             var dom = vnode.ns && doc.createElementNS
                 ? doc.createElementNS(vnode.ns, vnode.tag)
@@ -967,7 +482,8 @@ function _VDom_applyAttr(dom, attr, dispatch) {
             dom.style[attr.key] = attr.val;
             return;
         case 'AAttr':
-            dom.setAttribute(attr.key, attr.val);
+            if (attr.ns && dom.setAttributeNS) { dom.setAttributeNS(attr.ns, attr.key, attr.val); }
+            else { dom.setAttribute(attr.key, attr.val); }
             return;
         case 'AProp':
             dom[attr.key] = attr.val;
@@ -1008,6 +524,21 @@ function _VDom_applyAttr(dom, attr, dispatch) {
 
 function _VDom_attrKey(attr) {
     return attr.$ + ':' + (attr.key || attr.name);
+}
+
+// Whether the new attr differs from the old one with the same key, so patch can
+// skip re-applying an unchanged attribute (avoids thousands of redundant
+// className/setAttribute writes when a keyed list re-renders and only a couple
+// of rows actually changed). Events always "change": re-applying refreshes the
+// handler's decoder + dispatch (cheap — the listener is only attached once), and
+// their decoder closures aren't value-comparable.
+function _VDom_attrChanged(prev, attr) {
+    switch (attr.$) {
+        case 'AStyle': return prev.val !== attr.val;
+        case 'AAttr':  return prev.val !== attr.val || prev.ns !== attr.ns;
+        case 'AProp':  return prev.val !== attr.val;
+        default:       return true; // AEvent
+    }
 }
 
 function _VDom_unapplyAttr(dom, attr) {
@@ -1057,25 +588,60 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
         return dom;
     }
 
+    // A managed widget with the same `render`: let its `diff` redraw the DOM in
+    // place, then reconcile the plain facts. A different render (or kind) falls
+    // through to a full replace below.
+    if (oldV.$ === 'VCustom' && newV.$ === 'VCustom' && oldV.render === newV.render) {
+        var cdom = newV.diff(oldV.model, newV.model)(dom);
+        var oldCA = {};
+        for (var ca = 0; ca < oldV.attrs.length; ca++) { oldCA[_VDom_attrKey(oldV.attrs[ca])] = oldV.attrs[ca]; }
+        var newCK = {};
+        for (var cb = 0; cb < newV.attrs.length; cb++) {
+            var cattr = newV.attrs[cb], cak = _VDom_attrKey(cattr);
+            newCK[cak] = true;
+            var cprev = oldCA[cak];
+            if (cprev === undefined || _VDom_attrChanged(cprev, cattr)) { _VDom_applyAttr(cdom, cattr, dispatch); }
+        }
+        for (var cak2 in oldCA) { if (!newCK[cak2]) { _VDom_unapplyAttr(cdom, oldCA[cak2]); } }
+        return cdom;
+    }
+
     if (oldV.$ !== newV.$ || oldV.tag !== newV.tag || oldV.ns !== newV.ns) {
         var replacement = _VDom_render(newV, dispatch, doc);
         dom.parentNode.replaceChild(replacement, dom);
         return replacement;
     }
 
-    // Same tag: patch attributes...
-    var oldAttrs = {};
-    for (var i = 0; i < oldV.attrs.length; i++) {
-        oldAttrs[_VDom_attrKey(oldV.attrs[i])] = oldV.attrs[i];
+    // Same tag: diff attributes. Fast path — when the attr lists line up by key
+    // (the common case: same view code, only values differ), diff positionally
+    // with NO per-node map allocation. This is the hot path of a keyed re-render
+    // (thousands of nodes), so avoiding the `{}` + inserts + `for..in` per node
+    // matters. Fall back to a keyed diff only when attrs were added/removed/
+    // reordered (lengths or per-position keys differ).
+    var oldA = oldV.attrs, newA = newV.attrs, i, aligned = oldA.length === newA.length;
+    if (aligned) {
+        for (i = 0; i < newA.length; i++) {
+            var oa = oldA[i], na = newA[i];
+            if (oa.$ !== na.$ || (oa.key || oa.name) !== (na.key || na.name)) { aligned = false; break; }
+        }
     }
-    var newKeys = {};
-    for (var j = 0; j < newV.attrs.length; j++) {
-        var attr = newV.attrs[j];
-        newKeys[_VDom_attrKey(attr)] = true;
-        _VDom_applyAttr(dom, attr, dispatch);
-    }
-    for (var key in oldAttrs) {
-        if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
+    if (aligned) {
+        for (i = 0; i < newA.length; i++) {
+            if (_VDom_attrChanged(oldA[i], newA[i])) { _VDom_applyAttr(dom, newA[i], dispatch); }
+        }
+    } else {
+        var oldAttrs = {};
+        for (i = 0; i < oldA.length; i++) { oldAttrs[_VDom_attrKey(oldA[i])] = oldA[i]; }
+        var newKeys = {};
+        for (i = 0; i < newA.length; i++) {
+            var attr = newA[i], ak = _VDom_attrKey(attr);
+            newKeys[ak] = true;
+            var prev = oldAttrs[ak];
+            if (prev === undefined || _VDom_attrChanged(prev, attr)) { _VDom_applyAttr(dom, attr, dispatch); }
+        }
+        for (var key in oldAttrs) {
+            if (!newKeys[key]) { _VDom_unapplyAttr(dom, oldAttrs[key]); }
+        }
     }
 
     if (oldV.$ === 'VKeyed') {
@@ -1097,30 +663,107 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     return dom;
 }
 
-function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
-    // Reuse DOM nodes for matching keys; rebuild the child list in order.
-    var oldByKey = {};
-    for (var i = 0; i < oldV.kids.length; i++) {
-        oldByKey[oldV.kids[i].a] = { vnode: oldV.kids[i].b, dom: dom.childNodes[i] };
+// Longest increasing subsequence over `source` (old positions of the new
+// children; -1 marks a freshly rendered node). Returns a boolean mask marking
+// the reused children whose relative order is already correct, so they can stay
+// put while everything else is moved into place. Standard patience-sorting LIS.
+function _VDom_keyedStable(source) {
+    var n = source.length;
+    var stay = new Array(n);
+    for (var x = 0; x < n; x++) { stay[x] = false; }
+    var parent = new Array(n);
+    var tails = []; // indices into source; source[tails[k]] increasing
+    for (var i = 0; i < n; i++) {
+        if (source[i] === -1) { continue; } // new node: never stays
+        if (tails.length === 0) { tails.push(i); parent[i] = -1; continue; }
+        var last = tails[tails.length - 1];
+        if (source[last] < source[i]) { parent[i] = last; tails.push(i); continue; }
+        var lo = 0, hi = tails.length - 1;
+        while (lo < hi) {
+            var mid = (lo + hi) >> 1;
+            if (source[tails[mid]] < source[i]) { lo = mid + 1; } else { hi = mid; }
+        }
+        parent[i] = lo > 0 ? tails[lo - 1] : -1;
+        tails[lo] = i;
     }
-    var newDoms = [];
+    var u = tails.length;
+    var v = u > 0 ? tails[u - 1] : -1;
+    while (u-- > 0) { stay[v] = true; v = parent[v]; }
+    return stay;
+}
+
+function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
+    // Reuse DOM nodes for matching keys and move only the ones that actually
+    // moved. `source[j]` is the old index of new child j (-1 if freshly
+    // rendered); the LIS of `source` is the set of nodes already in the right
+    // relative order, which we leave untouched.
+    var oldKids = oldV.kids, newKids = newV.kids;
+    var n = newKids.length;
+
+    // Fast path: identical keys in identical order — nothing moved (select,
+    // update-in-place, an edit that doesn't reorder). Diff positionally with
+    // ZERO allocation, skipping the oldByKey map, the source/used scratch and
+    // the LIS pass. Mirrors the wasm reconciler: for an unchanged lazy child
+    // (999/1000 on select) the reference compare short-circuits BEFORE touching
+    // the DOM, so only the rows that actually changed cost a childNodes fetch +
+    // patch. A same-key positional patch replaces the node in place if its tag
+    // changed, so `kids` stays index-aligned throughout.
+    if (n === oldKids.length) {
+        var aligned = true;
+        for (var s = 0; s < n; s++) {
+            if (oldKids[s].a !== newKids[s].a) { aligned = false; break; }
+        }
+        if (aligned) {
+            var kids = dom.childNodes;
+            for (var p = 0; p < n; p++) {
+                var ov = oldKids[p].b, nv = newKids[p].b;
+                if (ov === nv) { continue; }
+                if (ov.$ === 'VLazy' && nv.$ === 'VLazy' && _VDom_sameLazy(ov, nv)) { nv.forced = ov.forced; continue; }
+                _VDom_patch(kids[p], ov, nv, dispatch, doc);
+            }
+            return dom;
+        }
+    }
+
+    var oldByKey = {};
+    for (var i = 0; i < oldKids.length; i++) {
+        oldByKey[oldKids[i].a] = { vnode: oldKids[i].b, dom: dom.childNodes[i], index: i };
+    }
+
+    var newDoms = new Array(n);
+    var source = new Array(n);
     var used = {};
-    for (var j = 0; j < newV.kids.length; j++) {
-        var key = newV.kids[j].a;
-        var newKid = newV.kids[j].b;
+    for (var j = 0; j < n; j++) {
+        var key = newKids[j].a;
+        var newKid = newKids[j].b;
         var old = !used[key] && oldByKey[key];
         if (old) {
             used[key] = true;
-            newDoms.push(_VDom_patch(old.dom, old.vnode, newKid, dispatch, doc));
+            source[j] = old.index;
+            newDoms[j] = _VDom_patch(old.dom, old.vnode, newKid, dispatch, doc);
         } else {
-            newDoms.push(_VDom_render(newKid, dispatch, doc));
+            source[j] = -1;
+            newDoms[j] = _VDom_render(newKid, dispatch, doc);
         }
     }
-    while (dom.childNodes.length > 0) {
-        dom.removeChild(dom.childNodes[dom.childNodes.length - 1]);
+
+    // Drop DOM nodes whose key disappeared.
+    for (var k = 0; k < oldKids.length; k++) {
+        if (!used[oldKids[k].a]) {
+            var gone = oldByKey[oldKids[k].a].dom;
+            if (gone && gone.parentNode === dom) { dom.removeChild(gone); }
+        }
     }
-    for (var n = 0; n < newDoms.length; n++) {
-        dom.appendChild(newDoms[n]);
+
+    // Insert/move from the end so `next` is always an already-placed node.
+    var stay = _VDom_keyedStable(source);
+    var next = null;
+    for (var m = n - 1; m >= 0; m--) {
+        var node = newDoms[m];
+        if (source[m] === -1 || !stay[m]) {
+            dom.insertBefore(node, next);
+        }
+        next = node;
     }
     return dom;
 }
@@ -1129,767 +772,87 @@ function _VDom_patchKeyed(dom, oldV, newV, dispatch, doc) {
 // a JS value to { ok: true, value } or { ok: false, error }.
 
 function _Json_ok(value) { return { ok: true, value: value }; }
-function _Json_err(error) { return { ok: false, error: error }; }
-function _Json_failure(msg, value) {
-    return _Json_err({ $: 'Failure', a: msg, b: value });
-}
-function _Json_decoder(run) { return { $: 'Decoder', run: run }; }
-function _Json_expecting(what, value) {
-    return _Json_failure('Expecting ' + what, value);
-}
-function _Json_runDecoder(decoder, value) {
-    var r = decoder.run(value);
-    return r.ok ? $Result$Ok(r.value) : $Result$Err(r.error);
-}
-
-var $Json$Decode$string = _Json_decoder(function (v) {
-    return typeof v === 'string' ? _Json_ok(v) : _Json_expecting('a STRING', v);
-});
-var $Json$Decode$int = _Json_decoder(function (v) {
-    return typeof v === 'number' && (v | 0) === v ? _Json_ok(v) : _Json_expecting('an INT', v);
-});
-var $Json$Decode$float = _Json_decoder(function (v) {
-    return typeof v === 'number' ? _Json_ok(v) : _Json_expecting('a FLOAT', v);
-});
-var $Json$Decode$bool = _Json_decoder(function (v) {
-    return typeof v === 'boolean' ? _Json_ok(v) : _Json_expecting('a BOOL', v);
-});
-var $Json$Decode$value = _Json_decoder(_Json_ok);
-var $Json$Decode$_null = function (fallback) {
-    return _Json_decoder(function (v) {
-        return v === null ? _Json_ok(fallback) : _Json_expecting('null', v);
-    });
-};
 var $Json$Decode$succeed = function (x) {
-    return _Json_decoder(function (_v) { return _Json_ok(x); });
+    return { $: 'Decoder', run: function (_v) { return _Json_ok(x); }, succeed: true, value: x };
 };
-var $Json$Decode$fail = function (msg) {
-    return _Json_decoder(function (v) { return _Json_failure(msg, v); });
-};
-var $Json$Decode$nullable = function (decoder) {
-    return _Json_decoder(function (v) {
-        if (v === null || v === undefined) { return _Json_ok($Maybe$Nothing); }
-        var r = decoder.run(v);
-        return r.ok ? _Json_ok($Maybe$Just(r.value)) : r;
-    });
-};
-var $Json$Decode$maybe = function (decoder) {
-    return _Json_decoder(function (v) {
-        var r = decoder.run(v);
-        return _Json_ok(r.ok ? $Maybe$Just(r.value) : $Maybe$Nothing);
-    });
-};
-var $Json$Decode$list = function (decoder) {
-    return _Json_decoder(function (v) {
-        if (!Array.isArray(v)) { return _Json_expecting('a LIST', v); }
-        var out = [];
-        for (var i = 0; i < v.length; i++) {
-            var r = decoder.run(v[i]);
-            if (!r.ok) { return _Json_err({ $: 'Index', a: i, b: r.error }); }
-            out.push(r.value);
-        }
-        return _Json_ok(_List_fromArray(out));
-    });
-};
-var $Json$Decode$array = function (decoder) {
-    return _Json_decoder(function (v) {
-        var r = $Json$Decode$list(decoder).run(v);
-        return r.ok ? _Json_ok({ $: 'Array', a: _List_toArray(r.value) }) : r;
-    });
-};
-var $Json$Decode$keyValuePairs = function (decoder) {
-    return _Json_decoder(function (v) {
-        if (v === null || typeof v !== 'object' || Array.isArray(v)) {
-            return _Json_expecting('an OBJECT', v);
-        }
-        var out = [];
-        for (var key in v) {
-            var r = decoder.run(v[key]);
-            if (!r.ok) { return _Json_err({ $: 'Field', a: key, b: r.error }); }
-            out.push({ $: '#2', a: key, b: r.value });
-        }
-        return _Json_ok(_List_fromArray(out));
-    });
-};
-var $Json$Decode$dict = function (decoder) {
-    return _Json_decoder(function (v) {
-        var r = $Json$Decode$keyValuePairs(decoder).run(v);
-        return r.ok ? _Json_ok($Dict$fromList(r.value)) : r;
-    });
-};
-var $Json$Decode$field = F2(function (name, decoder) {
-    return _Json_decoder(function (v) {
-        if (v === null || typeof v !== 'object' || Array.isArray(v) || !(name in v)) {
-            return _Json_expecting('an OBJECT with a field named `' + name + '`', v);
-        }
-        var r = decoder.run(v[name]);
-        return r.ok ? r : _Json_err({ $: 'Field', a: name, b: r.error });
-    });
-});
-var $Json$Decode$at = F2(function (path, decoder) {
-    var names = _List_toArray(path);
-    var result = decoder;
-    for (var i = names.length; i--;) { result = A2($Json$Decode$field, names[i], result); }
-    return result;
-});
-var $Json$Decode$index = F2(function (i, decoder) {
-    return _Json_decoder(function (v) {
-        if (!Array.isArray(v)) { return _Json_expecting('an ARRAY', v); }
-        if (i >= v.length) {
-            return _Json_expecting('a LONGER array — need index ' + i, v);
-        }
-        var r = decoder.run(v[i]);
-        return r.ok ? r : _Json_err({ $: 'Index', a: i, b: r.error });
-    });
-});
-var $Json$Decode$oneOf = function (decoders) {
-    var arr = _List_toArray(decoders);
-    return _Json_decoder(function (v) {
-        var errors = [];
-        for (var i = 0; i < arr.length; i++) {
-            var r = arr[i].run(v);
-            if (r.ok) { return r; }
-            errors.push(r.error);
-        }
-        return _Json_err({ $: 'OneOf', a: _List_fromArray(errors) });
-    });
-};
-var $Json$Decode$lazy = function (thunk) {
-    return _Json_decoder(function (v) { return thunk(_Utils_Tuple0).run(v); });
-};
-var $Json$Decode$map = F2(function (f, d) {
-    return _Json_decoder(function (v) {
-        var r = d.run(v);
-        return r.ok ? _Json_ok(f(r.value)) : r;
-    });
-});
-function _Json_mapMany(f, decoders) {
-    return _Json_decoder(function (v) {
-        var result = f;
-        for (var i = 0; i < decoders.length; i++) {
-            var r = decoders[i].run(v);
-            if (!r.ok) { return r; }
-            result = result(r.value);
-        }
-        return _Json_ok(result);
-    });
-}
-var $Json$Decode$map2 = F3(function (f, a, b) { return _Json_mapMany(f, [a, b]); });
-var $Json$Decode$map3 = F4(function (f, a, b, c) { return _Json_mapMany(f, [a, b, c]); });
-var $Json$Decode$map4 = F5(function (f, a, b, c, d) { return _Json_mapMany(f, [a, b, c, d]); });
-var $Json$Decode$map5 = F6(function (f, a, b, c, d, e) { return _Json_mapMany(f, [a, b, c, d, e]); });
-var $Json$Decode$map6 = F7(function (f, a, b, c, d, e, g) { return _Json_mapMany(f, [a, b, c, d, e, g]); });
-var $Json$Decode$map7 = function (f) { return function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (g) { return function (h) { return _Json_mapMany(f, [a, b, c, d, e, g, h]); }; }; }; }; }; }; }; };
-var $Json$Decode$map8 = function (f) { return function (a) { return function (b) { return function (c) { return function (d) { return function (e) { return function (g) { return function (h) { return function (i) { return _Json_mapMany(f, [a, b, c, d, e, g, h, i]); }; }; }; }; }; }; }; }; };
-var $Json$Decode$andThen = F2(function (f, d) {
-    return _Json_decoder(function (v) {
-        var r = d.run(v);
-        return r.ok ? f(r.value).run(v) : r;
-    });
-});
-var $Json$Decode$decodeValue = F2(_Json_runDecoder);
-var $Json$Decode$decodeString = F2(function (decoder, str) {
-    try {
-        var v = JSON.parse(str);
-    } catch (e) {
-        return $Result$Err({ $: 'Failure', a: 'This is not valid JSON! ' + e.message, b: str });
-    }
-    return _Json_runDecoder(decoder, v);
-});
-var $Json$Decode$errorToString = function (error) {
-    switch (error.$) {
-        case 'Field':
-            return 'Problem with the value at .' + error.a + ':\n' + $Json$Decode$errorToString(error.b);
-        case 'Index':
-            return 'Problem with the value at [' + error.a + ']:\n' + $Json$Decode$errorToString(error.b);
-        case 'OneOf': {
-            var errors = _List_toArray(error.a);
-            return 'All possibilities failed:\n' + errors.map($Json$Decode$errorToString).join('\n');
-        }
-        default:
-            return error.a + '\n\n' + JSON.stringify(error.b, null, 4);
-    }
-};
-
-var $Json$Encode$string = function (s) { return s; };
-var $Json$Encode$int = function (n) { return n; };
-var $Json$Encode$float = function (n) { return n; };
-var $Json$Encode$bool = function (b) { return b; };
-var $Json$Encode$_null = null;
-var $Json$Encode$list = F2(function (encodeItem, items) {
-    return _List_toArray(items).map(function (x) { return encodeItem(x); });
-});
-var $Json$Encode$array = F2(function (encodeItem, arr) {
-    return arr.a.map(function (x) { return encodeItem(x); });
-});
-var $Json$Encode$set = F2(function (encodeItem, set) {
-    return $Dict$keys(set.d) === undefined ? [] : _List_toArray($Dict$keys(set.d)).map(function (x) { return encodeItem(x); });
-});
-var $Json$Encode$object = function (pairs) {
-    var out = {};
-    for (var xs = pairs; xs.$ === '::'; xs = xs.b) { out[xs.a.a] = xs.a.b; }
-    return out;
-};
-var $Json$Encode$dict = F3(function (toKey, toValue, dict) {
-    var out = {};
-    for (var i = 0; i < dict.keys.length; i++) {
-        out[toKey(dict.keys[i])] = toValue(dict.vals[i]);
-    }
-    return out;
-});
-var $Json$Encode$encode = F2(function (indent, value) {
-    return JSON.stringify(value === undefined ? null : value, null, indent) || 'null';
-});
-
-// TASKS — CPS-style: { fork: function (onSuccess, onFailure) }.
-
 function _Task(fork) { return { $: 'Task', fork: fork }; }
-var $Task$succeed = function (value) {
-    return _Task(function (ok, _err) { ok(value); });
-};
-var $Task$fail = function (error) {
-    return _Task(function (_ok, err) { err(error); });
-};
-var $Task$andThen = F2(function (f, task) {
-    return _Task(function (ok, err) {
-        task.fork(function (a) { f(a).fork(ok, err); }, err);
-    });
-});
-var $Task$onError = F2(function (f, task) {
-    return _Task(function (ok, err) {
-        task.fork(ok, function (x) { f(x).fork(ok, err); });
-    });
-});
+// `Task.succeed`/`Task.fail` are pure DATA (tag 0/1 + value), like elm's
+// scheduler, so `Task.succeed x == Task.succeed x` is structurally true. Only
+// these carry no closure; every other task is a CPS `{ fork }`. `_Task_fork`
+// dispatches so the execution model is unchanged.
+function _Task_fork(task, ok, err) {
+    if (task.tag === 0) { return ok(task.a); }
+    if (task.tag === 1) { return err(task.a); }
+    return task.fork(ok, err);
+}
 var $Task$map = F2(function (f, task) {
     return _Task(function (ok, err) {
-        task.fork(function (a) { ok(f(a)); }, err);
+        _Task_fork(task, function (a) { ok(f(a)); }, err);
     });
 });
-var $Task$map2 = F3(function (f, ta, tb) {
-    return A2($Task$andThen, function (a) {
-        return A2($Task$map, function (b) { return A2(f, a, b); }, tb);
-    }, ta);
-});
-var $Task$mapError = F2(function (f, task) {
-    return _Task(function (ok, err) {
-        task.fork(ok, function (x) { err(f(x)); });
-    });
-});
-var $Task$sequence = function (tasks) {
-    var arr = _List_toArray(tasks);
-    return _Task(function (ok, err) {
-        var results = [];
-        function step(i) {
-            if (i >= arr.length) { return ok(_List_fromArray(results)); }
-            arr[i].fork(function (v) { results.push(v); step(i + 1); }, err);
-        }
-        step(0);
-    });
-};
 var $Task$perform = F2(function (toMsg, task) {
     return { $: 'CmdTask', task: A2($Task$map, toMsg, task) };
 });
-var $Task$attempt = F2(function (toMsg, task) {
-    return {
-        $: 'CmdTask',
-        task: _Task(function (ok, _err) {
-            task.fork(
-                function (v) { ok(toMsg($Result$Ok(v))); },
-                function (x) { ok(toMsg($Result$Err(x))); }
-            );
-        })
-    };
-});
-
 var $Process$sleep = function (ms) {
     return _Task(function (ok, _err) {
         setTimeout(function () { ok(_Utils_Tuple0); }, ms);
     });
 };
 
-// TIME
+// WEBGL TEXTURE (elm-explorations/webgl Elm.Kernel.Texture). `load` fetches an
+// image (`new Image()`), and — on first use by the renderer — uploads it to a GL
+// texture (`createTexture`, stashed on the returned value; see the SAMPLER_2D
+// uniform setter above). It needs a browser (DOM Image + a WebGL context), like
+// stock elm. The magnify/minify/wrap args are GL enums; `flipY` a Bool. Non-
+// power-of-two sizes are rejected unless clamped + non-mipmapped (a SizeError).
+function _Time_posix(ms) { return { $: 'Posix', a: ms }; }
 
-function _Time_posix(ms) { return { $: 'Posix', ms: ms }; }
-var $Time$millisToPosix = function (ms) { return _Time_posix(ms); };
-var $Time$posixToMillis = function (posix) { return posix.ms; };
-var $Time$utc = { $: 'Zone', offset: 0, eras: [] };
-var $Time$customZone = F2(function (offset, eras) {
-    return { $: 'Zone', offset: offset, eras: _List_toArray(eras) };
-});
-var $Time$here = _Task(function (ok, _err) {
-    ok({ $: 'Zone', offset: -new Date().getTimezoneOffset(), eras: [] });
-});
-var $Time$now = _Task(function (ok, _err) { ok(_Time_posix(Date.now())); });
-var $Time$getZoneName = _Task(function (ok, _err) {
-    try {
-        ok({ $: 'Name', a: Intl.DateTimeFormat().resolvedOptions().timeZone });
-    } catch (e) {
-        ok({ $: 'Offset', a: -new Date().getTimezoneOffset() });
+// Time kernel primitives. Posix/Zone, the calendar math, and `Time.every` now
+// come from the bundled Time effect module (builtin_src/Time.elm); only these
+// four primitives are kernel. `now`/`here`/`getZoneName` build the source ctor
+// reps via the module's own `millisToPosix`/`customZone`/`Name`/`Offset`.
+// `setInterval` is a cancellable timer task: its fork returns a canceller that
+// `Process.kill` invokes when the Time manager drops a subscription.
+function _Url_chompPort(protocol, params, frag, authority, path) {
+    var i = authority.indexOf(':');
+    if (i < 0) {
+        return $Maybe$Just({ protocol: protocol, host: authority, port_: $Maybe$Nothing, path: path, query: params, fragment: frag });
     }
-});
-var $Time$every = F2(function (interval, toMsg) {
-    return { $: 'SubTime', interval: interval, toMsg: toMsg };
-});
-function _Time_toAdjusted(zone, posix) {
-    var minutes = posix.ms / 60000;
-    var offset = zone.offset;
-    for (var i = 0; i < zone.eras.length; i++) {
-        if (zone.eras[i].start < minutes) { offset = zone.eras[i].offset; break; }
-    }
-    return new Date(posix.ms + offset * 60000);
+    var portNum = $String$toInt(authority.slice(i + 1));
+    if (portNum.$ !== 'Just') { return $Maybe$Nothing; }
+    return $Maybe$Just({ protocol: protocol, host: authority.slice(0, i), port_: portNum, path: path, query: params, fragment: frag });
 }
-var $Time$toYear = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCFullYear(); });
-var _Time_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-var $Time$toMonth = F2(function (zone, posix) {
-    return { $: _Time_months[_Time_toAdjusted(zone, posix).getUTCMonth()] };
-});
-var $Time$toDay = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCDate(); });
-var $Time$toHour = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCHours(); });
-var $Time$toMinute = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMinutes(); });
-var $Time$toSecond = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCSeconds(); });
-var $Time$toMillis = F2(function (zone, posix) { return _Time_toAdjusted(zone, posix).getUTCMilliseconds(); });
-var _Time_weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-var $Time$toWeekday = F2(function (zone, posix) {
-    return { $: _Time_weekdays[_Time_toAdjusted(zone, posix).getUTCDay()] };
-});
-
-// HTTP — fetch-based.
-
-var $Http$header = F2(function (name, value) { return { name: name, value: value }; });
-var $Http$emptyBody = { contentType: null, content: null };
-var $Http$stringBody = F2(function (contentType, content) {
-    return { contentType: contentType, content: content };
-});
-var $Http$fileBody = function (file) {
-    return { contentType: file.type || 'application/octet-stream', content: file };
-};
-var $Http$jsonBody = function (value) {
-    return { contentType: 'application/json', content: JSON.stringify(value) };
-};
-var $Http$stringPart = F2(function (name, value) { return { $: 'StringPart', name: name, value: value }; });
-var $Http$filePart = F2(function (name, file) { return { $: 'FilePart', name: name, file: file }; });
-var $Http$multipartBody = function (parts) {
-    return { contentType: 'multipart', parts: _List_toArray(parts) };
-};
-var $Http$expectString = function (toMsg) {
-    return { toMsg: toMsg, handle: function (response) {
-        return _Http_defaultHandle(response, function (body) { return $Result$Ok(body); });
-    } };
-};
-var $Http$expectWhatever = function (toMsg) {
-    return { toMsg: toMsg, handle: function (response) {
-        return _Http_defaultHandle(response, function (_body) { return $Result$Ok(_Utils_Tuple0); });
-    } };
-};
-var $Http$expectJson = F2(function (toMsg, decoder) {
-    return { toMsg: toMsg, handle: function (response) {
-        return _Http_defaultHandle(response, function (body) {
-            var r = A2($Json$Decode$decodeString, decoder, body);
-            return r.$ === 'Ok'
-                ? r
-                : $Result$Err({ $: 'BadBody', a: $Json$Decode$errorToString(r.a) });
-        });
-    } };
-});
-function _Http_defaultHandle(response, onGood) {
-    switch (response.$) {
-        case 'BadUrl_': return $Result$Err({ $: 'BadUrl', a: response.a });
-        case 'Timeout_': return $Result$Err({ $: 'Timeout' });
-        case 'NetworkError_': return $Result$Err({ $: 'NetworkError' });
-        case 'BadStatus_': return $Result$Err({ $: 'BadStatus', a: response.a.statusCode });
-        default: return onGood(response.b);
-    }
+function _Url_chompAfterAuthority(protocol, params, frag, authority, path) {
+    if (authority === '') { return $Maybe$Nothing; }
+    var i = authority.indexOf('@');
+    if (i < 0) { return _Url_chompPort(protocol, params, frag, authority, path); }
+    return _Url_chompPort(protocol, params, frag, authority.slice(i + 1), path);
 }
-function _Http_makeTask(config, handle) {
-    return _Task(function (ok, _err) {
-        var headers = {};
-        for (var i = 0; i < config.headers.length; i++) {
-            headers[config.headers[i].name] = config.headers[i].value;
-        }
-        var body = null;
-        if (config.body.contentType === 'multipart') {
-            var form = new FormData();
-            config.body.parts.forEach(function (part) {
-                if (part.$ === 'StringPart') { form.append(part.name, part.value); }
-                else { form.append(part.name, part.file); }
-            });
-            body = form;
-        } else if (config.body.content !== null) {
-            body = config.body.content;
-            if (config.body.contentType) { headers['Content-Type'] = config.body.contentType; }
-        }
-        var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timer = null;
-        if (config.timeout && config.timeout.$ === 'Just' && controller) {
-            timer = setTimeout(function () { controller.abort(); }, config.timeout.a);
-        }
-        fetch(config.url, {
-            method: config.method,
-            headers: headers,
-            body: config.method === 'GET' || config.method === 'HEAD' ? undefined : body,
-            signal: controller ? controller.signal : undefined
-        }).then(function (response) {
-            return response.text().then(function (text) {
-                if (timer) { clearTimeout(timer); }
-                var metadata = {
-                    url: response.url,
-                    statusCode: response.status,
-                    statusText: response.statusText,
-                    headers: $Dict$empty
-                };
-                ok(response.ok
-                    ? { $: 'GoodStatus_', a: metadata, b: text }
-                    : { $: 'BadStatus_', a: metadata, b: text });
-            });
-        }).catch(function (e) {
-            if (timer) { clearTimeout(timer); }
-            ok(e.name === 'AbortError' ? { $: 'Timeout_' } : { $: 'NetworkError_' });
-        });
-    });
+function _Url_chompBeforeQuery(protocol, params, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('/');
+    // elm defaults a pathless URL to "/" (so "https://x.com" -> path "/").
+    if (i < 0) { return _Url_chompAfterAuthority(protocol, params, frag, str, '/'); }
+    return _Url_chompAfterAuthority(protocol, params, frag, str.slice(0, i), str.slice(i));
 }
-var $Http$request = function (config) {
-    return { $: 'CmdHttp', config: config };
-};
-var $Http$get = function (config) {
-    return $Http$request({
-        method: 'GET', headers: [], url: config.url, body: $Http$emptyBody,
-        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
-    });
-};
-var $Http$post = function (config) {
-    return $Http$request({
-        method: 'POST', headers: [], url: config.url, body: config.body,
-        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
-    });
-};
-var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
-var $Http$track = F2(function (_tracker, _toMsg) { return $Platform$Sub$none; });
-var $Http$cancel = function (_tracker) { return $Platform$Cmd$none; };
-var $Http$fractionSent = function (p) {
-    return p.size > 0 ? p.sent / p.size : 1;
-};
-var $Http$fractionReceived = function (p) {
-    return p.size.$ === 'Just' && p.size.a > 0 ? p.received / p.size.a : 0;
-};
-var $Http$task = function (config) {
-    var cfg = {
-        method: config.method,
-        headers: _List_toArray(config.headers),
-        url: config.url,
-        body: config.body,
-        timeout: config.timeout
-    };
-    return A2($Task$andThen, function (response) {
-        var r = config.resolver.toResult(response);
-        return r.$ === 'Ok' ? $Task$succeed(r.a) : $Task$fail(r.a);
-    }, _Http_makeTask(cfg, null));
-};
-
-// FILE
-
-var $File$decoder = _Json_decoder(function (v) {
-    return v && typeof v === 'object' ? _Json_ok(v) : _Json_expecting('a FILE', v);
-});
-var $File$name = function (file) { return file.name; };
-var $File$size = function (file) { return file.size; };
-var $File$mime = function (file) { return file.type; };
-
-// URL
-
-var $Url$percentEncode = function (s) { return encodeURIComponent(s); };
-var $Url$percentDecode = function (s) {
-    try { return $Maybe$Just(decodeURIComponent(s)); }
-    catch (e) { return $Maybe$Nothing; }
-};
+function _Url_chompBeforeFragment(protocol, frag, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('?');
+    if (i < 0) { return _Url_chompBeforeQuery(protocol, $Maybe$Nothing, frag, str); }
+    return _Url_chompBeforeQuery(protocol, $Maybe$Just(str.slice(i + 1)), frag, str.slice(0, i));
+}
+function _Url_chompAfterProtocol(protocol, str) {
+    if (str === '') { return $Maybe$Nothing; }
+    var i = str.indexOf('#');
+    if (i < 0) { return _Url_chompBeforeFragment(protocol, $Maybe$Nothing, str); }
+    return _Url_chompBeforeFragment(protocol, $Maybe$Just(str.slice(i + 1)), str.slice(0, i));
+}
 var $Url$fromString = function (str) {
-    var match = /^(https?):\/\/([^/:?#]*)(?::(\d+))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/.exec(str);
-    if (!match) { return $Maybe$Nothing; }
-    return $Maybe$Just({
-        protocol: match[1] === 'https' ? { $: 'Https' } : { $: 'Http' },
-        host: match[2],
-        port_: match[3] ? $Maybe$Just(parseInt(match[3], 10)) : $Maybe$Nothing,
-        path: match[4] || '/',
-        query: match[5] !== undefined ? $Maybe$Just(match[5]) : $Maybe$Nothing,
-        fragment: match[6] !== undefined ? $Maybe$Just(match[6]) : $Maybe$Nothing
-    });
+    if (str.indexOf('http://') === 0) { return _Url_chompAfterProtocol({ $: 'Http' }, str.slice(7)); }
+    if (str.indexOf('https://') === 0) { return _Url_chompAfterProtocol({ $: 'Https' }, str.slice(8)); }
+    return $Maybe$Nothing;
 };
-var $Url$toString = function (url) {
-    var s = (url.protocol.$ === 'Https' ? 'https' : 'http') + '://' + url.host;
-    if (url.port_.$ === 'Just') { s += ':' + url.port_.a; }
-    s += url.path;
-    if (url.query.$ === 'Just') { s += '?' + url.query.a; }
-    if (url.fragment.$ === 'Just') { s += '#' + url.fragment.a; }
-    return s;
-};
-
-// BROWSER.DOM
-
-function _Dom_byId(id, andThen) {
-    return _Task(function (ok, err) {
-        var node = typeof document !== 'undefined' && document.getElementById
-            ? document.getElementById(id)
-            : null;
-        if (!node) { return err({ $: 'NotFound', a: id }); }
-        ok(andThen(node));
-    });
-}
-var $Browser$Dom$focus = function (id) {
-    return _Dom_byId(id, function (node) {
-        if (node.focus) { node.focus(); }
-        return _Utils_Tuple0;
-    });
-};
-var $Browser$Dom$blur = function (id) {
-    return _Dom_byId(id, function (node) {
-        if (node.blur) { node.blur(); }
-        return _Utils_Tuple0;
-    });
-};
-var $Browser$Dom$getViewport = _Task(function (ok, _err) {
-    var w = typeof window !== 'undefined' ? window : { pageXOffset: 0, pageYOffset: 0, innerWidth: 0, innerHeight: 0 };
-    ok({
-        scene: { width: w.innerWidth || 0, height: w.innerHeight || 0 },
-        viewport: { x: w.pageXOffset || 0, y: w.pageYOffset || 0, width: w.innerWidth || 0, height: w.innerHeight || 0 }
-    });
-});
-var $Browser$Dom$setViewport = F2(function (x, y) {
-    return _Task(function (ok, _err) {
-        if (typeof window !== 'undefined' && window.scroll) { window.scroll(x, y); }
-        ok(_Utils_Tuple0);
-    });
-});
-var $Browser$Dom$getElement = function (id) {
-    return _Dom_byId(id, function (node) {
-        var rect = node.getBoundingClientRect ? node.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
-        var x = typeof window !== 'undefined' ? window.pageXOffset : 0;
-        var y = typeof window !== 'undefined' ? window.pageYOffset : 0;
-        return {
-            scene: { width: 0, height: 0 },
-            viewport: { x: x, y: y, width: 0, height: 0 },
-            element: { x: x + rect.left, y: y + rect.top, width: rect.width, height: rect.height }
-        };
-    });
-};
-
-// BROWSER.EVENTS
-
-function _Browser_on(name, decoder) {
-    return { $: 'SubDom', name: name, decoder: decoder };
-}
-var $Browser$Events$onKeyDown = function (d) { return _Browser_on('keydown', d); };
-var $Browser$Events$onKeyUp = function (d) { return _Browser_on('keyup', d); };
-var $Browser$Events$onKeyPress = function (d) { return _Browser_on('keypress', d); };
-var $Browser$Events$onClick = function (d) { return _Browser_on('click', d); };
-var $Browser$Events$onMouseMove = function (d) { return _Browser_on('mousemove', d); };
-var $Browser$Events$onMouseDown = function (d) { return _Browser_on('mousedown', d); };
-var $Browser$Events$onMouseUp = function (d) { return _Browser_on('mouseup', d); };
-var $Browser$Events$onResize = function (toMsg) {
-    return _Browser_on('resize', _Json_decoder(function (_e) {
-        var w = typeof window !== 'undefined' ? window : { innerWidth: 0, innerHeight: 0 };
-        return _Json_ok(A2(toMsg, w.innerWidth, w.innerHeight));
-    }));
-};
-var $Browser$Events$onAnimationFrameDelta = function (toMsg) {
-    return { $: 'SubAnimation', toMsg: toMsg, delta: true };
-};
-var $Browser$Events$onAnimationFrame = function (toMsg) {
-    return { $: 'SubAnimation', toMsg: toMsg, delta: false };
-};
-
-// BROWSER.NAVIGATION
-
-var $Browser$Navigation$load = function (url) { return { $: 'CmdLoad', url: url }; };
-var $Browser$Navigation$reload = { $: 'CmdReload' };
-
-// RANDOM — generators as seed -> [value, seed] functions.
-
-function _Random_next(seed) {
-    // mulberry32
-    var t = (seed + 0x6D2B79F5) | 0;
-    var r = Math.imul(t ^ (t >>> 15), 1 | t);
-    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
-    return { state: t, value: ((r ^ (r >>> 14)) >>> 0) / 4294967296 };
-}
-function _Random_gen(fn) { return { $: 'Generator', gen: fn }; }
-var $Random$minInt = -2147483648;
-var $Random$maxInt = 2147483647;
-var $Random$initialSeed = function (n) { return { $: 'Seed', state: n | 0 }; };
-var $Random$int = F2(function (lo, hi) {
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        var value = lo + Math.floor(next.value * (hi - lo + 1));
-        return [value, { $: 'Seed', state: next.state }];
-    });
-});
-var $Random$float = F2(function (lo, hi) {
-    return _Random_gen(function (seed) {
-        var next = _Random_next(seed.state);
-        return [lo + next.value * (hi - lo), { $: 'Seed', state: next.state }];
-    });
-});
-var $Random$constant = function (x) {
-    return _Random_gen(function (seed) { return [x, seed]; });
-};
-var $Random$map = F2(function (f, g) {
-    return _Random_gen(function (seed) {
-        var r = g.gen(seed);
-        return [f(r[0]), r[1]];
-    });
-});
-var $Random$map2 = F3(function (f, ga, gb) {
-    return _Random_gen(function (seed) {
-        var ra = ga.gen(seed);
-        var rb = gb.gen(ra[1]);
-        return [A2(f, ra[0], rb[0]), rb[1]];
-    });
-});
-var $Random$andThen = F2(function (f, g) {
-    return _Random_gen(function (seed) {
-        var r = g.gen(seed);
-        return f(r[0]).gen(r[1]);
-    });
-});
-var $Random$list = F2(function (n, g) {
-    return _Random_gen(function (seed) {
-        var out = [];
-        for (var i = 0; i < n; i++) {
-            var r = g.gen(seed);
-            out.push(r[0]);
-            seed = r[1];
-        }
-        return [_List_fromArray(out), seed];
-    });
-});
-var $Random$step = F2(function (g, seed) {
-    var r = g.gen(seed);
-    return { $: '#2', a: r[0], b: r[1] };
-});
-var $Random$generate = F2(function (toMsg, g) {
-    return {
-        $: 'CmdTask',
-        task: _Task(function (ok, _err) {
-            var seed = { $: 'Seed', state: (Math.random() * 0xFFFFFFFF) | 0 };
-            ok(toMsg(g.gen(seed)[0]));
-        })
-    };
-});
-
-// UUID
-
-var $UUID$generator = _Random_gen(function (seed) {
-    var hex = '';
-    var s = seed;
-    for (var i = 0; i < 32; i++) {
-        var next = _Random_next(s.state !== undefined ? s.state : s);
-        s = { state: next.state };
-        hex += ((next.value * 16) | 0).toString(16);
-    }
-    var uuid = hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-4' + hex.slice(13, 16) +
-        '-' + ((parseInt(hex[16], 16) & 3 | 8)).toString(16) + hex.slice(17, 20) + '-' + hex.slice(20, 32);
-    return [{ $: 'UUID', s: uuid }, { $: 'Seed', state: s.state }];
-});
-var $UUID$toString = function (uuid) { return uuid.s; };
-var $UUID$toRepresentation = F2(function (representation, uuid) {
-    switch (representation.$) {
-        case 'Compact': return uuid.s.replace(/-/g, '');
-        case 'Guid': return '{' + uuid.s + '}';
-        case 'Urn': return 'urn:uuid:' + uuid.s;
-        default: return uuid.s;
-    }
-});
-var $UUID$fromString = function (s) {
-    var normalized = s.trim().toLowerCase();
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)
-        ? $Result$Ok({ $: 'UUID', s: normalized })
-        : $Result$Err({ $: 'WrongFormat' });
-};
-var $UUID$jsonDecoder = _Json_decoder(function (v) {
-    if (typeof v !== 'string') { return _Json_expecting('a UUID string', v); }
-    var r = $UUID$fromString(v);
-    return r.$ === 'Ok' ? _Json_ok(r.a) : _Json_failure('Invalid UUID', v);
-});
-var $UUID$toValue = function (uuid) { return uuid.s; };
-
-// ELM.KERNEL.PARSER — the primitives behind elm/parser, ported from
-// its kernel JavaScript so the package compiles from source.
-
-var $Elm$Kernel$Parser$isSubString = F5(function (smallString, offset, row, col, bigString) {
-    var smallLength = smallString.length;
-    var isGood = offset + smallLength <= bigString.length;
-    for (var i = 0; isGood && i < smallLength;) {
-        var code = bigString.charCodeAt(offset);
-        isGood = smallString[i++] === bigString[offset++]
-            && (code === 0x000A
-                ? (row++, col = 1, true)
-                : (col++, (code & 0xF800) === 0xD800 ? smallString[i++] === bigString[offset++] : true));
-    }
-    return { $: '#3', a: isGood ? offset : -1, b: row, c: col };
-});
-var $Elm$Kernel$Parser$isSubChar = F3(function (predicate, offset, string) {
-    return string.length <= offset
-        ? -1
-        : (string.charCodeAt(offset) & 0xF800) === 0xD800
-            ? (predicate(string.substr(offset, 2)) ? offset + 2 : -1)
-            : (predicate(string[offset])
-                ? (string[offset] === '\n' ? -2 : offset + 1)
-                : -1);
-});
-var $Elm$Kernel$Parser$isAsciiCode = F3(function (code, offset, string) {
-    return string.charCodeAt(offset) === code;
-});
-var $Elm$Kernel$Parser$chompBase10 = F2(function (offset, string) {
-    for (; offset < string.length; offset++) {
-        var code = string.charCodeAt(offset);
-        if (code < 0x30 || 0x39 < code) { return offset; }
-    }
-    return offset;
-});
-var $Elm$Kernel$Parser$consumeBase = F3(function (base, offset, string) {
-    for (var total = 0; offset < string.length; offset++) {
-        var digit = string.charCodeAt(offset) - 0x30;
-        if (digit < 0 || base <= digit) { break; }
-        total = base * total + digit;
-    }
-    return { $: '#2', a: offset, b: total };
-});
-var $Elm$Kernel$Parser$consumeBase16 = F2(function (offset, string) {
-    for (var total = 0; offset < string.length; offset++) {
-        var code = string.charCodeAt(offset);
-        if (0x30 <= code && code <= 0x39) {
-            total = 16 * total + code - 0x30;
-        } else if (0x41 <= code && code <= 0x46) {
-            total = 16 * total + code - 55;
-        } else if (0x61 <= code && code <= 0x66) {
-            total = 16 * total + code - 87;
-        } else {
-            break;
-        }
-    }
-    return { $: '#2', a: offset, b: total };
-});
-var $Elm$Kernel$Parser$findSubString = F5(function (smallString, offset, row, col, bigString) {
-    var newOffset = bigString.indexOf(smallString, offset);
-    var target = newOffset < 0 ? bigString.length : newOffset + smallString.length;
-    while (offset < target) {
-        var code = bigString.charCodeAt(offset++);
-        code === 0x000A
-            ? (col = 1, row++)
-            : (col++, (code & 0xF800) === 0xD800 && offset++);
-    }
-    return { $: '#3', a: newOffset, b: row, c: col };
-});
-
-// COMMANDS AND SUBSCRIPTIONS
-
 var $Platform$Cmd$none = { $: 'CmdNone' };
-var $Platform$Cmd$batch = function (cmds) { return { $: 'CmdBatch', cmds: _List_toArray(cmds) }; };
-var $Platform$Cmd$map = F2(function (f, cmd) { return { $: 'CmdMap', f: f, cmd: cmd }; });
-var $Platform$Sub$none = { $: 'SubNone' };
-var $Platform$Sub$batch = function (subs) { return { $: 'SubBatch', subs: _List_toArray(subs) }; };
-var $Platform$Sub$map = F2(function (f, sub) { return { $: 'SubMap', f: f, sub: sub }; });
-
-// PORTS
-
 var _Platform_portDefs = {};
 function _Port_id(v) { return v; }
 function _Platform_outgoingPort(name, converter) {
@@ -1905,43 +868,112 @@ function _Platform_incomingPort(name, converter) {
     };
 }
 
-// PROGRAMS
+// EFFECT MANAGERS
+//
+// A port of elm's `_Platform` effect-manager protocol onto alm's CPS `_Task`
+// model. `command`/`subscription` produce `Leaf` bags tagged with a manager
+// `home`; each `effect module` registers a manager here. At program start each
+// manager becomes a long-lived "process" with private state and a mailbox.
+// Every update we gather the manager's Cmd/Sub leaves and deliver them to its
+// `onEffects`; `sendToSelf` posts to its own mailbox, `sendToApp` feeds the app.
+// alm's own effects (Http/Time/ports/...) stay concrete and never come here.
 
-var $Browser$sandbox = function (impl) {
-    return { $: 'Program', kind: 'sandbox', impl: impl };
-};
+var _Platform_effectManagers = {};
+
+function _Platform_toEffect(map, taggers, value) {
+    return A2(map, function (x) {
+        for (var t = taggers; t; t = t.rest) { x = t.tagger(x); }
+        return x;
+    }, value);
+}
+
+function _Platform_gatherEffects(isCmd, bag, taggers, dict) {
+    if (!bag) { return; }
+    switch (bag.$) {
+        case 'CmdNone': case 'SubNone': return;
+        case 'CmdBatch':
+            bag.cmds.forEach(function (b) { _Platform_gatherEffects(isCmd, b, taggers, dict); });
+            return;
+        case 'SubBatch':
+            bag.subs.forEach(function (b) { _Platform_gatherEffects(isCmd, b, taggers, dict); });
+            return;
+        case 'CmdMap':
+            _Platform_gatherEffects(isCmd, bag.cmd, { tagger: bag.f, rest: taggers }, dict);
+            return;
+        case 'SubMap':
+            _Platform_gatherEffects(isCmd, bag.sub, { tagger: bag.f, rest: taggers }, dict);
+            return;
+        case 'Leaf': {
+            var mgr = _Platform_effectManagers[bag.home];
+            var effect = _Platform_toEffect(isCmd ? mgr.cmdMap : mgr.subMap, taggers, bag.value);
+            var slot = dict[bag.home] || (dict[bag.home] = { cmds: [], subs: [] });
+            (isCmd ? slot.cmds : slot.subs).push(effect);
+            return;
+        }
+        default: return;
+    }
+}
+
+// A manager process: init runs once to produce initial state; messages
+// (`fx` batches from the app, or `self` messages from sendToSelf) are handled
+// one at a time, each producing the next state via a CPS task.
+function _Platform_instantiateManager(home, sendToApp) {
+    var info = _Platform_effectManagers[home];
+    var proc = { mailbox: [], state: undefined, ready: false, running: false, info: info };
+    proc.router = { sendToApp: sendToApp, proc: proc };
+    _Task_fork(info.init, function (initialState) {
+        proc.state = initialState;
+        proc.ready = true;
+        _Platform_stepManager(proc);
+    }, function () {});
+    return proc;
+}
+
+function _Platform_stepManager(proc) {
+    if (proc.running || !proc.ready || proc.mailbox.length === 0) { return; }
+    proc.running = true;
+    var msg = proc.mailbox.shift();
+    var info = proc.info;
+    var task;
+    if (msg.type === 'self') {
+        task = A3(info.onSelfMsg, proc.router, msg.value, proc.state);
+    } else {
+        task = (info.cmdMap && info.subMap)
+            ? A4(info.onEffects, proc.router, msg.cmds, msg.subs, proc.state)
+            : A3(info.onEffects, proc.router, info.cmdMap ? msg.cmds : msg.subs, proc.state);
+    }
+    _Task_fork(task, function (newState) {
+        proc.state = newState;
+        proc.running = false;
+        _Platform_stepManager(proc);
+    }, function () {
+        proc.running = false;
+        _Platform_stepManager(proc);
+    });
+}
+
+function _Platform_sendToManager(proc, msg) {
+    proc.mailbox.push(msg);
+    _Platform_stepManager(proc);
+}
+
 var $Browser$element = function (impl) {
     return { $: 'Program', kind: 'element', impl: impl };
 };
-var $Browser$document = function (impl) {
-    return { $: 'Program', kind: 'document', impl: impl };
-};
-var $Browser$application = function (impl) {
-    return { $: 'Program', kind: 'application', impl: impl };
-};
-var $Platform$worker = function (impl) {
-    return { $: 'Program', kind: 'worker', impl: impl };
-};
-
-var $Browser$Navigation$pushUrl = F2(function (_key, url) {
-    return { $: 'CmdNav', kind: 'push', url: url };
-});
-var $Browser$Navigation$replaceUrl = F2(function (_key, url) {
-    return { $: 'CmdNav', kind: 'replace', url: url };
-});
-var $Browser$Navigation$back = F2(function (_key, n) {
-    return { $: 'CmdNav', kind: 'go', n: -n };
-});
-var $Browser$Navigation$forward = F2(function (_key, n) {
-    return { $: 'CmdNav', kind: 'go', n: n };
-});
-
 function _Browser_currentUrl() {
     var parsed = $Url$fromString(typeof location !== 'undefined' ? location.href : 'http://localhost/');
     return parsed.$ === 'Just' ? parsed.a : {
         protocol: { $: 'Http' }, host: 'localhost', port_: $Maybe$Nothing,
         path: '/', query: $Maybe$Nothing, fragment: $Maybe$Nothing
     };
+}
+
+// Run `fn` after the current synchronous frame. Elm defers a program's
+// initial Cmd this way so that ports subscribed right after `init()` returns
+// (the `app.ports.x.subscribe(...)` line) are registered before the Cmd fires.
+function _Platform_defer(fn) {
+    if (typeof queueMicrotask === 'function') { queueMicrotask(fn); }
+    else { Promise.resolve().then(fn); }
 }
 
 function _Platform_wrap(value) {
@@ -1951,6 +983,26 @@ function _Platform_wrap(value) {
             return _Platform_initialize(value, opts || {});
         }
     };
+}
+
+// One compiled module's public object. elm puts the program's initializer
+// directly on it (`Elm.Main.init(...)`); alm additionally exposes every
+// top-level binding, so `init` is layered on last and a binding of that name
+// never shadows the program.
+function _Platform_module(exports, main) {
+    if (main && main.$ === 'Program') { exports.init = _Platform_wrap(main).init; }
+    return exports;
+}
+
+// Publish the bundle as `Elm` in whatever scope loaded it — `module.exports`
+// under CommonJS, the global object in a browser. Two bundles loaded into one
+// scope merge, so several `alm make` outputs can share a page.
+function _Platform_export(scope, exports) {
+    if (scope.Elm) {
+        for (var name in exports) { scope.Elm[name] = exports[name]; }
+    } else {
+        scope.Elm = exports;
+    }
 }
 
 function _Platform_initialize(program, opts) {
@@ -1996,7 +1048,6 @@ function _Platform_initialize(program, opts) {
     // Live subscription state.
     var activePortSubs = {};   // port name -> [handler]
     var activeDomSubs = [];    // { name, handler } attached to document
-    var activeTimers = [];     // { interval, id }
     var animationFrame = null;
 
     function dispatch(msg) {
@@ -2006,6 +1057,7 @@ function _Platform_initialize(program, opts) {
             var next = A2(impl.update, msg, model);
             model = next.a;
             runCmd(next.b, function (m) { return m; });
+            enqueueManagerEffects(next.b);
         }
         if (view) {
             var newVnode = view(model);
@@ -2013,6 +1065,31 @@ function _Platform_initialize(program, opts) {
             vnode = newVnode;
         }
         updateSubs();
+    }
+
+    // Effect-manager processes for this program instance (empty for the common
+    // case of no `effect module`s). Manager definitions are global; each program
+    // gets its own processes so two mounted programs do not share state.
+    var managerHomes = Object.keys(_Platform_effectManagers);
+    var managerProcs = {};
+    for (var _mi = 0; _mi < managerHomes.length; _mi++) {
+        managerProcs[managerHomes[_mi]] = _Platform_instantiateManager(managerHomes[_mi], dispatch);
+    }
+    function enqueueManagerEffects(cmdBag) {
+        if (managerHomes.length === 0) { return; }
+        var subBag = (!isSandbox && impl.subscriptions) ? impl.subscriptions(model) : null;
+        var dict = {};
+        _Platform_gatherEffects(true, cmdBag, null, dict);
+        _Platform_gatherEffects(false, subBag, null, dict);
+        for (var i = 0; i < managerHomes.length; i++) {
+            var home = managerHomes[i];
+            var fx = dict[home] || { cmds: [], subs: [] };
+            _Platform_sendToManager(managerProcs[home], {
+                type: 'fx',
+                cmds: _List_fromArray(fx.cmds),
+                subs: _List_fromArray(fx.subs)
+            });
+        }
     }
 
     function runCmd(cmd, tagger) {
@@ -2032,28 +1109,17 @@ function _Platform_initialize(program, opts) {
                 }
                 return;
             }
+            case 'CmdWrite':
+                console.log(cmd.s);
+                return;
             case 'CmdTask':
-                cmd.task.fork(
+                _Task_fork(cmd.task,
                     function (msg) { dispatch(tagger(msg)); },
                     function (x) {
                         throw new Error('Task failed without an error handler: ' + _Debug_toString(x));
                     }
                 );
                 return;
-            case 'CmdHttp': {
-                var cfg = {
-                    method: cmd.config.method,
-                    headers: _List_toArray(cmd.config.headers),
-                    url: cmd.config.url,
-                    body: cmd.config.body,
-                    timeout: cmd.config.timeout
-                };
-                _Http_makeTask(cfg, null).fork(function (response) {
-                    var result = cmd.config.expect.handle(response);
-                    dispatch(tagger(cmd.config.expect.toMsg(result)));
-                }, function () {});
-                return;
-            }
             case 'CmdLoad':
                 if (typeof window !== 'undefined') { window.location.href = cmd.url; }
                 return;
@@ -2095,9 +1161,6 @@ function _Platform_initialize(program, opts) {
             case 'SubDom':
                 acc.dom.push({ name: sub.name, decoder: sub.decoder, tagger: tagger });
                 return;
-            case 'SubTime':
-                acc.timers.push({ interval: sub.interval, toMsg: sub.toMsg, tagger: tagger });
-                return;
             case 'SubAnimation':
                 acc.animation.push({ toMsg: sub.toMsg, delta: sub.delta, tagger: tagger });
                 return;
@@ -2105,7 +1168,7 @@ function _Platform_initialize(program, opts) {
     }
 
     function updateSubs() {
-        var acc = { ports: {}, dom: [], timers: [], animation: [] };
+        var acc = { ports: {}, dom: [], animation: [] };
         if (!isSandbox && impl.subscriptions) {
             collectSubs(impl.subscriptions(model), function (m) { return m; }, acc);
         }
@@ -2126,15 +1189,8 @@ function _Platform_initialize(program, opts) {
             });
         }
 
-        // Timers.
-        activeTimers.forEach(function (t) { clearInterval(t.id); });
-        activeTimers = acc.timers.map(function (spec) {
-            return {
-                id: setInterval(function () {
-                    dispatch(spec.tagger(spec.toMsg(_Time_posix(Date.now()))));
-                }, spec.interval)
-            };
-        });
+        // Time subscriptions are handled by the Time effect manager (see the
+        // bundled Time effect module), not here.
 
         // Animation frames.
         if (animationFrame) {
@@ -2206,7 +1262,17 @@ function _Platform_initialize(program, opts) {
     }
 
     updateSubs();
-    if (initialCmd) { runCmd(initialCmd, function (m) { return m; }); }
+    // Defer the initial Cmd so a port subscriber attached synchronously after
+    // `init()` returns receives values the Cmd sends (matching Elm).
+    if (initialCmd) {
+        _Platform_defer(function () { runCmd(initialCmd, function (m) { return m; }); });
+    }
+    // Deliver the initial batch of manager effects (initial Cmd + subscriptions),
+    // deferred like the initial Cmd so port subscribers attached right after
+    // `init()` returns are in place before a manager can call back into the app.
+    if (managerHomes.length > 0) {
+        _Platform_defer(function () { enqueueManagerEffects(initialCmd); });
+    }
 
     // The app.ports API.
     var ports = {};
@@ -2233,384 +1299,26 @@ function _Platform_initialize(program, opts) {
 }
 
 // HIGHER-ARITY CURRY HELPERS
-var F8 = function (fun) { return _Fn(8, fun); };
-var A8 = function (f, v0, v1, v2, v3, v4, v5, v6, v7) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7]); };
-var F9 = function (fun) { return _Fn(9, fun); };
-var A9 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8]); };
-var F10 = function (fun) { return _Fn(10, fun); };
-var A10 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9]); };
-var F11 = function (fun) { return _Fn(11, fun); };
-var A11 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10]); };
-var F12 = function (fun) { return _Fn(12, fun); };
-var A12 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11]); };
-var F13 = function (fun) { return _Fn(13, fun); };
-var A13 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12]); };
-var F14 = function (fun) { return _Fn(14, fun); };
-var A14 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13]); };
-var F15 = function (fun) { return _Fn(15, fun); };
-var A15 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14]); };
-var F16 = function (fun) { return _Fn(16, fun); };
-var A16 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15]); };
-var F17 = function (fun) { return _Fn(17, fun); };
-var A17 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16]); };
-var F18 = function (fun) { return _Fn(18, fun); };
-var A18 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17]); };
-var F19 = function (fun) { return _Fn(19, fun); };
-var A19 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18]); };
-var F20 = function (fun) { return _Fn(20, fun); };
-var A20 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19]); };
-var F21 = function (fun) { return _Fn(21, fun); };
-var A21 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20]); };
-var F22 = function (fun) { return _Fn(22, fun); };
-var A22 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21]); };
-var F23 = function (fun) { return _Fn(23, fun); };
-var A23 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22]); };
-var F24 = function (fun) { return _Fn(24, fun); };
-var A24 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23]); };
-var F25 = function (fun) { return _Fn(25, fun); };
-var A25 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24]); };
-var F26 = function (fun) { return _Fn(26, fun); };
-var A26 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25]); };
-var F27 = function (fun) { return _Fn(27, fun); };
-var A27 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26]); };
-var F28 = function (fun) { return _Fn(28, fun); };
-var A28 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27]); };
-var F29 = function (fun) { return _Fn(29, fun); };
-var A29 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28]); };
-var F30 = function (fun) { return _Fn(30, fun); };
-var A30 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29]); };
-var F31 = function (fun) { return _Fn(31, fun); };
-var A31 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30]); };
-var F32 = function (fun) { return _Fn(32, fun); };
-var A32 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31]); };
-var F33 = function (fun) { return _Fn(33, fun); };
-var A33 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32]); };
-var F34 = function (fun) { return _Fn(34, fun); };
-var A34 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33]); };
-var F35 = function (fun) { return _Fn(35, fun); };
-var A35 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34]); };
-var F36 = function (fun) { return _Fn(36, fun); };
-var A36 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35]); };
-var F37 = function (fun) { return _Fn(37, fun); };
-var A37 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36]); };
-var F38 = function (fun) { return _Fn(38, fun); };
-var A38 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37]); };
-var F39 = function (fun) { return _Fn(39, fun); };
-var A39 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38]); };
-var F40 = function (fun) { return _Fn(40, fun); };
-var A40 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39]); };
-var F41 = function (fun) { return _Fn(41, fun); };
-var A41 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40]); };
-var F42 = function (fun) { return _Fn(42, fun); };
-var A42 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41]); };
-var F43 = function (fun) { return _Fn(43, fun); };
-var A43 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42]); };
-var F44 = function (fun) { return _Fn(44, fun); };
-var A44 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43]); };
-var F45 = function (fun) { return _Fn(45, fun); };
-var A45 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44]); };
-var F46 = function (fun) { return _Fn(46, fun); };
-var A46 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45]); };
-var F47 = function (fun) { return _Fn(47, fun); };
-var A47 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46]); };
-var F48 = function (fun) { return _Fn(48, fun); };
-var A48 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47]); };
-var F49 = function (fun) { return _Fn(49, fun); };
-var A49 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48]); };
-var F50 = function (fun) { return _Fn(50, fun); };
-var A50 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49]); };
-var F51 = function (fun) { return _Fn(51, fun); };
-var A51 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50]); };
-var F52 = function (fun) { return _Fn(52, fun); };
-var A52 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51]); };
-var F53 = function (fun) { return _Fn(53, fun); };
-var A53 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52]); };
-var F54 = function (fun) { return _Fn(54, fun); };
-var A54 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53]); };
-var F55 = function (fun) { return _Fn(55, fun); };
-var A55 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54]); };
-var F56 = function (fun) { return _Fn(56, fun); };
-var A56 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55]); };
-var F57 = function (fun) { return _Fn(57, fun); };
-var A57 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56]); };
-var F58 = function (fun) { return _Fn(58, fun); };
-var A58 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57]); };
-var F59 = function (fun) { return _Fn(59, fun); };
-var A59 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58]); };
-var F60 = function (fun) { return _Fn(60, fun); };
-var A60 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59]); };
-var F61 = function (fun) { return _Fn(61, fun); };
-var A61 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60]); };
-var F62 = function (fun) { return _Fn(62, fun); };
-var A62 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61]); };
-var F63 = function (fun) { return _Fn(63, fun); };
-var A63 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61, v62) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61, v62]); };
-var F64 = function (fun) { return _Fn(64, fun); };
-var A64 = function (f, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61, v62, v63) { return _An(f, [v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39, v40, v41, v42, v43, v44, v45, v46, v47, v48, v49, v50, v51, v52, v53, v54, v55, v56, v57, v58, v59, v60, v61, v62, v63]); };
-
-// BUILTIN UNION CONSTRUCTORS
-var $Http$BadUrl = function (a) { return { $: 'BadUrl', a: a }; };
-var $Http$Timeout = { $: 'Timeout' };
-var $Http$NetworkError = { $: 'NetworkError' };
-var $Http$BadStatus = function (a) { return { $: 'BadStatus', a: a }; };
-var $Http$BadBody = function (a) { return { $: 'BadBody', a: a }; };
-var $Http$Sending = function (a) { return { $: 'Sending', a: a }; };
-var $Http$Receiving = function (a) { return { $: 'Receiving', a: a }; };
-var $Http$BadUrl_ = function (a) { return { $: 'BadUrl_', a: a }; };
-var $Http$Timeout_ = { $: 'Timeout_' };
-var $Http$NetworkError_ = { $: 'NetworkError_' };
-var $Http$BadStatus_ = F2(function (a, b) { return { $: 'BadStatus_', a: a, b: b }; });
-var $Http$GoodStatus_ = F2(function (a, b) { return { $: 'GoodStatus_', a: a, b: b }; });
-var $Time$Jan = { $: 'Jan' };
-var $Time$Feb = { $: 'Feb' };
-var $Time$Mar = { $: 'Mar' };
-var $Time$Apr = { $: 'Apr' };
-var $Time$May = { $: 'May' };
-var $Time$Jun = { $: 'Jun' };
-var $Time$Jul = { $: 'Jul' };
-var $Time$Aug = { $: 'Aug' };
-var $Time$Sep = { $: 'Sep' };
-var $Time$Oct = { $: 'Oct' };
-var $Time$Nov = { $: 'Nov' };
-var $Time$Dec = { $: 'Dec' };
-var $Time$Name = function (a) { return { $: 'Name', a: a }; };
-var $Time$Offset = function (a) { return { $: 'Offset', a: a }; };
-var $Time$Mon = { $: 'Mon' };
-var $Time$Tue = { $: 'Tue' };
-var $Time$Wed = { $: 'Wed' };
-var $Time$Thu = { $: 'Thu' };
-var $Time$Fri = { $: 'Fri' };
-var $Time$Sat = { $: 'Sat' };
-var $Time$Sun = { $: 'Sun' };
-var $Browser$Dom$NotFound = function (a) { return { $: 'NotFound', a: a }; };
-var $Url$Http = { $: 'Http' };
-var $Url$Https = { $: 'Https' };
-var $Browser$Internal = function (a) { return { $: 'Internal', a: a }; };
-var $Browser$External = function (a) { return { $: 'External', a: a }; };
-var $UUID$Canonical = { $: 'Canonical' };
-var $UUID$Compact = { $: 'Compact' };
-var $UUID$Guid = { $: 'Guid' };
-var $UUID$Urn = { $: 'Urn' };
-var $Json$Decode$Field = F2(function (a, b) { return { $: 'Field', a: a, b: b }; });
-var $Json$Decode$Index = F2(function (a, b) { return { $: 'Index', a: a, b: b }; });
-var $Json$Decode$OneOf = function (a) { return { $: 'OneOf', a: a }; };
-var $Json$Decode$Failure = F2(function (a, b) { return { $: 'Failure', a: a, b: b }; });
-
-// HTML HELPERS (generated from the builtin tables)
 var $Html$div = _VDom_node('div');
 var $Html$span = _VDom_node('span');
-var $Html$p = _VDom_node('p');
-var $Html$a = _VDom_node('a');
-var $Html$img = _VDom_node('img');
-var $Html$br = _VDom_node('br');
-var $Html$hr = _VDom_node('hr');
-var $Html$pre = _VDom_node('pre');
-var $Html$code = _VDom_node('code');
-var $Html$em = _VDom_node('em');
-var $Html$strong = _VDom_node('strong');
-var $Html$i = _VDom_node('i');
-var $Html$b = _VDom_node('b');
-var $Html$u = _VDom_node('u');
-var $Html$sub = _VDom_node('sub');
-var $Html$sup = _VDom_node('sup');
-var $Html$h1 = _VDom_node('h1');
-var $Html$h2 = _VDom_node('h2');
-var $Html$h3 = _VDom_node('h3');
-var $Html$h4 = _VDom_node('h4');
-var $Html$h5 = _VDom_node('h5');
-var $Html$h6 = _VDom_node('h6');
-var $Html$ul = _VDom_node('ul');
-var $Html$ol = _VDom_node('ol');
 var $Html$li = _VDom_node('li');
-var $Html$dl = _VDom_node('dl');
-var $Html$dt = _VDom_node('dt');
-var $Html$dd = _VDom_node('dd');
-var $Html$table = _VDom_node('table');
-var $Html$caption = _VDom_node('caption');
-var $Html$thead = _VDom_node('thead');
-var $Html$tbody = _VDom_node('tbody');
-var $Html$tfoot = _VDom_node('tfoot');
-var $Html$tr = _VDom_node('tr');
-var $Html$td = _VDom_node('td');
-var $Html$th = _VDom_node('th');
 var $Html$form = _VDom_node('form');
-var $Html$fieldset = _VDom_node('fieldset');
-var $Html$legend = _VDom_node('legend');
-var $Html$label = _VDom_node('label');
 var $Html$input = _VDom_node('input');
-var $Html$textarea = _VDom_node('textarea');
 var $Html$button = _VDom_node('button');
-var $Html$select = _VDom_node('select');
-var $Html$option = _VDom_node('option');
-var $Html$section = _VDom_node('section');
-var $Html$header = _VDom_node('header');
-var $Html$footer = _VDom_node('footer');
-var $Html$nav = _VDom_node('nav');
-var $Html$article = _VDom_node('article');
-var $Html$aside = _VDom_node('aside');
-var $Html$main_ = _VDom_node('main');
-var $Html$figure = _VDom_node('figure');
-var $Html$figcaption = _VDom_node('figcaption');
-var $Html$blockquote = _VDom_node('blockquote');
-var $Html$iframe = _VDom_node('iframe');
-var $Html$canvas = _VDom_node('canvas');
-var $Html$audio = _VDom_node('audio');
-var $Html$video = _VDom_node('video');
-var $Html$source = _VDom_node('source');
-var $Html$small = _VDom_node('small');
-var $Html$cite = _VDom_node('cite');
-var $Html$details = _VDom_node('details');
-var $Html$summary = _VDom_node('summary');
-var $Html$abbr = _VDom_node('abbr');
-var $Html$address = _VDom_node('address');
-var $Html$mark = _VDom_node('mark');
-var $Html$meter = _VDom_node('meter');
-var $Html$progress = _VDom_node('progress');
-var $Html$output = _VDom_node('output');
-var $Html$datalist = _VDom_node('datalist');
-var $Html$optgroup = _VDom_node('optgroup');
-var $Html$Attributes$_class = function (v) { return { $: 'AAttr', key: 'class', val: v }; };
-var $Html$Attributes$id = function (v) { return { $: 'AAttr', key: 'id', val: v }; };
-var $Html$Attributes$title = function (v) { return { $: 'AAttr', key: 'title', val: v }; };
-var $Html$Attributes$href = function (v) { return { $: 'AAttr', key: 'href', val: v }; };
-var $Html$Attributes$src = function (v) { return { $: 'AAttr', key: 'src', val: v }; };
-var $Html$Attributes$alt = function (v) { return { $: 'AAttr', key: 'alt', val: v }; };
-var $Html$Attributes$name = function (v) { return { $: 'AAttr', key: 'name', val: v }; };
-var $Html$Attributes$placeholder = function (v) { return { $: 'AAttr', key: 'placeholder', val: v }; };
+var $Html$Attributes$_class = _VDom_prop('className');
+var $Html$Attributes$id = _VDom_prop('id');
+var $Html$Attributes$type_ = _VDom_prop('type');
 var $Html$Attributes$value = _VDom_prop('value');
-var $Html$Attributes$type_ = function (v) { return { $: 'AAttr', key: 'type', val: v }; };
-var $Html$Attributes$draggable = function (v) { return { $: 'AAttr', key: 'draggable', val: v }; };
-var $Html$Attributes$_for = function (v) { return { $: 'AAttr', key: 'for', val: v }; };
-var $Html$Attributes$action = function (v) { return { $: 'AAttr', key: 'action', val: v }; };
-var $Html$Attributes$method = function (v) { return { $: 'AAttr', key: 'method', val: v }; };
-var $Html$Attributes$target = function (v) { return { $: 'AAttr', key: 'target', val: v }; };
-var $Html$Attributes$rel = function (v) { return { $: 'AAttr', key: 'rel', val: v }; };
-var $Html$Attributes$wrap = function (v) { return { $: 'AAttr', key: 'wrap', val: v }; };
-var $Html$Attributes$accept = function (v) { return { $: 'AAttr', key: 'accept', val: v }; };
-var $Html$Attributes$autocomplete = function (v) { return { $: 'AAttr', key: 'autocomplete', val: v }; };
-var $Html$Attributes$list = function (v) { return { $: 'AAttr', key: 'list', val: v }; };
-var $Html$Attributes$max = function (v) { return { $: 'AAttr', key: 'max', val: v }; };
-var $Html$Attributes$min = function (v) { return { $: 'AAttr', key: 'min', val: v }; };
-var $Html$Attributes$step = function (v) { return { $: 'AAttr', key: 'step', val: v }; };
-var $Html$Attributes$pattern = function (v) { return { $: 'AAttr', key: 'pattern', val: v }; };
-var $Html$Attributes$lang = function (v) { return { $: 'AAttr', key: 'lang', val: v }; };
-var $Html$Attributes$dir = function (v) { return { $: 'AAttr', key: 'dir', val: v }; };
 var $Html$Attributes$checked = _VDom_prop('checked');
-var $Html$Attributes$selected = _VDom_prop('selected');
 var $Html$Attributes$disabled = _VDom_prop('disabled');
-var $Html$Attributes$hidden = _VDom_prop('hidden');
-var $Html$Attributes$readonly = _VDom_prop('readOnly');
-var $Html$Attributes$required = _VDom_prop('required');
-var $Html$Attributes$autofocus = _VDom_prop('autofocus');
-var $Html$Attributes$contenteditable = _VDom_prop('contenteditable');
-var $Html$Attributes$autoplay = _VDom_prop('autoplay');
-var $Html$Attributes$controls = _VDom_prop('controls');
-var $Html$Attributes$loop = _VDom_prop('loop');
-var $Html$Attributes$multiple = _VDom_prop('multiple');
-var $Html$Attributes$novalidate = _VDom_prop('noValidate');
-var $Html$Attributes$spellcheck = _VDom_prop('spellcheck');
-var $Html$Attributes$rows = function (n) { return { $: 'AAttr', key: 'rows', val: String(n) }; };
-var $Html$Attributes$cols = function (n) { return { $: 'AAttr', key: 'cols', val: String(n) }; };
-var $Html$Attributes$colspan = function (n) { return { $: 'AAttr', key: 'colspan', val: String(n) }; };
-var $Html$Attributes$rowspan = function (n) { return { $: 'AAttr', key: 'rowspan', val: String(n) }; };
-var $Html$Attributes$tabindex = function (n) { return { $: 'AAttr', key: 'tabindex', val: String(n) }; };
-var $Html$Attributes$size = function (n) { return { $: 'AAttr', key: 'size', val: String(n) }; };
-var $Html$Attributes$maxlength = function (n) { return { $: 'AAttr', key: 'maxlength', val: String(n) }; };
-var $Html$Attributes$minlength = function (n) { return { $: 'AAttr', key: 'minlength', val: String(n) }; };
-var $Html$Attributes$height = function (n) { return { $: 'AAttr', key: 'height', val: String(n) }; };
-var $Html$Attributes$width = function (n) { return { $: 'AAttr', key: 'width', val: String(n) }; };
-var $Html$Attributes$classList = function (pairs) { var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) { if (xs.a.b) { names.push(xs.a.a); } } return { $: 'AAttr', key: 'class', val: names.join(' ') }; };
-var $Html$Attributes$property = F2(function (key, value) { return { $: 'AProp', key: key, val: value }; });
 var $Svg$svg = _VDom_nodeNS('svg');
 var $Svg$circle = _VDom_nodeNS('circle');
-var $Svg$ellipse = _VDom_nodeNS('ellipse');
-var $Svg$line = _VDom_nodeNS('line');
-var $Svg$path = _VDom_nodeNS('path');
-var $Svg$polygon = _VDom_nodeNS('polygon');
-var $Svg$polyline = _VDom_nodeNS('polyline');
-var $Svg$rect = _VDom_nodeNS('rect');
-var $Svg$g = _VDom_nodeNS('g');
-var $Svg$defs = _VDom_nodeNS('defs');
-var $Svg$text_ = _VDom_nodeNS('text');
-var $Svg$tspan = _VDom_nodeNS('tspan');
-var $Svg$use = _VDom_nodeNS('use');
-var $Svg$mask = _VDom_nodeNS('mask');
-var $Svg$clipPath = _VDom_nodeNS('clipPath');
-var $Svg$linearGradient = _VDom_nodeNS('linearGradient');
-var $Svg$radialGradient = _VDom_nodeNS('radialGradient');
-var $Svg$stop = _VDom_nodeNS('stop');
-var $Svg$pattern = _VDom_nodeNS('pattern');
-var $Svg$marker = _VDom_nodeNS('marker');
-var $Svg$symbol = _VDom_nodeNS('symbol');
-var $Svg$title = _VDom_nodeNS('title');
-var $Svg$desc = _VDom_nodeNS('desc');
-var $Svg$foreignObject = _VDom_nodeNS('foreignObject');
-var $Svg$animate = _VDom_nodeNS('animate');
-var $Svg$Attributes$viewBox = function (v) { return { $: 'AAttr', key: 'viewBox', val: v }; };
-var $Svg$Attributes$width = function (v) { return { $: 'AAttr', key: 'width', val: v }; };
-var $Svg$Attributes$height = function (v) { return { $: 'AAttr', key: 'height', val: v }; };
-var $Svg$Attributes$x = function (v) { return { $: 'AAttr', key: 'x', val: v }; };
-var $Svg$Attributes$y = function (v) { return { $: 'AAttr', key: 'y', val: v }; };
-var $Svg$Attributes$x1 = function (v) { return { $: 'AAttr', key: 'x1', val: v }; };
-var $Svg$Attributes$y1 = function (v) { return { $: 'AAttr', key: 'y1', val: v }; };
-var $Svg$Attributes$x2 = function (v) { return { $: 'AAttr', key: 'x2', val: v }; };
-var $Svg$Attributes$y2 = function (v) { return { $: 'AAttr', key: 'y2', val: v }; };
 var $Svg$Attributes$cx = function (v) { return { $: 'AAttr', key: 'cx', val: v }; };
 var $Svg$Attributes$cy = function (v) { return { $: 'AAttr', key: 'cy', val: v }; };
-var $Svg$Attributes$r = function (v) { return { $: 'AAttr', key: 'r', val: v }; };
-var $Svg$Attributes$rx = function (v) { return { $: 'AAttr', key: 'rx', val: v }; };
-var $Svg$Attributes$ry = function (v) { return { $: 'AAttr', key: 'ry', val: v }; };
-var $Svg$Attributes$d = function (v) { return { $: 'AAttr', key: 'd', val: v }; };
-var $Svg$Attributes$points = function (v) { return { $: 'AAttr', key: 'points', val: v }; };
 var $Svg$Attributes$fill = function (v) { return { $: 'AAttr', key: 'fill', val: v }; };
-var $Svg$Attributes$fillRule = function (v) { return { $: 'AAttr', key: 'fill-rule', val: v }; };
-var $Svg$Attributes$fillOpacity = function (v) { return { $: 'AAttr', key: 'fill-opacity', val: v }; };
-var $Svg$Attributes$stroke = function (v) { return { $: 'AAttr', key: 'stroke', val: v }; };
-var $Svg$Attributes$strokeWidth = function (v) { return { $: 'AAttr', key: 'stroke-width', val: v }; };
-var $Svg$Attributes$strokeLinecap = function (v) { return { $: 'AAttr', key: 'stroke-linecap', val: v }; };
-var $Svg$Attributes$strokeLinejoin = function (v) { return { $: 'AAttr', key: 'stroke-linejoin', val: v }; };
-var $Svg$Attributes$strokeDasharray = function (v) { return { $: 'AAttr', key: 'stroke-dasharray', val: v }; };
-var $Svg$Attributes$strokeDashoffset = function (v) { return { $: 'AAttr', key: 'stroke-dashoffset', val: v }; };
-var $Svg$Attributes$strokeOpacity = function (v) { return { $: 'AAttr', key: 'stroke-opacity', val: v }; };
-var $Svg$Attributes$strokeMiterlimit = function (v) { return { $: 'AAttr', key: 'stroke-miterlimit', val: v }; };
-var $Svg$Attributes$opacity = function (v) { return { $: 'AAttr', key: 'opacity', val: v }; };
-var $Svg$Attributes$transform = function (v) { return { $: 'AAttr', key: 'transform', val: v }; };
-var $Svg$Attributes$_class = function (v) { return { $: 'AAttr', key: 'class', val: v }; };
-var $Svg$Attributes$id = function (v) { return { $: 'AAttr', key: 'id', val: v }; };
-var $Svg$Attributes$style = function (v) { return { $: 'AAttr', key: 'style', val: v }; };
-var $Svg$Attributes$dx = function (v) { return { $: 'AAttr', key: 'dx', val: v }; };
-var $Svg$Attributes$dy = function (v) { return { $: 'AAttr', key: 'dy', val: v }; };
-var $Svg$Attributes$fontSize = function (v) { return { $: 'AAttr', key: 'font-size', val: v }; };
-var $Svg$Attributes$fontFamily = function (v) { return { $: 'AAttr', key: 'font-family', val: v }; };
-var $Svg$Attributes$textAnchor = function (v) { return { $: 'AAttr', key: 'text-anchor', val: v }; };
-var $Svg$Attributes$dominantBaseline = function (v) { return { $: 'AAttr', key: 'dominant-baseline', val: v }; };
-var $Svg$Attributes$gradientUnits = function (v) { return { $: 'AAttr', key: 'gradientUnits', val: v }; };
-var $Svg$Attributes$gradientTransform = function (v) { return { $: 'AAttr', key: 'gradientTransform', val: v }; };
-var $Svg$Attributes$offset = function (v) { return { $: 'AAttr', key: 'offset', val: v }; };
-var $Svg$Attributes$stopColor = function (v) { return { $: 'AAttr', key: 'stop-color', val: v }; };
-var $Svg$Attributes$stopOpacity = function (v) { return { $: 'AAttr', key: 'stop-opacity', val: v }; };
-var $Svg$Attributes$clipRule = function (v) { return { $: 'AAttr', key: 'clip-rule', val: v }; };
-var $Svg$Attributes$clipPathUnits = function (v) { return { $: 'AAttr', key: 'clipPathUnits', val: v }; };
-var $Svg$Attributes$preserveAspectRatio = function (v) { return { $: 'AAttr', key: 'preserveAspectRatio', val: v }; };
-var $Svg$Attributes$xlinkHref = function (v) { return { $: 'AAttr', key: 'xlink:href', val: v }; };
-var $Svg$Attributes$pointerEvents = function (v) { return { $: 'AAttr', key: 'pointer-events', val: v }; };
-var $Svg$Attributes$visibility = function (v) { return { $: 'AAttr', key: 'visibility', val: v }; };
-var $Svg$Attributes$version = function (v) { return { $: 'AAttr', key: 'version', val: v }; };
-var $Svg$Attributes$attributeName = function (v) { return { $: 'AAttr', key: 'attributeName', val: v }; };
-var $Svg$Attributes$values = function (v) { return { $: 'AAttr', key: 'values', val: v }; };
-var $Svg$Attributes$dur = function (v) { return { $: 'AAttr', key: 'dur', val: v }; };
-var $Svg$Attributes$repeatCount = function (v) { return { $: 'AAttr', key: 'repeatCount', val: v }; };
-var $Svg$Attributes$xmlSpace = function (v) { return { $: 'AAttr', key: 'xml:space', val: v }; };
-var $Svg$Attributes$xmlLang = function (v) { return { $: 'AAttr', key: 'xml:lang', val: v }; };
-var $Svg$Attributes$baseProfile = function (v) { return { $: 'AAttr', key: 'baseProfile', val: v }; };
-var $Svg$Attributes$markerEnd = function (v) { return { $: 'AAttr', key: 'marker-end', val: v }; };
-var $Svg$Attributes$markerStart = function (v) { return { $: 'AAttr', key: 'marker-start', val: v }; };
-var $Svg$Attributes$maskUnits = function (v) { return { $: 'AAttr', key: 'maskUnits', val: v }; };
-var $Svg$Attributes$patternUnits = function (v) { return { $: 'AAttr', key: 'patternUnits', val: v }; };
-var $Svg$Attributes$vectorEffect = function (v) { return { $: 'AAttr', key: 'vector-effect', val: v }; };
-
-// MODULE Main
-
+var $Svg$Attributes$r = function (v) { return { $: 'AAttr', key: 'r', val: v }; };
+var $Svg$Attributes$viewBox = function (v) { return { $: 'AAttr', key: 'viewBox', val: v }; };
+var $Svg$Attributes$width = function (v) { return { $: 'AAttr', key: 'width', val: v }; };
 var $Main$Increment = { $: 'Increment' };
 var $Main$ChildIncrement = function (a) { return { $: 'ChildIncrement', a: a }; };
 var $Main$Reorder = { $: 'Reorder' };
@@ -2631,8 +1339,8 @@ var $Main$Poke = { $: 'Poke' };
 
 var $Main$fromJs = _Platform_incomingPort('fromJs', _Port_id);
 var $Main$toJs = _Platform_outgoingPort('toJs', _Port_id);
-var $Main$init = function (_v1) { return { $: '#2', a: { count: 0, items: _List_fromArray([A2(F2(function (_r0, _r1) { return { key: _r0, label: _r1 }; }), 'a', 'alpha'), A2(F2(function (_r0, _r1) { return { key: _r0, label: _r1 }; }), 'b', 'beta'), A2(F2(function (_r0, _r1) { return { key: _r0, label: _r1 }; }), 'c', 'gamma')]), textValue: '', checkboxOn: false, submitted: 0, outerClicks: 0, innerClicks: 0, customLog: _List_Nil, slept: false, portEcho: '', showPanel: false, styleToggle: false }, b: A2($Task$perform, $Main$Slept, $Process$sleep(30)) }; };
-var $Main$update = F2(function (msg, model) { var _v2 = msg; if (_v2.$ === 'Increment') { return { $: '#2', a: _Utils_update(model, { count: (model.count + 1) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'ChildIncrement') { return { $: '#2', a: _Utils_update(model, { count: (model.count + 10) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'Reorder') { return { $: '#2', a: _Utils_update(model, { items: $List$reverse(model.items) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'InsertFront') { return { $: '#2', a: _Utils_update(model, { items: _List_Cons(A2(F2(function (_r0, _r1) { return { key: _r0, label: _r1 }; }), 'new', 'newcomer'), model.items) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'RemoveSecond') { return { $: '#2', a: _Utils_update(model, { items: _Utils_ap(A2($List$take, 1, model.items), A2($List$drop, 2, model.items)) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'TextChanged') { var s = _v2.a; return { $: '#2', a: _Utils_update(model, { textValue: s }), b: $Platform$Cmd$none }; } if (_v2.$ === 'CheckboxChanged') { var b = _v2.a; return { $: '#2', a: _Utils_update(model, { checkboxOn: b }), b: $Platform$Cmd$none }; } if (_v2.$ === 'FormSubmitted') { return { $: '#2', a: _Utils_update(model, { submitted: (model.submitted + 1) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'OuterClicked') { return { $: '#2', a: _Utils_update(model, { outerClicks: (model.outerClicks + 1) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'InnerClicked') { return { $: '#2', a: _Utils_update(model, { innerClicks: (model.innerClicks + 1) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'CustomEvent') { var tag = _v2.a; return { $: '#2', a: _Utils_update(model, { customLog: _List_Cons(tag, model.customLog) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'Slept') { return { $: '#2', a: _Utils_update(model, { slept: true }), b: $Platform$Cmd$none }; } if (_v2.$ === 'GotFromJs') { var s = _v2.a; return { $: '#2', a: _Utils_update(model, { portEcho: s }), b: $Main$toJs(_Utils_ap('echo:', s)) }; } if (_v2.$ === 'TogglePanel') { return { $: '#2', a: _Utils_update(model, { showPanel: $Basics$not(model.showPanel) }), b: $Platform$Cmd$none }; } if (_v2.$ === 'ToggleStyle') { return { $: '#2', a: _Utils_update(model, { styleToggle: $Basics$not(model.styleToggle) }), b: $Platform$Cmd$none }; } throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)'); });
+var $Main$init = function (_v1) { return { $: '#2', a: { count: 0, items: _List_fromArray([A2(_Record_ctor('key,label'), 'a', 'alpha'), A2(_Record_ctor('key,label'), 'b', 'beta'), A2(_Record_ctor('key,label'), 'c', 'gamma')]), textValue: '', checkboxOn: false, submitted: 0, outerClicks: 0, innerClicks: 0, customLog: _List_Nil, slept: false, portEcho: '', showPanel: false, styleToggle: false }, b: A2($Task$perform, $Main$Slept, $Process$sleep(30)) }; };
+var $Main$update = F2(function (msg, model) { var _v2 = msg; switch (_v2.$) { case 'Increment': { return { $: '#2', a: _Utils_update(model, { count: (model.count + 1) }), b: $Platform$Cmd$none }; } case 'ChildIncrement': { return { $: '#2', a: _Utils_update(model, { count: (model.count + 10) }), b: $Platform$Cmd$none }; } case 'Reorder': { return { $: '#2', a: _Utils_update(model, { items: $List$reverse(model.items) }), b: $Platform$Cmd$none }; } case 'InsertFront': { return { $: '#2', a: _Utils_update(model, { items: _List_Cons(A2(_Record_ctor('key,label'), 'new', 'newcomer'), model.items) }), b: $Platform$Cmd$none }; } case 'RemoveSecond': { return { $: '#2', a: _Utils_update(model, { items: _Utils_ap(A2($List$take, 1, model.items), A2($List$drop, 2, model.items)) }), b: $Platform$Cmd$none }; } case 'TextChanged': { var s = _v2.a; return { $: '#2', a: _Utils_update(model, { textValue: s }), b: $Platform$Cmd$none }; } case 'CheckboxChanged': { var b = _v2.a; return { $: '#2', a: _Utils_update(model, { checkboxOn: b }), b: $Platform$Cmd$none }; } case 'FormSubmitted': { return { $: '#2', a: _Utils_update(model, { submitted: (model.submitted + 1) }), b: $Platform$Cmd$none }; } case 'OuterClicked': { return { $: '#2', a: _Utils_update(model, { outerClicks: (model.outerClicks + 1) }), b: $Platform$Cmd$none }; } case 'InnerClicked': { return { $: '#2', a: _Utils_update(model, { innerClicks: (model.innerClicks + 1) }), b: $Platform$Cmd$none }; } case 'CustomEvent': { var tag = _v2.a; return { $: '#2', a: _Utils_update(model, { customLog: _List_Cons(tag, model.customLog) }), b: $Platform$Cmd$none }; } case 'Slept': { return { $: '#2', a: _Utils_update(model, { slept: true }), b: $Platform$Cmd$none }; } case 'GotFromJs': { var s = _v2.a; return { $: '#2', a: _Utils_update(model, { portEcho: s }), b: $Main$toJs(_Utils_ap('echo:', s)) }; } case 'TogglePanel': { return { $: '#2', a: _Utils_update(model, { showPanel: $Basics$not(model.showPanel) }), b: $Platform$Cmd$none }; } case 'ToggleStyle': { return { $: '#2', a: _Utils_update(model, { styleToggle: $Basics$not(model.styleToggle) }), b: $Platform$Cmd$none }; } default: { throw new Error('Missing case branch (compiler bug: exhaustiveness checking should have caught this)'); } } });
 var $Main$subscriptions = function (_v3) { return $Main$fromJs($Main$GotFromJs); };
 var $Main$viewItem = function (item) { return A2($Html$li, _List_fromArray([$Html$Attributes$_class('item')]), _List_fromArray([$Html$text(item.label)])); };
 var $Main$viewBadge = function (n) { return A2($Html$span, _List_fromArray([$Html$Attributes$id('lazy-badge')]), _List_fromArray([$Html$text(_Utils_ap('badge:', $String$fromInt(n)))])); };
@@ -2640,6 +1348,6 @@ var $Main$childView = A2($Html$button, _List_fromArray([$Html$Attributes$id('chi
 var $Main$view = function (model) { return A2($Html$div, _List_fromArray([$Html$Attributes$id('app-root')]), _List_fromArray([A2($Html$div, _List_fromArray([$Html$Attributes$id('count')]), _List_fromArray([$Html$text($String$fromInt(model.count))])), A2($Html$button, _List_fromArray([$Html$Attributes$id('inc'), $Html$Events$onClick($Main$Increment)]), _List_fromArray([$Html$text('+')])), A2($Html$map, $Main$ChildIncrement, $Main$childView), A2($Html$button, _List_fromArray([$Html$Attributes$id('reorder'), $Html$Events$onClick($Main$Reorder)]), _List_fromArray([$Html$text('reorder')])), A2($Html$button, _List_fromArray([$Html$Attributes$id('insert'), $Html$Events$onClick($Main$InsertFront)]), _List_fromArray([$Html$text('insert')])), A2($Html$button, _List_fromArray([$Html$Attributes$id('remove'), $Html$Events$onClick($Main$RemoveSecond)]), _List_fromArray([$Html$text('remove')])), A2($Html$Keyed$ul, _List_fromArray([$Html$Attributes$id('keyed-list')]), A2($List$map, function (item) { return { $: '#2', a: item.key, b: $Main$viewItem(item) }; }, model.items)), A2($Html$input, _List_fromArray([$Html$Attributes$id('text-in'), $Html$Attributes$type_('text'), $Html$Attributes$value(model.textValue), $Html$Events$onInput($Main$TextChanged)]), _List_Nil), A2($Html$div, _List_fromArray([$Html$Attributes$id('text-out')]), _List_fromArray([$Html$text($String$reverse(model.textValue))])), A2($Html$input, _List_fromArray([$Html$Attributes$id('check-in'), $Html$Attributes$type_('checkbox'), $Html$Attributes$checked(model.checkboxOn), $Html$Events$onCheck($Main$CheckboxChanged)]), _List_Nil), A2($Html$div, _List_fromArray([$Html$Attributes$id('check-out')]), _List_fromArray([$Html$text((model.checkboxOn ? 'on' : 'off'))])), A2($Html$form, _List_fromArray([$Html$Attributes$id('the-form'), $Html$Events$onSubmit($Main$FormSubmitted)]), _List_fromArray([A2($Html$button, _List_fromArray([$Html$Attributes$id('submit-btn'), $Html$Attributes$type_('submit')]), _List_fromArray([$Html$text('go')]))])), A2($Html$div, _List_fromArray([$Html$Attributes$id('submit-out')]), _List_fromArray([$Html$text($String$fromInt(model.submitted))])), A2($Html$div, _List_fromArray([$Html$Attributes$id('outer'), $Html$Events$onClick($Main$OuterClicked)]), _List_fromArray([A2($Html$button, _List_fromArray([$Html$Attributes$id('stopper'), A2($Html$Events$stopPropagationOn, 'click', $Json$Decode$succeed({ $: '#2', a: $Main$InnerClicked, b: true }))]), _List_fromArray([$Html$text('stop')])), A2($Html$button, _List_fromArray([$Html$Attributes$id('bubbler'), $Html$Events$onClick($Main$InnerClicked)]), _List_fromArray([$Html$text('bubble')]))])), A2($Html$div, _List_fromArray([$Html$Attributes$id('click-out')]), _List_fromArray([$Html$text(_Utils_ap($String$fromInt(model.outerClicks), _Utils_ap('/', $String$fromInt(model.innerClicks))))])), A2($Html$button, _List_fromArray([$Html$Attributes$id('custom-btn'), A2($Html$Events$custom, 'click', $Json$Decode$succeed({ message: $Main$CustomEvent('custom'), stopPropagation: true, preventDefault: true }))]), _List_fromArray([$Html$text('custom')])), A2($Html$div, _List_fromArray([$Html$Attributes$id('custom-out')]), _List_fromArray([$Html$text(A2($String$join, ',', model.customLog))])), A2($Html$div, _List_fromArray([$Html$Attributes$id('sleep-out')]), _List_fromArray([$Html$text((model.slept ? 'awake' : 'sleeping'))])), A2($Html$div, _List_fromArray([$Html$Attributes$id('port-out')]), _List_fromArray([$Html$text(model.portEcho)])), A2($Html$Lazy$lazy, $Main$viewBadge, model.count), (model.showPanel ? A2($Html$div, _List_fromArray([$Html$Attributes$id('panel')]), _List_fromArray([$Html$text('panel-content')])) : $Html$text('')), A2($Html$button, _List_fromArray([$Html$Attributes$id('toggle-panel'), $Html$Events$onClick($Main$TogglePanel)]), _List_fromArray([$Html$text('toggle')])), A2($Html$div, _List_fromArray([$Html$Attributes$id('styled'), A2($Html$Attributes$style, 'color', (model.styleToggle ? 'rgb(255, 0, 0)' : 'rgb(0, 0, 255)')), $Html$Attributes$_class((model.styleToggle ? 'hot' : 'cold')), $Html$Attributes$disabled(model.styleToggle)]), _List_fromArray([$Html$text('styled')])), A2($Html$button, _List_fromArray([$Html$Attributes$id('toggle-style'), $Html$Events$onClick($Main$ToggleStyle)]), _List_fromArray([$Html$text('style')])), A2($Svg$svg, _List_fromArray([$Svg$Attributes$viewBox('0 0 100 100'), $Svg$Attributes$width('50'), $Html$Attributes$id('the-svg')]), _List_fromArray([A2($Svg$circle, _List_fromArray([$Svg$Attributes$cx('50'), $Svg$Attributes$cy('50'), $Svg$Attributes$r('40'), $Svg$Attributes$fill('green')]), _List_Nil)]))])); };
 var $Main$main = $Browser$element({ init: $Main$init, update: $Main$update, subscriptions: $Main$subscriptions, view: $Main$view });
 
-var Elm = { 'Main': { 'init': _Platform_wrap($Main$init), 'update': _Platform_wrap($Main$update), 'subscriptions': _Platform_wrap($Main$subscriptions), 'viewItem': _Platform_wrap($Main$viewItem), 'viewBadge': _Platform_wrap($Main$viewBadge), 'childView': _Platform_wrap($Main$childView), 'view': _Platform_wrap($Main$view), 'main': _Platform_wrap($Main$main) } };
-if (typeof module !== 'undefined') { module.exports = Elm; } else { this.Elm = Elm; }
+var Elm = { 'Main': _Platform_module({ 'init': _Platform_wrap($Main$init), 'update': _Platform_wrap($Main$update), 'subscriptions': _Platform_wrap($Main$subscriptions), 'viewItem': _Platform_wrap($Main$viewItem), 'viewBadge': _Platform_wrap($Main$viewBadge), 'childView': _Platform_wrap($Main$childView), 'view': _Platform_wrap($Main$view), 'main': _Platform_wrap($Main$main) }, $Main$main) };
+_Platform_export(this, Elm);
 }).call(this);
