@@ -191,12 +191,6 @@ value — a type-directed encoder converts the payload (scalars, `List`,
 `Array`, tuples, records, `Maybe`, `Json.Value`) to JSON before it crosses,
 matching the JS backend value-for-value (checked by a differential test).
 
-## Not ported
-
-- **WebSockets** — removed from Elm 0.19 core, so nothing to port.
-- The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
-  values are untyped, like the original.
-
 ## Layout
 
 ```
