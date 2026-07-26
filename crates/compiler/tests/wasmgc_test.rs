@@ -3633,8 +3633,9 @@ fn bench_wasmgc_vs_js() {
         ("dict build+get 30k",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 30000))))\n",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (Dict.fromList (List.map (\\i -> ( i, i * 2 )) (List.range 1 1))))\n"),
-        // KNOWN O(n²): incremental Dict.insert / Array.push each copy the whole
-        // vector (see memory) — small n here just to track the ratio, not hang.
+        // Incremental Dict.insert / Array.push: measured linear/log-linear on
+        // both backends (the earlier O(n²) whole-vector-copy was fixed by the
+        // amortized persistent-structure work). Kept to track the ratio.
         ("dict incremental 50k",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 50000)))\n",
          "import Dict\nmain : String\nmain = String.fromInt (Dict.size (List.foldl (\\i d -> Dict.insert i i d) Dict.empty (List.range 1 1)))\n"),
