@@ -314,7 +314,8 @@ const G_NEXT_TASK: u32 = 24; // next async-task slot
 const G_HTTP_RESP: u32 = 25; // the Http.Response for the task being resumed (THttpDone reads it)
 const G_STRLITS: u32 = 26; // interned string-literal pool (ref T_ARR of ref T_STR), built once at instantiation
 const G_CLOSPOOL: u32 = 27; // interned capture-free function closures (ref T_ARR of ref T_CLOS), built once
-const G_RSEED: u32 = 28; // Random.generate's persistent Seed (eqref, null until first use → seeded from host time)
+#[allow(dead_code)]
+const G_RSEED: u32 = 28; // RESERVED (formerly Random.generate's persistent Seed; Random is a real effect module now — kept to preserve global indices)
 const G_EMPTY_LIST: u32 = 29; // the shared empty list {0,null,null}; the spine terminator every chunk's `next` points to
 const G_EMPTY_LISTF: u32 = 30; // the shared empty `List Float` (T_LISTF) terminator
 const G_EMPTY_LISTI: u32 = 31; // the shared empty `List Int` (T_LISTI) terminator
@@ -3976,7 +3977,8 @@ impl<'a> Codegen<'a> {
                 &ConstExpr::extended(insns),
             );
         }
-        // 28=G_RSEED: Random.generate's persistent Seed (null until first use).
+        // 28=G_RSEED: RESERVED (formerly Random.generate's persistent Seed; now
+        // unused — Random is a real effect module. Slot kept to preserve indices).
         globals.global(
             GlobalType { val_type: eqref(), mutable: true, shared: false },
             &ConstExpr::ref_null(eq_heap()),
@@ -5118,16 +5120,10 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed
             return Ok(());
         }
-        // Random.independentSeed : a nullary Generator (ctor tag 14).
-        if module == "Random" && name == "independentSeed" {
+        // Elm.Kernel.Random.independentSeed : a nullary Generator (ctor tag 14).
+        // (minInt/maxInt are source literals in Random.elm now.)
+        if module == "Elm.Kernel.Random" && name == "independentSeed" {
             push_nullary_ctor(f, 14);
-            return Ok(());
-        }
-        // Random.minInt / maxInt : the 32-bit signed bounds, as boxed Ints.
-        if module == "Random" && (name == "minInt" || name == "maxInt") {
-            let v: i64 = if name == "minInt" { -2147483648 } else { 2147483647 };
-            f.instruction(&Instruction::I64Const(v));
-            f.instruction(&Instruction::Call(self.box_int_idx));
             return Ok(());
         }
         let arity: u32 = match (module, name) {
@@ -16760,40 +16756,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.dispatch_msg_idx));
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // CMD_RANDOM (9): [toMsg, generator]. Seed lazily from host time, step
-        // the generator against the persistent seed (advancing it), and
-        // dispatch toMsg applied to the generated value.
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(9));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::GlobalGet(G_RSEED));
-        f.instruction(&Instruction::RefIsNull);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::Call(HOST_NOW));
-        f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::Call(self.random_initial_seed_idx));
-        f.instruction(&Instruction::GlobalSet(G_RSEED));
-        f.instruction(&Instruction::End);
-        // (value, newSeed) = random_step(generator, seed)
-        ctor_argn(&mut f, 0, 1);
-        f.instruction(&Instruction::GlobalGet(G_RSEED));
-        f.instruction(&Instruction::Call(self.random_step_idx));
-        f.instruction(&Instruction::LocalSet(5)); // tuple [value, newSeed]
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::GlobalSet(G_RSEED));
-        ctor_arg0(&mut f, 0); // toMsg
-        f.instruction(&Instruction::LocalGet(5));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
-        f.instruction(&Instruction::End); // CMD_RANDOM if
+        // (Random.generate is a manager command LEAF now — handled by the
+        // effect-manager machinery, not a hardcoded CMD_RANDOM branch here.)
         f.instruction(&Instruction::End); // run_cmd function
         f
     }
@@ -17264,22 +17228,8 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // CMD_RANDOM (9) [toMsg, generator]: compose f into toMsg.
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(9));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(9));
-        self.emit_make_closure(self.compose3_idx, 3, &mut f);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        ctor_arg0(&mut f, 1); // toMsg
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        ctor_argn(&mut f, 1, 1); // generator
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::StructNew(T_CTOR));
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        // (Random.generate is a manager command LEAF now; Cmd.map over it is the
+        // documented mgr_collect cmdMap limitation, not a CMD_RANDOM re-wrap.)
         // Everything else (none / port / nav) produces no message: unchanged.
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::End);
@@ -26245,11 +26195,11 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::Call(idx));
             }
             // Random: reify each generator as a tagged ctor; random_step runs it.
-            ("Random", "int") | ("Random", "float") | ("Random", "constant")
-            | ("Random", "map") | ("Random", "map2") | ("Random", "map3")
-            | ("Random", "andThen") | ("Random", "pair")
-            | ("Random", "map4") | ("Random", "map5") | ("Random", "list")
-            | ("Random", "weighted") | ("Random", "uniform") | ("Random", "lazy") => {
+            ("Elm.Kernel.Random", "int") | ("Elm.Kernel.Random", "float") | ("Elm.Kernel.Random", "constant")
+            | ("Elm.Kernel.Random", "map") | ("Elm.Kernel.Random", "map2") | ("Elm.Kernel.Random", "map3")
+            | ("Elm.Kernel.Random", "andThen") | ("Elm.Kernel.Random", "pair")
+            | ("Elm.Kernel.Random", "map4") | ("Elm.Kernel.Random", "map5") | ("Elm.Kernel.Random", "list")
+            | ("Elm.Kernel.Random", "weighted") | ("Elm.Kernel.Random", "uniform") | ("Elm.Kernel.Random", "lazy") => {
                 let tag: i32 = match name {
                     "int" => 0,
                     "float" => 1,
@@ -26276,24 +26226,14 @@ impl<'a> Codegen<'a> {
                 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            ("Random", "step") => {
+            ("Elm.Kernel.Random", "step") => {
                 self.emit_expr(&args[0], ctx, f)?; // generator
                 self.emit_expr(&args[1], ctx, f)?; // seed
                 f.instruction(&Instruction::Call(self.random_step_idx));
             }
-            ("Random", "initialSeed") => {
+            ("Elm.Kernel.Random", "initialSeed") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::Call(self.random_initial_seed_idx));
-            }
-            // Random.generate toMsg gen → CMD_RANDOM (9) [toMsg, generator].
-            // run_cmd steps the generator against a persistent seed and
-            // dispatches toMsg applied to the value.
-            ("Random", "generate") => {
-                f.instruction(&Instruction::I32Const(9));
-                self.emit_expr(&args[0], ctx, f)?; // toMsg
-                self.emit_expr(&args[1], ctx, f)?; // generator
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Task: reify combinators as tagged ctors; task_run interprets them.
             ("Task", "succeed") | ("Task", "fail") | ("Task", "map")
