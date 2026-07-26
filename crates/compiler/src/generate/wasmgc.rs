@@ -28303,17 +28303,17 @@ impl<'a> Codegen<'a> {
                 }
                 f.instruction(&Instruction::Call(idx));
             }
-            // Effects with no faithful headless implementation. elm's own JS
-            // backend leaves these kernels undefined (a package referencing them
-            // compiles, then throws a `ReferenceError` only if the effect is
-            // actually run). Mirror that: compile to a trap so the package builds
-            // — matching the JS backend's conformance — while failing honestly (a
-            // wasm trap, not a silent no-op) if the effect is ever invoked.
-            //   - File.Download.* / File.Select.* / File.* accessors: a File only
-            //     exists via a browser upload, absent headless (Markdown needs a
-            //     CommonMark parser; Benchmark/Test.runThunk are runner internals).
+            // Kernels this backend does not implement. A package referencing
+            // one still compiles; invoking the effect traps, which is honest
+            // (a trap, not a silent no-op).
+            //   - File.Download.* / File.Select.* / File.* accessors: a File
+            //     only exists via a browser upload.
             //     (Http.cancel is real Elm now; Http.fileBody delegates to
             //     Elm.Kernel.Http.fileBody, an inert Body placeholder.)
+            //   - Markdown/Benchmark: the JS backend implements both (the
+            //     vendored `marked` parser and performance.now sampling);
+            //     porting a CommonMark parser and a timing source to raw wasm
+            //     has not been done. Test.runThunk is a runner internal.
             ("Elm.Kernel.File", _)
             | ("File", "name" | "size" | "mime" | "lastModified" | "toString" | "toBytes" | "toUrl")
             | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith")
