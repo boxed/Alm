@@ -27014,11 +27014,14 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[1], ctx, f)?;
                 f.instruction(&Instruction::Call(self.val_compare_idx));
                 f.instruction(&Instruction::I32Const(0));
-                // min: pick a when compare<=0; max: pick a when compare>0.
+                // Elm: `min a b = if a < b then a else b`, `max a b = if a > b
+                // then a else b`. So pick `a` only when compare < 0 (min) or > 0
+                // (max) — on a tie (incl. NaN, which compares as 0) pick `b`, as
+                // Elm does. (`<=` for min would keep NaN and diverge from JS.)
                 f.instruction(if name == "min" {
-                    &Instruction::I32LeS
+                    &Instruction::I32LtS
                 } else {
-                    &Instruction::I32GtS
+                    &Instruction::I32GeS
                 });
                 f.instruction(&Instruction::TypedSelect(eqref()));
             }

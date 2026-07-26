@@ -484,6 +484,22 @@ fn string_replace() {
 }
 
 #[test]
+fn min_max_nan_semantics() {
+    // Elm `min a b = if a < b then a else b`, `max a b = if a < b then b else a`.
+    // With a NaN operand, `a < b` is false either way, so min/max return the
+    // second/first arg respectively. All backends must match JS.
+    assert_str_prog(
+        "min_max_nan",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \"|\" (List.map String.fromFloat\n\
+         \x20       [ min (0/0) 1.0, min 1.0 (0/0), max (0/0) 1.0, max 1.0 (0/0)\n\
+         \x20       , min 2.0 3.0, max 2.0 3.0 ])\n",
+    );
+}
+
+#[test]
 fn float_formatting_notation() {
     // String.fromFloat must match JS `String(x)` (ECMAScript Number::toString)
     // on all backends, including the exponential-notation thresholds (|x| >= 1e21

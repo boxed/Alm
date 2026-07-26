@@ -2382,7 +2382,9 @@ unsafe extern "C" fn basics_min(a: u64, b: u64) -> u64 {
     }
 }
 unsafe extern "C" fn basics_max(a: u64, b: u64) -> u64 {
-    if value_cmp(a, b) > 0 {
+    // Elm `max a b = if a < b then b else a`: pick `a` unless a < b, i.e. when
+    // cmp >= 0. On a tie/NaN (cmp == 0) that means `a`, matching JS.
+    if value_cmp(a, b) >= 0 {
         a
     } else {
         b
