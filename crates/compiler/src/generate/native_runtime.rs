@@ -2853,7 +2853,9 @@ unsafe extern "C" fn string_from_float(n: u64) -> u64 {
 }
 #[export_name = "rtb$String$length"]
 unsafe extern "C" fn string_length(s: u64) -> u64 {
-    rt_int(sstr(s).chars().count() as i64)
+    // Elm/JS strings are UTF-16: length counts code UNITS, so an astral char
+    // (surrogate pair) counts as 2. Native stores UTF-8, so derive it.
+    rt_int(sstr(s).chars().map(|c| c.len_utf16() as i64).sum())
 }
 unsafe extern "C" fn string_is_empty(s: u64) -> u64 {
     rt_bool(str_len_bytes(s) == 0)
@@ -2907,7 +2909,10 @@ unsafe extern "C" fn string_words(s: u64) -> u64 {
     list_from_slice(&parts)
 }
 unsafe extern "C" fn string_lines(s: u64) -> u64 {
-    let parts: Vec<u64> = sstr(s)
+    // Match JS/Elm `s.split(/\r\n|\r|\n/)`: break on \r\n, lone \r, and \n.
+    // (\r and \n are ASCII, never inside a multi-byte UTF-8 sequence.)
+    let normalized = sstr(s).replace("\r\n", "\n").replace('\r', "\n");
+    let parts: Vec<u64> = normalized
         .split('\n')
         .map(|l| mkstr(l.as_bytes().to_vec()))
         .collect();

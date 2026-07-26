@@ -44,15 +44,6 @@ fn assert_str_prog(test_name: &str, source: &str) {
     assert_str_prog_impl(test_name, source, true);
 }
 
-/// As `assert_str_prog` but only diffs JS↔WasmGC. Used by the two tests that
-/// exercise String edge cases where the native backend has a KNOWN Elm-parity
-/// bug (astral `String.length` counts code points not UTF-16 units; native
-/// `String.lines` splits only on `\n`, not `\r\n`/`\r`). WasmGC matches JS (the
-/// Elm reference) in both; the native gaps are tracked separately.
-fn assert_str_prog_js_wasm(test_name: &str, source: &str) {
-    assert_str_prog_impl(test_name, source, false);
-}
-
 fn assert_str_prog_impl(test_name: &str, source: &str, check_native: bool) {
     let dir = common::test_dir("alm-wasmgc", test_name);
     let entry = dir.join("Test.elm");
@@ -1464,8 +1455,8 @@ fn kernels_as_values() {
 
 #[test]
 fn string_words_lines() {
-    // JS↔WasmGC only: native String.lines splits on "\n" alone (misses \r\n/\r).
-    assert_str_prog_js_wasm(
+    // String.lines splits on \r\n / \r / \n on all three backends.
+    assert_str_prog(
         "words_lines",
         "module Test exposing (main)\n\n\
          show : List String -> String\n\
@@ -1520,8 +1511,8 @@ fn basics_clamp() {
 #[test]
 fn string_length_utf16() {
     // Elm String.length counts UTF-16 code units: BMP = 1, astral = 2.
-    // JS↔WasmGC only: native counts code points (astral = 1).
-    assert_str_prog_js_wasm(
+    // All three backends agree (native derives UTF-16 units from its UTF-8).
+    assert_str_prog(
         "len16",
         "module Test exposing (main)\n\n\
          main : String\n\
