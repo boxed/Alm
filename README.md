@@ -93,6 +93,13 @@ app.ports.somePort.subscribe(function (value) { ... });
   Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
   Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
   Lazy), Svg(+Attributes), Browser(+Dom/Events/Navigation), Platform.
+- **WebGL** (`elm-explorations/webgl`): GLSL `[glsl|…|]` shaders (parsed,
+  type-checked, `SHADER PROBLEM` errors), meshes, the `linear-algebra`
+  `Math.Vector*`/`Matrix4` kernel, and the full rendering kernel —
+  `WebGL.toHtml` mounts a canvas that compiles/links shaders, uploads
+  attribute/index buffers, sets uniforms, applies blend/depth/stencil/…
+  settings, and draws. Verified pixel-exact in a headless browser
+  (`tests/browser/webgl`). Texture upload is the one remaining gap.
 
 ## Benchmark
 
@@ -174,11 +181,9 @@ matching the JS backend value-for-value (checked by a differential test).
 
 ## Not ported
 
-- **WebGL rendering**: `[glsl|…|]` blocks parse, type-check, and report
-  `SHADER PROBLEM` errors, and the `elm-explorations/linear-algebra` math
-  kernel (`Math.Vector*`/`Matrix4`) is implemented — but `WebGL.entity`/
-  `toHtml` build inert nodes instead of driving a real GPU context (node
-  has none).
+- **WebGL textures** (`WebGL.Texture`): the WebGL rendering kernel is
+  implemented (see below) but `Texture.load` — async image upload to the
+  GPU — is still stubbed.
 - **WebSockets** — removed from Elm 0.19 core, so nothing to port.
 - Http/Time/Random are concrete runtime effects rather than real effect
   modules.
