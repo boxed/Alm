@@ -137,100 +137,70 @@ fn gen_bundle(
         )
         .unwrap();
     }
-    for attr in crate::builtins::HTML_STRING_ATTRS {
-        // elm defines most string attributes as DOM *properties* (stringProperty
-        // "name") and only a few as raw attributes. Matching this matters because
-        // a property and an attribute with the same DOM name (e.g. `type_` vs
-        // `attribute "type"`) must live in separate buckets. `Some(prop)` => a
-        // property; `None` => a raw attribute whose DOM name is the second element.
-        let (prop, attr_name): (Option<&str>, &str) = match *attr {
-            "class" => (Some("className"), "class"),
-            "for" => (Some("htmlFor"), "for"),
-            "type_" => (Some("type"), "type"),
-            "usemap" => (Some("useMap"), "usemap"),
-            "accesskey" => (Some("accessKey"), "accesskey"),
-            // Raw attributes in elm (no property form).
-            "draggable" => (None, "draggable"),
-            "rel" => (None, "rel"),
-            "list" => (None, "list"),
-            "media" => (None, "media"),
-            "datetime" => (None, "datetime"),
-            "manifest" => (None, "manifest"),
-            "charset" => (None, "charset"),
-            "content" => (None, "content"),
-            "httpEquiv" => (None, "http-equiv"),
-            // Everything else: a property whose name is the attr (sans trailing _).
-            other => (Some(other.trim_end_matches('_')), other.trim_end_matches('_')),
+    // String properties. `href`/`src`/`action` carry a URI, which elm screens
+    // for `javascript:` (and `data:text/html`) before setting — see _VDom_prop.
+    for (attr, prop) in crate::builtins::HTML_STRING_PROPS {
+        let sanitizer = match *attr {
+            "href" | "action" => "_VDom_noJavaScriptUri",
+            "src" => "_VDom_noJavaScriptOrHtmlUri",
+            _ => "",
         };
-        match prop {
-            Some(name) => writeln!(
-                gen.out,
-                "var $Html$Attributes${} = _VDom_prop('{}');",
-                sanitize(attr),
-                name
-            )
-            .unwrap(),
-            None => writeln!(
-                gen.out,
-                "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
-                sanitize(attr),
-                attr_name
-            )
-            .unwrap(),
-        }
-    }
-    for attr in crate::builtins::HTML_BOOL_ATTRS {
-        // elm/html defines `autocomplete : Bool -> Attribute msg` as a *string*
-        // property "autocomplete" whose value is "on"/"off", not a bool prop.
-        if *attr == "autocomplete" {
+        if sanitizer.is_empty() {
+            writeln!(gen.out, "var $Html$Attributes${} = _VDom_prop('{}');", sanitize(attr), prop)
+        } else {
             writeln!(
                 gen.out,
-                "var $Html$Attributes$autocomplete = function (b) {{ return {{ $: 'AProp', key: 'autocomplete', val: b ? 'on' : 'off' }}; }};"
+                "var $Html$Attributes${} = function (v) {{ return {{ $: 'AProp', key: '{}', val: {}(v) }}; }};",
+                sanitize(attr),
+                prop,
+                sanitizer
             )
-            .unwrap();
-            continue;
         }
-        let property = match *attr {
-            "readonly" => "readOnly",
-            "novalidate" => "noValidate",
-            "contenteditable" => "contentEditable",
-            "ismap" => "isMap",
-            other => other,
-        };
+        .unwrap();
+    }
+    for (attr, name) in crate::builtins::HTML_STRING_ATTRS {
         writeln!(
             gen.out,
-            "var $Html$Attributes${} = _VDom_prop('{}');",
+            "var $Html$Attributes${} = function (v) {{ return {{ $: 'AAttr', key: '{}', val: v }}; }};",
             sanitize(attr),
-            property
+            name
         )
         .unwrap();
     }
-    for attr in crate::builtins::HTML_INT_ATTRS {
-        // elm's int attributes: `start` is a property (Json.int); the rest are
-        // raw attributes rendered with String.fromInt, and a couple use a
-        // camelCased DOM name (tabIndex, minLength).
-        match *attr {
-            "start" => writeln!(
-                gen.out,
-                "var $Html$Attributes$start = function (n) {{ return {{ $: 'AProp', key: 'start', val: n }}; }};"
-            )
-            .unwrap(),
-            _ => {
-                let key = match *attr {
-                    "tabindex" => "tabIndex",
-                    "minlength" => "minLength",
-                    other => other,
-                };
-                writeln!(
-                    gen.out,
-                    "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
-                    sanitize(attr),
-                    key
-                )
-                .unwrap();
-            }
-        }
+    for (attr, prop) in crate::builtins::HTML_BOOL_ATTRS {
+        writeln!(gen.out, "var $Html$Attributes${} = _VDom_prop('{}');", sanitize(attr), prop).unwrap();
     }
+    for (attr, prop) in crate::builtins::HTML_CHAR_ATTRS {
+        // A Char is a boxed one-character string; `+ ''` is String.fromChar.
+        writeln!(
+            gen.out,
+            "var $Html$Attributes${} = function (c) {{ return {{ $: 'AProp', key: '{}', val: c + '' }}; }};",
+            sanitize(attr),
+            prop
+        )
+        .unwrap();
+    }
+    for (attr, name) in crate::builtins::HTML_INT_ATTRS {
+        writeln!(
+            gen.out,
+            "var $Html$Attributes${} = function (n) {{ return {{ $: 'AAttr', key: '{}', val: String(n) }}; }};",
+            sanitize(attr),
+            name
+        )
+        .unwrap();
+    }
+    // elm's two off-pattern helpers: a Bool rendered "on"/"off", and an Int
+    // rendered as a *string* property.
+    writeln!(
+        gen.out,
+        "var $Html$Attributes$autocomplete = function (b) {{ return {{ $: 'AProp', key: 'autocomplete', val: b ? 'on' : 'off' }}; }};"
+    )
+    .unwrap();
+    writeln!(
+        gen.out,
+        "var $Html$Attributes$start = function (n) {{ return {{ $: 'AProp', key: 'start', val: String(n) }}; }};"
+    )
+    .unwrap();
     writeln!(
         gen.out,
         "var $Html$Attributes$classList = function (pairs) {{ var names = []; for (var xs = pairs; xs.$ === '::'; xs = xs.b) {{ var d = xs.d; for (var i = xs.o, n = d.length; i < n; i++) {{ if (d[i].b) {{ names.push(d[i].a); }} }} }} return {{ $: 'AProp', key: 'className', val: names.join(' ') }}; }};"
@@ -238,7 +208,7 @@ fn gen_bundle(
     .unwrap();
     writeln!(
         gen.out,
-        "var $Html$Attributes$property = F2(function (key, value) {{ return {{ $: 'AProp', key: key, val: value }}; }});"
+        "var $Html$Attributes$property = $VirtualDom$property;"
     )
     .unwrap();
     for tag in crate::builtins::SVG_TAGS {

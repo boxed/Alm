@@ -1485,91 +1485,46 @@ fn html_event_name(ev: &str) -> Option<&'static str> {
     })
 }
 
-/// Common string-valued Html.Attributes helpers → their DOM attribute name.
-/// (attribute/style are handled separately; boolean/property attrs are not
-/// here.) Elm's trailing-underscore names (type_) map to the bare attribute.
+/// String-valued Html.Attributes helpers → the DOM name to set. Both elm's
+/// property-backed and attribute-backed helpers land here: this backend's vdom
+/// carries one string-attribute kind (AATTR, applied with `setAttribute`), and
+/// the DOM reflects the property helpers' names back onto it. Driven off the
+/// shared builtin tables so the set can never drift from the signatures.
 fn html_attr_name(a: &str) -> Option<&'static str> {
-    Some(match a {
-        "id" => "id",
-        "class" => "class",
-        "href" => "href",
-        "src" => "src",
-        "title" => "title",
-        "placeholder" => "placeholder",
-        "value" => "value",
-        "name" => "name",
-        "alt" => "alt",
-        "type_" => "type",
-        "for_" | "for" => "for",
-        "rel" => "rel",
-        "target" => "target",
-        "action" => "action",
-        "method" => "method",
-        "min" => "min",
-        "max" => "max",
-        "step" => "step",
-        "pattern" => "pattern",
-        "accept" => "accept",
-        "acceptCharset" => "accept-charset",
-        "autocomplete" => "autocomplete",
-        "enctype" => "enctype",
-        "download" => "download",
-        "dir" => "dir",
-        "lang" => "lang",
-        "wrap" => "wrap",
-        "cite" => "cite",
-        "datetime" => "datetime",
-        "accesskey" => "accesskey",
-        "scope" => "scope",
-        "align" => "align",
-        "draggable" => "draggable",
-        "media" => "media",
-        "list" => "list",
-        _ => return None,
-    })
+    if let Some((_, dom)) = crate::builtins::HTML_STRING_ATTRS.iter().find(|(n, _)| *n == a) {
+        return Some(dom);
+    }
+    if let Some((_, dom)) = crate::builtins::HTML_STRING_PROPS.iter().find(|(n, _)| *n == a) {
+        // `class`/`for`/`type_` reflect from the className/htmlFor/type
+        // properties onto the class/for/type attributes.
+        return Some(match *dom {
+            "className" => "class",
+            "htmlFor" => "for",
+            "acceptCharset" => "accept-charset",
+            other => other,
+        });
+    }
+    match a {
+        "accesskey" => Some("accesskey"),
+        _ => None,
+    }
 }
 
 /// Int-valued Html.Attributes helpers → their DOM attribute name (rendered as
 /// `String.fromInt n`).
 fn html_int_attr_name(a: &str) -> Option<&'static str> {
-    Some(match a {
-        "tabindex" => "tabIndex", // elm/html uses the camelCase DOM name here
-        "width" => "width",
-        "height" => "height",
-        "colspan" => "colspan",
-        "rowspan" => "rowspan",
-        "rows" => "rows",
-        "cols" => "cols",
-        "maxlength" => "maxlength",
-        "minlength" => "minlength",
-        "size" => "size",
-        "start" => "start",
-        "span" => "span",
-        _ => return None,
-    })
+    crate::builtins::HTML_INT_ATTRS
+        .iter()
+        .find(|(n, _)| *n == a)
+        .map(|(_, dom)| *dom)
+        // elm makes `start` a string property; as an attribute it reflects.
+        .or(if a == "start" { Some("start") } else { None })
 }
 
 /// Boolean Html.Attributes helpers → the DOM *property* name to set (a bare
 /// attribute when true, absent when false — matching elm's boolProperty).
 fn html_bool_attr_name(a: &str) -> Option<&'static str> {
-    Some(match a {
-        "checked" => "checked",
-        "disabled" => "disabled",
-        "hidden" => "hidden",
-        "selected" => "selected",
-        "required" => "required",
-        "autofocus" => "autofocus",
-        "multiple" => "multiple",
-        "readonly" => "readOnly",
-        "spellcheck" => "spellcheck",
-        "autoplay" => "autoplay",
-        "controls" => "controls",
-        "loop" => "loop",
-        "default" => "default",
-        "novalidate" => "novalidate",
-        "contenteditable" => "contentEditable",
-        _ => return None,
-    })
+    crate::builtins::HTML_BOOL_ATTRS.iter().find(|(n, _)| *n == a).map(|(_, dom)| *dom)
 }
 
 /// Browser.Events decoder subscriptions → the document event name they listen
@@ -27796,6 +27751,28 @@ impl<'a> Codegen<'a> {
                 self.emit_expr(&args[0], ctx, f)?; // name
                 self.emit_expr(&args[1], ctx, f)?; // Json.Value
                 f.instruction(&Instruction::Call(self.attr_property_idx));
+            }
+            // `accesskey : Char` — the DOM wants the one-character string.
+            ("Html.Attributes", "accesskey") => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, "accesskey");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::Call(self.str_from_char_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // `autocomplete : Bool` is elm's one string-valued Bool: "on"/"off".
+            ("Html.Attributes", "autocomplete") => {
+                f.instruction(&Instruction::I32Const(0)); // AATTR
+                push_str_const(f, "autocomplete");
+                self.emit_expr(&args[0], ctx, f)?;
+                f.instruction(&Instruction::If(BlockType::Result(ref_null_to(T_STR))));
+                push_str_const(f, "on");
+                f.instruction(&Instruction::Else);
+                push_str_const(f, "off");
+                f.instruction(&Instruction::End);
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Common string attributes: Html.Attributes.<name> value → AATTR.
             ("Html.Attributes", a) if html_attr_name(a).is_some() => {

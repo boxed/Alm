@@ -361,15 +361,22 @@ pub fn values() -> &'static [BuiltinValue] {
                 "List (Attribute msg) -> List (Html msg) -> Html msg",
             ));
         }
-        for attr in HTML_STRING_ATTRS {
+        for (attr, _) in HTML_STRING_PROPS.iter().chain(HTML_STRING_ATTRS) {
             table.push(V("Html.Attributes", attr, "String -> Attribute msg"));
         }
-        for attr in HTML_BOOL_ATTRS {
+        for (attr, _) in HTML_BOOL_ATTRS {
             table.push(V("Html.Attributes", attr, "Bool -> Attribute msg"));
         }
-        for attr in HTML_INT_ATTRS {
+        for (attr, _) in HTML_INT_ATTRS {
             table.push(V("Html.Attributes", attr, "Int -> Attribute msg"));
         }
+        for (attr, _) in HTML_CHAR_ATTRS {
+            table.push(V("Html.Attributes", attr, "Char -> Attribute msg"));
+        }
+        // elm defines these two off-pattern: `autocomplete : Bool` is a string
+        // property carrying "on"/"off", and `start : Int` a string property.
+        table.push(V("Html.Attributes", "autocomplete", "Bool -> Attribute msg"));
+        table.push(V("Html.Attributes", "start", "Int -> Attribute msg"));
         for tag in SVG_TAGS {
             table.push(V(
                 "Svg",
@@ -546,10 +553,20 @@ pub fn values() -> &'static [BuiltinValue] {
     })
 }
 
-/// Int-valued HTML attribute helpers in Html.Attributes.
-pub const HTML_INT_ATTRS: &[&str] = &[
-    "rows", "cols", "colspan", "rowspan", "tabindex", "size", "maxlength", "minlength",
-    "height", "width", "start",
+/// Int-valued Html.Attributes helpers, all raw attributes rendered with
+/// `String.fromInt`: (Elm name, DOM attribute name). `start` is the exception —
+/// elm makes it a string *property* — and is emitted separately.
+pub const HTML_INT_ATTRS: &[(&str, &str)] = &[
+    ("cols", "cols"),
+    ("colspan", "colspan"),
+    ("height", "height"),
+    ("maxlength", "maxlength"),
+    ("minlength", "minLength"),
+    ("rows", "rows"),
+    ("rowspan", "rowspan"),
+    ("size", "size"),
+    ("tabindex", "tabIndex"),
+    ("width", "width"),
 ];
 
 /// SVG element helpers.
@@ -837,22 +854,102 @@ pub const HTML_TAGS: &[&str] = &[
     "wbr", "menu", "menuitem",
 ];
 
-/// String-valued HTML attribute helpers in Html.Attributes.
-pub const HTML_STRING_ATTRS: &[&str] = &[
-    "class", "id", "title", "href", "src", "alt", "name", "placeholder", "value", "type_", "draggable",
-    "for", "action", "method", "target", "rel", "wrap", "accept", "list",
-    "max", "min", "step", "pattern", "lang", "dir",
-    "download", "hreflang", "media", "ping", "usemap", "shape", "coords", "enctype",
-    "datetime", "charset", "content", "httpEquiv", "poster", "kind", "srclang", "sandbox",
-    "srcdoc", "manifest", "headers", "scope", "accesskey", "cite", "align", "acceptCharset",
+// The Html.Attributes tables below mirror elm/html 1.0.0's Html/Attributes.elm
+// declaration for declaration: which helpers exist, their argument type, and
+// whether each sets a DOM *property* (elm's `stringProperty`/`boolProperty`) or
+// a raw attribute (`Elm.Kernel.VirtualDom.attribute`). The distinction is
+// observable — a property and an attribute of the same name live in separate
+// buckets, and only properties track a controlled input's live value. Every
+// backend derives both its signatures and its emission from these tables, so
+// they cannot drift apart.
+
+/// String-valued Html.Attributes helpers set as DOM *properties*:
+/// (Elm name, DOM property name).
+pub const HTML_STRING_PROPS: &[(&str, &str)] = &[
+    ("accept", "accept"),
+    ("acceptCharset", "acceptCharset"),
+    ("action", "action"),
+    ("align", "align"),
+    ("alt", "alt"),
+    ("cite", "cite"),
+    ("class", "className"),
+    ("coords", "coords"),
+    ("dir", "dir"),
+    ("download", "download"),
+    ("dropzone", "dropzone"),
+    ("enctype", "enctype"),
+    ("for", "htmlFor"),
+    ("headers", "headers"),
+    ("href", "href"),
+    ("hreflang", "hreflang"),
+    ("id", "id"),
+    ("kind", "kind"),
+    ("lang", "lang"),
+    ("max", "max"),
+    ("method", "method"),
+    ("min", "min"),
+    ("name", "name"),
+    ("pattern", "pattern"),
+    ("ping", "ping"),
+    ("placeholder", "placeholder"),
+    ("poster", "poster"),
+    ("preload", "preload"),
+    ("sandbox", "sandbox"),
+    ("scope", "scope"),
+    ("shape", "shape"),
+    ("src", "src"),
+    ("srcdoc", "srcdoc"),
+    ("srclang", "srclang"),
+    ("step", "step"),
+    ("target", "target"),
+    ("title", "title"),
+    ("type_", "type"),
+    ("usemap", "useMap"),
+    ("value", "value"),
+    ("wrap", "wrap"),
 ];
 
-/// Bool-valued HTML attribute helpers in Html.Attributes.
-pub const HTML_BOOL_ATTRS: &[&str] = &[
-    "checked", "selected", "disabled", "hidden", "readonly", "required", "autofocus", "contenteditable",
-    "autoplay", "controls", "loop", "multiple", "novalidate", "spellcheck", "autocomplete",
-    "ismap", "default",
+/// String-valued Html.Attributes helpers set as raw attributes:
+/// (Elm name, DOM attribute name).
+pub const HTML_STRING_ATTRS: &[(&str, &str)] = &[
+    ("contextmenu", "contextmenu"),
+    ("datetime", "datetime"),
+    ("draggable", "draggable"),
+    ("form", "form"),
+    ("itemprop", "itemprop"),
+    ("list", "list"),
+    ("manifest", "manifest"),
+    ("media", "media"),
+    ("pubdate", "pubdate"),
+    ("rel", "rel"),
 ];
+
+/// Bool-valued Html.Attributes helpers (elm's `boolProperty`):
+/// (Elm name, DOM property name). `autocomplete` is *not* here — elm defines it
+/// as a string property carrying "on"/"off", and it is emitted separately.
+pub const HTML_BOOL_ATTRS: &[(&str, &str)] = &[
+    ("autofocus", "autofocus"),
+    ("autoplay", "autoplay"),
+    ("checked", "checked"),
+    ("contenteditable", "contentEditable"),
+    ("controls", "controls"),
+    ("default", "default"),
+    ("disabled", "disabled"),
+    ("hidden", "hidden"),
+    ("ismap", "isMap"),
+    ("loop", "loop"),
+    ("multiple", "multiple"),
+    ("novalidate", "noValidate"),
+    ("readonly", "readOnly"),
+    ("required", "required"),
+    ("reversed", "reversed"),
+    ("selected", "selected"),
+    ("spellcheck", "spellcheck"),
+];
+
+/// The one Char-valued helper: `accesskey`, a string property of the one-char
+/// string (elm: `stringProperty "accessKey" (String.fromChar char)`).
+pub const HTML_CHAR_ATTRS: &[(&str, &str)] = &[("accesskey", "accessKey")];
 
 // INFIX OPERATORS — the table from elm/core's Basics.elm and List.elm.
 

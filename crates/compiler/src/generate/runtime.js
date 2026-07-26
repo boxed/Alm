@@ -2961,6 +2961,24 @@ function _VDom_organize(attrs) {
     }
     return out;
 }
+// XSS ATTACK VECTOR CHECKS — elm/virtual-dom screens every tag, attribute key
+// and URI that a program can build dynamically. The regexes look freaky
+// because tabs may appear inside a href protocol and it still works, so
+// '\tjava\tSCRIPT:alert(1)' and 'javascript:alert(1)' are the same in practice.
+var _VDom_RE_script = /^script$/i;
+var _VDom_RE_on_formAction = /^(on|formAction$)/i;
+var _VDom_RE_js = /^\s*j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/i;
+var _VDom_RE_js_html = /^\s*(j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:|d\s*a\s*t\s*a\s*:\s*t\s*e\s*x\s*t\s*\/\s*h\s*t\s*m\s*l\s*(,|;))/i;
+var _VDom_XSS = 'javascript:alert("This is an XSS vector. Please use ports or web components instead.")';
+function _VDom_noScript(tag) { return _VDom_RE_script.test(tag) ? 'p' : tag; }
+function _VDom_noOnOrFormAction(key) { return _VDom_RE_on_formAction.test(key) ? 'data-' + key : key; }
+function _VDom_noInnerHtmlOrFormAction(key) { return key == 'innerHTML' || key == 'formAction' ? 'data-' + key : key; }
+function _VDom_noJavaScriptUri(value) { return _VDom_RE_js.test(value) ? _VDom_XSS : value; }
+function _VDom_noJavaScriptOrHtmlUri(value) { return _VDom_RE_js_html.test(value) ? _VDom_XSS : value; }
+function _VDom_noJavaScriptOrHtmlJson(value) {
+    return typeof value === 'string' && _VDom_RE_js_html.test(value) ? _VDom_XSS : value;
+}
+
 function _VDom_node(tag) {
     return F2(function (attrs, kids) {
         return { $: 'VNode', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids) };
@@ -2977,14 +2995,19 @@ function _VDom_nodeNS(tag) {
 
 var $Html$text = _VDom_text;
 var $VirtualDom$text = _VDom_text;
-var $VirtualDom$node = function (tag) { return _VDom_node(tag); };
+var $VirtualDom$node = function (tag) { return _VDom_node(_VDom_noScript(tag)); };
 var $VirtualDom$nodeNS = F2(function (ns, tag) {
+    tag = _VDom_noScript(tag);
     return F2(function (attrs, kids) {
         return { $: 'VNode', tag: tag, ns: ns, attrs: _VDom_organize(_List_toArray(attrs)), kids: _List_toArray(kids) };
     });
 });
-var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
-var $VirtualDom$property = F2(function (key, val) { return { $: 'AProp', key: key, val: val }; });
+var $VirtualDom$attribute = F2(function (key, val) {
+    return { $: 'AAttr', key: _VDom_noOnOrFormAction(key), val: _VDom_noJavaScriptOrHtmlUri(val) };
+});
+var $VirtualDom$property = F2(function (key, val) {
+    return { $: 'AProp', key: _VDom_noInnerHtmlOrFormAction(key), val: _VDom_noJavaScriptOrHtmlJson(val) };
+});
 var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
 // A managed widget node (elm's Elm.Kernel.VirtualDom.custom). `render(model)`
 // produces the DOM element; `diff(oldModel, newModel)` returns a `(dom) => dom`
@@ -2995,13 +3018,14 @@ function _VirtualDom_custom(factList, model, render, diff) {
 }
 
 var $VirtualDom$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
-var $Html$node = function (tag) { return _VDom_node(tag); };
+var $Html$node = $VirtualDom$node;
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 var $Svg$map = $Html$map;
 var $Svg$text = _VDom_text;
-var $Svg$node = function (tag) { return _VDom_nodeNS(tag); };
+var $Svg$node = function (tag) { return _VDom_nodeNS(_VDom_noScript(tag)); };
 
 var $Html$Keyed$node = function (tag) {
+    tag = _VDom_noScript(tag);
     return F2(function (attrs, keyedKids) {
         return {
             $: 'VKeyed', tag: tag, attrs: _VDom_organize(_List_toArray(attrs)),
@@ -3013,6 +3037,7 @@ var $Html$Keyed$ul = $Html$Keyed$node('ul');
 var $Html$Keyed$ol = $Html$Keyed$node('ol');
 var $VirtualDom$keyedNode = $Html$Keyed$node;
 var $VirtualDom$keyedNodeNS = F2(function (ns, tag) {
+    tag = _VDom_noScript(tag);
     return F2(function (attrs, keyedKids) {
         return {
             $: 'VKeyed', tag: tag, ns: ns, attrs: _VDom_organize(_List_toArray(attrs)),
@@ -3021,7 +3046,7 @@ var $VirtualDom$keyedNodeNS = F2(function (ns, tag) {
     });
 });
 var $VirtualDom$attributeNS = F3(function (ns, key, val) {
-    return { $: 'AAttr', key: key, val: val, ns: ns };
+    return { $: 'AAttr', key: _VDom_noOnOrFormAction(key), val: _VDom_noJavaScriptOrHtmlUri(val), ns: ns };
 });
 var $VirtualDom$on = F2(function (name, handler) {
     switch (handler.$) {
@@ -3068,7 +3093,7 @@ function _VDom_sameLazy(a, b) {
 
 // Attributes are tagged with how they apply to a DOM node.
 var $Html$Attributes$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
-var $Html$Attributes$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
+var $Html$Attributes$attribute = $VirtualDom$attribute;
 var $Html$Attributes$map = F2(function (f, attr) {
     return attr.$ === 'AEvent' ? { $: 'AEvent', name: attr.name, toMsg: function (e) { return f(attr.toMsg(e)); }, opts: attr.opts } : attr;
 });
