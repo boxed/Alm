@@ -2986,6 +2986,14 @@ var $VirtualDom$nodeNS = F2(function (ns, tag) {
 var $VirtualDom$attribute = F2(function (key, val) { return { $: 'AAttr', key: key, val: val }; });
 var $VirtualDom$property = F2(function (key, val) { return { $: 'AProp', key: key, val: val }; });
 var $VirtualDom$style = F2(function (key, val) { return { $: 'AStyle', key: key, val: val }; });
+// A managed widget node (elm's Elm.Kernel.VirtualDom.custom). `render(model)`
+// produces the DOM element; `diff(oldModel, newModel)` returns a `(dom) => dom`
+// patcher applied on re-render. `factList` are ordinary attributes.
+var _VirtualDom_doc = typeof document !== 'undefined' ? document : undefined;
+function _VirtualDom_custom(factList, model, render, diff) {
+    return { $: 'VCustom', attrs: _VDom_organize(_List_toArray(factList)), model: model, render: render, diff: diff };
+}
+
 var $VirtualDom$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
 var $Html$node = function (tag) { return _VDom_node(tag); };
 var $Html$map = F2(function (f, vnode) { return { $: 'VMap', f: f, node: vnode }; });
@@ -3144,6 +3152,16 @@ function _VDom_render(vnode, dispatch, doc) {
         }
         case 'VLazy':
             return _VDom_render(_VDom_forceLazy(vnode), dispatch, doc);
+        case 'VCustom': {
+            // A managed widget (e.g. WebGL): `render(model)` builds the DOM
+            // element; `attrs` are ordinary facts applied on top.
+            var cdom = vnode.render(vnode.model);
+            cdom._almListeners = {};
+            for (var ci = 0; ci < vnode.attrs.length; ci++) {
+                _VDom_applyAttr(cdom, vnode.attrs[ci], dispatch);
+            }
+            return cdom;
+        }
         default: {
             var dom = vnode.ns && doc.createElementNS
                 ? doc.createElementNS(vnode.ns, vnode.tag)
@@ -3271,6 +3289,24 @@ function _VDom_patch(dom, oldV, newV, dispatch, doc) {
     if (oldV.$ === 'VText' && newV.$ === 'VText') {
         if (oldV.text !== newV.text) { dom.textContent = newV.text; }
         return dom;
+    }
+
+    // A managed widget with the same `render`: let its `diff` redraw the DOM in
+    // place, then reconcile the plain facts. A different render (or kind) falls
+    // through to a full replace below.
+    if (oldV.$ === 'VCustom' && newV.$ === 'VCustom' && oldV.render === newV.render) {
+        var cdom = newV.diff(oldV.model, newV.model)(dom);
+        var oldCA = {};
+        for (var ca = 0; ca < oldV.attrs.length; ca++) { oldCA[_VDom_attrKey(oldV.attrs[ca])] = oldV.attrs[ca]; }
+        var newCK = {};
+        for (var cb = 0; cb < newV.attrs.length; cb++) {
+            var cattr = newV.attrs[cb], cak = _VDom_attrKey(cattr);
+            newCK[cak] = true;
+            var cprev = oldCA[cak];
+            if (cprev === undefined || _VDom_attrChanged(cprev, cattr)) { _VDom_applyAttr(cdom, cattr, dispatch); }
+        }
+        for (var cak2 in oldCA) { if (!newCK[cak2]) { _VDom_unapplyAttr(cdom, oldCA[cak2]); } }
+        return cdom;
     }
 
     if (oldV.$ !== newV.$ || oldV.tag !== newV.tag || oldV.ns !== newV.ns) {
@@ -3800,35 +3836,449 @@ var $Elm$Kernel$Texture$load = F6(function (magnify, minify, hWrap, vWrap, flipY
     return _Task(function (ok, err) { err(_Utils_Tuple0); });
 });
 
-// WEBGL (elm-explorations/webgl Elm.Kernel.WebGL). Real rendering needs a
-// GPU/DOM `gl` context, which node lacks, so these headless stand-ins only let
-// modules that build WebGL entities/scenes (e.g. emilgoldsmith/elm-speedcubing)
-// load and be tested for their non-rendering logic. `entity` is F5, `toHtml`
-// is F3, and every `enable*` setting/option is F2 returning unit — matching the
-// arities the WebGL package expects. The nodes carry their inputs as plain data
-// (no function fields) so structural equality behaves predictably.
-var $Elm$Kernel$WebGL$entity = F5(function (settings, vert, frag, mesh, uniforms) {
+// WEBGL (elm-explorations/webgl Elm.Kernel.WebGL). A faithful port of the
+// package's kernel, adapted to alm: chunked lists (via _List_toArray) instead
+// of elm cons cells, alm's `.a/.b/.c` constructor-arg layout + full record
+// field names (no field mangling), and alm's vdom custom widget node
+// (_VirtualDom_custom). Vectors/matrices are elm-explorations/linear-algebra's
+// Float64Array reps (indexable / convertible to Float32Array for the GPU).
+// Renders in a real browser (or headless Chromium/ANGLE); node has no WebGL.
+var _WebGL_guid = 0;
+
+function _WebGL_listEach(fn, list) {
+    var arr = _List_toArray(list);
+    for (var i = 0; i < arr.length; i++) { fn(arr[i]); }
+}
+function _WebGL_listLength(list) { return _List_toArray(list).length; }
+
+// Call rAF via the global object so `this` is correct (a bare
+// `requestAnimationFrame(cb)` throws "Illegal invocation" under strict-mode
+// bundles). The canvas is not in the DOM at render time, so the first draw is
+// deferred to the next frame.
+function _WebGL_rAF(cb) {
+    var g = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : null);
+    if (g && g.requestAnimationFrame) { return g.requestAnimationFrame(cb); }
+    return setTimeout(cb, 1000 / 60);
+}
+
+function _WebGL_entity(settings, vert, frag, mesh, uniforms) {
     return { $: 'Entity', settings: settings, vert: vert, frag: frag, mesh: mesh, uniforms: uniforms };
+}
+
+// --- settings (operate on the gl-state cache + a Setting ctor's args a..k) ---
+
+function _WebGL_enableBlend(cache, setting) {
+    var blend = cache.blend;
+    blend.toggle = cache.toggle;
+    if (!blend.enabled) { cache.gl.enable(cache.gl.BLEND); blend.enabled = true; }
+    if (blend.a !== setting.a || blend.d !== setting.d) {
+        cache.gl.blendEquationSeparate(setting.a, setting.d);
+        blend.a = setting.a; blend.d = setting.d;
+    }
+    if (blend.b !== setting.b || blend.c !== setting.c || blend.e !== setting.e || blend.f !== setting.f) {
+        cache.gl.blendFuncSeparate(setting.b, setting.c, setting.e, setting.f);
+        blend.b = setting.b; blend.c = setting.c; blend.e = setting.e; blend.f = setting.f;
+    }
+    if (blend.g !== setting.g || blend.h !== setting.h || blend.i !== setting.i || blend.j !== setting.j) {
+        cache.gl.blendColor(setting.g, setting.h, setting.i, setting.j);
+        blend.g = setting.g; blend.h = setting.h; blend.i = setting.i; blend.j = setting.j;
+    }
+}
+function _WebGL_enableDepthTest(cache, setting) {
+    var depthTest = cache.depthTest;
+    depthTest.toggle = cache.toggle;
+    if (!depthTest.enabled) { cache.gl.enable(cache.gl.DEPTH_TEST); depthTest.enabled = true; }
+    if (depthTest.a !== setting.a) { cache.gl.depthFunc(setting.a); depthTest.a = setting.a; }
+    if (depthTest.b !== setting.b) { cache.gl.depthMask(setting.b); depthTest.b = setting.b; }
+    if (depthTest.c !== setting.c || depthTest.d !== setting.d) {
+        cache.gl.depthRange(setting.c, setting.d); depthTest.c = setting.c; depthTest.d = setting.d;
+    }
+}
+function _WebGL_enableStencilTest(cache, setting) {
+    var stencilTest = cache.stencilTest;
+    stencilTest.toggle = cache.toggle;
+    if (!stencilTest.enabled) { cache.gl.enable(cache.gl.STENCIL_TEST); stencilTest.enabled = true; }
+    var gl = cache.gl;
+    if (stencilTest.d !== setting.d || stencilTest.a !== setting.a || stencilTest.b !== setting.b) {
+        gl.stencilFuncSeparate(gl.FRONT, setting.d, setting.a, setting.b); stencilTest.d = setting.d;
+    }
+    if (stencilTest.e !== setting.e || stencilTest.f !== setting.f || stencilTest.g !== setting.g) {
+        gl.stencilOpSeparate(gl.FRONT, setting.e, setting.f, setting.g);
+        stencilTest.e = setting.e; stencilTest.f = setting.f; stencilTest.g = setting.g;
+    }
+    if (stencilTest.h !== setting.h || stencilTest.a !== setting.a || stencilTest.b !== setting.b) {
+        gl.stencilFuncSeparate(gl.BACK, setting.h, setting.a, setting.b);
+        stencilTest.h = setting.h; stencilTest.a = setting.a; stencilTest.b = setting.b;
+    }
+    if (stencilTest.i !== setting.i || stencilTest.j !== setting.j || stencilTest.k !== setting.k) {
+        gl.stencilOpSeparate(gl.BACK, setting.i, setting.j, setting.k);
+        stencilTest.i = setting.i; stencilTest.j = setting.j; stencilTest.k = setting.k;
+    }
+}
+function _WebGL_enableScissor(cache, setting) {
+    var scissor = cache.scissor;
+    scissor.toggle = cache.toggle;
+    if (!scissor.enabled) { cache.gl.enable(cache.gl.SCISSOR_TEST); scissor.enabled = true; }
+    if (scissor.a !== setting.a || scissor.b !== setting.b || scissor.c !== setting.c || scissor.d !== setting.d) {
+        cache.gl.scissor(setting.a, setting.b, setting.c, setting.d);
+        scissor.a = setting.a; scissor.b = setting.b; scissor.c = setting.c; scissor.d = setting.d;
+    }
+}
+function _WebGL_enableColorMask(cache, setting) {
+    var colorMask = cache.colorMask;
+    colorMask.toggle = cache.toggle;
+    colorMask.enabled = true;
+    if (colorMask.a !== setting.a || colorMask.b !== setting.b || colorMask.c !== setting.c || colorMask.d !== setting.d) {
+        cache.gl.colorMask(setting.a, setting.b, setting.c, setting.d);
+        colorMask.a = setting.a; colorMask.b = setting.b; colorMask.c = setting.c; colorMask.d = setting.d;
+    }
+}
+function _WebGL_enableCullFace(cache, setting) {
+    var cullFace = cache.cullFace;
+    cullFace.toggle = cache.toggle;
+    if (!cullFace.enabled) { cache.gl.enable(cache.gl.CULL_FACE); cullFace.enabled = true; }
+    if (cullFace.a !== setting.a) { cache.gl.cullFace(setting.a); cullFace.a = setting.a; }
+}
+function _WebGL_enablePolygonOffset(cache, setting) {
+    var polygonOffset = cache.polygonOffset;
+    polygonOffset.toggle = cache.toggle;
+    if (!polygonOffset.enabled) { cache.gl.enable(cache.gl.POLYGON_OFFSET_FILL); polygonOffset.enabled = true; }
+    if (polygonOffset.a !== setting.a || polygonOffset.b !== setting.b) {
+        cache.gl.polygonOffset(setting.a, setting.b); polygonOffset.a = setting.a; polygonOffset.b = setting.b;
+    }
+}
+function _WebGL_enableSampleCoverage(cache, setting) {
+    var sampleCoverage = cache.sampleCoverage;
+    sampleCoverage.toggle = cache.toggle;
+    if (!sampleCoverage.enabled) { cache.gl.enable(cache.gl.SAMPLE_COVERAGE); sampleCoverage.enabled = true; }
+    if (sampleCoverage.a !== setting.a || sampleCoverage.b !== setting.b) {
+        cache.gl.sampleCoverage(setting.a, setting.b); sampleCoverage.a = setting.a; sampleCoverage.b = setting.b;
+    }
+}
+function _WebGL_enableSampleAlphaToCoverage(cache) {
+    var sampleAlphaToCoverage = cache.sampleAlphaToCoverage;
+    sampleAlphaToCoverage.toggle = cache.toggle;
+    if (!sampleAlphaToCoverage.enabled) {
+        cache.gl.enable(cache.gl.SAMPLE_ALPHA_TO_COVERAGE); sampleAlphaToCoverage.enabled = true;
+    }
+}
+
+function _WebGL_disableBlend(cache) { if (cache.blend.enabled) { cache.gl.disable(cache.gl.BLEND); cache.blend.enabled = false; } }
+function _WebGL_disableDepthTest(cache) { if (cache.depthTest.enabled) { cache.gl.disable(cache.gl.DEPTH_TEST); cache.depthTest.enabled = false; } }
+function _WebGL_disableStencilTest(cache) { if (cache.stencilTest.enabled) { cache.gl.disable(cache.gl.STENCIL_TEST); cache.stencilTest.enabled = false; } }
+function _WebGL_disableScissor(cache) { if (cache.scissor.enabled) { cache.gl.disable(cache.gl.SCISSOR_TEST); cache.scissor.enabled = false; } }
+function _WebGL_disableColorMask(cache) {
+    var colorMask = cache.colorMask;
+    if (!colorMask.a || !colorMask.b || !colorMask.c || !colorMask.d) {
+        cache.gl.colorMask(true, true, true, true);
+        colorMask.a = true; colorMask.b = true; colorMask.c = true; colorMask.d = true;
+    }
+}
+function _WebGL_disableCullFace(cache) { cache.gl.disable(cache.gl.CULL_FACE); }
+function _WebGL_disablePolygonOffset(cache) { cache.gl.disable(cache.gl.POLYGON_OFFSET_FILL); }
+function _WebGL_disableSampleCoverage(cache) { cache.gl.disable(cache.gl.SAMPLE_COVERAGE); }
+function _WebGL_disableSampleAlphaToCoverage(cache) { cache.gl.disable(cache.gl.SAMPLE_ALPHA_TO_COVERAGE); }
+
+var _WebGL_settings = ['blend', 'depthTest', 'stencilTest', 'scissor', 'colorMask', 'cullFace', 'polygonOffset', 'sampleCoverage', 'sampleAlphaToCoverage'];
+var _WebGL_disableFunctions = [_WebGL_disableBlend, _WebGL_disableDepthTest, _WebGL_disableStencilTest, _WebGL_disableScissor, _WebGL_disableColorMask, _WebGL_disableCullFace, _WebGL_disablePolygonOffset, _WebGL_disableSampleCoverage, _WebGL_disableSampleAlphaToCoverage];
+
+// --- shader/program compilation + attribute/index buffers -------------------
+
+function _WebGL_doCompile(gl, src, type) {
+    var shader = gl.createShader(type);
+    gl.shaderSource(shader, '#extension GL_OES_standard_derivatives : enable\n' + src);
+    gl.compileShader(shader);
+    return shader;
+}
+function _WebGL_doLink(gl, vshader, fshader) {
+    var program = gl.createProgram();
+    gl.attachShader(program, vshader);
+    gl.attachShader(program, fshader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw ('Link failed: ' + gl.getProgramInfoLog(program) +
+            '\nvs info-log: ' + gl.getShaderInfoLog(vshader) +
+            '\nfs info-log: ' + gl.getShaderInfoLog(fshader));
+    }
+    return program;
+}
+function _WebGL_getAttributeInfo(gl, type) {
+    switch (type) {
+        case gl.FLOAT: return { size: 1, arraySize: 1, type: Float32Array, baseType: gl.FLOAT };
+        case gl.FLOAT_VEC2: return { size: 2, arraySize: 1, type: Float32Array, baseType: gl.FLOAT };
+        case gl.FLOAT_VEC3: return { size: 3, arraySize: 1, type: Float32Array, baseType: gl.FLOAT };
+        case gl.FLOAT_VEC4: return { size: 4, arraySize: 1, type: Float32Array, baseType: gl.FLOAT };
+        case gl.FLOAT_MAT4: return { size: 4, arraySize: 4, type: Float32Array, baseType: gl.FLOAT };
+        case gl.INT: return { size: 1, arraySize: 1, type: Int32Array, baseType: gl.INT };
+    }
+}
+function _WebGL_doBindAttribute(gl, attribute, mesh, attributes) {
+    var elemSize = mesh.a.elemSize;
+    var idxKeys = [];
+    for (var i = 0; i < elemSize; i++) { idxKeys.push(String.fromCharCode(97 + i)); }
+    function dataFill(data, cnt, fillOffset, elem, key) {
+        var j;
+        if (elemSize === 1) {
+            for (j = 0; j < cnt; j++) { data[fillOffset++] = cnt === 1 ? elem[key] : elem[key][j]; }
+        } else {
+            idxKeys.forEach(function (idx) {
+                for (j = 0; j < cnt; j++) { data[fillOffset++] = cnt === 1 ? elem[idx][key] : elem[idx][key][j]; }
+            });
+        }
+    }
+    var attributeInfo = _WebGL_getAttributeInfo(gl, attribute.type);
+    if (attributeInfo === undefined) { throw new Error('No info available for: ' + attribute.type); }
+    var dataIdx = 0;
+    var dataOffset = attributeInfo.size * attributeInfo.arraySize * elemSize;
+    var array = new attributeInfo.type(_WebGL_listLength(mesh.b) * dataOffset);
+    _WebGL_listEach(function (elem) {
+        dataFill(array, attributeInfo.size * attributeInfo.arraySize, dataIdx, elem, attributes[attribute.name] || attribute.name);
+        dataIdx += dataOffset;
+    }, mesh.b);
+    var buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
+    return buffer;
+}
+function _WebGL_doBindSetup(gl, mesh) {
+    if (mesh.a.indexSize > 0) {
+        var indexBuffer = gl.createBuffer();
+        var indices = _WebGL_makeIndexedBuffer(mesh.c, mesh.a.indexSize);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+        return { numIndices: indices.length, indexBuffer: indexBuffer, buffers: {} };
+    }
+    return { numIndices: mesh.a.elemSize * _WebGL_listLength(mesh.b), indexBuffer: null, buffers: {} };
+}
+function _WebGL_makeIndexedBuffer(indicesList, indexSize) {
+    var indices = new Uint32Array(_WebGL_listLength(indicesList) * indexSize);
+    var fillOffset = 0, i;
+    _WebGL_listEach(function (elem) {
+        if (indexSize === 1) { indices[fillOffset++] = elem; }
+        else { for (i = 0; i < indexSize; i++) { indices[fillOffset++] = elem[String.fromCharCode(97 + i)]; } }
+    }, indicesList);
+    return indices;
+}
+function _WebGL_getProgID(vertID, fragID) { return vertID + '#' + fragID; }
+
+// --- draw -------------------------------------------------------------------
+
+function _WebGL_drawGL(model, domNode) {
+    var cache = model.cache;
+    var gl = cache.gl;
+    if (!gl) { return domNode; }
+
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    if (!cache.depthTest.b) { gl.depthMask(true); cache.depthTest.b = true; }
+    if (cache.stencilTest.c !== cache.STENCIL_WRITEMASK) {
+        gl.stencilMask(cache.STENCIL_WRITEMASK); cache.stencilTest.c = cache.STENCIL_WRITEMASK;
+    }
+    _WebGL_disableScissor(cache);
+    _WebGL_disableColorMask(cache);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+
+    function drawEntity(entity) {
+        if (_WebGL_listLength(entity.mesh.b) === 0) { return; }
+        var progid, program, i, attribute, attribLocation, attributeInfo;
+
+        if (entity.vert.id && entity.frag.id) {
+            progid = _WebGL_getProgID(entity.vert.id, entity.frag.id);
+            program = cache.programs[progid];
+        }
+        if (!program) {
+            var vshader;
+            if (entity.vert.id) { vshader = cache.shaders[entity.vert.id]; } else { entity.vert.id = _WebGL_guid++; }
+            if (!vshader) { vshader = _WebGL_doCompile(gl, entity.vert.src, gl.VERTEX_SHADER); cache.shaders[entity.vert.id] = vshader; }
+            var fshader;
+            if (entity.frag.id) { fshader = cache.shaders[entity.frag.id]; } else { entity.frag.id = _WebGL_guid++; }
+            if (!fshader) { fshader = _WebGL_doCompile(gl, entity.frag.src, gl.FRAGMENT_SHADER); cache.shaders[entity.frag.id] = fshader; }
+            var glProgram = _WebGL_doLink(gl, vshader, fshader);
+            program = {
+                glProgram: glProgram,
+                attributes: Object.assign({}, entity.vert.attributes, entity.frag.attributes),
+                currentUniforms: {}, activeAttributes: [], activeAttributeLocations: []
+            };
+            program.uniformSetters = _WebGL_createUniformSetters(
+                gl, model, program, Object.assign({}, entity.vert.uniforms, entity.frag.uniforms));
+            var numActiveAttributes = gl.getProgramParameter(glProgram, gl.ACTIVE_ATTRIBUTES);
+            for (i = 0; i < numActiveAttributes; i++) {
+                var attr = gl.getActiveAttrib(glProgram, i);
+                program.activeAttributes.push(attr);
+                program.activeAttributeLocations.push(gl.getAttribLocation(glProgram, attr.name));
+            }
+            progid = _WebGL_getProgID(entity.vert.id, entity.frag.id);
+            cache.programs[progid] = program;
+        }
+        if (cache.lastProgId !== progid) { gl.useProgram(program.glProgram); cache.lastProgId = progid; }
+        _WebGL_setUniforms(program.uniformSetters, entity.uniforms);
+
+        var buffer = cache.buffers.get(entity.mesh);
+        if (!buffer) { buffer = _WebGL_doBindSetup(gl, entity.mesh); cache.buffers.set(entity.mesh, buffer); }
+
+        for (i = 0; i < program.activeAttributes.length; i++) {
+            attribute = program.activeAttributes[i];
+            attribLocation = program.activeAttributeLocations[i];
+            if (buffer.buffers[attribute.name] === undefined) {
+                buffer.buffers[attribute.name] = _WebGL_doBindAttribute(gl, attribute, entity.mesh, program.attributes);
+            }
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer.buffers[attribute.name]);
+            attributeInfo = _WebGL_getAttributeInfo(gl, attribute.type);
+            if (attributeInfo.arraySize === 1) {
+                gl.enableVertexAttribArray(attribLocation);
+                gl.vertexAttribPointer(attribLocation, attributeInfo.size, attributeInfo.baseType, false, 0, 0);
+            } else {
+                var offset = attributeInfo.size * 4;
+                var stride = offset * attributeInfo.arraySize;
+                for (var m = 0; m < attributeInfo.arraySize; m++) {
+                    gl.enableVertexAttribArray(attribLocation + m);
+                    gl.vertexAttribPointer(attribLocation + m, attributeInfo.size, attributeInfo.baseType, false, stride, offset * m);
+                }
+            }
+        }
+
+        cache.toggle = !cache.toggle;
+        _WebGL_listEach($WebGL$Internal$enableSetting(cache), entity.settings);
+        for (i = 0; i < _WebGL_settings.length; i++) {
+            var setting = cache[_WebGL_settings[i]];
+            if (setting.toggle !== cache.toggle && setting.enabled) {
+                _WebGL_disableFunctions[i](cache);
+                setting.enabled = false; setting.toggle = cache.toggle;
+            }
+        }
+
+        if (buffer.indexBuffer) {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer.indexBuffer);
+            gl.drawElements(entity.mesh.a.mode, buffer.numIndices, gl.UNSIGNED_INT, 0);
+        } else {
+            gl.drawArrays(entity.mesh.a.mode, 0, buffer.numIndices);
+        }
+    }
+
+    _WebGL_listEach(drawEntity, model.entities);
+    return domNode;
+}
+
+function _WebGL_createUniformSetters(gl, model, program, uniformsMap) {
+    var glProgram = program.glProgram;
+    var currentUniforms = program.currentUniforms;
+    var textureCounter = 0;
+    var cache = model.cache;
+    function createUniformSetter(glProgram, uniform) {
+        var uniformName = uniform.name;
+        var uniformLocation = gl.getUniformLocation(glProgram, uniformName);
+        switch (uniform.type) {
+            case gl.INT: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform1i(uniformLocation, value); currentUniforms[uniformName] = value; } };
+            case gl.FLOAT: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform1f(uniformLocation, value); currentUniforms[uniformName] = value; } };
+            case gl.FLOAT_VEC2: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform2f(uniformLocation, value[0], value[1]); currentUniforms[uniformName] = value; } };
+            case gl.FLOAT_VEC3: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform3f(uniformLocation, value[0], value[1], value[2]); currentUniforms[uniformName] = value; } };
+            case gl.FLOAT_VEC4: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform4f(uniformLocation, value[0], value[1], value[2], value[3]); currentUniforms[uniformName] = value; } };
+            case gl.FLOAT_MAT4: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniformMatrix4fv(uniformLocation, false, new Float32Array(value)); currentUniforms[uniformName] = value; } };
+            case gl.SAMPLER_2D:
+                var currentTexture = textureCounter++;
+                return function (texture) {
+                    gl.activeTexture(gl.TEXTURE0 + currentTexture);
+                    var tex = cache.textures.get(texture);
+                    if (!tex) { tex = texture.createTexture(gl); cache.textures.set(texture, tex); }
+                    gl.bindTexture(gl.TEXTURE_2D, tex);
+                    if (currentUniforms[uniformName] !== texture) { gl.uniform1i(uniformLocation, currentTexture); currentUniforms[uniformName] = texture; }
+                };
+            case gl.BOOL: return function (value) { if (currentUniforms[uniformName] !== value) { gl.uniform1i(uniformLocation, value); currentUniforms[uniformName] = value; } };
+            default: return function () { };
+        }
+    }
+    var uniformSetters = {};
+    var numUniforms = gl.getProgramParameter(glProgram, gl.ACTIVE_UNIFORMS);
+    for (var i = 0; i < numUniforms; i++) {
+        var uniform = gl.getActiveUniform(glProgram, i);
+        uniformSetters[uniformsMap[uniform.name] || uniform.name] = createUniformSetter(glProgram, uniform);
+    }
+    return uniformSetters;
+}
+function _WebGL_setUniforms(setters, values) {
+    Object.keys(values).forEach(function (name) {
+        var setter = setters[name];
+        if (setter) { setter(values[name]); }
+    });
+}
+
+// --- options (context attributes + scene settings) --------------------------
+
+function _WebGL_enableAlpha(options, option) { options.contextAttributes.alpha = true; options.contextAttributes.premultipliedAlpha = option.a; }
+function _WebGL_enableDepth(options, option) { options.contextAttributes.depth = true; options.sceneSettings.push(function (gl) { gl.clearDepth(option.a); }); }
+function _WebGL_enableStencil(options, option) { options.contextAttributes.stencil = true; options.sceneSettings.push(function (gl) { gl.clearStencil(option.a); }); }
+function _WebGL_enableAntialias(options, option) { options.contextAttributes.antialias = true; }
+function _WebGL_enableClearColor(options, option) { options.sceneSettings.push(function (gl) { gl.clearColor(option.a, option.b, option.c, option.d); }); }
+function _WebGL_enablePreserveDrawingBuffer(options, option) { options.contextAttributes.preserveDrawingBuffer = true; }
+
+// --- the virtual-dom widget -------------------------------------------------
+
+function _WebGL_render(model) {
+    var options = {
+        contextAttributes: { alpha: false, depth: false, stencil: false, antialias: false, premultipliedAlpha: false, preserveDrawingBuffer: false },
+        sceneSettings: []
+    };
+    _WebGL_listEach(function (option) { return A2($WebGL$Internal$enableOption, options, option); }, model.options);
+
+    var canvas = _VirtualDom_doc.createElement('canvas');
+    var gl = canvas.getContext && (
+        canvas.getContext('webgl', options.contextAttributes) ||
+        canvas.getContext('experimental-webgl', options.contextAttributes));
+
+    if (gl && typeof WeakMap !== 'undefined') {
+        options.sceneSettings.forEach(function (sceneSetting) { sceneSetting(gl); });
+        gl.getExtension('OES_standard_derivatives');
+        gl.getExtension('OES_element_index_uint');
+        model.cache.gl = gl;
+        model.cache.toggle = false;
+        model.cache.blend = { enabled: false, toggle: false };
+        model.cache.depthTest = { enabled: false, toggle: false };
+        model.cache.stencilTest = { enabled: false, toggle: false };
+        model.cache.scissor = { enabled: false, toggle: false };
+        model.cache.colorMask = { enabled: false, toggle: false };
+        model.cache.cullFace = { enabled: false, toggle: false };
+        model.cache.polygonOffset = { enabled: false, toggle: false };
+        model.cache.sampleCoverage = { enabled: false, toggle: false };
+        model.cache.sampleAlphaToCoverage = { enabled: false, toggle: false };
+        model.cache.shaders = [];
+        model.cache.programs = {};
+        model.cache.lastProgId = null;
+        model.cache.buffers = new WeakMap();
+        model.cache.textures = new WeakMap();
+        model.cache.STENCIL_WRITEMASK = gl.getParameter(gl.STENCIL_WRITEMASK);
+        // Draw in an animation frame, because the canvas is not in the DOM yet.
+        _WebGL_rAF(function () { return _WebGL_drawGL(model, canvas); });
+    } else {
+        canvas = _VirtualDom_doc.createElement('div');
+        canvas.innerHTML = '<a href="https://get.webgl.org/">Enable WebGL</a> to see this content!';
+    }
+    return canvas;
+}
+function _WebGL_diff(oldModel, newModel) {
+    newModel.cache = oldModel.cache;
+    return function (domNode) { return _WebGL_drawGL(newModel, domNode); };
+}
+
+// --- exported kernel surface ------------------------------------------------
+
+var $Elm$Kernel$WebGL$entity = F5(_WebGL_entity);
+var $Elm$Kernel$WebGL$toHtml = F3(function (options, factList, entities) {
+    return _VirtualDom_custom(factList, { entities: entities, cache: {}, options: options }, _WebGL_render, _WebGL_diff);
 });
-var $Elm$Kernel$WebGL$toHtml = F3(function (options, attributes, entities) {
-    return { $: 'WebGLScene', options: options, attributes: attributes, entities: entities };
-});
-var _WebGL_enable = F2(function (_ctx, _setting) { return _Utils_Tuple0; });
-var $Elm$Kernel$WebGL$enableAlpha = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableAntialias = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableBlend = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableClearColor = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableColorMask = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableCullFace = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableDepth = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableDepthTest = _WebGL_enable;
-var $Elm$Kernel$WebGL$enablePolygonOffset = _WebGL_enable;
-var $Elm$Kernel$WebGL$enablePreserveDrawingBuffer = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableSampleAlphaToCoverage = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableSampleCoverage = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableScissor = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableStencil = _WebGL_enable;
-var $Elm$Kernel$WebGL$enableStencilTest = _WebGL_enable;
+var $Elm$Kernel$WebGL$enableBlend = F2(_WebGL_enableBlend);
+var $Elm$Kernel$WebGL$enableDepthTest = F2(_WebGL_enableDepthTest);
+var $Elm$Kernel$WebGL$enableStencilTest = F2(_WebGL_enableStencilTest);
+var $Elm$Kernel$WebGL$enableScissor = F2(_WebGL_enableScissor);
+var $Elm$Kernel$WebGL$enableColorMask = F2(_WebGL_enableColorMask);
+var $Elm$Kernel$WebGL$enableCullFace = F2(_WebGL_enableCullFace);
+var $Elm$Kernel$WebGL$enablePolygonOffset = F2(_WebGL_enablePolygonOffset);
+var $Elm$Kernel$WebGL$enableSampleCoverage = F2(_WebGL_enableSampleCoverage);
+var $Elm$Kernel$WebGL$enableSampleAlphaToCoverage = function (cache) { _WebGL_enableSampleAlphaToCoverage(cache); return _Utils_Tuple0; };
+var $Elm$Kernel$WebGL$enableAlpha = F2(_WebGL_enableAlpha);
+var $Elm$Kernel$WebGL$enableDepth = F2(_WebGL_enableDepth);
+var $Elm$Kernel$WebGL$enableStencil = F2(_WebGL_enableStencil);
+var $Elm$Kernel$WebGL$enableAntialias = F2(_WebGL_enableAntialias);
+var $Elm$Kernel$WebGL$enableClearColor = F2(_WebGL_enableClearColor);
+var $Elm$Kernel$WebGL$enablePreserveDrawingBuffer = F2(_WebGL_enablePreserveDrawingBuffer);
 
 var $Terminal$writeLine = function (s) { return { $: 'CmdWrite', s: s }; };
 
