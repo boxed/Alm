@@ -444,10 +444,21 @@ impl Scopes {
 /// pure Elm packages compile from their real sources, each scoped to its own
 /// declared dependencies.
 fn resolve_scopes(entry: &Path) -> Scopes {
-    let entry_dir = entry
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Canonicalize first. Module paths are canonicalized when loaded, so the
+    // source directories have to be too or `strip_prefix` cannot line them up.
+    // It also makes the walk terminate correctly for a bare `alm make Main.elm`:
+    // `Path::parent` of a lone file name is `""`, not `None`, so an uncanonical
+    // walk neither finds `elm.json` in the current directory's ancestors nor
+    // stops — it settles on an empty source dir, against which every absolute
+    // module path "matches", and the expected module name comes out as the
+    // whole path with the separators turned into dots.
+    let entry_dir = canonical(
+        &entry
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
     let mut dir = entry_dir.clone();
     loop {
         let elm_json = dir.join("elm.json");
@@ -464,8 +475,16 @@ fn resolve_scopes(entry: &Path) -> Scopes {
     }
 }
 
+/// Resolve a directory to its canonical absolute form, leaving it as-is if it
+/// does not exist (an unresolvable path still has to produce a report, not a
+/// panic).
+fn canonical(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 /// A project with no (readable) elm.json: one source directory, no packages.
 fn single_dir_scope(source: PathBuf) -> Scopes {
+    let source = canonical(&source);
     let app_search = vec![source.clone()];
     let mut dir_search = HashMap::new();
     dir_search.insert(source, app_search.clone());
@@ -508,9 +527,9 @@ fn build_scopes(project_dir: &Path, elm_json: &str) -> Scopes {
     // The app's own source directories.
     let source_names = parse_source_directories(elm_json);
     let app_source_dirs: Vec<PathBuf> = if source_names.is_empty() {
-        vec![project_dir.join("src")]
+        vec![canonical(&project_dir.join("src"))]
     } else {
-        source_names.iter().map(|d| project_dir.join(d)).collect()
+        source_names.iter().map(|d| canonical(&project_dir.join(d))).collect()
     };
 
     // Every installed package and its `src` dir, keyed by "author/name". The
