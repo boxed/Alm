@@ -484,9 +484,26 @@ fn string_replace() {
 }
 
 #[test]
+fn float_formatting_notation() {
+    // String.fromFloat must match JS `String(x)` (ECMAScript Number::toString)
+    // on all backends, including the exponential-notation thresholds (|x| >= 1e21
+    // or < 1e-6). Native derives this from Rust's shortest digits; regression for
+    // the fix where native used plain fixed notation. (No transcendentals — those
+    // differ by a ULP between libm and V8's Math.)
+    assert_str_prog(
+        "float_notation",
+        "module Test exposing (main)\n\n\
+         main : String\n\
+         main =\n\
+         \x20   String.join \"|\" (List.map String.fromFloat\n\
+         \x20       [ 0.0000001, 0.000001, 1.0e21, 1.0e20, 1.0e22, 5.0, 1234.5\n\
+         \x20       , -0.5, -1.0e-7, -3.5e30, 0.1, 1000000.5, 0.30000000000000004\n\
+         \x20       , 123456789.123456789, 12345678901234567890.0 ])\n",
+    );
+}
+
+#[test]
 fn string_from_to_float() {
-    // js<->wasm (both format via the host's String(x) / +s); native uses Rust
-    // float formatting which can differ.
     assert_str_prog(
         "string_from_to_float",
         "module Test exposing (main)\n\n\

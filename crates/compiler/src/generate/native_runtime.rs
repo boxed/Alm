@@ -2275,7 +2275,41 @@ fn fmt_float(x: f64) -> String {
     if x == 0.0 {
         return "0".to_string();
     }
-    format!("{}", x)
+    // Match JS/Elm `String(x)` (ECMAScript Number::toString): Rust's `{}` never
+    // uses exponential notation (so 1e21 -> "1000…", 1e-7 -> "0.0000001"), but JS
+    // does past certain magnitudes. Extract the shortest round-tripping digits +
+    // base-10 exponent (both Rust `{:e}` and JS use the unique shortest form, so
+    // the digits agree), then apply the spec's notation rules.
+    let neg = x < 0.0;
+    let sci = format!("{:e}", x.abs()); // e.g. "1.2345e3", "5e0", "1e-7"
+    let (mantissa, exp_str) = sci.split_once('e').expect("`{:e}` always has 'e'");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32; // significant-digit count
+    let n = exp_str.parse::<i32>().expect("exponent") + 1; // decimal point position
+    let body = if k <= n && n <= 21 {
+        // Integer: all digits, then (n-k) trailing zeros.
+        format!("{}{}", digits, "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        // Point falls inside the digits.
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        // Small: "0." then (-n) leading zeros then the digits.
+        format!("0.{}{}", "0".repeat((-n) as usize), digits)
+    } else {
+        // Exponential (n > 21 or n <= -6).
+        let e = n - 1;
+        let (esign, eabs) = if e >= 0 { ("+", e) } else { ("-", -e) };
+        if k == 1 {
+            format!("{}e{}{}", digits, esign, eabs)
+        } else {
+            format!("{}.{}e{}{}", &digits[..1], &digits[1..], esign, eabs)
+        }
+    };
+    if neg {
+        format!("-{body}")
+    } else {
+        body
+    }
 }
 
 // BASICS
