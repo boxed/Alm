@@ -133,19 +133,42 @@ fn make(args: &[String]) -> ExitCode {
             println!("Success! Compiled to {}", output.display());
             ExitCode::SUCCESS
         }
-        Err(errors) => {
-            let count: usize = errors.iter().map(|e| e.reports.len()).sum();
-            for error in &errors {
-                eprintln!("{}", error.render());
+        Err(mut errors) => {
+            // Headers name each file relative to the project root, as elm does,
+            // and modules are ordered by when they were last edited — elm shows
+            // the file you touched most recently last, nearest the prompt.
+            let root = alm_compiler::project::project_root(&input);
+            errors.sort_by_key(|e| {
+                std::fs::metadata(&e.path).and_then(|m| m.modified()).ok()
+            });
+            for (i, error) in errors.iter().enumerate() {
+                if i > 0 {
+                    eprint!("{}", module_separator(&errors[i - 1].module_name(), &error.module_name()));
+                }
+                eprint!("{}", error.render_from(Some(&root)));
             }
-            if count > 0 {
-                eprintln!(
-                    "Detected {} problem{}.",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                );
+            // elm counts *modules*, and prints the tally on stdout so a piped
+            // stderr holds nothing but the reports themselves.
+            let modules: std::collections::BTreeSet<_> =
+                errors.iter().map(|e| e.path.clone()).collect();
+            match modules.len() {
+                0 => {}
+                1 => println!("Detected problems in 1 module."),
+                n => println!("Detected problems in {} modules.", n),
             }
             ExitCode::FAILURE
         }
     }
+}
+
+/// The band elm draws between two modules' error reports.
+fn module_separator(before: &str, after: &str) -> String {
+    let before = format!("{before}  \u{2191}    ");
+    let indent = 80usize.saturating_sub(before.chars().count());
+    format!(
+        "{}{}\n====o======================================================================o====\n    \u{2193}  {}\n\n\n",
+        " ".repeat(indent),
+        before,
+        after
+    )
 }

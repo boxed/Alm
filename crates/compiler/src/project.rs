@@ -24,6 +24,9 @@ pub struct BuildError {
     pub path: PathBuf,
     pub source: String,
     pub reports: Vec<Report>,
+    /// The module's declared name, known once the file has parsed. Used only
+    /// by the band drawn between two modules' reports.
+    pub module: Option<String>,
 }
 
 impl BuildError {
@@ -37,21 +40,45 @@ impl BuildError {
                 message,
                 elm: None,
             }],
+            module: None,
         }
     }
 
     /// A build error carrying already-built reports (e.g. a byte-exact parse
     /// diagnostic from the syntax catalogue).
     fn from_reports(path: PathBuf, source: String, reports: Vec<Report>) -> Self {
-        BuildError { path, source, reports }
+        BuildError { path, source, reports, module: None }
+    }
+
+    fn in_module(mut self, name: &Name) -> Self {
+        self.module = Some(name.to_string());
+        self
+    }
+
+    /// Render every report in this module. `root` is the project directory, so
+    /// the header names the file the way elm does — `src/Main.elm`, not an
+    /// absolute path.
+    pub fn render_from(&self, root: Option<&Path>) -> String {
+        let displayed = root
+            .and_then(|root| self.path.strip_prefix(root).ok())
+            .unwrap_or(&self.path)
+            .display()
+            .to_string();
+        self.reports
+            .iter()
+            .map(|r| r.render(&displayed, &self.source))
+            .collect::<String>()
     }
 
     pub fn render(&self) -> String {
-        self.reports
-            .iter()
-            .map(|r| r.render(&self.path.display().to_string(), &self.source))
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.render_from(None)
+    }
+
+    /// The module's name, as the band between two modules' reports shows it.
+    pub fn module_name(&self) -> String {
+        self.module.clone().unwrap_or_else(|| {
+            self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+        })
     }
 }
 
@@ -321,8 +348,16 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
     let mut all_node_types: HashMap<Name, HashMap<Region, can::Type>> = HashMap::new();
     let mut all_types: HashMap<Name, HashMap<Name, can::Type>> = HashMap::new();
     let mut all_sources: HashMap<Name, (PathBuf, String)> = HashMap::new();
+    // Keep going after a module fails: elm reports every module it could
+    // check, and only skips the ones whose imports never produced an interface.
+    let mut build_errors: Vec<BuildError> = Vec::new();
+    let mut failed: HashSet<PathBuf> = HashSet::new();
     for path in &order {
         let source_module = &modules[path];
+        if source_module.imports.iter().any(|(_, dep)| failed.contains(dep)) {
+            failed.insert(path.clone());
+            continue;
+        }
         let name = unique_names[path].clone();
         all_sources.insert(
             name.clone(),
@@ -332,8 +367,8 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         // at the resolved, unique names. Downstream code is unchanged.
         let rewritten = rewrite_module(source_module, &unique_names);
 
-        let (mut canonical, mut interface) =
-            canonicalize::canonicalize_module(&rewritten, &interfaces).map_err(|errors| {
+        let canonicalized = canonicalize::canonicalize_module(&rewritten, &interfaces).map_err(
+            |errors| {
                 errors
                     .into_iter()
                     .map(|e| {
@@ -346,31 +381,49 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
                         )
                     })
                     .collect::<Vec<_>>()
-            })?;
+            },
+        );
+        let (mut canonical, mut interface) = match canonicalized {
+            Ok(pair) => pair,
+            Err(errors) => {
+                build_errors.extend(errors.into_iter().map(|e| e.in_module(&name)));
+                failed.insert(path.clone());
+                continue;
+            }
+        };
 
-        let checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
-            errors
+        let type_checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
+            // All of a module's type errors belong to one report block.
+            let reports = errors
                 .into_iter()
                 .map(|e| match e.report {
-                    Some(report) => BuildError::from_reports(
-                        source_module.path.clone(),
-                        source_module.source.clone(),
-                        vec![report],
-                    ),
-                    None => BuildError::new(
-                        source_module.path.clone(),
-                        source_module.source.clone(),
-                        "TYPE MISMATCH",
-                        e.region,
-                        e.message,
-                    ),
+                    Some(report) => report,
+                    None => crate::reporting::Report {
+                        title: "TYPE MISMATCH".to_string(),
+                        region: e.region,
+                        message: e.message,
+                        elm: None,
+                    },
                 })
-                .collect::<Vec<_>>()
-        })?;
+                .collect::<Vec<_>>();
+            vec![BuildError::from_reports(
+                source_module.path.clone(),
+                source_module.source.clone(),
+                reports,
+            )]
+        });
+        let checked = match type_checked {
+            Ok(checked) => checked,
+            Err(errors) => {
+                build_errors.extend(errors.into_iter().map(|e| e.in_module(&name)));
+                failed.insert(path.clone());
+                continue;
+            }
+        };
         let types = checked.types;
         all_node_types.insert(name.clone(), checked.node_types);
 
-        nitpick::check(&canonical, &interfaces).map_err(|errors| {
+        let nitpicked = nitpick::check(&canonical, &interfaces).map_err(|errors| {
             errors
                 .into_iter()
                 .map(|e| {
@@ -383,7 +436,12 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
                     )
                 })
                 .collect::<Vec<_>>()
-        })?;
+        });
+        if let Err(errors) = nitpicked {
+            build_errors.extend(errors.into_iter().map(|e| e.in_module(&name)));
+            failed.insert(path.clone());
+            continue;
+        }
 
         // Local constant folding / simplification (after nitpick so it sees the
         // original patterns; before codegen so every backend benefits).
@@ -400,6 +458,10 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         interfaces.insert(name.clone(), interface);
         all_types.insert(name.clone(), types);
         canonical_modules.push(canonical);
+    }
+
+    if !build_errors.is_empty() {
+        return Err(build_errors);
     }
 
     Ok(CheckedProject {
@@ -448,6 +510,27 @@ impl Scopes {
 /// dependencies listed in elm.json are resolved from the ELM_HOME cache so
 /// pure Elm packages compile from their real sources, each scoped to its own
 /// declared dependencies.
+/// The directory holding the project's `elm.json`, which is what error headers
+/// are shown relative to. Falls back to the current directory.
+pub fn project_root(entry: &Path) -> PathBuf {
+    let mut dir = canonical(
+        &entry
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
+    loop {
+        if dir.join("elm.json").is_file() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+}
+
 fn resolve_scopes(entry: &Path) -> Scopes {
     // Canonicalize first. Module paths are canonicalized when loaded, so the
     // source directories have to be too or `strip_prefix` cannot line them up.

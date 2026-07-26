@@ -14,13 +14,13 @@ use std::path::Path;
 /// Fixtures alm does not yet render exactly like elm. Each entry is a category
 /// of `Reporting.Error.Type` that has not been ported.
 const KNOWN_DIFFERENT: &[&str] = &[
+    // The pattern half of `Reporting.Error.Type` (PCategory/PContext) is not
+    // ported, so a pattern that cannot match its scrutinee still gets alm's
+    // own wording.
     "case_pattern_mismatch",
-    "field_typo_hint",
-    "if_condition",
+    // The occurs check reports a plain mismatch rather than elm's separate
+    // INFINITE TYPE report.
     "infinite_type",
-    "record_access_non_record",
-    "record_missing_field",
-    "record_update_field",
 ];
 
 fn render(source: &str) -> String {

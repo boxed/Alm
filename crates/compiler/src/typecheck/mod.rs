@@ -1822,9 +1822,21 @@ impl Checker<'_> {
                 let expected = self
                     .pool
                     .fresh(Content::Structure(FlatType::Record(fields, ext)));
-                self.unify(expected, record_var, field.region, || {
-                    format!("This is not a record with a `{}` field", field.value)
-                })?;
+                self.unify_expr(
+                    expected,
+                    record_var,
+                    record.region,
+                    self.category_of(record),
+                    Expect::Context(
+                        region,
+                        TContext::RecordAccess(
+                            record.region,
+                            record_name(record),
+                            field.region,
+                            field.value.to_string(),
+                        ),
+                    ),
+                )?;
                 Ok(field_var)
             }
             Update(record, fields) => {
@@ -1840,14 +1852,33 @@ impl Checker<'_> {
                 let expected = self
                     .pool
                     .fresh(Content::Structure(FlatType::Record(field_types, ext)));
-                self.unify(expected, record_var, region, || {
-                    "This record update mentions fields the record does not have".to_string()
-                })?;
-                for (field_var, value) in value_pairs {
+                let record_label = record_name(record).unwrap_or_else(|| "_".to_string());
+                let mentioned: Vec<(String, Region)> = fields
+                    .iter()
+                    .map(|(field, _)| (field.value.to_string(), field.region))
+                    .collect();
+                self.unify_expr(
+                    expected,
+                    record_var,
+                    record.region,
+                    self.category_of(record),
+                    Expect::Context(
+                        region,
+                        TContext::RecordUpdateKeys(record_label, mentioned),
+                    ),
+                )?;
+                for ((field, _), (field_var, value)) in fields.iter().zip(value_pairs) {
                     let value_var = self.infer_expr(value)?;
-                    self.unify(field_var, value_var, value.region, || {
-                        "Record updates cannot change the type of a field".to_string()
-                    })?;
+                    self.unify_expr(
+                        field_var,
+                        value_var,
+                        value.region,
+                        self.category_of(value),
+                        Expect::Context(
+                            region,
+                            TContext::RecordUpdateValue(field.value.to_string()),
+                        ),
+                    )?;
                 }
                 Ok(record_var)
             }
@@ -2009,5 +2040,14 @@ fn func_name(func: &can::Expr) -> TMaybeName {
         }
         VarCtor(_, _, ctor) => TMaybeName::CtorName(ctor.name.to_string()),
         _ => TMaybeName::NoName,
+    }
+}
+
+/// The name a record expression was written as, for "This `point` record …".
+fn record_name(expr: &can::Expr) -> Option<String> {
+    match &expr.value {
+        can::Expr_::VarLocal(name) | can::Expr_::VarTopLevel(name) => Some(name.to_string()),
+        can::Expr_::VarForeign(_, name) => Some(name.to_string()),
+        _ => None,
     }
 }

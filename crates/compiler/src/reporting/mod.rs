@@ -129,17 +129,30 @@ fn render_snippet(source: &str, region: Region, highlight: Region) -> String {
     let start_row = region.start.row.max(1);
     let end_row = region.end.row.max(start_row);
     let gutter = end_row.to_string().len();
+    // Carets can only point at one line, and only the last one shown. When the
+    // highlight is anywhere else, elm marks each highlighted line by turning
+    // its gutter into `n|>` instead of underlining.
+    let underlined = highlight.start.row == highlight.end.row && highlight.end.row == end_row;
     let mut out = String::new();
     for row in start_row..=end_row {
         let idx = (row - 1) as usize;
         let text = lines.get(idx).copied().unwrap_or("");
-        out.push_str(&format!("{:>gutter$}| {}\n", row, text, gutter = gutter));
+        let marker = if !underlined && highlight.start.row <= row && row <= highlight.end.row {
+            '>'
+        } else {
+            ' '
+        };
+        out.push_str(&format!("{:>gutter$}|{}{}\n", row, marker, text, gutter = gutter));
     }
-    if highlight.start.row == highlight.end.row && highlight.end.row == end_row {
+    if underlined {
         let from = highlight.start.col.max(1) as usize;
         let to = (highlight.end.col as usize).max(from + 1);
         out.push_str(&" ".repeat(gutter + 2 + (from - 1)));
         out.push_str(&"^".repeat(to - from));
+        out.push('\n');
+    } else {
+        // elm's snippet ends with an empty final line where the carets would
+        // have gone, which separates the code from the text that follows.
         out.push('\n');
     }
     out

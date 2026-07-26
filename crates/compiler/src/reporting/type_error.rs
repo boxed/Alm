@@ -230,6 +230,61 @@ fn to_doc(ctx: Ctx, tipe: &ErrorType) -> Doc {
     }
 }
 
+/// `RT.vrecord` — one field per line, always broken.
+fn vrecord_doc(entries: Vec<(Doc, Doc)>, ext: Option<Doc>) -> Doc {
+    let fields: Vec<Doc> = entries.into_iter().map(|(f, t)| entry_doc(f, t)).collect();
+    match (fields.is_empty(), ext) {
+        (true, None) => Doc::text("{}"),
+        (false, None) => {
+            let mut parts = Vec::new();
+            for (i, f) in fields.into_iter().enumerate() {
+                parts.push(Doc::space(Doc::text(if i == 0 { "{" } else { "," }), f));
+            }
+            parts.push(Doc::text("}"));
+            Doc::vcat(parts)
+        }
+        (_, Some(ext)) => {
+            let mut parts = Vec::new();
+            for (i, f) in fields.into_iter().enumerate() {
+                parts.push(Doc::space(Doc::text(if i == 0 { "|" } else { "," }), f));
+            }
+            let head = Doc::hang(
+                4,
+                Doc::vcat(vec![Doc::space(Doc::text("{"), ext), Doc::cat(parts)]),
+            );
+            Doc::vcat(vec![head, Doc::text("}")])
+        }
+    }
+}
+
+/// `RT.vrecordSnippet` — the first few fields then `...`.
+fn vrecord_snippet_doc(first: (Doc, Doc), rest: Vec<(Doc, Doc)>) -> Doc {
+    let mut lines = vec![Doc::space(Doc::text("{"), entry_doc(first.0, first.1))];
+    for (f, t) in rest {
+        lines.push(Doc::space(Doc::text(","), entry_doc(f, t)));
+    }
+    lines.push(Doc::space(Doc::text(","), Doc::text("...")));
+    lines.push(Doc::text("}"));
+    Doc::vcat(lines)
+}
+
+/// `toNearbyRecord` — the record's fields, closest match first, at most four.
+fn nearby_record(fields: &BTreeMap<String, ErrorType>, field: &str, ext: &Extension) -> String {
+    let order = nearby_names(field, &fields.keys().cloned().collect::<Vec<_>>());
+    let entries: Vec<(Doc, Doc)> = order
+        .iter()
+        .map(|name| (Doc::text(name.clone()), to_doc(Ctx::None, &fields[name])))
+        .collect();
+    let doc = if entries.len() <= 4 {
+        vrecord_doc(entries, ext_to_doc(ext))
+    } else {
+        let mut it = entries.into_iter();
+        let first = it.next().unwrap();
+        vrecord_snippet_doc(first, it.take(3).collect())
+    };
+    render_type(&doc)
+}
+
 fn ext_to_doc(ext: &Extension) -> Option<Doc> {
     match ext {
         Extension::Closed => None,
@@ -594,6 +649,13 @@ pub enum Context {
     CaseBranch(usize),
     CallArity(MaybeName, usize),
     CallArg(MaybeName, usize),
+    /// The record's region, the name it was written as, the field's region and
+    /// the field being read.
+    RecordAccess(Region, Option<String>, Region, String),
+    /// The record being updated, and the fields the update mentions with the
+    /// region of each.
+    RecordUpdateKeys(String, Vec<(String, Region)>),
+    RecordUpdateValue(String),
     Destructure,
 }
 
@@ -1125,6 +1187,123 @@ pub fn to_expr_report(
 
                 Context::OpLeft(op) => op_left_report(expr_region, *region, category, op, tipe, expected_type),
                 Context::OpRight(op) => op_right_report(expr_region, *region, category, op, tipe, expected_type),
+
+                Context::RecordAccess(record_region, maybe_name, field_region, field) => {
+                    let named = match maybe_name {
+                        Some(n) => format!("`{n}` "),
+                        None => String::new(),
+                    };
+                    match tipe {
+                        ErrorType::Record(fields, ext) => {
+                            let (after, notes) = if fields.is_empty() {
+                                ("In fact, it is a record with NO fields!".to_string(), vec![])
+                            } else {
+                                let nearest =
+                                    nearby_names(field, &fields.keys().cloned().collect::<Vec<_>>())
+                                        .remove(0);
+                                (
+                                    format!(
+                                        "This is usually a typo. Here are the {named}fields that are most similar:"
+                                    ),
+                                    vec![
+                                        Section::Block(nearby_record(fields, field, ext)),
+                                        Section::Para(format!("So maybe {field} should be {nearest}?")),
+                                    ],
+                                )
+                            };
+                            report(
+                                "TYPE MISMATCH",
+                                *field_region,
+                                *region,
+                                format!("This {named}record does not have a `{field}` field:"),
+                                after,
+                                notes,
+                            )
+                        }
+                        _ => {
+                            let (after, notes) = lone_type(
+                                tipe,
+                                expected_type,
+                                add_category("It is", category),
+                                vec![Section::Para(format!(
+                                    "But I need a record with a {field} field!"
+                                ))],
+                            );
+                            report(
+                                "TYPE MISMATCH",
+                                *record_region,
+                                *region,
+                                "This is not a record, so it has no fields to access!".to_string(),
+                                after,
+                                notes,
+                            )
+                        }
+                    }
+                }
+
+                Context::RecordUpdateKeys(record, expected_fields) => match tipe {
+                    ErrorType::Record(actual_fields, ext) => {
+                        match expected_fields.iter().find(|(f, _)| !actual_fields.contains_key(f)) {
+                            None => mismatch(
+                                "Something is off with this record update:".to_string(),
+                                format!("The `{record}` record is"),
+                                "But this update needs it to be compatable with:".to_string(),
+                                vec![Section::Para(
+                                    "Do you mind creating an <http://sscce.org/> that produces this                                      error message and sharing it at                                      <https://github.com/elm/error-message-catalog/issues> so we can                                      try to give better advice here?"
+                                        .to_string(),
+                                )],
+                            ),
+                            Some((field, field_region)) => {
+                                let (after, notes) = if actual_fields.is_empty() {
+                                    (
+                                        format!("In fact, `{record}` is a record with NO fields!"),
+                                        vec![],
+                                    )
+                                } else {
+                                    let nearest = nearby_names(
+                                        field,
+                                        &actual_fields.keys().cloned().collect::<Vec<_>>(),
+                                    )
+                                    .remove(0);
+                                    (
+                                        format!(
+                                            "This is usually a typo. Here are the `{record}` fields that are most similar:"
+                                        ),
+                                        vec![
+                                            Section::Block(nearby_record(actual_fields, field, ext)),
+                                            Section::Para(format!(
+                                                "So maybe {field} should be {nearest}?"
+                                            )),
+                                        ],
+                                    )
+                                };
+                                report(
+                                    "TYPE MISMATCH",
+                                    *field_region,
+                                    *region,
+                                    format!("The `{record}` record does not have a `{field}` field:"),
+                                    after,
+                                    notes,
+                                )
+                            }
+                        }
+                    }
+                    _ => bad_type(
+                        "This is not a record, so it has no fields to update!".to_string(),
+                        "It is".to_string(),
+                        vec![Section::Para("But I need a record!".to_string())],
+                    ),
+                },
+
+                Context::RecordUpdateValue(field) => mismatch(
+                    format!("I cannot update the `{field}` field like this:"),
+                    format!("You are trying to update `{field}` to be"),
+                    "But it should be:".to_string(),
+                    vec![Section::Para(
+                        "Note: The record update syntax does not allow you to change the type of                          fields. You can achieve that with record constructors or the record                          literal syntax."
+                            .to_string(),
+                    )],
+                ),
 
                 Context::Destructure => {
                     let (after, notes) = type_comparison(
