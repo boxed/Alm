@@ -1848,3 +1848,164 @@ fn bad_append_right(category: &Category, tipe: &ErrorType, expected: &ErrorType)
         }
     }
 }
+
+// ------------------------------------------------------------------ patterns
+
+/// What kind of pattern is being matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PCategory {
+    PRecord,
+    PUnit,
+    PTuple,
+    PList,
+    PCtor(String),
+    PInt,
+    PStr,
+    PChr,
+    PBool,
+}
+
+/// Where a pattern's expectation came from.
+#[derive(Debug, Clone)]
+pub enum PExpected {
+    PNoExpectation(ErrorType),
+    PFromContext(Region, PContext, ErrorType),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PContext {
+    PTypedArg(String, usize),
+    PCaseMatch(usize),
+    PCtorArg(String, usize),
+    PListEntry(usize),
+    PTail,
+}
+
+fn add_pattern_category(trying_to_match: &str, category: &PCategory) -> String {
+    let suffix = match category {
+        PCategory::PRecord => " record values of type:".to_string(),
+        PCategory::PUnit => " unit values:".to_string(),
+        PCategory::PTuple => " tuples of type:".to_string(),
+        PCategory::PList => " lists of type:".to_string(),
+        PCategory::PCtor(name) => format!(" `{name}` values of type:"),
+        PCategory::PInt => " integers:".to_string(),
+        PCategory::PStr => " strings:".to_string(),
+        PCategory::PChr => " characters:".to_string(),
+        PCategory::PBool => " booleans:".to_string(),
+    };
+    format!("{trying_to_match}{suffix}")
+}
+
+/// Like `type_comparison`, but a pattern report puts its context note *after*
+/// the hint rather than before it.
+fn pattern_type_comparison(
+    actual: &ErrorType,
+    expected: &ErrorType,
+    i_am_seeing: String,
+    instead_of: String,
+    context_hints: Vec<Section>,
+) -> (String, Vec<Section>) {
+    let (actual_doc, expected_doc, problems) = to_comparison(actual, expected);
+    let mut notes = vec![
+        Section::Block(actual_doc),
+        Section::Para(instead_of),
+        Section::Block(expected_doc),
+    ];
+    notes.extend(problems_to_hint(&problems));
+    notes.extend(context_hints);
+    (i_am_seeing, notes)
+}
+
+/// `Reporting.Error.Type.toPatternReport`.
+pub fn to_pattern_report(
+    pattern_region: Region,
+    category: &PCategory,
+    tipe: &ErrorType,
+    expected: &PExpected,
+) -> Report {
+    match expected {
+        PExpected::PNoExpectation(expected_type) => {
+            let (after, notes) = pattern_type_comparison(
+                tipe,
+                expected_type,
+                add_pattern_category("It is", category),
+                "But it needs to match:".to_string(),
+                vec![],
+            );
+            report(
+                "TYPE MISMATCH",
+                pattern_region,
+                pattern_region,
+                "This pattern is being used in an unexpected way:".to_string(),
+                after,
+                notes,
+            )
+        }
+        PExpected::PFromContext(region, context, expected_type) => {
+            let (before, i_am_seeing, instead_of, hints) = match context {
+                PContext::PTypedArg(name, index) => {
+                    let ith = ordinal(*index);
+                    (
+                        format!("The {ith} argument to `{name}` is weird."),
+                        add_pattern_category("The argument is a pattern that matches", category),
+                        format!(
+                            "But the type annotation on `{name}` says the {ith} argument should be:"
+                        ),
+                        vec![],
+                    )
+                }
+                PContext::PCaseMatch(index) if *index == 1 => (
+                    "The 1st pattern in this `case` causing a mismatch:".to_string(),
+                    add_pattern_category("The first pattern is trying to match", category),
+                    "But the expression between `case` and `of` is:".to_string(),
+                    vec![Section::Para(
+                        "These can never match! Is the pattern the problem? Or is it the                          expression?"
+                            .to_string(),
+                    )],
+                ),
+                PContext::PCaseMatch(index) => {
+                    let ith = ordinal(*index);
+                    (
+                        format!("The {ith} pattern in this `case` does not match the previous ones."),
+                        add_pattern_category(&format!("The {ith} pattern is trying to match"), category),
+                        "But all the previous patterns match:".to_string(),
+                        vec![Section::Para(
+                            "Note: A `case` expression can only handle one type of value, so you                              may want to use <https://elm-lang.org/0.19.1/custom-types> to handle                              “mixing” types."
+                                .to_string(),
+                        )],
+                    )
+                }
+                PContext::PCtorArg(name, index) => {
+                    let ith = ordinal(*index);
+                    (
+                        format!("The {ith} argument to `{name}` is weird."),
+                        add_pattern_category("It is trying to match", category),
+                        format!("But `{name}` needs its {ith} argument to be:"),
+                        vec![],
+                    )
+                }
+                PContext::PListEntry(index) => {
+                    let ith = ordinal(*index);
+                    (
+                        format!("The {ith} pattern in this list does not match all the previous ones:"),
+                        add_pattern_category(&format!("The {ith} pattern is trying to match"), category),
+                        "But all the previous patterns in the list are:".to_string(),
+                        vec![Section::Para(
+                            "Hint: Everything in a list must be the same type of value. This way,                              we never run into unexpected values partway through a List.map,                              List.foldl, etc. Read <https://elm-lang.org/0.19.1/custom-types> to                              learn how to “mix” types."
+                                .to_string(),
+                        )],
+                    )
+                }
+                PContext::PTail => (
+                    "The pattern after (::) is causing issues.".to_string(),
+                    add_pattern_category("The pattern after (::) is trying to match", category),
+                    "But it needs to match lists like this:".to_string(),
+                    vec![],
+                ),
+            };
+            let (after, notes) =
+                pattern_type_comparison(tipe, expected_type, i_am_seeing, instead_of, hints);
+            report("TYPE MISMATCH", pattern_region, *region, before, after, notes)
+        }
+    }
+}

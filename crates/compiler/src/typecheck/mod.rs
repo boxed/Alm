@@ -46,7 +46,8 @@ pub enum Expect {
 
 use crate::reporting::type_error::{
     Category as TCategory, Context as TContext, ErrorType, Expected as TExpected,
-    MaybeName as TMaybeName, SubContext as TSubContext,
+    MaybeName as TMaybeName, PCategory as TPCategory, PContext as TPContext,
+    PExpected as TPExpected, SubContext as TSubContext,
 };
 
 /// A polymorphic type. `free` maps type variable names that must NOT be
@@ -1220,9 +1221,13 @@ impl Checker<'_> {
                     self.scopes.push(HashMap::new());
                     let result = (|this: &mut Self| {
                         let pattern_var = this.infer_pattern(pattern)?;
-                        this.unify(scrutinee_var, pattern_var, pattern.region, || {
-                            "This pattern does not match the value being inspected".to_string()
-                        })?;
+                        this.unify_pattern(
+                            scrutinee_var,
+                            pattern_var,
+                            pattern,
+                            body.region,
+                            TPContext::PCaseMatch(index + 1),
+                        )?;
                         let branch_var = this.infer_expr(branch)?;
                         this.unify_expr(
                             expected,
@@ -1240,6 +1245,19 @@ impl Checker<'_> {
                     result?;
                 }
                 Ok(expected)
+            }
+            // The annotation describes the `let`'s body, not the whole `let`,
+            // so push the expectation past the declarations onto it.
+            can::Expr_::Let(decls, inner) => {
+                self.scopes.push(HashMap::new());
+                self.let_depth += 1;
+                let result = (|this: &mut Self| {
+                    this.bind_let_decls(decls)?;
+                    this.check_annotated_body(inner, expected, name, arity)
+                })(self);
+                self.let_depth -= 1;
+                self.scopes.pop();
+                result
             }
             _ => {
                 let body_var = self.infer_expr(body)?;
@@ -1301,6 +1319,74 @@ impl Checker<'_> {
                 _ => return true,
             }
         }
+    }
+
+
+    /// Unify a pattern against what it must match, with the information
+    /// `Reporting.Error.Type.toPatternReport` needs.
+    fn unify_pattern(
+        &mut self,
+        expected: Variable,
+        actual: Variable,
+        pattern: &can::Pattern,
+        region: Region,
+        context: TPContext,
+    ) -> Infer<()> {
+        match self.pool.unify(expected, actual) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let mut names = types::ErrorTypeNames::new();
+                let actual_type = self.pool.to_error_type(actual, &mut names);
+                let expected_type = self.pool.to_error_type(expected, &mut names);
+                self.pool.set_content(expected, Content::Error);
+                self.pool.set_content(actual, Content::Error);
+                let report = crate::reporting::type_error::to_pattern_report(
+                    pattern.region,
+                    &pattern_category(pattern),
+                    &actual_type,
+                    &TPExpected::PFromContext(region, context, expected_type),
+                );
+                self.errors.push(Error {
+                    message: String::new(),
+                    region: pattern.region,
+                    report: Some(report),
+                });
+                Ok(())
+            }
+        }
+    }
+
+
+    /// Type-check a `let`'s declarations and bind them in the current scope.
+    /// Shared by ordinary `let` inference and by the annotated-body checker,
+    /// which pushes the annotation's expectation past the declarations onto the
+    /// `let`'s body — the expression the annotation actually describes.
+    fn bind_let_decls(&mut self, decls: &[can::LetDecl]) -> Infer<()> {
+            for decl in decls {
+                match decl {
+                    can::LetDecl::Def(def) => {
+                        let scheme = self.check_def(def)?;
+                        self.bind_local(
+                            def.name.value.clone(),
+                            Binding::Scheme(scheme),
+                        );
+                    }
+                    can::LetDecl::Recursive(defs) => {
+                        self.check_recursive_defs(defs, |checker, name, binding| {
+                            checker.bind_local(name, binding);
+                        })?;
+                    }
+                    can::LetDecl::Destruct(pattern, value) => {
+                        let value_var = self.infer_expr(value)?;
+                        let pattern_var = self.infer_pattern(pattern)?;
+                        self.unify(pattern_var, value_var, pattern.region, || {
+                            "This destructuring pattern does not match the value"
+                                .to_string()
+                        })?;
+                    }
+                }
+            }
+        Ok(())
     }
 
     // UNIFICATION WRAPPER
@@ -1750,30 +1836,7 @@ impl Checker<'_> {
                 self.scopes.push(HashMap::new());
                 self.let_depth += 1;
                 let result = (|| {
-                    for decl in decls {
-                        match decl {
-                            can::LetDecl::Def(def) => {
-                                let scheme = self.check_def(def)?;
-                                self.bind_local(
-                                    def.name.value.clone(),
-                                    Binding::Scheme(scheme),
-                                );
-                            }
-                            can::LetDecl::Recursive(defs) => {
-                                self.check_recursive_defs(defs, |checker, name, binding| {
-                                    checker.bind_local(name, binding);
-                                })?;
-                            }
-                            can::LetDecl::Destruct(pattern, value) => {
-                                let value_var = self.infer_expr(value)?;
-                                let pattern_var = self.infer_pattern(pattern)?;
-                                self.unify(pattern_var, value_var, pattern.region, || {
-                                    "This destructuring pattern does not match the value"
-                                        .to_string()
-                                })?;
-                            }
-                        }
-                    }
+                    self.bind_let_decls(decls)?;
                     self.infer_expr(body)
                 })();
                 self.let_depth -= 1;
@@ -1783,18 +1846,25 @@ impl Checker<'_> {
             Case(scrutinee, branches) => {
                 let scrutinee_var = self.infer_expr(scrutinee)?;
                 let result = self.pool.fresh_var();
-                for (pattern, branch) in branches {
+                for (index, (pattern, branch)) in branches.iter().enumerate() {
                     self.scopes.push(HashMap::new());
                     let branch_result = (|| {
                         let pattern_var = self.infer_pattern(pattern)?;
-                        self.unify(scrutinee_var, pattern_var, pattern.region, || {
-                            "This pattern does not match the type of the value being inspected"
-                                .to_string()
-                        })?;
+                        self.unify_pattern(
+                            scrutinee_var,
+                            pattern_var,
+                            pattern,
+                            region,
+                            TPContext::PCaseMatch(index + 1),
+                        )?;
                         let branch_var = self.infer_expr(branch)?;
-                        self.unify(result, branch_var, branch.region, || {
-                            "All branches of this `case` must have the same type".to_string()
-                        })
+                        self.unify_expr(
+                            result,
+                            branch_var,
+                            branch.region,
+                            self.category_of(branch),
+                            Expect::Context(region, TContext::CaseBranch(index + 1)),
+                        )
                     })();
                     self.scopes.pop();
                     branch_result?;
@@ -2049,5 +2119,22 @@ fn record_name(expr: &can::Expr) -> Option<String> {
         can::Expr_::VarLocal(name) | can::Expr_::VarTopLevel(name) => Some(name.to_string()),
         can::Expr_::VarForeign(_, name) => Some(name.to_string()),
         _ => None,
+    }
+}
+
+/// `Reporting.Error.Type.PCategory` — what kind of pattern this is.
+fn pattern_category(pattern: &can::Pattern) -> TPCategory {
+    use can::Pattern_::*;
+    match &pattern.value {
+        Record(_) => TPCategory::PRecord,
+        Unit => TPCategory::PUnit,
+        Tuple(..) => TPCategory::PTuple,
+        List(_) | Cons(..) => TPCategory::PList,
+        Ctor(_, _, ctor, _) => TPCategory::PCtor(ctor.name.to_string()),
+        Int(_) => TPCategory::PInt,
+        Str(_) => TPCategory::PStr,
+        Chr(_) => TPCategory::PChr,
+        Alias(inner, _) => pattern_category(inner),
+        _ => TPCategory::PCtor(String::new()),
     }
 }
