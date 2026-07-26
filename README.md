@@ -64,6 +64,20 @@ app.ports.somePort.subscribe(function (value) { ... });
   (`SHADER PROBLEM`), via a vendored Rust GLSL parser; its embedded message
   differs from elm's, which delegates to a different 3rd-party parser, so
   that one report is not byte-exact.
+- **Byte-exact type errors** (`Reporting.Error.Type`, `Type.Error`): a
+  mismatch is reported as elm reports it — the type found and the type
+  wanted, laid out by a port of elm's pretty-printer, with the parts that
+  differ marked and the hint chosen from *how* they differ (Int vs Float,
+  a String where an Int was wanted, a record field typo, a rigid type
+  variable pinned to something concrete). The wording follows the context:
+  which argument of which call, which branch of an `if` or `case`, which
+  element of a list, which side of which operator, which field of a record
+  update, which pattern in a `case`. All of a module's errors are reported,
+  not just the first, and several failing modules are separated the way elm
+  separates them. Pinned by a differential suite of 30 fixtures; 29 match
+  `elm make` byte-for-byte on both stdout and stderr. The exception is the
+  occurs check: alm has none, so a self-referential type is reported as an
+  ordinary mismatch rather than elm's `INFINITE TYPE`.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
@@ -93,6 +107,14 @@ app.ports.somePort.subscribe(function (value) { ... });
   Dict, Set, Array, Bitwise, Debug, Json.Decode/Encode, Task, Process,
   Time, Http, File, Url, Random, UUID, Html(+Attributes/Events/Keyed/
   Lazy), Svg(+Attributes), Browser(+Dom/Events/Navigation), Platform.
+  Every value of every module `elm/core`, `elm/json`, `elm/html`,
+  `elm/virtual-dom`, `elm/browser`, `elm/url`, `elm/time`, `elm/random`,
+  `elm/file`, `elm/bytes`, `elm/parser`, `elm/regex`, `elm/http` and
+  `elm/svg` publish compiles under alm at the type it is published with —
+  as does `elm-explorations/test`, `markdown`, `benchmark`,
+  `linear-algebra`, `webgl` and `elm/project-metadata-utils`.
+  `elm-explorations/markdown` renders through the same `marked` build elm
+  vendors, so its HTML is identical.
 - **WebGL** (`elm-explorations/webgl`): GLSL `[glsl|…|]` shaders (parsed,
   type-checked, `SHADER PROBLEM` errors), meshes, the `linear-algebra`
   `Math.Vector*`/`Matrix4` kernel, and the full rendering kernel —
