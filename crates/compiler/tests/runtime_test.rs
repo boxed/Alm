@@ -22,7 +22,7 @@ fn run(body: &str) -> String {
 /// that reference a bundled effect module (Time), whose source is injected only
 /// on the project path.
 fn run_proj(body: &str) -> String {
-    let source = format!("module Test exposing (..)\n\nimport Time\n\n{}", body);
+    let source = format!("module Test exposing (..)\n\nimport Random\nimport Time\n\n{}", body);
     let javascript = common::compile_via_project("Test", &source);
     let js_path = common::write_js("runtime", &javascript);
     common::run_node(
@@ -38,7 +38,7 @@ fn run_proj(body: &str) -> String {
 /// modules such as Time).
 fn run_worker_proj(body: &str) -> Vec<String> {
     let source = format!(
-        "port module Test exposing (main)\n\nimport Json.Decode\nimport Time\n\nport ask : (() -> msg) -> Sub msg\n\nport answer : String -> Cmd msg\n\n{}",
+        "port module Test exposing (main)\n\nimport Json.Decode\nimport Random\nimport Time\n\nport ask : (() -> msg) -> Sub msg\n\nport answer : String -> Cmd msg\n\n{}",
         body
     );
     let javascript = common::compile_via_project("Test", &source);
@@ -217,7 +217,7 @@ fn task_attempt_and_time() {
 
 #[test]
 fn random_generation() {
-    let out = run_worker(
+    let out = run_worker_proj(
         "type Msg\n    = Ask ()\n    | Got Int\n\nupdate msg model =\n    case msg of\n        Ask _ ->\n            ( model, Random.generate Got (Random.int 1 6) )\n\n        Got n ->\n            ( model\n            , answer\n                (if n >= 1 && n <= 6 then\n                    \"in-range\"\n                 else\n                    \"out-of-range:\" ++ String.fromInt n\n                )\n            )\n\nmain =\n    Platform.worker\n        { init = \\_ -> ( (), Cmd.none )\n        , update = update\n        , subscriptions = \\_ -> ask Ask\n        }",
     );
     assert_eq!(out, vec!["in-range"]);
@@ -277,7 +277,7 @@ fn time_conversions() {
 #[test]
 fn random_step_deterministic() {
     assert_eq!(
-        run("gen = Random.map2 (\\a b -> ( a, b )) (Random.int 0 100) (Random.constant 5)\n\nstep seed = Random.step gen seed\n\nmain =\n    let\n        ( ( a1, b1 ), _ ) =\n            step (Random.initialSeed 42)\n\n        ( ( a2, b2 ), _ ) =\n            step (Random.initialSeed 42)\n\n        ( xs, _ ) =\n            Random.step (Random.list 3 (Random.andThen Random.constant (Random.float 0 1))) (Random.initialSeed 7)\n    in\n    Debug.toString ( a1 == a2 && b1 == 5, List.length xs, List.all (\\x -> x >= 0 && x <= 1) xs )"),
+        run_proj("gen = Random.map2 (\\a b -> ( a, b )) (Random.int 0 100) (Random.constant 5)\n\nstep seed = Random.step gen seed\n\nmain =\n    let\n        ( ( a1, b1 ), _ ) =\n            step (Random.initialSeed 42)\n\n        ( ( a2, b2 ), _ ) =\n            step (Random.initialSeed 42)\n\n        ( xs, _ ) =\n            Random.step (Random.list 3 (Random.andThen Random.constant (Random.float 0 1))) (Random.initialSeed 7)\n    in\n    Debug.toString ( a1 == a2 && b1 == 5, List.length xs, List.all (\\x -> x >= 0 && x <= 1) xs )"),
         "(True,3,True)"
     );
 }
@@ -713,7 +713,7 @@ fn random_pinned_outputs() {
     // Pin the PRNG algorithm exactly: any constant or operator mutation
     // inside _Random_next changes these values.
     let program = "main =\n    let\n        ( a, s2 ) =\n            Random.step (Random.int 0 999999) (Random.initialSeed 42)\n\n        ( b, _ ) =\n            Random.step (Random.int 0 999999) s2\n\n        ( c, _ ) =\n            Random.step (Random.float 0 1) (Random.initialSeed 7)\n    in\n    Debug.toString ( a, b, truncate (c * 1000000) )";
-    let out = run(program);
+    let out = run_proj(program);
     assert!(out.starts_with('(') && out.split(',').count() == 3, "got: {}", out);
     // Pin the exact values so any PRNG constant/operator mutation is caught.
     assert_eq!(out, PINNED_RANDOM, "PRNG output changed — update PINNED_RANDOM if intentional");
@@ -722,12 +722,12 @@ fn random_pinned_outputs() {
 #[test]
 fn random_bounds_and_constants() {
     assert_eq!(
-        run("main = Debug.toString ( Random.minInt, Random.maxInt )"),
+        run_proj("main = Debug.toString ( Random.minInt, Random.maxInt )"),
         "(-2147483648,2147483647)"
     );
     // Tight bounds make off-by-one in the range formula visible.
     assert_eq!(
-        run("main =\n    let\n        ( v, _ ) =\n            Random.step (Random.int 5 5) (Random.initialSeed 1)\n\n        ( w, _ ) =\n            Random.step (Random.int 0 1) (Random.initialSeed 2)\n    in\n    Debug.toString ( v, w >= 0 && w <= 1 )"),
+        run_proj("main =\n    let\n        ( v, _ ) =\n            Random.step (Random.int 5 5) (Random.initialSeed 1)\n\n        ( w, _ ) =\n            Random.step (Random.int 0 1) (Random.initialSeed 2)\n    in\n    Debug.toString ( v, w >= 0 && w <= 1 )"),
         "(5,True)"
     );
 }
@@ -919,7 +919,7 @@ fn http_fraction_small_sizes() {
 #[test]
 fn random_full_precision_and_combinators() {
     let program = "main =\n    let\n        ( c, _ ) =\n            Random.step (Random.float 0 1) (Random.initialSeed 7)\n\n        ( pair, _ ) =\n            Random.step (Random.map2 Tuple.pair (Random.int 0 999999) (Random.int 0 999999)) (Random.initialSeed 11)\n\n        ( xs, _ ) =\n            Random.step (Random.list 3 (Random.int 0 99)) (Random.initialSeed 13)\n\n        ( nested, _ ) =\n            Random.step (Random.andThen (\\n -> Random.int n (n + 1)) (Random.int 10 20)) (Random.initialSeed 17)\n    in\n    Debug.toString ( c, pair, ( xs, nested ) )";
-    let out = run(program);
+    let out = run_proj(program);
     assert_eq!(out, PINNED_RANDOM_FULL, "PRNG chain output changed");
 }
 
@@ -967,7 +967,7 @@ fn dict_and_set_folds_pin_keys() {
 #[test]
 fn random_float_ranges_and_seed_threading() {
     let program = "main =\n    let\n        ( f1, s1 ) =\n            Random.step (Random.float 2 5) (Random.initialSeed 3)\n\n        ( p, s2 ) =\n            Random.step (Random.map2 Tuple.pair (Random.int 0 9) (Random.int 0 9)) s1\n\n        ( after, _ ) =\n            Random.step (Random.int 0 999999) s2\n\n        ( nested, _ ) =\n            Random.step (Random.andThen (\\n -> Random.int 0 (n * 100000)) (Random.int 1 9)) (Random.initialSeed 23)\n    in\n    Debug.toString ( f1, p, ( after, nested ) )";
-    assert_eq!(run(program), PINNED_RANDOM_THREADED);
+    assert_eq!(run_proj(program), PINNED_RANDOM_THREADED);
 }
 
 const PINNED_RANDOM_THREADED: &str = "(3.897207004541149,(2,4),(60852,26829))";
