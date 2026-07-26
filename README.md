@@ -170,6 +170,16 @@ CPS task model), **native** (on the reified-task interpreter), and
 differential test runs the same command / self-message / subscription
 programs on every backend and checks their output agrees.
 
+`Time`, `Random`, and `Http` are themselves **real effect modules** — not
+special-cased runtime effects. They compile from bundled `effect module`
+sources, so `Time.every` and `Http.track` are genuine subscriptions,
+`Random.generate`/`Http.request`/`Http.cancel` genuine commands, all routed
+through the same manager protocol on every backend. Their pure helpers
+(calendar math, PCG generators, request/body/expect builders) stay as
+backend intrinsics behind `Elm.Kernel.*`, and dropping a `Time.every`
+subscription or cancelling a tracked request now `Process.kill`s the
+underlying timer/request — alm's scheduler gained real task cancellation.
+
 `elm/bytes` works on all three backends (encode/decode of ints, floats,
 strings, and bytes, `Decode.loop`/`map`/`andThen`, and decode failures),
 verified byte-for-byte across js, native, and wasm-gc by a differential
@@ -184,8 +194,6 @@ matching the JS backend value-for-value (checked by a differential test).
 ## Not ported
 
 - **WebSockets** — removed from Elm 0.19 core, so nothing to port.
-- Http/Time/Random are concrete runtime effects rather than real effect
-  modules.
 - The kernel type-checks trusted boundaries loosely: `Elm.Kernel.*`
   values are untyped, like the original.
 

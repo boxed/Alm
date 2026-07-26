@@ -1,5 +1,10 @@
 # Making Time / Random / Http real effect modules
 
+**STATUS: COMPLETE.** All three are real effect modules on JS/native/wasm-gc
+(commits: Time 6aaaf36; Random a7c834b/0d73a1e/956ad5c; Http in the Http commit).
+Full suite green. README updated (the "concrete runtime effects" caveat removed).
+
+
 Goal (user directive): convert the EFFECT part of Time/Random/Http from hardcoded
 "concrete runtime effects" into real `effect module` managers running through
 alm's `_Platform` protocol, on **all three backends** (JS, native, wasm-gc).
