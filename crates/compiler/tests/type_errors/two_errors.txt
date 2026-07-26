@@ -1,0 +1,32 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `a` definition:
+
+6|     "one"
+       ^^^^^
+The body is a string of type:
+
+    String
+
+But the type annotation on `a` says it should be:
+
+    Int
+
+Hint: Want to convert a String into an Int? Use the String.toInt function!
+
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `b` definition:
+
+11|     2
+        ^
+The body is a number of type:
+
+    number
+
+But the type annotation on `b` says it should be:
+
+    String
+
+Hint: Try using String.fromInt to convert it to a string?
+

@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::data::Name;
+use crate::reporting::type_error::{ErrorType, Extension, Super as ErrorSuper};
 
 pub type Variable = usize;
 
@@ -605,6 +606,125 @@ impl NameGenerator {
                 break;
             }
             n -= 1;
+        }
+        self.assigned.insert(var, name.clone());
+        name
+    }
+}
+
+// ---------------------------------------------------- snapshots for reporting
+
+/// Freeze a pool variable as a `reporting::type_error::ErrorType`, the shape
+/// elm's reports compare and render. `names` is shared between the two sides of
+/// a comparison so the same unnamed variable prints as the same letter in both.
+impl Pool {
+    pub fn to_error_type(&mut self, var: Variable, names: &mut ErrorTypeNames) -> ErrorType {
+        self.to_error_type_help(var, names, &mut Vec::new())
+    }
+
+    fn to_error_type_help(
+        &mut self,
+        var: Variable,
+        names: &mut ErrorTypeNames,
+        seen: &mut Vec<Variable>,
+    ) -> ErrorType {
+        let root = self.find(var);
+        // A variable reached while already being expanded is a cycle; elm
+        // prints ∞ there rather than looping.
+        if seen.contains(&root) {
+            return ErrorType::Infinite;
+        }
+        seen.push(root);
+        let result = match self.content(root) {
+            Content::FlexVar(Some(name)) => ErrorType::FlexVar(name.to_string()),
+            Content::FlexVar(None) => ErrorType::FlexVar(names.name_for(root)),
+            Content::FlexSuper(s, name) => ErrorType::FlexSuper(
+                error_super(s),
+                name.map(|n| n.to_string()).unwrap_or_else(|| s.name().to_string()),
+            ),
+            Content::RigidVar(name) => ErrorType::RigidVar(name.to_string()),
+            Content::RigidSuper(s, name) => ErrorType::RigidSuper(error_super(s), name.to_string()),
+            Content::Error => ErrorType::Error,
+            Content::Structure(flat) => match flat {
+                FlatType::App(home, name, args) => ErrorType::Type(
+                    home.to_string(),
+                    name.to_string(),
+                    args.iter().map(|&a| self.to_error_type_help(a, names, seen)).collect(),
+                ),
+                FlatType::Fun(arg, result) => {
+                    let first = self.to_error_type_help(arg, names, seen);
+                    match self.to_error_type_help(result, names, seen) {
+                        ErrorType::Lambda(b, c, rest) => {
+                            let mut tail = vec![*c];
+                            tail.extend(rest);
+                            ErrorType::Lambda(Box::new(first), b, tail)
+                        }
+                        other => ErrorType::Lambda(Box::new(first), Box::new(other), Vec::new()),
+                    }
+                }
+                FlatType::EmptyRecord => ErrorType::Record(BTreeMap::new(), Extension::Closed),
+                FlatType::Record(..) => {
+                    let (fields, ext) = self.gather_fields(root);
+                    let mut out = BTreeMap::new();
+                    for (name, field_var) in fields {
+                        out.insert(name.to_string(), self.to_error_type_help(field_var, names, seen));
+                    }
+                    let ext_root = self.find(ext);
+                    let extension = match self.content(ext_root) {
+                        Content::Structure(FlatType::EmptyRecord) => Extension::Closed,
+                        Content::RigidVar(name) => Extension::RigidOpen(name.to_string()),
+                        Content::FlexVar(Some(name)) => Extension::FlexOpen(name.to_string()),
+                        _ => Extension::FlexOpen(names.name_for(ext_root)),
+                    };
+                    ErrorType::Record(out, extension)
+                }
+                FlatType::Unit => ErrorType::Unit,
+                FlatType::Tuple(a, b, c) => ErrorType::Tuple(
+                    Box::new(self.to_error_type_help(a, names, seen)),
+                    Box::new(self.to_error_type_help(b, names, seen)),
+                    c.map(|c| Box::new(self.to_error_type_help(c, names, seen))),
+                ),
+            },
+        };
+        seen.pop();
+        result
+    }
+}
+
+fn error_super(s: Super) -> ErrorSuper {
+    match s {
+        Super::Number => ErrorSuper::Number,
+        Super::Comparable => ErrorSuper::Comparable,
+        Super::Appendable => ErrorSuper::Appendable,
+        Super::CompAppend => ErrorSuper::CompAppend,
+    }
+}
+
+/// Variable naming shared across the two sides of one comparison.
+#[derive(Default)]
+pub struct ErrorTypeNames {
+    assigned: std::collections::HashMap<Variable, String>,
+    next: usize,
+}
+
+impl ErrorTypeNames {
+    pub fn new() -> ErrorTypeNames {
+        ErrorTypeNames::default()
+    }
+
+    fn name_for(&mut self, var: Variable) -> String {
+        if let Some(name) = self.assigned.get(&var) {
+            return name.clone();
+        }
+        let mut n = self.next;
+        self.next += 1;
+        let mut name = String::new();
+        loop {
+            name.insert(0, (b'a' + (n % 26) as u8) as char);
+            if n < 26 {
+                break;
+            }
+            n = n / 26 - 1;
         }
         self.assigned.insert(var, name.clone());
         name

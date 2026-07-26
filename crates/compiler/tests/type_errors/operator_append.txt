@@ -1,0 +1,8 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I thought I was appending String values here, not number values like this:
+
+6|     "a" ++ 1
+              ^
+Try using String.fromInt to turn it into a string?
+

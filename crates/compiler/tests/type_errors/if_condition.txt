@@ -1,0 +1,18 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+This `if` condition does not evaluate to a boolean value, True or False.
+
+ 6|>    if 1 then
+ 7|         1
+ 8| 
+ 9|     else
+10|         2
+
+It is a number of type:
+
+    number
+
+But I need this `if` condition to be a Bool value.
+
+Hint: Only Int and Float values work as numbers.
+

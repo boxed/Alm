@@ -5,14 +5,16 @@
 
 mod common;
 
-/// Compile a single module and return the concatenated error messages.
+/// Compile a single module and return the concatenated error messages. Type
+/// errors carry a structured body rather than a plain message, so render each
+/// report the way `alm make` prints it.
 fn errors_of(body: &str) -> String {
     let source = format!("module Test exposing (..)\n\n{}", body);
     match alm_compiler::compile(&source) {
         Ok(_) => panic!("expected a compile error for:\n{}", body),
         Err(reports) => reports
             .iter()
-            .map(|r| format!("{}: {}", r.title, r.message))
+            .map(|r| format!("{}: {}", r.title, r.render("src/Test.elm", &source)))
             .collect::<Vec<_>>()
             .join("\n"),
     }
@@ -368,7 +370,7 @@ fn pattern_parse_error_branches() {
 
 #[test]
 fn type_error_through_compile() {
-    expect("x : String\nx = 1\n", "I needed");
+    expect("x : String\nx = 1\n", "But the type annotation on `x` says it should be:");
 }
 
 #[test]

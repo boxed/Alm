@@ -1,0 +1,16 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+6|     5
+       ^
+The body is a number of type:
+
+    number
+
+But the type annotation on `bad` says it should be:
+
+    Int -> Int
+
+Hint: Only Int and Float values work as numbers.
+

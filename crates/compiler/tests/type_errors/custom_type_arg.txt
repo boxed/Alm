@@ -1,0 +1,16 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+10|     Box 1
+        ^^^^^
+This `Box` call produces:
+
+    Box number
+
+But the type annotation on `bad` says it should be:
+
+    Box String
+
+Hint: Try using String.fromInt to convert it to a string?
+

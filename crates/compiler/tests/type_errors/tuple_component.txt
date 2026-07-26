@@ -1,0 +1,16 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+6|     ( 1, 2 )
+       ^^^^^^^^
+The body is a tuple of type:
+
+    ( Int, number )
+
+But the type annotation on `bad` says it should be:
+
+    ( Int, String )
+
+Hint: Try using String.fromInt to convert it to a string?
+

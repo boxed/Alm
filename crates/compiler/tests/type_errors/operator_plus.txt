@@ -1,0 +1,10 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I cannot do addition with String values like this one:
+
+6|     1 + "two"
+           ^^^^^
+The (+) operator only works with Int and Float values.
+
+Hint: Switch to the (++) operator to append strings!
+

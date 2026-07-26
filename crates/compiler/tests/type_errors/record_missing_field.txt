@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+This `point` record does not have a `z` field:
+
+11|     point.z
+              ^
+This is usually a typo. Here are the `point` fields that are most similar:
+
+    { x : Int
+    , y : Int
+    }
+
+So maybe z should be x?
+

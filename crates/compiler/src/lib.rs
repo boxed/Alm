@@ -122,11 +122,14 @@ fn check_typed(source: &str, is_package: bool) -> Result<ast::canonical::Module,
     typecheck::check(&canonical).map_err(|errors| {
         errors
             .into_iter()
-            .map(|e| Report {
-                title: "TYPE MISMATCH".to_string(),
-                region: e.region,
-                message: e.message,
-                elm: None,
+            .map(|e| match e.report {
+                Some(report) => report,
+                None => Report {
+                    title: "TYPE MISMATCH".to_string(),
+                    region: e.region,
+                    message: e.message,
+                    elm: None,
+                },
             })
             .collect::<Vec<_>>()
     })?;

@@ -1,0 +1,16 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The 1st argument to `greet` is not what I expect:
+
+11|     greet 5
+              ^
+This argument is a number of type:
+
+    number
+
+But `greet` needs the 1st argument to be:
+
+    String
+
+Hint: Try using String.fromInt to convert it to a string?
+

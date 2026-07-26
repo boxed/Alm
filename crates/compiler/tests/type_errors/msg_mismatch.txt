@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+10|     "Clicked"
+        ^^^^^^^^^
+The body is a string of type:
+
+    String
+
+But the type annotation on `bad` says it should be:
+
+    Msg
+

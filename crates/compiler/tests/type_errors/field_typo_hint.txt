@@ -1,0 +1,13 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+This `point` record does not have a `nmae` field:
+
+11|     point.nmae
+              ^^^^
+This is usually a typo. Here are the `point` fields that are most similar:
+
+    { name : String
+    }
+
+So maybe nmae should be name?
+

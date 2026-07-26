@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I do not know how to negate this type of value:
+
+6|     -"x"
+        ^^^
+It is a string of type:
+
+    String
+
+But I only now how to negate Int and Float values.
+
+Hint: Try using String.toInt to convert it to an integer?
+

@@ -1,0 +1,16 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+6|     n + 1
+       ^^^^^
+The body is:
+
+    Int
+
+But the type annotation on `bad` says it should be:
+
+    String
+
+Hint: Want to convert an Int into a String? Use the String.fromInt function!
+

@@ -1,5 +1,7 @@
 pub mod annotation;
+pub mod doc;
 pub mod syntax;
+pub mod type_error;
 
 pub use annotation::{Located, Position, Region};
 

@@ -1,0 +1,8 @@
+-- TOO MANY ARGS -------------------------------------------------- src/Main.elm
+
+The `greet` function expects 1 argument, but it got 2 instead.
+
+11|     greet "a" "b"
+        ^^^^^
+Are there any missing commas? Or missing parentheses?
+

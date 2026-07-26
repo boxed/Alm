@@ -351,14 +351,19 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         let checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
             errors
                 .into_iter()
-                .map(|e| {
-                    BuildError::new(
+                .map(|e| match e.report {
+                    Some(report) => BuildError::from_reports(
+                        source_module.path.clone(),
+                        source_module.source.clone(),
+                        vec![report],
+                    ),
+                    None => BuildError::new(
                         source_module.path.clone(),
                         source_module.source.clone(),
                         "TYPE MISMATCH",
                         e.region,
                         e.message,
-                    )
+                    ),
                 })
                 .collect::<Vec<_>>()
         })?;

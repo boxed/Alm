@@ -1,0 +1,34 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+6|     "a" :: [ 1, 2 ]
+       ^^^^^^^^^^^^^^^
+The body is:
+
+    List String
+
+But the type annotation on `bad` says it should be:
+
+    List Int
+
+Hint: Want to convert a String into an Int? Use the String.toInt function!
+
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I am having trouble with this (::) operator:
+
+6|     "a" :: [ 1, 2 ]
+       ^^^^^^^^^^^^^^^
+The left side of (::) is:
+
+    String
+
+But you are trying to put that into a list filled with:
+
+    number
+
+Lists need ALL elements to be the same type though.
+
+Hint: Try using String.toInt to convert it to an integer?
+

@@ -21,7 +21,33 @@ use types::{Content, FlatType, Pool, Super, Variable};
 pub struct Error {
     pub message: String,
     pub region: Region,
+    /// A report rendered the way `Reporting.Error.Type` does. Sites that have
+    /// been given elm's category and expectation build one; the rest still fall
+    /// back to `message`.
+    pub report: Option<crate::reporting::Report>,
 }
+
+impl Error {
+    fn plain(message: String, region: Region) -> Error {
+        Error { message, region, report: None }
+    }
+}
+
+/// Where an expectation came from, in elm's terms — enough to build the
+/// `Expected` that decides a report's wording. The expected *type* is filled in
+/// from the pool when a unification actually fails.
+#[derive(Debug, Clone)]
+pub enum Expect {
+    /// The definition's type annotation: name, arity, sub-context.
+    Annotation(Name, usize, TSubContext),
+    /// A surrounding expression: the region to show, and what it is.
+    Context(Region, TContext),
+}
+
+use crate::reporting::type_error::{
+    Category as TCategory, Context as TContext, ErrorType, Expected as TExpected,
+    MaybeName as TMaybeName, SubContext as TSubContext,
+};
 
 /// A polymorphic type. `free` maps type variable names that must NOT be
 /// re-instantiated (because they are shared with the enclosing scope) to
@@ -242,8 +268,17 @@ pub fn check_module(
             node_types: checker.node_types,
         })
     } else {
-        Err(checker.errors)
+        Err(sorted(checker.errors))
     }
+}
+
+/// Report errors in source order. elm's solver discovers them in constraint
+/// order — an enclosing expression's expectation after the sub-expressions it
+/// contains — but prints the enclosing one first, so ordering by where each
+/// error starts is what reproduces its output.
+fn sorted(mut errors: Vec<Error>) -> Vec<Error> {
+    errors.sort_by_key(|e| (e.region.start.row, e.region.start.col));
+    errors
 }
 
 type Infer<T> = Result<T, Error>;
@@ -488,8 +523,13 @@ impl Checker<'_> {
             // `let` binding that generalizes mid-body (e.g. `x = config.add`)
             // would capture an under-constrained parameter type and be
             // generalized too eagerly, producing spurious mismatches later.
+            // Peel one arrow per parameter; what is left is the type the body
+            // must have, which is what elm checks the body against (and what it
+            // names in "the type annotation on `f` says it should be").
+            let mut annotated_result = None;
             if let Some(expected) = expected {
                 let mut remaining = expected;
+                let mut peeled = 0;
                 for &arg_var in &arg_vars {
                     let root = self.pool.find(remaining);
                     match self.pool.content(root) {
@@ -501,23 +541,34 @@ impl Checker<'_> {
                                 )
                             })?;
                             remaining = result_type;
+                            peeled += 1;
                         }
                         _ => break,
                     }
                 }
+                if peeled == arg_vars.len() {
+                    annotated_result = Some(remaining);
+                }
             }
-            let body_var = self.infer_expr(&def.body)?;
+            let body_var = match annotated_result {
+                Some(result_var) => {
+                    self.check_annotated_body(&def.body, result_var, &def.name.value, arg_vars.len())?
+                }
+                None => self.infer_expr(&def.body)?,
+            };
             let mut def_type = body_var;
             for arg in arg_vars.into_iter().rev() {
                 def_type = self.pool.fresh(Content::Structure(FlatType::Fun(arg, def_type)));
             }
             if let Some(expected) = expected {
-                self.unify(expected, def_type, def.name.region, || {
-                    format!(
-                        "Something is off with the body of the `{}` definition",
-                        def.name.value
-                    )
-                })?;
+                if annotated_result.is_none() {
+                    self.unify(expected, def_type, def.name.region, || {
+                        format!(
+                            "Something is off with the body of the `{}` definition",
+                            def.name.value
+                        )
+                    })?;
+                }
             }
             // Record the definition's own (arg1 -> .. -> body) type at its name
             // region so monomorphization can recover a `let`-bound function's
@@ -617,6 +668,7 @@ impl Checker<'_> {
                             name
                         ),
                         region: Region::ZERO,
+                        report: None,
                     });
                     continue;
                 }
@@ -637,6 +689,7 @@ impl Checker<'_> {
                 self.errors.push(Error {
                     message: format!("This `effect module` is missing a `{fname}` definition."),
                     region: Region::ZERO,
+                    report: None,
                 });
             }
         }
@@ -1080,6 +1133,176 @@ impl Checker<'_> {
         result
     }
 
+
+    /// `Reporting.Error.Type.Category` — what kind of thing an expression is,
+    /// which decides how a report describes the type it found.
+    fn category_of(&self, expr: &can::Expr) -> TCategory {
+        use can::Expr_::*;
+        match &expr.value {
+            Str(_) => TCategory::String,
+            Chr(_) => TCategory::Char,
+            Int(_) => TCategory::Number,
+            Float(_) => TCategory::Float,
+            List(_) => TCategory::List,
+            Unit => TCategory::Unit,
+            Tuple(..) => TCategory::Tuple,
+            Record(_) | Update(..) => TCategory::Record,
+            Lambda(..) => TCategory::Lambda,
+            If(..) => TCategory::If,
+            Case(..) => TCategory::Case,
+            Accessor(field) => TCategory::Accessor(field.to_string()),
+            Access(_, field) => TCategory::Access(field.value.to_string()),
+            VarLocal(name) | VarTopLevel(name) => TCategory::Local(name.to_string()),
+            VarForeign(_, name) => TCategory::Foreign(name.to_string()),
+            VarCtor(_, _, ctor) => TCategory::Foreign(ctor.name.to_string()),
+            Call(func, _) => TCategory::CallResult(func_name(func)),
+            Binop(op, ..) => TCategory::CallResult(TMaybeName::OpName(op.to_string())),
+            Negate(_) => TCategory::Number,
+            Let(_, body) => self.category_of(body),
+            Shader(_) => TCategory::Unit,
+        }
+    }
+
+
+    /// Check an annotated definition's body against the annotation's result
+    /// type. elm pushes the expectation *into* an `if`/`case` so each branch is
+    /// blamed individually ("the 2nd branch of this `case` expression") rather
+    /// than the whole expression.
+    fn check_annotated_body(
+        &mut self,
+        body: &can::Expr,
+        expected: Variable,
+        name: &Name,
+        arity: usize,
+    ) -> Infer<Variable> {
+        match &body.value {
+            can::Expr_::If(branches, otherwise) => {
+                let bool_type = self.app("Basics", "Bool", vec![]);
+                for (index, (condition, branch)) in branches.iter().enumerate() {
+                    let cond_var = self.infer_expr(condition)?;
+                    self.unify_expr(
+                        bool_type,
+                        cond_var,
+                        condition.region,
+                        self.category_of(condition),
+                        Expect::Context(body.region, TContext::IfCondition),
+                    )?;
+                    let branch_var = self.infer_expr(branch)?;
+                    self.unify_expr(
+                        expected,
+                        branch_var,
+                        branch.region,
+                        self.category_of(branch),
+                        Expect::Annotation(
+                            name.clone(),
+                            arity,
+                            TSubContext::TypedIfBranch(index + 1),
+                        ),
+                    )?;
+                }
+                let else_var = self.infer_expr(otherwise)?;
+                self.unify_expr(
+                    expected,
+                    else_var,
+                    otherwise.region,
+                    self.category_of(otherwise),
+                    Expect::Annotation(
+                        name.clone(),
+                        arity,
+                        TSubContext::TypedIfBranch(branches.len() + 1),
+                    ),
+                )?;
+                Ok(expected)
+            }
+            can::Expr_::Case(scrutinee, branches) => {
+                let scrutinee_var = self.infer_expr(scrutinee)?;
+                for (index, (pattern, branch)) in branches.iter().enumerate() {
+                    self.scopes.push(HashMap::new());
+                    let result = (|this: &mut Self| {
+                        let pattern_var = this.infer_pattern(pattern)?;
+                        this.unify(scrutinee_var, pattern_var, pattern.region, || {
+                            "This pattern does not match the value being inspected".to_string()
+                        })?;
+                        let branch_var = this.infer_expr(branch)?;
+                        this.unify_expr(
+                            expected,
+                            branch_var,
+                            branch.region,
+                            this.category_of(branch),
+                            Expect::Annotation(
+                                name.clone(),
+                                arity,
+                                TSubContext::TypedCaseBranch(index + 1),
+                            ),
+                        )
+                    })(self);
+                    self.scopes.pop();
+                    result?;
+                }
+                Ok(expected)
+            }
+            _ => {
+                let body_var = self.infer_expr(body)?;
+                self.unify_expr(
+                    expected,
+                    body_var,
+                    body.region,
+                    self.category_of(body),
+                    Expect::Annotation(name.clone(), arity, TSubContext::TypedBody),
+                )?;
+                Ok(expected)
+            }
+        }
+    }
+
+
+    /// Split a function type into (parameter, result). If it is not (yet) known
+    /// to be a function, invent the two halves and tie them to it, so the
+    /// caller can constrain the parts independently.
+    fn peel_arrow(&mut self, func: Variable) -> (Variable, Variable) {
+        let root = self.pool.find(func);
+        if let Content::Structure(FlatType::Fun(arg, result)) = self.pool.content(root) {
+            return (arg, result);
+        }
+        let arg = self.pool.fresh_var();
+        let result = self.pool.fresh_var();
+        let arrow = self.pool.fresh(Content::Structure(FlatType::Fun(arg, result)));
+        let _ = self.pool.unify(func, arrow);
+        (arg, result)
+    }
+
+
+    /// How many arrows a type has at the top level.
+    fn arrow_arity(&mut self, var: Variable) -> usize {
+        let mut count = 0;
+        let mut current = var;
+        loop {
+            let root = self.pool.find(current);
+            match self.pool.content(root) {
+                Content::Structure(FlatType::Fun(_, result)) => {
+                    count += 1;
+                    current = result;
+                }
+                _ => return count,
+            }
+        }
+    }
+
+    /// Whether the type is concrete enough to say a call passes too many
+    /// arguments — an unresolved variable could still turn out to be a
+    /// function of any arity.
+    fn is_known_function(&mut self, var: Variable) -> bool {
+        let mut current = var;
+        loop {
+            let root = self.pool.find(current);
+            match self.pool.content(root) {
+                Content::Structure(FlatType::Fun(_, result)) => current = result,
+                Content::FlexVar(_) | Content::FlexSuper(..) | Content::Error => return false,
+                _ => return true,
+            }
+        }
+    }
+
     // UNIFICATION WRAPPER
 
     fn unify(
@@ -1098,15 +1321,64 @@ impl Checker<'_> {
                 let actual_str = self.pool.render(actual);
                 self.pool.set_content(expected, Content::Error);
                 self.pool.set_content(actual, Content::Error);
-                Err(Error {
-                    message: format!(
+                Err(Error::plain(
+                    format!(
                         "{}.\n\nI needed:\n\n    {}\n\nBut I found:\n\n    {}",
                         context(),
                         expected_str,
                         actual_str
                     ),
                     region,
-                })
+                ))
+            }
+        }
+    }
+
+    /// Unify with the information `Reporting.Error.Type` needs: what the actual
+    /// expression *is* (its category) and where the expectation came from. A
+    /// failure renders exactly as `elm make` renders it.
+    fn unify_expr(
+        &mut self,
+        expected: Variable,
+        actual: Variable,
+        actual_region: Region,
+        category: TCategory,
+        expect: Expect,
+    ) -> Infer<()> {
+        match self.pool.unify(expected, actual) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let mut names = types::ErrorTypeNames::new();
+                // Snapshot the *actual* side first so its unnamed variables get
+                // the earlier letters, as elm's naming does.
+                let actual_type = self.pool.to_error_type(actual, &mut names);
+                let expected_type = self.pool.to_error_type(expected, &mut names);
+                self.pool.set_content(expected, Content::Error);
+                self.pool.set_content(actual, Content::Error);
+                let expected = match expect {
+                    Expect::Annotation(name, arity, sub) => {
+                        TExpected::FromAnnotation(name.to_string(), arity, sub, expected_type)
+                    }
+                    Expect::Context(region, context) => {
+                        TExpected::FromContext(region, context, expected_type)
+                    }
+                };
+                let report = crate::reporting::type_error::to_expr_report(
+                    actual_region,
+                    &category,
+                    &actual_type,
+                    &expected,
+                );
+                // Both variables are now `Error`, which absorbs every later
+                // unification, so inference can carry on and report the rest of
+                // the definition's problems — as elm's solver does. Returning
+                // here instead would hide all but the first.
+                self.errors.push(Error {
+                    message: String::new(),
+                    region: actual_region,
+                    report: Some(report),
+                });
+                Ok(())
             }
         }
     }
@@ -1202,11 +1474,13 @@ impl Checker<'_> {
             .ok_or_else(|| Error {
                 message: format!("I cannot find the `{}` type.", union_name),
                 region,
+                report: None,
             })?;
         let vars = info.vars.clone();
         let arg_types = info.ctor_args.get(ctor_name).cloned().ok_or_else(|| Error {
             message: format!("The `{}` type has no `{}` constructor.", union_name, ctor_name),
             region,
+            report: None,
         })?;
 
         let mut substitutions: HashMap<Name, Variable> = HashMap::new();
@@ -1237,7 +1511,7 @@ impl Checker<'_> {
         op: &Name,
         home: &Name,
         function: &Name,
-        region: Region,
+                region: Region,
     ) -> Infer<Variable> {
         if let Some(value) = builtins::lookup_value(home.as_str(), function.as_str()) {
             let tipe = builtins::parse_signature(value.signature);
@@ -1264,6 +1538,7 @@ impl Checker<'_> {
         Err(Error {
             message: format!("I cannot find the function behind the `{}` operator.", op),
             region,
+            report: None,
         })
     }
 
@@ -1297,6 +1572,7 @@ impl Checker<'_> {
                 let binding = self.lookup(name).cloned().ok_or_else(|| Error {
                     message: format!("I cannot find a `{}` variable.", name),
                     region,
+                    report: None,
                 })?;
                 Ok(match binding {
                     Binding::Mono(var) => var,
@@ -1328,6 +1604,7 @@ impl Checker<'_> {
                         .ok_or_else(|| Error {
                             message: format!("I cannot find `{}.{}`.", module, name),
                             region,
+                            report: None,
                         })?,
                 };
                 Ok(self.instantiate(&Scheme::closed(tipe)))
@@ -1343,36 +1620,53 @@ impl Checker<'_> {
             }
             List(items) => {
                 let elem = self.pool.fresh_var();
-                for item in items {
+                for (index, item) in items.iter().enumerate() {
                     let item_var = self.infer_expr(item)?;
-                    self.unify(elem, item_var, item.region, || {
-                        "All entries of a list must have the same type".to_string()
-                    })?;
+                    self.unify_expr(
+                        elem,
+                        item_var,
+                        item.region,
+                        self.category_of(item),
+                        Expect::Context(region, TContext::ListEntry(index + 1)),
+                    )?;
                 }
                 Ok(self.app("List", "List", vec![elem]))
             }
             Negate(inner) => {
                 let inner_var = self.infer_expr(inner)?;
                 let number = self.pool.fresh(Content::FlexSuper(Super::Number, None));
-                self.unify(number, inner_var, inner.region, || {
-                    "I can only negate Int and Float values".to_string()
-                })?;
+                self.unify_expr(
+                    number,
+                    inner_var,
+                    inner.region,
+                    self.category_of(inner),
+                    Expect::Context(region, TContext::Negate),
+                )?;
                 Ok(number)
             }
             Binop(op, home, function, left, right) => {
+                // elm blames one operand at a time, so peel the operator's own
+                // type rather than unifying a whole `l -> r -> res` against it:
+                // that lets a failure say which side is at fault.
                 let func_var = self.binop_function_type(op, home, function, region)?;
+                let (left_param, rest) = self.peel_arrow(func_var);
+                let (right_param, result) = self.peel_arrow(rest);
                 let left_var = self.infer_expr(left)?;
+                self.unify_expr(
+                    left_param,
+                    left_var,
+                    left.region,
+                    self.category_of(left),
+                    Expect::Context(region, TContext::OpLeft(op.to_string())),
+                )?;
                 let right_var = self.infer_expr(right)?;
-                let result = self.pool.fresh_var();
-                let expected_right = self
-                    .pool
-                    .fresh(Content::Structure(FlatType::Fun(right_var, result)));
-                let expected = self
-                    .pool
-                    .fresh(Content::Structure(FlatType::Fun(left_var, expected_right)));
-                self.unify(func_var, expected, region, || {
-                    format!("The arguments to the `{}` operator are off", op)
-                })?;
+                self.unify_expr(
+                    right_param,
+                    right_var,
+                    right.region,
+                    self.category_of(right),
+                    Expect::Context(region, TContext::OpRight(op.to_string())),
+                )?;
                 Ok(result)
             }
             Lambda(args, body) => {
@@ -1393,22 +1687,45 @@ impl Checker<'_> {
                 result
             }
             Call(func, args) => {
+                // Check the arguments left to right against the function's own
+                // parameter types, as elm does, so a failure can name which
+                // argument is wrong instead of blaming the whole call.
                 let func_var = self.infer_expr(func)?;
-                let mut arg_vars = Vec::new();
-                for arg in args {
-                    arg_vars.push(self.infer_expr(arg)?);
+                let name = func_name(func);
+                let arity = self.arrow_arity(func_var);
+                if arity < args.len() && self.is_known_function(func_var) {
+                    let mut names = types::ErrorTypeNames::new();
+                    let actual_type = self.pool.to_error_type(func_var, &mut names);
+                    let report = crate::reporting::type_error::to_expr_report(
+                        func.region,
+                        &self.category_of(func),
+                        &actual_type,
+                        &TExpected::FromContext(
+                            region,
+                            TContext::CallArity(name, args.len()),
+                            actual_type.clone(),
+                        ),
+                    );
+                    return Err(Error {
+                        message: String::new(),
+                        region: func.region,
+                        report: Some(report),
+                    });
                 }
-                let result = self.pool.fresh_var();
-                let mut expected = result;
-                for arg in arg_vars.into_iter().rev() {
-                    expected = self
-                        .pool
-                        .fresh(Content::Structure(FlatType::Fun(arg, expected)));
+                let mut remaining = func_var;
+                for (index, arg) in args.iter().enumerate() {
+                    let (param, result) = self.peel_arrow(remaining);
+                    let arg_var = self.infer_expr(arg)?;
+                    self.unify_expr(
+                        param,
+                        arg_var,
+                        arg.region,
+                        self.category_of(arg),
+                        Expect::Context(region, TContext::CallArg(name.clone(), index + 1)),
+                    )?;
+                    remaining = result;
                 }
-                self.unify(func_var, expected, region, || {
-                    "This function call has a problem".to_string()
-                })?;
-                Ok(result)
+                Ok(remaining)
             }
             If(branches, otherwise) => {
                 let result = self.pool.fresh_var();
@@ -1680,5 +1997,17 @@ impl GeneralizeState {
                 Name::from(name)
             }
         }
+    }
+}
+
+/// `Reporting.Error.Type.MaybeName` for the function in a call.
+fn func_name(func: &can::Expr) -> TMaybeName {
+    use can::Expr_::*;
+    match &func.value {
+        VarLocal(name) | VarTopLevel(name) | VarForeign(_, name) => {
+            TMaybeName::FuncName(name.to_string())
+        }
+        VarCtor(_, _, ctor) => TMaybeName::CtorName(ctor.name.to_string()),
+        _ => TMaybeName::NoName,
     }
 }

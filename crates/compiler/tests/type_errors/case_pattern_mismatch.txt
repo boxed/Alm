@@ -1,0 +1,23 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The 1st pattern in this `case` causing a mismatch:
+
+ 6|     case n of
+ 7|>        "x" ->
+ 8|             1
+ 9| 
+10|         _ ->
+11|             2
+
+The first pattern is trying to match strings:
+
+    String
+
+But the expression between `case` and `of` is:
+
+    Int
+
+Hint: Want to convert a String into an Int? Use the String.toInt function!
+
+These can never match! Is the pattern the problem? Or is it the expression?
+

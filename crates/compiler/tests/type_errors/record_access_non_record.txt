@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+This is not a record, so it has no fields to access!
+
+6|     (5).name
+        ^
+It is a number of type:
+
+    number
+
+But I need a record with a name field!
+
+Hint: Only Int and Float values work as numbers.
+

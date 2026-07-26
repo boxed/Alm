@@ -1,0 +1,18 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+Something is off with the body of the `bad` definition:
+
+6|     5.5
+       ^^^
+The body is a float of type:
+
+    Float
+
+But the type annotation on `bad` says it should be:
+
+    Int
+
+Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats. Use toFloat and round to do explicit
+conversions.
+
