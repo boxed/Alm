@@ -3551,6 +3551,12 @@ const TT_NOW: u32 = 5;
 const TT_SEND_APP: u32 = 6;
 const TT_SEND_SELF: u32 = 7;
 const TT_SPAWN: u32 = 8;
+/// `Elm.Kernel.Time.setInterval interval task`: a task that, when spawned,
+/// registers a repeating timer firing `task` every `interval` ms. Never
+/// completes; cancellable via `Process.kill` (see `run_task`).
+const TT_SET_INTERVAL: u32 = 9;
+/// `Process.kill processId`: stop the timer the process's binding registered.
+const TT_KILL: u32 = 10;
 
 /// Effect-manager leaf (`command`/`subscription` value). A distinct ctor tag
 /// shared by the Cmd and Sub bag walkers so it never collides with a `CT_`/`ST_`
@@ -3570,7 +3576,6 @@ const CT_RELOAD: u32 = 8;
 const ST_NONE: u32 = 0;
 const ST_BATCH: u32 = 1;
 const ST_MAP: u32 = 2;
-const ST_TIME: u32 = 3;
 const ST_PORT: u32 = 4;
 const ST_DOM: u32 = 5;
 const ST_ANIM: u32 = 6;
@@ -3589,10 +3594,6 @@ unsafe fn closure(func: *const (), arity: i32, caps: &[u64]) -> u64 {
         caps.as_ptr()
     };
     rt_closure(func, arity, caps.len() as i32, ptr)
-}
-
-unsafe fn time_posix(ms: f64) -> u64 {
-    ctor(b"Posix\0".as_ptr(), 0, vec![rt_int(ms as i64)])
 }
 
 // Task constructors.
@@ -3677,111 +3678,27 @@ pub unsafe extern "C" fn process_sleep(ms: u64) -> u64 {
     ctor(b"TaskSleep\0".as_ptr(), TT_SLEEP, vec![ms])
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn time_every(interval: u64, to_msg: u64) -> u64 {
-    ctor(b"SubTime\0".as_ptr(), ST_TIME, vec![interval, to_msg])
+// Time kernel primitives (`Elm.Kernel.Time.*`). Posix/Zone/Month/Weekday and
+// all calendar math now come from the bundled Time effect module
+// (builtin_src/Time.elm); only these four are kernel. `now` builds the source
+// ctor rep by applying the module's own `millisToPosix` to the current clock,
+// deferred through a `TaskNow` task so the memoized `Time.now` CAF still reads
+// the clock afresh on each run. `here`/`getZoneName` yield UTC (offset 0 —
+// native has no host-timezone facility). `setInterval` is a cancellable
+// repeating timer (registered/killed in `run_task`, fired by the event loop).
+unsafe extern "C" fn kernel_time_now(millis_to_posix: u64) -> u64 {
+    ctor(b"TaskNow\0".as_ptr(), TT_NOW, vec![millis_to_posix])
 }
-unsafe extern "C" fn time_millis_to_posix(n: u64) -> u64 {
-    ctor(b"Posix\0".as_ptr(), 0, vec![n])
+unsafe extern "C" fn kernel_time_here(_unit: u64) -> u64 {
+    // Zone = Zone Int (List Era); UTC has offset 0 and no eras.
+    task_succeed(ctor(b"Zone\0".as_ptr(), 0, vec![rt_int(0), nil()]))
 }
-unsafe extern "C" fn time_posix_to_millis(p: u64) -> u64 {
-    rt_ctor_arg(p, 0)
+unsafe extern "C" fn kernel_time_get_zone_name(_unit: u64) -> u64 {
+    // ZoneName = Name String | Offset Int; report a 0-minute offset.
+    task_succeed(ctor(b"Offset\0".as_ptr(), 1, vec![rt_int(0)]))
 }
-
-// Time civil-date math — a port of elm/time's Elm.Kernel.Time / Time.elm.
-// `Zone` is `Zone Int (List { start : Int, offset : Int })`; `Posix` is
-// `Posix Int` (milliseconds).
-
-/// `Math.floor(n / d)`; every divisor here is positive so div_euclid is floor.
-fn time_floored_div(n: i64, d: i64) -> i64 {
-    n.div_euclid(d)
-}
-
-struct Civil {
-    year: i64,
-    month: i64,
-    day: i64,
-}
-// Ported verbatim from _Time_toCivil; JS `| 0` is truncation toward zero,
-// which Rust integer `/` matches for the non-negative operands used here.
-fn time_to_civil(minutes: i64) -> Civil {
-    let raw_day = time_floored_div(minutes, 1440) + 719468;
-    let era = (if raw_day >= 0 { raw_day } else { raw_day - 146096 }) / 146097;
-    let day_of_era = raw_day - era * 146097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    Civil {
-        year: year + if month <= 2 { 1 } else { 0 },
-        month,
-        day: day_of_year - (153 * mp + 2) / 5 + 1,
-    }
-}
-
-unsafe fn time_adjusted_minutes(zone: u64, posix: u64) -> i64 {
-    let ms = int_val(rt_ctor_arg(posix, 0));
-    let posix_minutes = time_floored_div(ms, 60000);
-    // First era whose start is before now wins; otherwise the base offset.
-    for era in to_vec(rt_ctor_arg(zone, 1)) {
-        let start = int_val(rt_access(era, b"start\0".as_ptr()));
-        if start < posix_minutes {
-            return posix_minutes + int_val(rt_access(era, b"offset\0".as_ptr()));
-        }
-    }
-    posix_minutes + int_val(rt_ctor_arg(zone, 0))
-}
-
-unsafe extern "C" fn time_custom_zone(offset: u64, eras: u64) -> u64 {
-    ctor(b"Zone\0".as_ptr(), 0, vec![offset, eras])
-}
-unsafe extern "C" fn time_to_year(zone: u64, posix: u64) -> u64 {
-    rt_int(time_to_civil(time_adjusted_minutes(zone, posix)).year)
-}
-unsafe extern "C" fn time_to_month(zone: u64, posix: u64) -> u64 {
-    // Month = Jan | Feb | .. | Dec (indices 0..11); civil month is 1..12.
-    const NAMES: [&[u8]; 12] = [
-        b"Jan\0", b"Feb\0", b"Mar\0", b"Apr\0", b"May\0", b"Jun\0", b"Jul\0", b"Aug\0", b"Sep\0",
-        b"Oct\0", b"Nov\0", b"Dec\0",
-    ];
-    let idx = (time_to_civil(time_adjusted_minutes(zone, posix)).month - 1) as u32;
-    ctor(NAMES[idx as usize].as_ptr(), idx, Vec::new())
-}
-unsafe extern "C" fn time_to_day(zone: u64, posix: u64) -> u64 {
-    rt_int(time_to_civil(time_adjusted_minutes(zone, posix)).day)
-}
-unsafe extern "C" fn time_to_hour(zone: u64, posix: u64) -> u64 {
-    rt_int(time_floored_div(time_adjusted_minutes(zone, posix), 60).rem_euclid(24))
-}
-unsafe extern "C" fn time_to_minute(zone: u64, posix: u64) -> u64 {
-    rt_int(time_adjusted_minutes(zone, posix).rem_euclid(60))
-}
-unsafe extern "C" fn time_to_second(_zone: u64, posix: u64) -> u64 {
-    let ms = int_val(rt_ctor_arg(posix, 0));
-    rt_int(time_floored_div(ms, 1000).rem_euclid(60))
-}
-unsafe extern "C" fn time_to_millis(_zone: u64, posix: u64) -> u64 {
-    rt_int(int_val(rt_ctor_arg(posix, 0)).rem_euclid(1000))
-}
-unsafe extern "C" fn time_to_weekday(zone: u64, posix: u64) -> u64 {
-    // JS indexes ['Thu','Fri','Sat','Sun','Mon','Tue','Wed'] by
-    // modBy 7 (flooredDiv adjMinutes 1440); map each to the elm Weekday index
-    // (Mon | Tue | Wed | Thu | Fri | Sat | Sun == 0..6).
-    const TABLE: [(&[u8], u32); 7] = [
-        (b"Thu\0", 3),
-        (b"Fri\0", 4),
-        (b"Sat\0", 5),
-        (b"Sun\0", 6),
-        (b"Mon\0", 0),
-        (b"Tue\0", 1),
-        (b"Wed\0", 2),
-    ];
-    let adj = time_adjusted_minutes(zone, posix);
-    let wi = time_floored_div(adj, 1440).rem_euclid(7) as usize;
-    let (name, idx) = TABLE[wi];
-    ctor(name.as_ptr(), idx, Vec::new())
+unsafe extern "C" fn kernel_time_set_interval(interval: u64, task: u64) -> u64 {
+    ctor(b"SetInterval\0".as_ptr(), TT_SET_INTERVAL, vec![interval, task])
 }
 
 #[no_mangle]
@@ -9736,18 +9653,10 @@ kernel_fns! {
 
     G_PROCESS_SLEEP "$Process$sleep" process_sleep, 1;
 
-    G_TIME_EVERY "$Time$every" time_every, 2;
-    G_TIME_MILLISTOPOSIX "$Time$millisToPosix" time_millis_to_posix, 1;
-    G_TIME_POSIXTOMILLIS "$Time$posixToMillis" time_posix_to_millis, 1;
-    G_TIME_CUSTOMZONE "$Time$customZone" time_custom_zone, 2;
-    G_TIME_TOYEAR "$Time$toYear" time_to_year, 2;
-    G_TIME_TOMONTH "$Time$toMonth" time_to_month, 2;
-    G_TIME_TODAY "$Time$toDay" time_to_day, 2;
-    G_TIME_TOWEEKDAY "$Time$toWeekday" time_to_weekday, 2;
-    G_TIME_TOHOUR "$Time$toHour" time_to_hour, 2;
-    G_TIME_TOMINUTE "$Time$toMinute" time_to_minute, 2;
-    G_TIME_TOSECOND "$Time$toSecond" time_to_second, 2;
-    G_TIME_TOMILLIS "$Time$toMillis" time_to_millis, 2;
+    G_KTIME_NOW "$Elm$Kernel$Time$now" kernel_time_now, 1;
+    G_KTIME_HERE "$Elm$Kernel$Time$here" kernel_time_here, 1;
+    G_KTIME_GETZONENAME "$Elm$Kernel$Time$getZoneName" kernel_time_get_zone_name, 1;
+    G_KTIME_SETINTERVAL "$Elm$Kernel$Time$setInterval" kernel_time_set_interval, 2;
 
     G_PLATFORM_WORKER "$Platform$worker" platform_worker, 1;
     G_PLATFORM_SEND_TO_APP "$Platform$sendToApp" platform_send_to_app, 2;
@@ -9938,9 +9847,6 @@ kernel_fns! {
 kernel_vals! {
     G_BASICS_PI "$Basics$pi";
     G_BASICS_E "$Basics$e";
-    G_TIME_NOW "$Time$now";
-    G_TIME_UTC "$Time$utc";
-    G_TIME_HERE "$Time$here";
     G_PLATFORM_CMD_NONE "$Platform$Cmd$none";
     G_PLATFORM_SUB_NONE "$Platform$Sub$none";
     G_DICT_EMPTY "$Dict$empty";
@@ -10076,10 +9982,6 @@ unsafe fn runtime_init() {
 
     G_BASICS_PI.set(rt_float(std::f64::consts::PI));
     G_BASICS_E.set(rt_float(std::f64::consts::E));
-    G_TIME_NOW.set(ctor(b"TaskNow\0".as_ptr(), TT_NOW, Vec::new()));
-    let utc = ctor(b"Zone\0".as_ptr(), 0, vec![rt_int(0), nil()]);
-    G_TIME_UTC.set(utc);
-    G_TIME_HERE.set(task_succeed(utc));
     G_PLATFORM_CMD_NONE.set(ctor(b"CmdNone\0".as_ptr(), CT_NONE, Vec::new()));
     G_PLATFORM_SUB_NONE.set(ctor(b"SubNone\0".as_ptr(), ST_NONE, Vec::new()));
     G_DICT_EMPTY.set(alloc(Value::Dict(0)));
@@ -10142,18 +10044,29 @@ enum Sink {
     Discard,
 }
 
-struct SubTimer {
+/// A repeating timer created by `Elm.Kernel.Time.setInterval` (via
+/// `Process.spawn`). Fires `task` (a `Task Never ()`, typically a `sendToSelf`
+/// to the Time manager) every `interval` ms until `Process.kill` clears `alive`.
+struct IntervalTimer {
+    id: u64,
     fire_at: f64,
     interval: f64,
-    to_msg: u64,
-    tagger: u64,
+    task: u64,
+    alive: bool,
 }
 
 static mut TEA_MODEL: u64 = 0u64;
 static mut TEA_UPDATE: u64 = 0u64;
 static mut TEA_SUBSCRIPTIONS: u64 = 0u64;
 static mut PENDING: Vec<Pending> = Vec::new();
-static mut TIMERS: Vec<SubTimer> = Vec::new();
+static mut TIMERS: Vec<IntervalTimer> = Vec::new();
+/// Monotonic id handed out to each `setInterval` timer; a `ProcessId` carries
+/// this id so `Process.kill` can find and stop the timer.
+static mut NEXT_TIMER_ID: u64 = 1;
+/// The canceller id produced by the most recent `setInterval` binding, read by
+/// `Process.spawn` (TT_SPAWN) immediately after running the spawned task. A raw
+/// counter (0 = "no canceller"), not a heap value, so it needs no GC rooting.
+static mut LAST_CANCELLER: u64 = 0;
 
 fn now_ms() -> f64 {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -10250,8 +10163,8 @@ unsafe extern "C" fn platform_send_to_self(router: u64, msg: u64) -> u64 {
 unsafe extern "C" fn process_spawn(task: u64) -> u64 {
     ctor(b"Spawn\0".as_ptr(), TT_SPAWN, vec![task])
 }
-unsafe extern "C" fn process_kill(_id: u64) -> u64 {
-    task_succeed(unit())
+unsafe extern "C" fn process_kill(id: u64) -> u64 {
+    ctor(b"Kill\0".as_ptr(), TT_KILL, vec![id])
 }
 
 /// Create the manager processes and run each `init` to its initial state. Run
@@ -10440,7 +10353,12 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, sink: Sink) {
                 });
                 return;
             }
-            TT_NOW => task = task_succeed(time_posix(now_ms())),
+            TT_NOW => {
+                // `Elm.Kernel.Time.now millisToPosix`: apply the source's
+                // `millisToPosix` (carried in arg0) to the current clock.
+                let f = rt_ctor_arg(task, 0);
+                task = task_succeed(ap1(f, rt_int(now_ms() as i64)));
+            }
             TT_SEND_APP => {
                 tea_dispatch(rt_ctor_arg(task, 0));
                 task = task_succeed(unit());
@@ -10452,8 +10370,52 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, sink: Sink) {
                 task = task_succeed(unit());
             }
             TT_SPAWN => {
+                // Run the spawned task; a `setInterval` binding registers a
+                // timer and stashes its canceller id in LAST_CANCELLER (0 = the
+                // task carried no canceller). Capture it on the ProcessId so
+                // `Process.kill` can stop the timer later. Mirrors the JS
+                // `$Process$spawn` capturing `_Task_fork`'s return.
+                LAST_CANCELLER = 0;
                 run_task(rt_ctor_arg(task, 0), Vec::new(), Sink::Discard);
-                task = task_succeed(ctor(b"ProcessId\0".as_ptr(), 0, Vec::new()));
+                let canceller = LAST_CANCELLER;
+                LAST_CANCELLER = 0;
+                task = task_succeed(ctor(
+                    b"ProcessId\0".as_ptr(),
+                    0,
+                    vec![rt_int(canceller as i64)],
+                ));
+            }
+            TT_SET_INTERVAL => {
+                // Register a repeating timer and record its canceller id. The
+                // task never completes (like the JS setInterval fork, which
+                // returns the canceller without calling `ok`), so stop here.
+                let interval = num(rt_ctor_arg(task, 0));
+                let tick = rt_ctor_arg(task, 1);
+                let id = NEXT_TIMER_ID;
+                NEXT_TIMER_ID += 1;
+                TIMERS.push(IntervalTimer {
+                    id,
+                    fire_at: now_ms() + interval,
+                    interval,
+                    task: tick,
+                    alive: true,
+                });
+                LAST_CANCELLER = id;
+                return;
+            }
+            TT_KILL => {
+                // `Process.kill processId`: stop the timer the process's binding
+                // registered (a no-op for processes with no canceller).
+                let pid = rt_ctor_arg(task, 0);
+                let canceller = int_val(rt_ctor_arg(pid, 0)) as u64;
+                if canceller != 0 {
+                    for t in TIMERS.iter_mut() {
+                        if t.id == canceller {
+                            t.alive = false;
+                        }
+                    }
+                }
+                task = task_succeed(unit());
             }
             _ => crash!("unknown task"),
         }
@@ -10477,44 +10439,15 @@ unsafe fn run_cmd(cmd: u64, tagger: u64) {
     }
 }
 
-unsafe fn collect_subs(sub: u64, tagger: u64) {
-    match ctor_index(sub) {
-        ST_NONE => {}
-        ST_BATCH => {
-            for s in to_vec(rt_ctor_arg(sub, 0)) {
-                collect_subs(s, tagger);
-            }
-        }
-        ST_MAP => collect_subs(rt_ctor_arg(sub, 1), tagger_compose(tagger, rt_ctor_arg(sub, 0))),
-        ST_TIME => {
-            let interval = num(rt_ctor_arg(sub, 0));
-            TIMERS.push(SubTimer {
-                fire_at: now_ms() + interval,
-                interval,
-                to_msg: rt_ctor_arg(sub, 1),
-                tagger,
-            });
-        }
-        // Effect-manager leaves are handled by enqueue_manager_effects.
-        LEAF => {}
-        _ => crash!("unknown subscription"),
-    }
-}
-
-/// Re-collect subscriptions after every dispatch (this also restarts the
-/// interval timers), matching the JS runtime.
-unsafe fn update_subs() {
-    TIMERS.clear();
-    collect_subs(ap1(TEA_SUBSCRIPTIONS, TEA_MODEL), identity());
-}
-
 unsafe fn tea_dispatch(msg: u64) {
     let next = ap2(TEA_UPDATE, msg, TEA_MODEL);
     TEA_MODEL = rt_tuple_item(next, 0);
     let cmd = rt_tuple_item(next, 1);
     run_cmd(cmd, identity());
+    // `Time.every` and every other subscription is now handled by its effect
+    // manager: onEffects diffs the sub set and spawns/kills `setInterval`
+    // timers, so there is no per-dispatch sub reconciliation here.
     enqueue_manager_effects(cmd, ap1(TEA_SUBSCRIPTIONS, TEA_MODEL));
-    update_subs();
 }
 
 unsafe fn tea_run(impl_: u64) {
@@ -10527,21 +10460,25 @@ unsafe fn tea_run(impl_: u64) {
     // Start the effect managers and deliver their first batch of effects.
     instantiate_managers();
     enqueue_manager_effects(initial_cmd, ap1(TEA_SUBSCRIPTIONS, TEA_MODEL));
-    update_subs();
 
     loop {
         let now = now_ms();
 
-        // Fire one due pending task, then rescan (a dispatch rebuilds the
-        // timers).
+        // Fire one due pending task first.
         if let Some(i) = PENDING.iter().position(|p| p.fire_at <= now) {
             let p = PENDING.remove(i);
             run_task(p.task, p.frames, p.sink);
             continue;
         }
+        // Drop cancelled interval timers, then fire one that is due, running
+        // its task (typically a `sendToSelf` into the Time manager) and
+        // rescheduling it. Read the fields BEFORE running the task, since the
+        // task may reentrantly spawn/kill timers (mutating TIMERS).
+        TIMERS.retain(|t| t.alive);
         if let Some(i) = TIMERS.iter().position(|t| t.fire_at <= now) {
-            let (to_msg, tagger) = (TIMERS[i].to_msg, TIMERS[i].tagger);
-            tea_dispatch(ap1(tagger, ap1(to_msg, time_posix(now))));
+            let task = TIMERS[i].task;
+            TIMERS[i].fire_at = now + TIMERS[i].interval;
+            run_task(task, Vec::new(), Sink::Discard);
             continue;
         }
 

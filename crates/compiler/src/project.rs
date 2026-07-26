@@ -699,6 +699,70 @@ fn user_imports(module: &src::Module) -> Vec<Name> {
         .collect()
 }
 
+/// Effect-module packages (Time/Random/Http) that alm compiles from a thin
+/// source bundled with the compiler rather than from a builtin shim or the
+/// `~/.elm` cache. Their pure helpers delegate to `Elm.Kernel.*` intrinsics; the
+/// effect part is a real `effect module` manager driven by `_Platform`.
+fn bundled_source(name: &str) -> Option<&'static str> {
+    match name {
+        "Time" => Some(include_str!("builtin_src/Time.elm")),
+        _ => None,
+    }
+}
+
+/// Load a bundled effect-module source into the module graph under a synthetic
+/// key, recursing into any other bundled modules it imports (e.g. Random → Time).
+fn load_bundled_module(
+    name: &Name,
+    source: &'static str,
+    scopes: &Scopes,
+    modules: &mut HashMap<PathBuf, LoadedModule>,
+) -> Result<PathBuf, BuildError> {
+    let key = PathBuf::from(format!("<builtin>/{}.elm", name.as_str().replace('.', "/")));
+    if modules.contains_key(&key) {
+        return Ok(key);
+    }
+    let module = parse::parse_module_typed(source, true).map_err(|e| match e.syntax {
+        Some(se) => BuildError::from_reports(key.clone(), source.to_string(), vec![se.to_report()]),
+        None => BuildError::new(key.clone(), source.to_string(), "SYNTAX PROBLEM", e.region, e.message),
+    })?;
+    let declared_name = module.get_name();
+    let import_names = user_imports(&module);
+    modules.insert(
+        key.clone(),
+        LoadedModule {
+            path: key.clone(),
+            source: source.to_string(),
+            module,
+            declared_name,
+            imports: Vec::new(),
+        },
+    );
+    let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
+    for import in import_names {
+        if let Some(bsrc) = bundled_source(import.as_str()) {
+            let child = load_bundled_module(&import, bsrc, scopes, modules)?;
+            resolved.push((import, child));
+        } else {
+            let (import_path, matched_dir) =
+                find_module_file(&import, &scopes.app_search).ok_or_else(|| {
+                    BuildError::new(
+                        key.clone(),
+                        source.to_string(),
+                        "MODULE NOT FOUND",
+                        Region::ZERO,
+                        format!("The bundled `{name}` module imports `{import}`, but I cannot find it."),
+                    )
+                })?;
+            let child_search = scopes.search_for(&matched_dir);
+            let child = load_module_file(&import_path, child_search, scopes, modules)?;
+            resolved.push((import, child));
+        }
+    }
+    modules.get_mut(&key).unwrap().imports = resolved;
+    Ok(key)
+}
+
 /// Parse a module file and recursively load everything it imports, resolving
 /// each import within `search_dirs` (this module's package scope). Returns the
 /// module's canonical file-path key.
@@ -754,6 +818,11 @@ fn load_module_file(
 
     let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
     for import in import_names {
+        if let Some(bsrc) = bundled_source(import.as_str()) {
+            let child_key = load_bundled_module(&import, bsrc, scopes, modules)?;
+            resolved.push((import, child_key));
+            continue;
+        }
         let (import_path, matched_dir) =
             find_module_file(&import, search_dirs).ok_or_else(|| {
                 BuildError::new(

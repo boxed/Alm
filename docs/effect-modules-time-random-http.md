@@ -89,6 +89,12 @@ Seed/Generator; Http.Error/Body/Expect/Progress/Response/Metadata/Header/Part.
 ## Milestones (each = all 3 backends + differential test + commit)
 1. **Time** — bundled Time.elm, Elm.Kernel.Time prims (now/here/setInterval/
    getZoneName + calendar), Process cancellation, remove SubTime dispatch.
+   STATUS: DONE on all 3 backends (JS/native/wasm-gc). `Time.every` fires through
+   the manager and unsubscribe cancels the timer (no leak) on every backend;
+   full suite green. Task cancellation (`Process.spawn`/`kill`) added to all three
+   schedulers. Old `SubTime`/`ST_TIME` dispatch + calendar intrinsics removed.
+   Single-module `compile` API can't host effect modules → Time-using single-
+   module tests routed through the project path (`compile_via_project`).
 2. **Random** — bundled Random.elm (init depends on Time.now), Elm.Kernel.Random
    backing for generators/step/seed, remove CmdRandom dispatch.
 3. **Http** — bundled Http.elm, Elm.Kernel.Http prims (toTask/expect/…), remove

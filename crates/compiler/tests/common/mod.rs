@@ -70,6 +70,32 @@ pub fn compile_single_no_dce(file_name: &str, source: &str) -> String {
     unwrap_compiled(file_name, source, alm_compiler::compile_no_dce(source))
 }
 
+/// Compile `source` (declaring `module <module_name>`) through the full project
+/// pipeline, returning JS. Needed for modules that import a bundled effect
+/// module (Time/Random/Http), whose source is injected only on the project path
+/// (`check_project`), not the single-module `compile` API.
+pub fn compile_via_project(module_name: &str, source: &str) -> String {
+    let dir = test_dir("proj-compile", module_name);
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"], "elm-version": "0.19.1",
+            "dependencies": { "direct": { "elm/core": "1.0.5" }, "indirect": {} },
+            "test-dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    let entry = src.join(format!("{module_name}.elm"));
+    std::fs::write(&entry, source).unwrap();
+    match alm_compiler::project::check_project(&entry) {
+        Ok(checked) => alm_compiler::generate::generate_project(&checked.modules),
+        Err(errors) => panic!(
+            "project compilation failed:\n{}",
+            errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+        ),
+    }
+}
+
 fn unwrap_compiled(
     file_name: &str,
     source: &str,

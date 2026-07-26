@@ -179,9 +179,13 @@ function start(wasmPath, doc, clock) {
     },
     host_set_title: (p, l) => { doc.title = str(p, l); },
     host_http: (up, ul, reqId) => { parkedHttp.push({ reqId, url: str(up, ul) }); },
-    host_clear_timers: () => { timerIds.forEach((id) => clock.clearInterval(id)); timerIds = []; },
+    host_clear_timers: () => { timerIds.forEach((id) => id != null && clock.clearInterval(id)); timerIds = []; },
     host_set_interval: (ms, slot) => {
-      timerIds.push(clock.setInterval(() => instance.exports.alm_tick(slot, clock.now()), ms));
+      // Index by slot so Process.kill (host_clear_interval) can cancel one timer.
+      timerIds[slot] = clock.setInterval(() => instance.exports.alm_tick(slot, clock.now()), ms);
+    },
+    host_clear_interval: (slot) => {
+      if (timerIds[slot] != null) { clock.clearInterval(timerIds[slot]); timerIds[slot] = null; }
     },
     host_set_timeout: (ms, slot) => {
       clock.setTimeout(() => instance.exports.alm_task_resume(slot), ms);

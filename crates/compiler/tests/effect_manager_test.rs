@@ -318,3 +318,94 @@ fn subscription_reaches_the_app_wasmgc() {
         "sub-ok"
     );
 }
+
+// --- Time.every through the bundled Time effect module (wasm-gc) -------------
+
+// Like WASMGC_PORT_RUNNER, but drives a deterministic virtual clock: host_now
+// reads it, host_set_interval registers a per-slot repeating timer (Process.kill
+// -> host_clear_interval cancels one), and alm_tick fires. After start it
+// advances the clock by 1000ms, firing due timers, and prints the comma-joined
+// port output. A leaked (not-killed) timer would keep firing and change output.
+const WASMGC_CLOCK_RUNNER: &str = r#"
+let mem;
+const clock = { now: 0, iv: {} };
+const out = [];
+const HM = { math_sin:Math.sin,math_cos:Math.cos,math_tan:Math.tan,math_asin:Math.asin,math_acos:Math.acos,math_atan:Math.atan,math_log:Math.log,math_atan2:Math.atan2,math_pow:Math.pow,
+  host_now: () => clock.now,
+  host_ftoa:(x,o)=>{const b=Buffer.from(String(x));new Uint8Array(mem.buffer,o,b.length).set(b);return b.length;},
+  host_atof:(p,l,o)=>{const s=Buffer.from(new Uint8Array(mem.buffer,p,l)).toString();if(s.length===0)return 0;const n=+s;if(n!==n)return 0;new DataView(mem.buffer).setFloat64(o,n,true);return 1;},
+  host_set_interval:(ms,slot)=>{ clock.iv[slot]={every:ms,next:clock.now+ms}; },
+  host_clear_interval:(slot)=>{ delete clock.iv[slot]; },
+  host_port_out:(np,nl,jp,jl)=>{ out.push(JSON.parse(Buffer.from(new Uint8Array(mem.buffer,jp,jl)).toString())); } };
+const fs = require('fs');
+const bytes = fs.readFileSync(process.argv[2]);
+const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {env:new Proxy(HM,{get:(t,k)=>t[k]||(()=>0)})});
+mem = instance.exports.memory;
+instance.exports.alm_browser_start();
+const target = 1000;
+for (;;) {
+  let next = Infinity;
+  for (const s in clock.iv) next = Math.min(next, clock.iv[s].next);
+  if (next > target || next === Infinity) break;
+  clock.now = next;
+  for (const s in clock.iv) {
+    while (clock.iv[s] && clock.iv[s].next <= clock.now) { clock.iv[s].next += clock.iv[s].every; instance.exports.alm_tick(+s, clock.now); }
+  }
+}
+clock.now = target;
+process.stdout.write(out.join(","));
+"#;
+
+fn run_wasmgc_clock(test_name: &str, modules: &[(&str, &str)]) -> String {
+    let dir = common::test_dir("alm-effect-manager-wasmgc", test_name);
+    for (file, source) in modules {
+        std::fs::write(dir.join(file), source).expect("write module");
+    }
+    let entry = dir.join("Main.elm");
+    let wasm = dir.join("app.wasm");
+    project::compile_project_wasmgc(&entry, &wasm, false).unwrap_or_else(|e| {
+        panic!("wasmgc build failed:\n{}", e.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n"))
+    });
+    let runner = dir.join("run.cjs");
+    std::fs::write(&runner, WASMGC_CLOCK_RUNNER).expect("write runner");
+    let output = Command::new("node")
+        .arg(&runner)
+        .arg(&wasm)
+        .env_remove("FORCE_COLOR")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("run node");
+    assert!(
+        output.status.success(),
+        "wasm-gc run failed:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim_end().to_string()
+}
+
+/// `Time.every 40 Tick` fires through the bundled Time effect module's manager;
+/// dropping the subscription (n reaches 3) must `Process.kill` the timer so no
+/// further ticks arrive — output is exactly "1,2,3", not a runaway stream.
+#[test]
+fn time_every_fires_and_kills_wasmgc() {
+    let main = r#"port module Main exposing (main)
+
+import Time
+
+port out : String -> Cmd msg
+
+type Msg = Tick Time.Posix
+
+main : Program () Int Msg
+main =
+    Platform.worker
+        { init = \_ -> ( 0, Cmd.none )
+        , update = \(Tick _) n -> ( n + 1, out (String.fromInt (n + 1)) )
+        , subscriptions = \n -> if n < 3 then Time.every 40 Tick else Sub.none
+        }
+"#;
+    assert_eq!(
+        run_wasmgc_clock("time_every", &[("Main.elm", main)]),
+        "1,2,3"
+    );
+}

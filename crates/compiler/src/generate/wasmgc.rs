@@ -245,7 +245,9 @@ const DOM_REMOVE_EVENT_LISTENER: u32 = 13; // (node,ptr,len) -> freed hid (or -1
 const HOST_PORT_OUT: u32 = 14; // (nameptr,namelen,jsonptr,jsonlen) — outgoing port
 const HOST_SET_TITLE: u32 = 15; // (ptr,len) — Browser.document title
 const HOST_HTTP: u32 = 16; // (urlptr,urllen,reqId) — start an HTTP GET
-const HOST_CLEAR_TIMERS: u32 = 17; // () — cancel all Time.every intervals
+// Import index 17 ("host_clear_timers") is still declared for host-ABI
+// stability but no longer called: Time.every timers are now owned by the Time
+// effect manager (spawn/kill via host_clear_interval), not cleared en masse.
 const HOST_SET_INTERVAL: u32 = 18; // (intervalMs:f64, slot) — register a timer
 const HOST_CLEAR_DOM: u32 = 19; // () — remove all document-event listeners
 const HOST_ADD_DOM: u32 = 20; // (nameptr,namelen,slot) — add a document listener
@@ -271,13 +273,14 @@ const DOM_INSERT_BEFORE: u32 = 40; // (parent,node,ref) — insert node before r
 const DOM_BUILD: u32 = 44; // (streamPtr) -> rootHandle — build a whole subtree from a bytecode stream
 const DOM_CLEAR: u32 = 45; // (parent) — remove & reclaim all children in one host call
 const DOM_GET_EVENT_HID: u32 = 46; // (node,ptr,len) -> existing listener hid for this event name, or -1
+const HOST_CLEAR_INTERVAL: u32 = 47; // (slot) — cancel one Time.every interval (Process.kill)
 const HOST_NOW: u32 = 37; // () -> f64 — Date.now() ms (Time.now)
 const HOST_FTOA: u32 = 38; // (f64, outptr) -> len — String(x) into memory (String.fromFloat)
 const HOST_ATOF: u32 = 39; // (ptr, len, outptr) -> ok — parse float to memory (String.toFloat)
 const HOST_REGEX_COMPILE: u32 = 41; // (patPtr,patLen,flags) -> id (elm/regex)
 const HOST_REGEX_FIND: u32 = 42; // (id,sp,sl,n,out) -> match count
 const HOST_REGEX_SPLIT: u32 = 43; // (id,sp,sl,n,out) -> piece count
-const N_IMPORTS: u32 = 47;
+const N_IMPORTS: u32 = 48;
 
 /// Max size of a chunk grown by `cons` (front-slack fill); bulk builders make
 /// single chunks of any size, so this only bounds cons-grown chunks so a run of
@@ -4091,6 +4094,7 @@ impl<'a> Codegen<'a> {
             ("dom_build", i_i_ty), // (streamPtr) -> rootHandle — batched subtree build (44)
             ("dom_clear", imp_i_v), // (parent) — remove+reclaim all children (45)
             ("dom_get_event_hid", alm_event_ty), // (node,ptr,len) -> listener hid or -1 (46)
+            ("host_clear_interval", imp_i_v), // (slot) — cancel one Time.every timer (47)
         ] {
             imports.import("env", name, EntityType::Function(ty));
         }
@@ -5112,54 +5116,6 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 }); // Viewport
             f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
             f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed
-            return Ok(());
-        }
-        // Time.utc : the UTC zone, elm's `Zone 0 []` (single ctor, tag 0):
-        // args [offset-minutes = 0, eras = []].
-        if module == "Time" && name == "utc" {
-            f.instruction(&Instruction::I32Const(0));
-            f.instruction(&Instruction::I64Const(0));
-            f.instruction(&Instruction::Call(self.box_int_idx));
-            push_empty_list(f);
-            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-            f.instruction(&Instruction::StructNew(T_CTOR));
-            return Ok(());
-        }
-        // Time.now : a nullary Task (ctor tag 10 = Now leaf).
-        if module == "Time" && name == "now" {
-            push_nullary_ctor(f, 10);
-            return Ok(());
-        }
-        // Time.getZoneName : Task x ZoneName. In elm it uses `Intl` and falls
-        // back to `Offset (-getTimezoneOffset())` when unavailable; a headless
-        // wasm host has no Intl, so we return that fallback directly, as a
-        // synchronously-resolved `Task.Succeed (Offset 0)`. ZoneName ctors:
-        // Name = 0, Offset = 1 (declaration order); Task.Succeed = tag 0.
-        if module == "Time" && name == "getZoneName" {
-            f.instruction(&Instruction::I32Const(0)); // Task.Succeed
-            f.instruction(&Instruction::I32Const(1)); // ZoneName.Offset
-            f.instruction(&Instruction::I64Const(0));
-            f.instruction(&Instruction::Call(self.box_int_idx));
-            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-            f.instruction(&Instruction::StructNew(T_CTOR)); // Offset 0
-            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-            f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed (Offset 0)
-            return Ok(());
-        }
-        // Time.here : Task x Zone — the local zone. A headless host has no
-        // timezone info (like getZoneName above), so resolve synchronously to
-        // the UTC fallback `Task.Succeed (Zone 0 [])` (Zone = tag 0 [offset,
-        // eras]; Task.Succeed = tag 0).
-        if module == "Time" && name == "here" {
-            f.instruction(&Instruction::I32Const(0)); // Task.Succeed
-            f.instruction(&Instruction::I32Const(0)); // Zone tag
-            f.instruction(&Instruction::I64Const(0));
-            f.instruction(&Instruction::Call(self.box_int_idx)); // offset 0
-            push_empty_list(f); // eras []
-            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-            f.instruction(&Instruction::StructNew(T_CTOR)); // Zone 0 []
-            f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-            f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed (Zone 0 [])
             return Ok(());
         }
         // Random.independentSeed : a nullary Generator (ctor tag 14).
@@ -8616,18 +8572,18 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::Call(self.apply1_idx));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // Now (10): synchronous — Ok(Posix (trunc host_now())).
+        // Now (10) [millisToPosix]: synchronous — Ok(millisToPosix (trunc
+        // host_now())). The ctor fn comes from the bundled Time source.
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Const(10));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::I32Const(0)); // Ok
-        f.instruction(&Instruction::I32Const(0)); // Posix ctor tag 0
+        ctor_arg0(&mut f, 0); // millisToPosix
         f.instruction(&Instruction::Call(HOST_NOW));
         f.instruction(&Instruction::I64TruncF64S);
         f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-        f.instruction(&Instruction::StructNew(T_CTOR)); // Posix
+        f.instruction(&Instruction::Call(self.apply1_idx)); // millisToPosix millis
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR)); // Ok
         f.instruction(&Instruction::Return);
@@ -8682,17 +8638,93 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // spawn (15) [task]: run the task now (fire-and-forget), Ok(processId).
+        // spawn (15) [task]: run the task now (fire-and-forget), capturing its Ok
+        // result as the ProcessId's canceller (setInterval yields its timer slot;
+        // other tasks yield null). ProcessId = ctor tag0 [canceller].
         f.instruction(&Instruction::LocalGet(5));
         f.instruction(&Instruction::I32Const(15));
         f.instruction(&Instruction::I32Eq);
         f.instruction(&Instruction::If(BlockType::Empty));
-        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::I32Const(0)); // ProcessId ctor tag 0
+        ctor_arg0(&mut f, 0); // task
         f.instruction(&Instruction::Call(self.task_run_idx));
-        f.instruction(&Instruction::Drop);
+        f.instruction(&Instruction::LocalSet(1)); // r
+        ctor_tag(&mut f, 1);
+        f.instruction(&Instruction::I32Eqz); // Ok?
+        f.instruction(&Instruction::If(BlockType::Result(eqref())));
+        ctor_arg0(&mut f, 1); // canceller = r.arg0
+        f.instruction(&Instruction::Else);
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // ProcessId
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR)); // Ok(ProcessId)
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // TSetInterval (16) [interval, task]: register a repeating host timer at a
+        // fresh slot (G_TICKS[slot] = task), fired by alm_tick. Ok(box slot) — the
+        // slot is the canceller Process.spawn stores in the ProcessId.
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(16));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
+        f.instruction(&Instruction::LocalSet(6)); // slot
+        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
+        // G_TICKS[slot] = task (arg1)
+        f.instruction(&Instruction::GlobalGet(G_TICKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(6));
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_set_interval(interval(arg0) as f64, slot)
+        ctor_arg0(&mut f, 0);
+        unbox_f64(&mut f);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(HOST_SET_INTERVAL));
+        // Ok(box slot)
         f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::I64Const(0));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::I64ExtendI32S);
         f.instruction(&Instruction::Call(self.box_int_idx));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // TKill (17) [processId]: cancel the timer the process registered.
+        // processId = ctor tag0 [canceller]; canceller = box slot (or null). Ok(()).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(17));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        ctor_arg0(&mut f, 0); // processId (ctor0[canceller])
+        f.instruction(&Instruction::LocalSet(1));
+        ctor_arg0(&mut f, 1); // canceller = processId.arg0
+        f.instruction(&Instruction::LocalTee(1));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::I32Eqz);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        // slot = i32(unbox canceller)
+        f.instruction(&Instruction::LocalGet(1));
+        f.instruction(&Instruction::Call(self.unbox_int_idx));
+        f.instruction(&Instruction::I32WrapI64);
+        f.instruction(&Instruction::LocalSet(6));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(HOST_CLEAR_INTERVAL));
+        // G_TICKS[slot] = null (release the task; stop any late fire)
+        f.instruction(&Instruction::GlobalGet(G_TICKS));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::I32Const(0)); // Ok
+        f.instruction(&Instruction::RefNull(eq_heap())); // ()
         f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
@@ -17293,15 +17325,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // SubPort (2) [name, toMsg] / SubTime (4) [interval, toMsg]: arg0 kept,
-        // toMsg (arg1) composed with f.
+        // SubPort (2) [name, toMsg]: arg0 kept, toMsg (arg1) composed with f.
+        // (Time.every is a manager LEAF now; Sub.map over it is the documented
+        // mgr_collect subMap limitation — the LEAF passes through unchanged.)
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(2));
         f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(4));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::I32Or);
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::LocalGet(2)); // preserve tag
         ctor_arg0(&mut f, 1); // name/interval
@@ -19665,11 +19694,12 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::If(BlockType::Empty));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        f.instruction(&Instruction::Call(HOST_CLEAR_TIMERS));
+        // Time.every timers are owned by the Time effect manager (spawn/kill), not
+        // reconciled here — so G_TICKS / G_NEXT_TICK are left untouched (clearing
+        // them each dispatch would kill the manager's live timers). Only the
+        // hardcoded DOM-event and animation-frame subs are cleared and rebuilt.
         f.instruction(&Instruction::Call(HOST_CLEAR_DOM));
         f.instruction(&Instruction::Call(HOST_CLEAR_FRAMES));
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
         f.instruction(&Instruction::I32Const(0));
         f.instruction(&Instruction::GlobalSet(G_NEXT_DOM));
         f.instruction(&Instruction::I32Const(0));
@@ -19682,36 +19712,15 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// walk_timers(sub) : register each SubTime (tag4 [interval, toMsg]) with the
-    /// host, recursing into Sub.batch (tag1). Stores toMsg in G_TICKS by slot.
+    /// walk_timers(sub) : register the hardcoded DOM-event (tag5) and
+    /// animation-frame (tag6) subs with the host, recursing into Sub.batch
+    /// (tag1). Time.every is no longer here — it is a manager LEAF (tag20)
+    /// handled through the _Platform effect protocol.
     fn emit_walk_timers(&self) -> Function {
         // param sub(0). locals: tag(1),len(2),i(3),slot(4):i32, list(5):eqref
         let mut f = Function::new([(4, ValType::I32), (1, eqref())]);
         ctor_tag(&mut f, 0);
         f.instruction(&Instruction::LocalSet(1));
-        // SubTime (tag 4)
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(4));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
-        f.instruction(&Instruction::LocalSet(4)); // slot
-        f.instruction(&Instruction::GlobalGet(G_NEXT_TICK));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::GlobalSet(G_NEXT_TICK));
-        // G_TICKS[slot] = toMsg (sub.arg1)
-        f.instruction(&Instruction::GlobalGet(G_TICKS));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::LocalGet(4));
-        ctor_argn(&mut f, 0, 1);
-        f.instruction(&Instruction::ArraySet(T_ARR));
-        // host_set_interval(interval(sub.arg0) as f64, slot)
-        ctor_arg0(&mut f, 0);
-        unbox_f64(&mut f);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::Call(HOST_SET_INTERVAL));
-        f.instruction(&Instruction::End);
         // SubDom (tag 5): document-event decoder [name, decoder]
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(5));
@@ -19826,27 +19835,32 @@ impl<'a> Codegen<'a> {
         f
     }
 
-    /// alm_tick(slot, millis) : fire a Time.every timer — apply its toMsg to
-    /// `millisToPosix millis` (Posix is opaque: T_CTOR tag0 [Int millis]) and
-    /// dispatch.
-    fn emit_tick(&self) -> Function {
-        // params slot(0):i32, millis(1):f64. local toMsg(2):eqref
-        let mut f = Function::new([(1, eqref())]);
+    /// alm_tick(slot, millis) : fire a Time.every timer. `G_TICKS[slot]` now holds
+    /// the setInterval's task (`Platform.sendToSelf router interval`); run it to
+    /// enqueue the manager self-message, then pump every manager so `onSelfMsg`
+    /// reads `now` and delivers to the app. `millis` is unused (the manager reads
+    /// the clock itself). A null slot means the timer was killed — no-op.
+    fn emit_tick(&mut self) -> Function {
+        // params slot(0):i32, millis(1):f64. local task(2):eqref. Locals 3..6 are
+        // declared as eqref for the inlined emit_mgr_pump (which uses 4,5,6).
+        let mut f = Function::new([(5, eqref())]);
         f.instruction(&Instruction::GlobalGet(G_TICKS));
         f.instruction(&cast_to(T_ARR));
         f.instruction(&Instruction::LocalGet(0));
         f.instruction(&Instruction::ArrayGet(T_ARR));
-        f.instruction(&Instruction::LocalSet(2)); // toMsg
+        f.instruction(&Instruction::LocalSet(2)); // task
         f.instruction(&Instruction::LocalGet(2));
-        // posix = T_CTOR tag0 [ Int (trunc millis) ]
-        f.instruction(&Instruction::I32Const(0));
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I64TruncF64S);
-        f.instruction(&Instruction::Call(self.box_int_idx));
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-        f.instruction(&Instruction::StructNew(T_CTOR));
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::Call(self.dispatch_msg_idx));
+        f.instruction(&Instruction::RefIsNull);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        f.instruction(&Instruction::LocalGet(2));
+        f.instruction(&Instruction::Call(self.task_run_idx));
+        f.instruction(&Instruction::Drop);
+        let managers = self.mono.managers.clone();
+        for m in &managers {
+            self.emit_mgr_pump(&mut f, m.index as i32);
+        }
         f.instruction(&Instruction::End);
         f
     }
@@ -27238,10 +27252,11 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // Process.kill _ → Task.succeed () (alm's CPS-free tasks can't cancel).
+            // Process.kill id → TKill task (tag 17) [id]: task_run cancels the
+            // host timer the process's setInterval binding registered.
             ("Process", "kill") => {
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::RefNull(eq_heap()));
+                f.instruction(&Instruction::I32Const(17));
+                self.emit_expr(&args[0], ctx, f)?; // process id
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
@@ -28151,27 +28166,50 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // Time.every interval toMsg → SubTime tag4 [interval, toMsg].
-            ("Time", "every") => {
-                f.instruction(&Instruction::I32Const(4));
-                self.emit_expr(&args[0], ctx, f)?; // interval (Float)
-                self.emit_expr(&args[1], ctx, f)?; // toMsg
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
-            }
-            // Posix is opaque: T_CTOR tag0 [Int millis].
-            ("Time", "millisToPosix") => {
-                f.instruction(&Instruction::I32Const(0));
-                self.emit_expr(&args[0], ctx, f)?;
+            // Time kernel primitives. Posix/Zone/calendar math and `Time.every`
+            // now come from the bundled Time effect module (builtin_src/Time.elm);
+            // only these four are kernel. `now millisToPosix` → a Now task (tag 10)
+            // carrying the ctor fn, applied to the host clock when run.
+            ("Elm.Kernel.Time", "now") => {
+                f.instruction(&Instruction::I32Const(10)); // Now task tag
+                self.emit_expr(&args[0], ctx, f)?; // millisToPosix
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            ("Time", "posixToMillis") => {
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&cast_to(T_CTOR));
-                f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::ArrayGet(T_ARR));
+            // `here ()` → Task.Succeed (Zone 0 []) — headless has no host timezone,
+            // so resolve to the UTC fallback (Zone = tag 0 [offset, eras]).
+            ("Elm.Kernel.Time", "here") => {
+                f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+                f.instruction(&Instruction::I32Const(0)); // Zone tag
+                f.instruction(&Instruction::I64Const(0));
+                f.instruction(&Instruction::Call(self.box_int_idx)); // offset 0
+                push_empty_list(f); // eras []
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // Zone 0 []
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed
+            }
+            // `getZoneName ()` → Task.Succeed (Offset 0). No Intl on a headless
+            // host; ZoneName = Name String | Offset Int → Offset is tag 1.
+            ("Elm.Kernel.Time", "getZoneName") => {
+                f.instruction(&Instruction::I32Const(0)); // Task.Succeed
+                f.instruction(&Instruction::I32Const(1)); // ZoneName.Offset
+                f.instruction(&Instruction::I64Const(0));
+                f.instruction(&Instruction::Call(self.box_int_idx));
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // Offset 0
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::StructNew(T_CTOR)); // Succeed
+            }
+            // `setInterval interval task` → a cancellable timer task (tag 16). When
+            // spawned (Process.spawn), task_run registers a host timer that runs
+            // `task` each interval and yields the timer slot as the canceller.
+            ("Elm.Kernel.Time", "setInterval") => {
+                f.instruction(&Instruction::I32Const(16)); // TSetInterval task tag
+                self.emit_expr(&args[0], ctx, f)?; // interval (Float)
+                self.emit_expr(&args[1], ctx, f)?; // task
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // elm/regex — delegate to the host RegExp (see emit_regex_*).
             ("Elm.Kernel.Regex", "fromStringWith") => {
@@ -28254,102 +28292,6 @@ impl<'a> Codegen<'a> {
                     self.emit_expr(a, ctx, f)?;
                 }
                 f.instruction(&Instruction::Call(self.parser_find_sub_string_idx));
-            }
-            // Time.customZone offset eras → Zone (ctor tag0 [offset, eras]).
-            ("Time", "customZone") => {
-                f.instruction(&Instruction::I32Const(0));
-                self.emit_expr(&args[0], ctx, f)?; // default offset
-                self.emit_expr(&args[1], ctx, f)?; // eras
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
-            }
-            // Calendar accessors (zone, posix). year/day extract from toCivil;
-            // month/weekday map the civil month / day-of-week to their ctor tags.
-            ("Time", "toYear") | ("Time", "toMonth") | ("Time", "toDay") => {
-                self.emit_expr(&args[0], ctx, f)?; // zone
-                self.emit_expr(&args[1], ctx, f)?; // posix
-                f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
-                f.instruction(&Instruction::Call(self.time_civil_idx));
-                f.instruction(&cast_to(T_ARR));
-                let field = match name {
-                    "toYear" => 0,
-                    "toMonth" => 1,
-                    _ => 2,
-                };
-                f.instruction(&Instruction::I32Const(field));
-                f.instruction(&Instruction::ArrayGet(T_ARR));
-                if name == "toMonth" {
-                    // month (1..12) -> Month ctor tag (month-1), Jan=0..Dec=11.
-                    f.instruction(&Instruction::Call(self.unbox_int_idx));
-                    f.instruction(&Instruction::I32WrapI64);
-                    f.instruction(&Instruction::I32Const(1));
-                    f.instruction(&Instruction::I32Sub);
-                    f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                    f.instruction(&Instruction::StructNew(T_CTOR));
-                }
-            }
-            ("Time", "toHour") | ("Time", "toMinute") | ("Time", "toSecond")
-            | ("Time", "toMillis") => {
-                // modBy K (flooredDiv base D) — base = adjusted minutes (hour/
-                // minute) or posixMillis (second/millis); modby(box K, box value).
-                let (modulus, div): (i64, f64) = match name {
-                    "toHour" => (24, 60.0),
-                    "toMinute" => (60, 1.0),
-                    "toSecond" => (60, 1000.0),
-                    _ => (1000, 1.0),
-                };
-                f.instruction(&Instruction::I64Const(modulus));
-                f.instruction(&Instruction::Call(self.box_int_idx)); // modBy's modulus
-                if name == "toSecond" || name == "toMillis" {
-                    self.emit_expr(&args[1], ctx, f)?; // posix
-                    f.instruction(&cast_to(T_CTOR));
-                    f.instruction(&Instruction::StructGet { struct_type_index: T_CTOR, field_index: 1 });
-                    f.instruction(&Instruction::I32Const(0));
-                    f.instruction(&Instruction::ArrayGet(T_ARR));
-                    f.instruction(&Instruction::Call(self.unbox_int_idx));
-                } else {
-                    self.emit_expr(&args[0], ctx, f)?; // zone
-                    self.emit_expr(&args[1], ctx, f)?; // posix
-                    f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
-                    f.instruction(&Instruction::Call(self.unbox_int_idx));
-                }
-                if div != 1.0 {
-                    // flooredDiv value div
-                    f.instruction(&Instruction::F64ConvertI64S);
-                    f.instruction(&Instruction::F64Const(div.into()));
-                    f.instruction(&Instruction::F64Div);
-                    f.instruction(&Instruction::F64Floor);
-                    f.instruction(&Instruction::I64TruncF64S);
-                }
-                f.instruction(&Instruction::Call(self.box_int_idx));
-                f.instruction(&Instruction::Call(self.modby_idx));
-            }
-            ("Time", "toWeekday") => {
-                // modBy 7 (flooredDiv adjustedMinutes 1440) -> Weekday. Map the
-                // day-of-week index to the ctor tag: 0->Thu(3),1->Fri(4),2->Sat(5),
-                // 3->Sun(6),4->Mon(0),5->Tue(1),_->Wed(2).
-                f.instruction(&Instruction::I64Const(7));
-                f.instruction(&Instruction::Call(self.box_int_idx));
-                self.emit_expr(&args[0], ctx, f)?;
-                self.emit_expr(&args[1], ctx, f)?;
-                f.instruction(&Instruction::Call(self.time_adj_minutes_idx));
-                f.instruction(&Instruction::Call(self.unbox_int_idx));
-                f.instruction(&Instruction::F64ConvertI64S);
-                f.instruction(&Instruction::F64Const(1440.0.into()));
-                f.instruction(&Instruction::F64Div);
-                f.instruction(&Instruction::F64Floor);
-                f.instruction(&Instruction::I64TruncF64S);
-                f.instruction(&Instruction::Call(self.box_int_idx));
-                f.instruction(&Instruction::Call(self.modby_idx));
-                // dow in [0,6]; ctorTag = [3,4,5,6,0,1,2][dow] = (dow+3) mod 7.
-                f.instruction(&Instruction::Call(self.unbox_int_idx));
-                f.instruction(&Instruction::I32WrapI64);
-                f.instruction(&Instruction::I32Const(3));
-                f.instruction(&Instruction::I32Add);
-                f.instruction(&Instruction::I32Const(7));
-                f.instruction(&Instruction::I32RemS);
-                f.instruction(&Instruction::RefNull(HeapType::Concrete(T_ARR)));
-                f.instruction(&Instruction::StructNew(T_CTOR));
             }
             // Platform.Cmd.batch / Platform.Sub.batch → tag1 [List].
             ("Platform.Cmd", "batch") | ("Platform.Sub", "batch") => {

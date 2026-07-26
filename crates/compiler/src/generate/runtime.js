@@ -4316,68 +4316,40 @@ var $Terminal$writeLine = function (s) { return { $: 'CmdWrite', s: s }; };
 
 // TIME
 
-function _Time_posix(ms) { return { $: 'Posix', ms: ms }; }
-var $Time$millisToPosix = function (ms) { return _Time_posix(ms); };
-var $Time$posixToMillis = function (posix) { return posix.ms; };
-var $Time$utc = { $: 'Zone', offset: 0, eras: [] };
-var $Time$customZone = F2(function (offset, eras) {
-    return { $: 'Zone', offset: offset, eras: _List_toArray(eras) };
-});
-var $Time$here = _Task(function (ok, _err) {
-    ok({ $: 'Zone', offset: -new Date().getTimezoneOffset(), eras: [] });
-});
-var $Time$now = _Task(function (ok, _err) { ok(_Time_posix(Date.now())); });
-var $Time$getZoneName = _Task(function (ok, _err) {
-    try {
-        ok({ $: 'Name', a: Intl.DateTimeFormat().resolvedOptions().timeZone });
-    } catch (e) {
-        ok({ $: 'Offset', a: -new Date().getTimezoneOffset() });
-    }
-});
-var $Time$every = F2(function (interval, toMsg) {
-    return { $: 'SubTime', interval: interval, toMsg: toMsg };
-});
-// Pure-integer date math, ported from elm/time's Time.elm (toAdjustedMinutes +
-// toCivil). NOT via `new Date`, because JS Date is Invalid beyond ~271821 years
-// (getUTCMonth => NaN), whereas elm's algorithm works for any Posix. `//` in elm
-// truncates toward zero, matched here with `| 0`; flooredDiv uses Math.floor.
-function _Time_flooredDiv(numerator, denominator) { return Math.floor(numerator / denominator); }
-function _Time_toAdjustedMinutes(zone, posix) {
-    var posixMinutes = _Time_flooredDiv(posix.ms, 60000);
-    for (var i = 0; i < zone.eras.length; i++) {
-        if (zone.eras[i].start < posixMinutes) { return posixMinutes + zone.eras[i].offset; }
-    }
-    return posixMinutes + zone.offset;
-}
-function _Time_toCivil(minutes) {
-    var rawDay = _Time_flooredDiv(minutes, 1440) + 719468;
-    var era = ((rawDay >= 0 ? rawDay : rawDay - 146096) / 146097) | 0;
-    var dayOfEra = rawDay - era * 146097;
-    var yearOfEra = ((dayOfEra - ((dayOfEra / 1460) | 0) + ((dayOfEra / 36524) | 0) - ((dayOfEra / 146096) | 0)) / 365) | 0;
-    var year = yearOfEra + era * 400;
-    var dayOfYear = dayOfEra - (365 * yearOfEra + ((yearOfEra / 4) | 0) - ((yearOfEra / 100) | 0));
-    var mp = ((5 * dayOfYear + 2) / 153) | 0;
-    var month = mp + (mp < 10 ? 3 : -9);
-    return {
-        year: year + (month <= 2 ? 1 : 0),
-        month: month,
-        day: dayOfYear - (((153 * mp + 2) / 5) | 0) + 1
-    };
-}
-var $Time$toYear = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).year; });
-var _Time_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-var $Time$toMonth = F2(function (zone, posix) {
-    return { $: _Time_months[_Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).month - 1] };
-});
-var $Time$toDay = F2(function (zone, posix) { return _Time_toCivil(_Time_toAdjustedMinutes(zone, posix)).day; });
-var $Time$toHour = F2(function (zone, posix) { return A2($Basics$modBy, 24, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 60)); });
-var $Time$toMinute = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_toAdjustedMinutes(zone, posix)); });
-var $Time$toSecond = F2(function (zone, posix) { return A2($Basics$modBy, 60, _Time_flooredDiv(posix.ms, 1000)); });
-var $Time$toMillis = F2(function (zone, posix) { return A2($Basics$modBy, 1000, posix.ms); });
-// elm's toWeekday: modBy 7 (flooredDiv adjMinutes 1440) => 0:Thu 1:Fri 2:Sat 3:Sun 4:Mon 5:Tue _:Wed
-var _Time_weekdays = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed'];
-var $Time$toWeekday = F2(function (zone, posix) {
-    return { $: _Time_weekdays[A2($Basics$modBy, 7, _Time_flooredDiv(_Time_toAdjustedMinutes(zone, posix), 1440))] };
+// Build a `Time.Posix` value in the bundled Time module's ctor representation
+// (`Posix Int` → `{$:'Posix', a}`). Used by kernel values that yield a Posix
+// without going through the Time module — `File.lastModified` and the
+// animation-frame subscription.
+function _Time_posix(ms) { return { $: 'Posix', a: ms }; }
+
+// Time kernel primitives. Posix/Zone, the calendar math, and `Time.every` now
+// come from the bundled Time effect module (builtin_src/Time.elm); only these
+// four primitives are kernel. `now`/`here`/`getZoneName` build the source ctor
+// reps via the module's own `millisToPosix`/`customZone`/`Name`/`Offset`.
+// `setInterval` is a cancellable timer task: its fork returns a canceller that
+// `Process.kill` invokes when the Time manager drops a subscription.
+var $Elm$Kernel$Time$now = function (millisToPosix) {
+    return _Task(function (ok) { ok(millisToPosix(Date.now())); });
+};
+var $Elm$Kernel$Time$here = function (_unit) {
+    return _Task(function (ok) {
+        ok(A2($Time$customZone, -new Date().getTimezoneOffset(), _List_fromArray([])));
+    });
+};
+var $Elm$Kernel$Time$getZoneName = function (_unit) {
+    return _Task(function (ok) {
+        try {
+            ok($Time$Name(Intl.DateTimeFormat().resolvedOptions().timeZone));
+        } catch (e) {
+            ok($Time$Offset(-new Date().getTimezoneOffset()));
+        }
+    });
+};
+var $Elm$Kernel$Time$setInterval = F2(function (interval, task) {
+    return _Task(function (_ok) {
+        var id = setInterval(function () { _Task_fork(task, function () {}, function () {}); }, interval);
+        return function () { clearInterval(id); };
+    });
 });
 
 // HTTP — fetch-based.
@@ -5079,17 +5051,21 @@ var $Platform$sendToSelf = F2(function (router, msg) {
     });
 });
 
-// Process: background tasks for effect managers. alm's CPS tasks cannot be
-// interrupted, so `kill` is a no-op (the spawned task simply runs to
-// completion); this is enough for managers that spawn fire-and-forget loops.
+// Process: background tasks for effect managers. Spawning captures any canceller
+// the task's binding returns (e.g. Time's setInterval → clearInterval, Http's
+// request → abort); `kill` invokes it. Tasks that carry no canceller simply run
+// to completion, and killing them is a no-op — enough for fire-and-forget loops.
 var $Process$spawn = function (task) {
     return _Task(function (ok) {
-        _Task_fork(task, function () {}, function () {});
-        ok({ $: 'ProcessId' });
+        var cancel = _Task_fork(task, function () {}, function () {});
+        ok({ $: 'ProcessId', cancel: typeof cancel === 'function' ? cancel : null });
     });
 };
-var $Process$kill = function (_id) {
-    return _Task(function (ok) { ok(_Utils_Tuple0); });
+var $Process$kill = function (id) {
+    return _Task(function (ok) {
+        if (id && id.cancel) { id.cancel(); }
+        ok(_Utils_Tuple0);
+    });
 };
 
 // PROGRAMS
@@ -5191,7 +5167,6 @@ function _Platform_initialize(program, opts) {
     // Live subscription state.
     var activePortSubs = {};   // port name -> [handler]
     var activeDomSubs = [];    // { name, handler } attached to document
-    var activeTimers = [];     // { interval, id }
     var animationFrame = null;
 
     function dispatch(msg) {
@@ -5319,9 +5294,6 @@ function _Platform_initialize(program, opts) {
             case 'SubDom':
                 acc.dom.push({ name: sub.name, decoder: sub.decoder, tagger: tagger });
                 return;
-            case 'SubTime':
-                acc.timers.push({ interval: sub.interval, toMsg: sub.toMsg, tagger: tagger });
-                return;
             case 'SubAnimation':
                 acc.animation.push({ toMsg: sub.toMsg, delta: sub.delta, tagger: tagger });
                 return;
@@ -5329,7 +5301,7 @@ function _Platform_initialize(program, opts) {
     }
 
     function updateSubs() {
-        var acc = { ports: {}, dom: [], timers: [], animation: [] };
+        var acc = { ports: {}, dom: [], animation: [] };
         if (!isSandbox && impl.subscriptions) {
             collectSubs(impl.subscriptions(model), function (m) { return m; }, acc);
         }
@@ -5350,15 +5322,8 @@ function _Platform_initialize(program, opts) {
             });
         }
 
-        // Timers.
-        activeTimers.forEach(function (t) { clearInterval(t.id); });
-        activeTimers = acc.timers.map(function (spec) {
-            return {
-                id: setInterval(function () {
-                    dispatch(spec.tagger(spec.toMsg(_Time_posix(Date.now()))));
-                }, spec.interval)
-            };
-        });
+        // Time subscriptions are handled by the Time effect manager (see the
+        // bundled Time effect module), not here.
 
         // Animation frames.
         if (animationFrame) {

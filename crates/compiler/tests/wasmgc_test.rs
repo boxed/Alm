@@ -3041,10 +3041,11 @@ fn element_time_every() {
             "const S={sup:?};\
              const {{Document,serializeBody}}=require(S+'/dom_stub.cjs');\
              const js=require(S+'/js_driver.cjs');const wg=require(S+'/wasmgc_driver.cjs');\
-             function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+             async function run(startFn,arg){{const doc=new Document();const r=startFn(arg,doc);\
+               await new Promise(function(res){{setImmediate(res);}});\
                r.clock.advance(2500);const out=serializeBody(doc);if(r.restore)r.restore();return out;}}\
-             const j=run(js.start,{b:?});const w=run(wg.start,{w:?});\
-             process.stdout.write(j+'\\u001e'+w);",
+             (async function(){{const j=await run(js.start,{b:?});const w=await run(wg.start,{w:?});\
+               process.stdout.write(j+'\\u001e'+w);}})();",
             sup = support, b = bundle.display(), w = wasm.display()
         ),
     )

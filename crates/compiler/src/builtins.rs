@@ -473,23 +473,8 @@ pub fn values() -> &'static [BuiltinValue] {
             // Terminal — server-side output (the start of the native
             // platform surface; also works in the JS backend via console).
             V("Terminal", "writeLine", "String -> Cmd msg"),
-            // Time
-            V("Time", "now", "Task x Time.Posix"),
-            V("Time", "posixToMillis", "Time.Posix -> Int"),
-            V("Time", "millisToPosix", "Int -> Time.Posix"),
-            V("Time", "utc", "Time.Zone"),
-            V("Time", "here", "Task x Time.Zone"),
-            V("Time", "customZone", "Int -> List { start : Int, offset : Int } -> Time.Zone"),
-            V("Time", "every", "Float -> (Time.Posix -> msg) -> Sub msg"),
-            V("Time", "toYear", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toMonth", "Time.Zone -> Time.Posix -> Time.Month"),
-            V("Time", "toDay", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toHour", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toMinute", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toSecond", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toMillis", "Time.Zone -> Time.Posix -> Int"),
-            V("Time", "toWeekday", "Time.Zone -> Time.Posix -> Time.Weekday"),
-            V("Time", "getZoneName", "Task x Time.ZoneName"),
+            // Time is a bundled effect-module source (crates/compiler/src/builtin_src/Time.elm),
+            // not a builtin — its values/types come from that compiled module.
             // Http
             V("Http", "get", "{ url : String, expect : Http.Expect msg } -> Cmd msg"),
             V("Http", "post", "{ url : String, body : Http.Body, expect : Http.Expect msg } -> Cmd msg"),
@@ -986,16 +971,7 @@ pub const UNIONS: &[BuiltinUnion] = &[
         ("BadStatus_", &["Http.Metadata", "body"]),
         ("GoodStatus_", &["Http.Metadata", "body"]),
     ] },
-    BuiltinUnion { module: "Time", name: "Month", vars: &[], ctors: &[
-        ("Jan", &[]), ("Feb", &[]), ("Mar", &[]), ("Apr", &[]), ("May", &[]), ("Jun", &[]),
-        ("Jul", &[]), ("Aug", &[]), ("Sep", &[]), ("Oct", &[]), ("Nov", &[]), ("Dec", &[]),
-    ] },
-    BuiltinUnion { module: "Time", name: "ZoneName", vars: &[], ctors: &[
-        ("Name", &["String"]), ("Offset", &["Int"]),
-    ] },
-    BuiltinUnion { module: "Time", name: "Weekday", vars: &[], ctors: &[
-        ("Mon", &[]), ("Tue", &[]), ("Wed", &[]), ("Thu", &[]), ("Fri", &[]), ("Sat", &[]), ("Sun", &[]),
-    ] },
+    // Time.Month/ZoneName/Weekday now come from the bundled Time effect module.
     BuiltinUnion { module: "Browser.Dom", name: "Error", vars: &[], ctors: &[("NotFound", &["String"])] },
     BuiltinUnion { module: "Browser.Events", name: "Visibility", vars: &[], ctors: &[("Visible", &[]), ("Hidden", &[])] },
     BuiltinUnion { module: "Url", name: "Protocol", vars: &[], ctors: &[("Http", &[]), ("Https", &[])] },
@@ -1061,9 +1037,7 @@ pub const OPAQUE_TYPES: &[(&str, &str)] = &[
     ("Http", "Header"),
     ("Http", "Part"),
     ("Http", "Resolver"),
-    ("Time", "Posix"),
-    ("Time", "Zone"),
-    ("Time", "ZoneName"),
+    // Time.Posix/Zone/ZoneName now come from the bundled Time effect module.
     ("Task", "Task"),
     ("Json.Decode", "Decoder"),
     ("Json.Encode", "Value"),
@@ -1101,7 +1075,6 @@ pub fn lookup_type_home(name: &str) -> Option<&'static str> {
         "Sub" => Some("Platform.Sub"),
         "Value" => Some("Json.Encode"),
         "Decoder" => Some("Json.Decode"),
-        "Posix" | "Zone" | "Month" | "Weekday" => Some("Time"),
         "Task" => Some("Task"),
         "File" => Some("File"),
         "Protocol" => Some("Url"),
@@ -1115,7 +1088,7 @@ pub const MODULES: &[&str] = &[
     "Basics", "List", "String", "Char", "Maybe", "Result", "Tuple", "Debug", "Dict", "Set",
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
-    "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process", "Time",
+    "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process",
     "Http", "File", "Url", "Svg", "Svg.Attributes", "Random", "VirtualDom", "Terminal",
 ];
 

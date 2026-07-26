@@ -18,6 +18,46 @@ fn run(body: &str) -> String {
     )
 }
 
+/// Like [`run`], but through the project pipeline — for `main = <expr>` bodies
+/// that reference a bundled effect module (Time), whose source is injected only
+/// on the project path.
+fn run_proj(body: &str) -> String {
+    let source = format!("module Test exposing (..)\n\nimport Time\n\n{}", body);
+    let javascript = common::compile_via_project("Test", &source);
+    let js_path = common::write_js("runtime", &javascript);
+    common::run_node(
+        &format!(
+            "console.log(require({:?})['Test']['main']);",
+            js_path.to_str().unwrap()
+        ),
+        &javascript,
+    )
+}
+
+/// Like [`run_worker`], but through the project pipeline (for bundled effect
+/// modules such as Time).
+fn run_worker_proj(body: &str) -> Vec<String> {
+    let source = format!(
+        "port module Test exposing (main)\n\nimport Json.Decode\nimport Time\n\nport ask : (() -> msg) -> Sub msg\n\nport answer : String -> Cmd msg\n\n{}",
+        body
+    );
+    let javascript = common::compile_via_project("Test", &source);
+    let js_path = common::write_js("runtime-worker", &javascript);
+    let script = format!(
+        "var Elm = require({:?});\n\
+         var app = Elm.Test.main.init({{}});\n\
+         var out = [];\n\
+         app.ports.answer.subscribe(function (s) {{ out.push(s); }});\n\
+         app.ports.ask.send(null);\n\
+         setTimeout(function () {{ out.forEach(function (s) {{ console.log(s); }}); process.exit(0); }}, 150);",
+        js_path.to_str().unwrap()
+    );
+    common::run_node(&script, &javascript)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 /// Effectful programs: a Platform.worker with `ask`/`answer` ports. The
 /// harness sends one `ask`, collects `answer` messages for a beat, and
 /// prints them.
@@ -169,7 +209,7 @@ fn task_machinery() {
 
 #[test]
 fn task_attempt_and_time() {
-    let out = run_worker(
+    let out = run_worker_proj(
         "type Msg\n    = Ask ()\n    | Got (Result String Time.Posix)\n\nupdate msg model =\n    case msg of\n        Ask _ ->\n            ( model, Task.attempt Got (Task.andThen (\\_ -> Time.now) (Task.succeed ())) )\n\n        Got (Ok posix) ->\n            ( model\n            , answer\n                (if Time.posixToMillis posix > 1000000 then\n                    \"time-ok\"\n                 else\n                    \"time-bad\"\n                )\n            )\n\n        Got (Err e) ->\n            ( model, answer e )\n\nmain =\n    Platform.worker\n        { init = \\_ -> ( (), Cmd.none )\n        , update = update\n        , subscriptions = \\_ -> ask Ask\n        }",
     );
     assert_eq!(out, vec!["time-ok"]);
@@ -222,12 +262,12 @@ main =
 #[test]
 fn time_conversions() {
     assert_eq!(
-        run("t = Time.millisToPosix 1720000000000\n\nmain =\n    String.join \" \"\n        [ String.fromInt (Time.toYear Time.utc t)\n        , Debug.toString (Time.toMonth Time.utc t)\n        , String.fromInt (Time.toDay Time.utc t)\n        , String.fromInt (Time.toHour Time.utc t)\n        , String.fromInt (Time.toMinute Time.utc t)\n        , String.fromInt (Time.toSecond Time.utc t)\n        , String.fromInt (Time.toMillis Time.utc t)\n        , Debug.toString (Time.toWeekday Time.utc t)\n        , String.fromInt (Time.posixToMillis t)\n        ]"),
+        run_proj("t = Time.millisToPosix 1720000000000\n\nmain =\n    String.join \" \"\n        [ String.fromInt (Time.toYear Time.utc t)\n        , Debug.toString (Time.toMonth Time.utc t)\n        , String.fromInt (Time.toDay Time.utc t)\n        , String.fromInt (Time.toHour Time.utc t)\n        , String.fromInt (Time.toMinute Time.utc t)\n        , String.fromInt (Time.toSecond Time.utc t)\n        , String.fromInt (Time.toMillis Time.utc t)\n        , Debug.toString (Time.toWeekday Time.utc t)\n        , String.fromInt (Time.posixToMillis t)\n        ]"),
         "2024 Jul 3 9 46 40 0 Wed 1720000000000"
     );
     // custom zones shift the clock
     assert_eq!(
-        run("zone = Time.customZone 60 []\n\nmain = String.fromInt (Time.toHour zone (Time.millisToPosix 0))"),
+        run_proj("zone = Time.customZone 60 []\n\nmain = String.fromInt (Time.toHour zone (Time.millisToPosix 0))"),
         "1"
     );
 }
@@ -719,7 +759,7 @@ fn time_zone_eras() {
     // A zone with eras: times after the era start use the era offset,
     // older times fall back to the default.
     assert_eq!(
-        run("zone = Time.customZone 0 [ { start = 100, offset = 120 } ]\n\nmain = Debug.toString ( Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 0) )"),
+        run_proj("zone = Time.customZone 0 [ { start = 100, offset = 120 } ]\n\nmain = Debug.toString ( Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 0) )"),
         "(5,0)"
     );
 }
@@ -863,7 +903,7 @@ fn time_era_boundary_and_millis() {
     // in minute 200. era.start=200 is NOT `< 200`, so the era does not apply and
     // both use the default offset 0 -> hour 3. (Matches elm/time exactly.)
     assert_eq!(
-        run("zone = Time.customZone 0 [ { start = 200, offset = 120 } ]\n\nmain = Debug.toString [ Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 12000001), Time.toMillis zone (Time.millisToPosix 12000001) ]"),
+        run_proj("zone = Time.customZone 0 [ { start = 200, offset = 120 } ]\n\nmain = Debug.toString [ Time.toHour zone (Time.millisToPosix 12000000), Time.toHour zone (Time.millisToPosix 12000001), Time.toMillis zone (Time.millisToPosix 12000001) ]"),
         "[3,3,1]"
     );
 }
