@@ -4352,48 +4352,52 @@ var $Elm$Kernel$Time$setInterval = F2(function (interval, task) {
     });
 });
 
-// HTTP — fetch-based.
+// HTTP — fetch-based. The `Header`/`Body`/`Part`/`Expect`/`Resolver` builders,
+// requests, progress `track`, and `cancel` come from the bundled Http effect
+// module (builtin_src/Http.elm); these `Elm.Kernel.Http.*` primitives are the
+// pure builders it delegates to (representation unchanged) plus `toTask`
+// (a cancellable request driven by the manager) and `mapExpect` (for cmdMap).
 
-var $Http$header = F2(function (name, value) { return { name: name, value: value }; });
-var $Http$emptyBody = { contentType: null, content: null };
-var $Http$stringBody = F2(function (contentType, content) {
+var $Elm$Kernel$Http$header = F2(function (name, value) { return { name: name, value: value }; });
+var $Elm$Kernel$Http$emptyBody = { contentType: null, content: null };
+var $Elm$Kernel$Http$stringBody = F2(function (contentType, content) {
     return { contentType: contentType, content: content };
 });
-var $Http$fileBody = function (file) {
+var $Elm$Kernel$Http$fileBody = function (file) {
     return { contentType: file.type || 'application/octet-stream', content: file };
 };
-var $Http$jsonBody = function (value) {
+var $Elm$Kernel$Http$jsonBody = function (value) {
     return { contentType: 'application/json', content: JSON.stringify(value) };
 };
-var $Http$stringPart = F2(function (name, value) { return { $: 'StringPart', name: name, value: value }; });
-var $Http$filePart = F2(function (name, file) { return { $: 'FilePart', name: name, file: file }; });
-var $Http$multipartBody = function (parts) {
+var $Elm$Kernel$Http$stringPart = F2(function (name, value) { return { $: 'StringPart', name: name, value: value }; });
+var $Elm$Kernel$Http$filePart = F2(function (name, file) { return { $: 'FilePart', name: name, file: file }; });
+var $Elm$Kernel$Http$multipartBody = function (parts) {
     return { contentType: 'multipart', parts: _List_toArray(parts) };
 };
-var $Http$expectString = function (toMsg) {
+var $Elm$Kernel$Http$expectString = function (toMsg) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (body) { return $Result$Ok(body); });
     } };
 };
-var $Http$expectWhatever = function (toMsg) {
+var $Elm$Kernel$Http$expectWhatever = function (toMsg) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (_body) { return $Result$Ok(_Utils_Tuple0); });
     } };
 };
-var $Http$expectStringResponse = F2(function (toMsg, toResult) {
+var $Elm$Kernel$Http$expectStringResponse = F2(function (toMsg, toResult) {
     return { toMsg: toMsg, handle: function (response) { return toResult(response); } };
 });
-var $Http$expectBytes = F2(function (toMsg, _decoder) {
+var $Elm$Kernel$Http$expectBytes = F2(function (toMsg, _decoder) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (body) { return $Result$Ok(body); });
     } };
 });
-var $Http$expectBytesResponse = F2(function (toMsg, toResult) {
+var $Elm$Kernel$Http$expectBytesResponse = F2(function (toMsg, toResult) {
     return { toMsg: toMsg, handle: function (response) { return toResult(response); } };
 });
-var $Http$bytesBody = F2(function (mime, bytes) { return { $: 'StringBody', mime: mime, body: bytes }; });
-var $Http$bytesPart = F3(function (name, mime, bytes) { return { $: 'Part', name: name, mime: mime, body: bytes }; });
-var $Http$expectJson = F2(function (toMsg, decoder) {
+var $Elm$Kernel$Http$bytesBody = F2(function (mime, bytes) { return { $: 'StringBody', mime: mime, body: bytes }; });
+var $Elm$Kernel$Http$bytesPart = F3(function (name, mime, bytes) { return { $: 'Part', name: name, mime: mime, body: bytes }; });
+var $Elm$Kernel$Http$expectJson = F2(function (toMsg, decoder) {
     return { toMsg: toMsg, handle: function (response) {
         return _Http_defaultHandle(response, function (body) {
             var r = A2($Json$Decode$decodeString, decoder, body);
@@ -4402,6 +4406,14 @@ var $Http$expectJson = F2(function (toMsg, decoder) {
                 : $Result$Err({ $: 'BadBody', a: $Json$Decode$errorToString(r.a) });
         });
     } };
+});
+// mapExpect f expect : map the toMsg inside an Expect (used by the source's
+// cmdMap). The handle (response → Result) is unchanged.
+var $Elm$Kernel$Http$mapExpect = F2(function (f, expect) {
+    return {
+        toMsg: function (x) { return f(expect.toMsg(x)); },
+        handle: expect.handle
+    };
 });
 function _Http_defaultHandle(response, onGood) {
     switch (response.$) {
@@ -4457,35 +4469,17 @@ function _Http_makeTask(config, handle) {
             if (timer) { clearTimeout(timer); }
             ok(e.name === 'AbortError' ? { $: 'Timeout_' } : { $: 'NetworkError_' });
         });
+        // Canceller: `Process.kill` (via the spawn/kill mechanism) aborts the
+        // in-flight fetch. Also clears the timeout so no late fire leaks.
+        return function () {
+            if (controller) { controller.abort(); }
+            if (timer) { clearTimeout(timer); }
+        };
     });
 }
-var $Http$request = function (config) {
-    return { $: 'CmdHttp', config: config };
-};
-var $Http$riskyRequest = $Http$request;
-var $Http$get = function (config) {
-    return $Http$request({
-        method: 'GET', headers: [], url: config.url, body: $Http$emptyBody,
-        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
-    });
-};
-var $Http$post = function (config) {
-    return $Http$request({
-        method: 'POST', headers: [], url: config.url, body: config.body,
-        expect: config.expect, timeout: $Maybe$Nothing, tracker: $Maybe$Nothing
-    });
-};
-var $Http$stringResolver = function (toResult) { return { toResult: toResult }; };
-var $Http$bytesResolver = function (toResult) { return { toResult: toResult }; };
-var $Http$track = F2(function (_tracker, _toMsg) { return $Platform$Sub$none; });
-var $Http$cancel = function (_tracker) { return $Platform$Cmd$none; };
-var $Http$fractionSent = function (p) {
-    return p.size > 0 ? p.sent / p.size : 1;
-};
-var $Http$fractionReceived = function (p) {
-    return p.size.$ === 'Just' && p.size.a > 0 ? p.received / p.size.a : 0;
-};
-var $Http$task = function (config) {
+var $Elm$Kernel$Http$stringResolver = function (toResult) { return { toResult: toResult }; };
+var $Elm$Kernel$Http$bytesResolver = function (toResult) { return { toResult: toResult }; };
+var $Elm$Kernel$Http$task = function (config) {
     var cfg = {
         method: config.method,
         headers: _List_toArray(config.headers),
@@ -4498,7 +4492,33 @@ var $Http$task = function (config) {
         return r.$ === 'Ok' ? $Task$succeed(r.a) : $Task$fail(r.a);
     }, _Http_makeTask(cfg, null));
 };
-var $Http$riskyTask = $Http$task;
+// toTask(router, sendToApp, req) : run a request as a cancellable task the Http
+// manager spawns. On response, apply the Expect's `handle` → Result, `toMsg` →
+// msg, and send it to the app; the task's binding returns a canceller (abort)
+// that `Process.kill` invokes. `req.headers` is an Elm `List Header` (from the
+// bundled source), converted to the array `_Http_makeTask` expects.
+var $Elm$Kernel$Http$toTask = F3(function (_router, sendToApp, req) {
+    return _Task(function (ok) {
+        var cfg = {
+            method: req.method,
+            headers: _List_toArray(req.headers),
+            url: req.url,
+            body: req.body,
+            timeout: req.timeout
+        };
+        var cancelled = false;
+        var abort = _Task_fork(_Http_makeTask(cfg, null), function (response) {
+            if (cancelled) { return; }
+            var result = req.expect.handle(response);
+            _Task_fork(sendToApp(req.expect.toMsg(result)), function () {}, function () {});
+            ok(_Utils_Tuple0);
+        }, function () { ok(_Utils_Tuple0); });
+        return function () {
+            cancelled = true;
+            if (typeof abort === 'function') { abort(); }
+        };
+    });
+});
 
 // FILE
 
@@ -5231,20 +5251,6 @@ function _Platform_initialize(program, opts) {
                     }
                 );
                 return;
-            case 'CmdHttp': {
-                var cfg = {
-                    method: cmd.config.method,
-                    headers: _List_toArray(cmd.config.headers),
-                    url: cmd.config.url,
-                    body: cmd.config.body,
-                    timeout: cmd.config.timeout
-                };
-                _Task_fork(_Http_makeTask(cfg, null), function (response) {
-                    var result = cmd.config.expect.handle(response);
-                    dispatch(tagger(cmd.config.expect.toMsg(result)));
-                }, function () {});
-                return;
-            }
             case 'CmdLoad':
                 if (typeof window !== 'undefined') { window.location.href = cmd.url; }
                 return;

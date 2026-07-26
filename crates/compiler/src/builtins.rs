@@ -475,35 +475,8 @@ pub fn values() -> &'static [BuiltinValue] {
             V("Terminal", "writeLine", "String -> Cmd msg"),
             // Time is a bundled effect-module source (crates/compiler/src/builtin_src/Time.elm),
             // not a builtin — its values/types come from that compiled module.
-            // Http
-            V("Http", "get", "{ url : String, expect : Http.Expect msg } -> Cmd msg"),
-            V("Http", "post", "{ url : String, body : Http.Body, expect : Http.Expect msg } -> Cmd msg"),
-            V("Http", "request", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, expect : Http.Expect msg, timeout : Maybe Float, tracker : Maybe String } -> Cmd msg"),
-            V("Http", "riskyRequest", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, expect : Http.Expect msg, timeout : Maybe Float, tracker : Maybe String } -> Cmd msg"),
-            V("Http", "riskyTask", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, resolver : Http.Resolver x a, timeout : Maybe Float } -> Task x a"),
-            V("Http", "header", "String -> String -> Http.Header"),
-            V("Http", "emptyBody", "Http.Body"),
-            V("Http", "jsonBody", "Value -> Http.Body"),
-            V("Http", "stringBody", "String -> String -> Http.Body"),
-            V("Http", "fileBody", "File -> Http.Body"),
-            V("Http", "multipartBody", "List Http.Part -> Http.Body"),
-            V("Http", "stringPart", "String -> String -> Http.Part"),
-            V("Http", "filePart", "String -> File -> Http.Part"),
-            V("Http", "expectJson", "(Result Http.Error a -> msg) -> Decoder a -> Http.Expect msg"),
-            V("Http", "expectString", "(Result Http.Error String -> msg) -> Http.Expect msg"),
-            V("Http", "expectWhatever", "(Result Http.Error () -> msg) -> Http.Expect msg"),
-            V("Http", "expectStringResponse", "(Result x a -> msg) -> (Http.Response String -> Result x a) -> Http.Expect msg"),
-            V("Http", "expectBytes", "(Result Http.Error a -> msg) -> Bytes.Decode.Decoder a -> Http.Expect msg"),
-            V("Http", "expectBytesResponse", "(Result x a -> msg) -> (Http.Response Bytes.Bytes -> Result x a) -> Http.Expect msg"),
-            V("Http", "bytesBody", "String -> Bytes.Bytes -> Http.Body"),
-            V("Http", "bytesPart", "String -> String -> Bytes.Bytes -> Http.Part"),
-            V("Http", "task", "{ method : String, headers : List Http.Header, url : String, body : Http.Body, resolver : Http.Resolver x a, timeout : Maybe Float } -> Task x a"),
-            V("Http", "stringResolver", "(Http.Response String -> Result x a) -> Http.Resolver x a"),
-            V("Http", "bytesResolver", "(Http.Response Bytes.Bytes -> Result x a) -> Http.Resolver x a"),
-            V("Http", "track", "String -> (Http.Progress -> msg) -> Sub msg"),
-            V("Http", "fractionSent", "{ sent : Int, size : Int } -> Float"),
-            V("Http", "fractionReceived", "{ received : Int, size : Maybe Int } -> Float"),
-            V("Http", "cancel", "String -> Cmd msg"),
+            // Http is a bundled effect-module source (builtin_src/Http.elm),
+            // not a builtin — its values/types come from that compiled module.
             // File
             V("File", "decoder", "Decoder File"),
             V("File", "name", "File -> String"),
@@ -933,24 +906,7 @@ pub const UNIONS: &[BuiltinUnion] = &[
     BuiltinUnion { module: "Basics", name: "Order", vars: &[], ctors: &[("LT", &[]), ("EQ", &[]), ("GT", &[])] },
     BuiltinUnion { module: "Maybe", name: "Maybe", vars: &["a"], ctors: &[("Just", &["a"]), ("Nothing", &[])] },
     BuiltinUnion { module: "Result", name: "Result", vars: &["error", "value"], ctors: &[("Ok", &["value"]), ("Err", &["error"])] },
-    BuiltinUnion { module: "Http", name: "Error", vars: &[], ctors: &[
-        ("BadUrl", &["String"]),
-        ("Timeout", &[]),
-        ("NetworkError", &[]),
-        ("BadStatus", &["Int"]),
-        ("BadBody", &["String"]),
-    ] },
-    BuiltinUnion { module: "Http", name: "Progress", vars: &[], ctors: &[
-        ("Sending", &["{ sent : Int, size : Int }"]),
-        ("Receiving", &["{ received : Int, size : Maybe Int }"]),
-    ] },
-    BuiltinUnion { module: "Http", name: "Response", vars: &["body"], ctors: &[
-        ("BadUrl_", &["String"]),
-        ("Timeout_", &[]),
-        ("NetworkError_", &[]),
-        ("BadStatus_", &["Http.Metadata", "body"]),
-        ("GoodStatus_", &["Http.Metadata", "body"]),
-    ] },
+    // Http.Error/Progress/Response now come from the bundled Http effect module.
     // Time.Month/ZoneName/Weekday now come from the bundled Time effect module.
     BuiltinUnion { module: "Browser.Dom", name: "Error", vars: &[], ctors: &[("NotFound", &["String"])] },
     BuiltinUnion { module: "Browser.Events", name: "Visibility", vars: &[], ctors: &[("Visible", &[]), ("Hidden", &[])] },
@@ -975,7 +931,7 @@ pub const UNIONS: &[BuiltinUnion] = &[
 /// Built-in type aliases: (module, name, vars, body signature).
 pub const ALIASES: &[(&str, &str, &[&str], &str)] = &[
     ("Json.Decode", "Value", &[], "Value"),
-    ("Http", "Metadata", &[], "{ url : String, statusCode : Int, statusText : String, headers : Dict String String }"),
+    // Http.Metadata now comes from the bundled Http effect module.
     ("Browser.Dom", "Viewport", &[], "{ scene : { width : Float, height : Float }, viewport : { x : Float, y : Float, width : Float, height : Float } }"),
     ("Browser.Dom", "Element", &[], "{ scene : { width : Float, height : Float }, viewport : { x : Float, y : Float, width : Float, height : Float }, element : { x : Float, y : Float, width : Float, height : Float } }"),
     ("Url", "Url", &[], "{ protocol : Protocol, host : String, port_ : Maybe Int, path : String, query : Maybe String, fragment : Maybe String }"),
@@ -1012,11 +968,7 @@ pub fn is_builtin_type(module: &str, name: &str) -> bool {
 /// module hands out abstractly. Kept as a table so `exposing (..)` on a
 /// builtin module can bring them into scope alongside its unions and aliases.
 pub const OPAQUE_TYPES: &[(&str, &str)] = &[
-    ("Http", "Expect"),
-    ("Http", "Body"),
-    ("Http", "Header"),
-    ("Http", "Part"),
-    ("Http", "Resolver"),
+    // Http.Expect/Body/Header/Part/Resolver come from the bundled Http effect module.
     // Time.Posix/Zone/ZoneName now come from the bundled Time effect module.
     ("Task", "Task"),
     ("Json.Decode", "Decoder"),
@@ -1068,7 +1020,7 @@ pub const MODULES: &[&str] = &[
     "Array", "Bitwise", "Html", "Html.Attributes", "Html.Events", "Html.Lazy", "Html.Keyed",
     "Browser", "Browser.Dom", "Browser.Events", "Browser.Navigation", "Platform",
     "Platform.Cmd", "Platform.Sub", "Json.Decode", "Json.Encode", "Task", "Process",
-    "Http", "File", "Url", "Svg", "Svg.Attributes", "VirtualDom", "Terminal",
+    "File", "Url", "Svg", "Svg.Attributes", "VirtualDom", "Terminal",
 ];
 
 pub fn is_builtin_module(name: &str) -> bool {

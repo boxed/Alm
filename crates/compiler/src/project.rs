@@ -418,6 +418,11 @@ struct Scopes {
     /// a package's imports see only its own `src` plus its declared
     /// dependencies' `src` dirs.
     dir_search: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Extra source dirs used only when resolving a *bundled* effect module's
+    /// imports (currently elm/bytes' `src`): the bundled `Http` module needs
+    /// `Bytes`/`Bytes.Decode` even when the app itself does not declare
+    /// elm/bytes. Empty if elm/bytes is not in the package cache.
+    bundled_search: Vec<PathBuf>,
     /// Whether the project's `elm.json` declares `"type": "package"`. Packages
     /// may not declare ports.
     is_package: bool,
@@ -464,10 +469,26 @@ fn single_dir_scope(source: PathBuf) -> Scopes {
     let app_search = vec![source.clone()];
     let mut dir_search = HashMap::new();
     dir_search.insert(source, app_search.clone());
+    let bundled_search = register_bundled_deps(&mut dir_search);
     Scopes {
         app_search,
         dir_search,
+        bundled_search,
         is_package: false,
+    }
+}
+
+/// Register the search scope for bundled effect modules' non-builtin imports
+/// (elm/bytes) so `Bytes.Decode` can find `Bytes`, and return the extra dirs to
+/// search when resolving a bundled module's imports. elm/bytes depends only on
+/// elm/core (a builtin), so its own scope is just its `src`.
+fn register_bundled_deps(dir_search: &mut HashMap<PathBuf, Vec<PathBuf>>) -> Vec<PathBuf> {
+    match elm_bytes_src() {
+        Some(src) => {
+            dir_search.insert(src.clone(), vec![src.clone()]);
+            vec![src]
+        }
+        None => Vec::new(),
     }
 }
 
@@ -524,9 +545,12 @@ fn build_scopes(project_dir: &Path, elm_json: &str) -> Scopes {
         dir_search.insert(src.clone(), search);
     }
 
+    let bundled_search = register_bundled_deps(&mut dir_search);
+
     Scopes {
         app_search,
         dir_search,
+        bundled_search,
         is_package: is_package_project(elm_json),
     }
 }
@@ -707,8 +731,26 @@ fn bundled_source(name: &str) -> Option<&'static str> {
     match name {
         "Time" => Some(include_str!("builtin_src/Time.elm")),
         "Random" => Some(include_str!("builtin_src/Random.elm")),
+        "Http" => Some(include_str!("builtin_src/Http.elm")),
         _ => None,
     }
+}
+
+/// The `src` directory of the newest `elm/bytes` in the package cache, if
+/// installed. The bundled `Http` effect module imports `Bytes`/`Bytes.Decode`
+/// (for `bytesBody`/`expectBytes`), which are the elm/bytes package — NOT
+/// builtins. So that `Http.get` compiles in an app that declares only
+/// elm/core + elm/http, bundled modules resolve elm/bytes from the cache
+/// unconditionally rather than from the app's declared dependencies.
+fn elm_bytes_src() -> Option<PathBuf> {
+    let dir = packages_root().join("elm").join("bytes");
+    let mut versions: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.join("src").is_dir())
+        .collect();
+    versions.sort();
+    versions.pop().map(|p| p.join("src"))
 }
 
 /// Load a bundled effect-module source into the module graph under a synthetic
@@ -739,6 +781,15 @@ fn load_bundled_module(
             imports: Vec::new(),
         },
     );
+    // A bundled module's non-builtin imports resolve against the app's search
+    // dirs plus the bundled-dependency dirs (elm/bytes), so `Http` finds
+    // `Bytes`/`Bytes.Decode` even when the app never declared elm/bytes.
+    let bundled_import_search: Vec<PathBuf> = scopes
+        .app_search
+        .iter()
+        .chain(scopes.bundled_search.iter())
+        .cloned()
+        .collect();
     let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
     for import in import_names {
         if let Some(bsrc) = bundled_source(import.as_str()) {
@@ -746,7 +797,7 @@ fn load_bundled_module(
             resolved.push((import, child));
         } else {
             let (import_path, matched_dir) =
-                find_module_file(&import, &scopes.app_search).ok_or_else(|| {
+                find_module_file(&import, &bundled_import_search).ok_or_else(|| {
                     BuildError::new(
                         key.clone(),
                         source.to_string(),

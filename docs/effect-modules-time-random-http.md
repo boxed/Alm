@@ -99,6 +99,53 @@ Seed/Generator; Http.Error/Body/Expect/Progress/Response/Metadata/Header/Part.
    backing for generators/step/seed, remove CmdRandom dispatch.
 3. **Http** — bundled Http.elm, Elm.Kernel.Http prims (toTask/expect/…), remove
    CmdHttp dispatch. Biggest (progress track sub, cancel, multipart).
+   STATUS: Time + Random DONE (committed). Http design (below) ready to implement.
+
+## Http implementation design (milestone 3)
+
+Same pattern as Random (opaque types + Elm.Kernel backing + real manager). The
+real elm/http ALREADY declares `Header`/`Body`/`Part`/`Expect`/`Resolver` as
+opaque (kernel-built) — keep them opaque, delegate builders to
+`Elm.Kernel.Http.*` (alm's existing `$Http$*` builders, rekeyed). alm's runtime
+reps already MATCH the source ctors: `Error` (BadUrl/Timeout/NetworkError/
+BadStatus/BadBody), `Response` (BadUrl_/Timeout_/NetworkError_/BadStatus_ Meta
+body/GoodStatus_ Meta body), `Metadata` = {url,statusCode,statusText,headers}.
+Declared (exposed) source types: Error(..), Response(..), Progress(..)=Sending
+{sent,size}|Receiving{received,size}, Metadata alias.
+
+- **Bundled Http.elm** (`effect module Http where { command = MyCmd, subscription = MySub }`):
+  all pure builders delegate to `Elm.Kernel.Http.*`; `get`/`post`/`request` →
+  `command (Request {method,headers,url,body,expect,timeout,tracker})`;
+  `track tracker toMsg` → `subscription (MySub tracker toMsg)`; `cancel tracker`
+  → `command (Cancel tracker)`. `MyCmd = Cancel String | Request <config>`.
+  Manager: `init = Task.succeed (State Dict.empty [])`; `onEffects` = updateReqs
+  (per Request: `Process.spawn (Elm.Kernel.Http.toTask router (Platform.sendToApp
+  router) req)`, track pid by tracker; per Cancel: `Process.kill` the pid);
+  `onSelfMsg (tracker,progress)` delivers to matching MySub via sendToApp.
+- **Elm.Kernel.Http.toTask(router, sendToApp, req)** (JS): reuse alm's
+  `_Http_makeTask(req)` → response, apply `req.expect.handle(response)` → Result
+  → `req.expect.toMsg(result)`, then RUN `sendToApp(msg)` task; cancellable
+  (AbortController.abort on Process.kill via the canceller the binding returns —
+  same Process.spawn/kill mechanism Time/Http share). Progress via sendToSelf is
+  limited by fetch; track is a real sub but may only deliver coarse/no progress
+  (document it) — the DISPATCH is a real manager either way.
+- **Rekey** JS `$Http$*` pure builders → `$Elm$Kernel$Http$*`; REMOVE the
+  `CmdHttp` runCmd branch + `$Http$request`/`riskyRequest` old leaf + no-op
+  `$Http$track`/`$Http$cancel`. Config `headers` is now an Elm `List Header`
+  (source), so `_Http_makeTask` must `_List_toArray` them.
+- **native**: Http is currently a no-op (native CLI has no fetch). Wire the
+  manager (request→command→onEffects→Process.spawn toTask); `Elm.Kernel.Http.toTask`
+  stays unsupported/failing on native as today — DO NOT add an HTTP client dep.
+  The effect DISPATCH becomes a real manager; actual I/O remains native-unsupported.
+- **wasm-gc**: rekey Http builders to Elm.Kernel.Http; route request through the
+  manager (LEAF) instead of CMD_HTTP(3); `Elm.Kernel.Http.toTask` reuses the
+  existing `host_http` + `emit_http_response` settlement, driven from the manager.
+  Remove CMD_HTTP branch in emit_run_cmd/emit_cmd_map.
+- Types stay: Http.Error/Body/Expect/Part/Header/Response/Metadata/Progress/
+  Resolver come from the bundled source now (remove from builtins). Bytes/File
+  deps: keep expectBytes/bytesBody delegating to kernel (Bytes available).
+- Tests: differential get/expectString + a mock; convert any single-module Http
+  tests (runtime_test http_*) to run_proj.
 
 ## native + wasm-gc
 

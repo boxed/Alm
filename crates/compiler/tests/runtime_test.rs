@@ -22,7 +22,7 @@ fn run(body: &str) -> String {
 /// that reference a bundled effect module (Time), whose source is injected only
 /// on the project path.
 fn run_proj(body: &str) -> String {
-    let source = format!("module Test exposing (..)\n\nimport Random\nimport Time\n\n{}", body);
+    let source = format!("module Test exposing (..)\n\nimport Http\nimport Random\nimport Time\n\n{}", body);
     let javascript = common::compile_via_project("Test", &source);
     let js_path = common::write_js("runtime", &javascript);
     common::run_node(
@@ -306,7 +306,7 @@ fn url_parsing() {
 #[test]
 fn http_progress_math() {
     assert_eq!(
-        run("main = Debug.toString ( Http.fractionSent { sent = 25, size = 100 }, Http.fractionReceived { received = 5, size = Just 10 }, Http.fractionReceived { received = 5, size = Nothing } )"),
+        run_proj("main = Debug.toString ( Http.fractionSent { sent = 25, size = 100 }, Http.fractionReceived { received = 5, size = Just 10 }, Http.fractionReceived { received = 5, size = Nothing } )"),
         "(0.25,0.5,0)"
     );
 }
@@ -767,8 +767,10 @@ fn time_zone_eras() {
 #[test]
 fn http_progress_boundaries() {
     assert_eq!(
-        run("main = Debug.toString ( Http.fractionSent { sent = 0, size = 0 }, Http.fractionReceived { received = 1, size = Just 0 } )"),
-        "(1,0)"
+        // fractionReceived with size (Just 0) is 1 (elm/http: `if n == 0 then 1`);
+        // the old hardcoded builtin wrongly returned 0.
+        run_proj("main = Debug.toString ( Http.fractionSent { sent = 0, size = 0 }, Http.fractionReceived { received = 1, size = Just 0 } )"),
+        "(1,1)"
     );
 }
 
@@ -911,7 +913,7 @@ fn time_era_boundary_and_millis() {
 #[test]
 fn http_fraction_small_sizes() {
     assert_eq!(
-        run("main = Debug.toString ( Http.fractionSent { sent = 0, size = 1 }, Http.fractionReceived { received = 1, size = Just 1 } )"),
+        run_proj("main = Debug.toString ( Http.fractionSent { sent = 0, size = 1 }, Http.fractionReceived { received = 1, size = Just 1 } )"),
         "(0,1)"
     );
 }

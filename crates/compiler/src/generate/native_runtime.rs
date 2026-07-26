@@ -3557,6 +3557,9 @@ const TT_SPAWN: u32 = 8;
 const TT_SET_INTERVAL: u32 = 9;
 /// `Process.kill processId`: stop the timer the process's binding registered.
 const TT_KILL: u32 = 10;
+/// `Elm.Kernel.Http.toTask`/`task` on native: a task that never completes
+/// (native has no HTTP client). `run_task` stops without delivering.
+const TT_HTTP_NEVER: u32 = 11;
 
 /// Effect-manager leaf (`command`/`subscription` value). A distinct ctor tag
 /// shared by the Cmd and Sub bag walkers so it never collides with a `CT_`/`ST_`
@@ -7363,40 +7366,55 @@ unsafe extern "C" fn http_expect_string_response2(to_msg: u64, to_result: u64) -
 unsafe extern "C" fn http_expect_bytes_response2(to_msg: u64, to_result: u64) -> u64 {
     http_expect(to_msg, EXPECT_BYTES_RESPONSE, to_result)
 }
-unsafe extern "C" fn http_request1(config: u64) -> u64 {
-    ctor1(b"CmdHttp\0".as_ptr(), 0, config)
-}
-unsafe fn http_simple_request(method: &[u8], url: u64, body: u64, expect: u64) -> u64 {
-    let rec = rt_record_new(7);
-    rt_record_set(rec, 0, b"method\0".as_ptr(), mkstr(method.to_vec()));
-    rt_record_set(rec, 1, b"headers\0".as_ptr(), nil());
-    rt_record_set(rec, 2, b"url\0".as_ptr(), url);
-    rt_record_set(rec, 3, b"body\0".as_ptr(), body);
-    rt_record_set(rec, 4, b"expect\0".as_ptr(), expect);
-    rt_record_set(rec, 5, b"timeout\0".as_ptr(), nothing());
-    rt_record_set(rec, 6, b"tracker\0".as_ptr(), nothing());
-    http_request1(rec)
-}
-unsafe extern "C" fn http_get1(config: u64) -> u64 {
-    let url = rt_access(config, b"url\0".as_ptr());
-    let expect = rt_access(config, b"expect\0".as_ptr());
-    http_simple_request(b"GET", url, http_empty_body0(), expect)
-}
-unsafe extern "C" fn http_post1(config: u64) -> u64 {
-    let url = rt_access(config, b"url\0".as_ptr());
-    let body = rt_access(config, b"body\0".as_ptr());
-    let expect = rt_access(config, b"expect\0".as_ptr());
-    http_simple_request(b"POST", url, body, expect)
-}
+// get/post/request/riskyRequest are real Elm in the bundled Http module now
+// (they build `command (Request ...)` leaves dispatched by the manager), so the
+// old native `CmdHttp`-wrapping stubs are gone.
 unsafe extern "C" fn http_string_resolver1(to_result: u64) -> u64 {
     let rec = rt_record_new(1);
     rt_record_set(rec, 0, b"toResult\0".as_ptr(), to_result);
     rec
 }
-// `Http.task`/`riskyTask` — a Task value that is never executed natively
-// (tests only construct and compose it); an opaque constructor suffices.
-unsafe extern "C" fn http_task1(config: u64) -> u64 {
-    ctor1(b"TaskHttp\0".as_ptr(), 0, config)
+// Remaining body/part builders + expectBytes. Like the others, these only build
+// structural values (native never performs the request), so the shapes just need
+// to be valid — bodies reuse `http_body`, parts are simple records.
+unsafe extern "C" fn http_bytes_body2(mime: u64, bytes: u64) -> u64 {
+    http_body(mime, bytes)
+}
+unsafe extern "C" fn http_file_body1(file: u64) -> u64 {
+    http_body(mkstr(b"application/octet-stream".to_vec()), file)
+}
+unsafe extern "C" fn http_multipart_body1(parts: u64) -> u64 {
+    http_body(mkstr(b"multipart".to_vec()), parts)
+}
+unsafe extern "C" fn http_string_part2(name: u64, value: u64) -> u64 {
+    http_header2(name, value)
+}
+unsafe extern "C" fn http_file_part2(name: u64, file: u64) -> u64 {
+    http_header2(name, file)
+}
+unsafe extern "C" fn http_bytes_part3(name: u64, _mime: u64, bytes: u64) -> u64 {
+    http_header2(name, bytes)
+}
+unsafe extern "C" fn http_expect_bytes2(to_msg: u64, decoder: u64) -> u64 {
+    http_expect(to_msg, EXPECT_JSON, decoder)
+}
+// mapExpect f expect (source cmdMap): native never delivers an HTTP response, so
+// the tagger inside the Expect is never invoked — return the Expect unchanged.
+unsafe extern "C" fn http_map_expect2(_f: u64, expect: u64) -> u64 {
+    expect
+}
+// `Http.task` / `Elm.Kernel.Http.toTask` — native has no HTTP client, so both
+// are tasks that never complete (deliver nothing). The effect DISPATCH through
+// the manager is real; only the I/O is unsupported, as it was before Http became
+// a real effect module.
+unsafe fn http_never() -> u64 {
+    ctor(b"HttpNever\0".as_ptr(), TT_HTTP_NEVER, Vec::new())
+}
+unsafe extern "C" fn http_task1(_config: u64) -> u64 {
+    http_never()
+}
+unsafe extern "C" fn http_to_task3(_router: u64, _send: u64, _req: u64) -> u64 {
+    http_never()
 }
 
 // --- Browser.Dom: headless stand-ins (no DOM natively). The JS runtime's
@@ -8750,7 +8768,7 @@ macro_rules! baked_globals {
 }
 
 baked_globals! {
-    G_HTTP_EMPTYBODY "$Http$emptyBody" = http_empty_body0();
+    G_HTTP_EMPTYBODY "$Elm$Kernel$Http$emptyBody" = http_empty_body0();
     // elm-explorations/linear-algebra: the identity matrix is a kernel VALUE.
     G_MJS_M4X4IDENTITY "$Elm$Kernel$MJS$m4x4identity" = mk_floats(vec![
         1.0, 0.0, 0.0, 0.0,
@@ -9304,22 +9322,30 @@ kernel_fns! {
     G_HTMLLAZY_LAZY6 "$Html$Lazy$lazy6" vdom_lazy7, 7;
     G_HTMLLAZY_LAZY7 "$Html$Lazy$lazy7" vdom_lazy8, 8;
     G_HTMLLAZY_LAZY8 "$Html$Lazy$lazy8" vdom_lazy9, 9;
-    G_HTTP_HEADER "$Http$header" http_header2, 2;
-    G_HTTP_STRINGBODY "$Http$stringBody" http_string_body2, 2;
-    G_HTTP_JSONBODY "$Http$jsonBody" http_json_body1, 1;
-    G_HTTP_EXPECTSTRING "$Http$expectString" http_expect_string1, 1;
-    G_HTTP_EXPECTWHATEVER "$Http$expectWhatever" http_expect_whatever1, 1;
-    G_HTTP_EXPECTJSON "$Http$expectJson" http_expect_json2, 2;
-    G_HTTP_EXPECTSTRINGRESPONSE "$Http$expectStringResponse" http_expect_string_response2, 2;
-    G_HTTP_EXPECTBYTESRESPONSE "$Http$expectBytesResponse" http_expect_bytes_response2, 2;
-    G_HTTP_REQUEST "$Http$request" http_request1, 1;
-    G_HTTP_RISKYREQUEST "$Http$riskyRequest" http_request1, 1;
-    G_HTTP_GET "$Http$get" http_get1, 1;
-    G_HTTP_POST "$Http$post" http_post1, 1;
-    G_HTTP_STRINGRESOLVER "$Http$stringResolver" http_string_resolver1, 1;
-    G_HTTP_BYTESRESOLVER "$Http$bytesResolver" http_string_resolver1, 1;
-    G_HTTP_TASK "$Http$task" http_task1, 1;
-    G_HTTP_RISKYTASK "$Http$riskyTask" http_task1, 1;
+    // Http pure builders back the bundled `Http` effect module's delegating
+    // `Elm.Kernel.Http.*` calls (source in builtin_src/Http.elm). get/post/
+    // request/riskyRequest are real Elm now (they build `command (Request ...)`
+    // leaves); native has no HTTP client, so `toTask`/`task` never complete.
+    G_HTTP_HEADER "$Elm$Kernel$Http$header" http_header2, 2;
+    G_HTTP_STRINGBODY "$Elm$Kernel$Http$stringBody" http_string_body2, 2;
+    G_HTTP_JSONBODY "$Elm$Kernel$Http$jsonBody" http_json_body1, 1;
+    G_HTTP_BYTESBODY "$Elm$Kernel$Http$bytesBody" http_bytes_body2, 2;
+    G_HTTP_FILEBODY "$Elm$Kernel$Http$fileBody" http_file_body1, 1;
+    G_HTTP_MULTIPARTBODY "$Elm$Kernel$Http$multipartBody" http_multipart_body1, 1;
+    G_HTTP_STRINGPART "$Elm$Kernel$Http$stringPart" http_string_part2, 2;
+    G_HTTP_FILEPART "$Elm$Kernel$Http$filePart" http_file_part2, 2;
+    G_HTTP_BYTESPART "$Elm$Kernel$Http$bytesPart" http_bytes_part3, 3;
+    G_HTTP_EXPECTSTRING "$Elm$Kernel$Http$expectString" http_expect_string1, 1;
+    G_HTTP_EXPECTWHATEVER "$Elm$Kernel$Http$expectWhatever" http_expect_whatever1, 1;
+    G_HTTP_EXPECTJSON "$Elm$Kernel$Http$expectJson" http_expect_json2, 2;
+    G_HTTP_EXPECTBYTES "$Elm$Kernel$Http$expectBytes" http_expect_bytes2, 2;
+    G_HTTP_EXPECTSTRINGRESPONSE "$Elm$Kernel$Http$expectStringResponse" http_expect_string_response2, 2;
+    G_HTTP_EXPECTBYTESRESPONSE "$Elm$Kernel$Http$expectBytesResponse" http_expect_bytes_response2, 2;
+    G_HTTP_STRINGRESOLVER "$Elm$Kernel$Http$stringResolver" http_string_resolver1, 1;
+    G_HTTP_BYTESRESOLVER "$Elm$Kernel$Http$bytesResolver" http_string_resolver1, 1;
+    G_HTTP_MAPEXPECT "$Elm$Kernel$Http$mapExpect" http_map_expect2, 2;
+    G_HTTP_TASK "$Elm$Kernel$Http$task" http_task1, 1;
+    G_HTTP_TOTASK "$Elm$Kernel$Http$toTask" http_to_task3, 3;
     G_DOM_GETELEMENT "$Browser$Dom$getElement" dom_get_element1, 1;
     G_DOM_SETVIEWPORTOF "$Browser$Dom$setViewportOf" dom_set_viewport_of3, 3;
     G_WEBGL_ENTITY "$Elm$Kernel$WebGL$entity" webgl_entity5, 5;
@@ -10416,6 +10442,11 @@ unsafe fn run_task(mut task: u64, mut frames: Vec<Frame>, sink: Sink) {
                     }
                 }
                 task = task_succeed(unit());
+            }
+            TT_HTTP_NEVER => {
+                // Native has no HTTP client: the request never completes and
+                // delivers nothing (I/O unsupported). Stop this task/process.
+                return;
             }
             _ => crash!("unknown task"),
         }

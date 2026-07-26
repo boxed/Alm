@@ -5077,10 +5077,11 @@ impl<'a> Codegen<'a> {
             f.instruction(&Instruction::StructNew(T_CTOR)); // outer field
             return Ok(());
         }
-        // Http.emptyBody : the host HTTP shim ignores the request body, so any
-        // placeholder value works (a unit ctor). Http.stringBody/jsonBody/
-        // bytesBody are functions handled in emit_kernel and likewise ignored.
-        if module == "Http" && name == "emptyBody" {
+        // Elm.Kernel.Http.emptyBody : the host HTTP shim ignores the request
+        // body, so any placeholder value works (a unit ctor). stringBody/
+        // jsonBody/bytesBody are functions handled in emit_kernel and likewise
+        // ignored. (The bundled Http source delegates `emptyBody` here.)
+        if module == "Elm.Kernel.Http" && name == "emptyBody" {
             push_nullary_ctor(f, 0);
             return Ok(());
         }
@@ -8566,6 +8567,40 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::ArrayGet(T_ARR)); // toResult fn
         f.instruction(&Instruction::GlobalGet(G_HTTP_RESP));
         f.instruction(&Instruction::Call(self.apply1_idx));
+        f.instruction(&Instruction::Return);
+        f.instruction(&Instruction::End);
+        // THttpCmd (18) [expect, url]: the Http manager spawns this to dispatch a
+        // request. Register the expect by a fresh request id and fire host_http;
+        // settlement (alm_http_response) applies the expect and dispatches to the
+        // app. Completes immediately with Ok(null) — a null canceller, so
+        // Process.kill is a no-op (the host test shim has no fetch abort).
+        f.instruction(&Instruction::LocalGet(5));
+        f.instruction(&Instruction::I32Const(18));
+        f.instruction(&Instruction::I32Eq);
+        f.instruction(&Instruction::If(BlockType::Empty));
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::LocalSet(6)); // reqId
+        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Add);
+        f.instruction(&Instruction::GlobalSet(G_NEXT_REQ));
+        // G_HTTP[reqId] = expect (arg0)
+        f.instruction(&Instruction::GlobalGet(G_HTTP));
+        f.instruction(&cast_to(T_ARR));
+        f.instruction(&Instruction::LocalGet(6));
+        ctor_arg0(&mut f, 0);
+        f.instruction(&Instruction::ArraySet(T_ARR));
+        // host_http(marshal(url=arg1), len, reqId)
+        ctor_argn(&mut f, 0, 1);
+        f.instruction(&Instruction::LocalSet(3)); // url string
+        self.dom_str(&mut f, 3);
+        f.instruction(&Instruction::LocalGet(6));
+        f.instruction(&Instruction::Call(HOST_HTTP));
+        // Ok(null canceller)
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::RefNull(eq_heap()));
+        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+        f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
         // Now (10) [millisToPosix]: synchronous — Ok(millisToPosix (trunc
@@ -16644,30 +16679,9 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
         f.instruction(&Instruction::End);
-        // CMD_HTTP (3): [url, expect]. Register expect by request id, start GET.
-        f.instruction(&Instruction::LocalGet(1));
-        f.instruction(&Instruction::I32Const(3));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
-        f.instruction(&Instruction::LocalSet(2)); // reqId
-        f.instruction(&Instruction::GlobalGet(G_NEXT_REQ));
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Add);
-        f.instruction(&Instruction::GlobalSet(G_NEXT_REQ));
-        // G_HTTP[reqId] = expect (cmd.arg1)
-        f.instruction(&Instruction::GlobalGet(G_HTTP));
-        f.instruction(&cast_to(T_ARR));
-        f.instruction(&Instruction::LocalGet(2));
-        ctor_argn(&mut f, 0, 1);
-        f.instruction(&Instruction::ArraySet(T_ARR));
-        // host_http(marshal(url=cmd.arg0), len, reqId)
-        ctor_arg0(&mut f, 0);
-        f.instruction(&Instruction::LocalSet(5));
-        self.dom_str(&mut f, 5);
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::Call(HOST_HTTP));
-        f.instruction(&Instruction::End);
+        // (Http.get/request are manager command LEAVES now; the request is
+        // dispatched by the Http manager via Elm.Kernel.Http.toTask, which
+        // reifies as a THttpCmd task — not a hardcoded CMD_HTTP branch here.)
         // CMD_NAV push (4) / replace (5): change history, then fire onUrlChange
         f.instruction(&Instruction::LocalGet(1));
         f.instruction(&Instruction::I32Const(4));
@@ -17174,40 +17188,10 @@ impl<'a> Codegen<'a> {
         f.instruction(&Instruction::StructNew(T_CTOR));
         f.instruction(&Instruction::Return);
         f.instruction(&Instruction::End);
-        // CMD_HTTP (3) [url, expect]: rebuild with a mapped expect.
-        f.instruction(&Instruction::LocalGet(2));
-        f.instruction(&Instruction::I32Const(3));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Empty));
-        f.instruction(&Instruction::I32Const(3));
-        ctor_arg0(&mut f, 1); // url
-        // composed = compose3[f][expect.toMsg]
-        ctor_argn(&mut f, 1, 1);
-        f.instruction(&Instruction::LocalSet(3)); // expect
-        self.emit_make_closure(self.compose3_idx, 3, &mut f);
-        f.instruction(&Instruction::LocalGet(0));
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        ctor_arg0(&mut f, 3); // expect.toMsg
-        f.instruction(&Instruction::Call(self.apply1_idx));
-        f.instruction(&Instruction::LocalSet(4)); // composed
-        // new expect: same tag; args [composed] or [composed, decoder] (JSON=1).
-        ctor_tag(&mut f, 3);
-        ctor_tag(&mut f, 3);
-        f.instruction(&Instruction::I32Const(1));
-        f.instruction(&Instruction::I32Eq);
-        f.instruction(&Instruction::If(BlockType::Result(ref_to(T_ARR))));
-        f.instruction(&Instruction::LocalGet(4));
-        ctor_argn(&mut f, 3, 1); // decoder
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::Else);
-        f.instruction(&Instruction::LocalGet(4));
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
-        f.instruction(&Instruction::End);
-        f.instruction(&Instruction::StructNew(T_CTOR)); // new expect
-        f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-        f.instruction(&Instruction::StructNew(T_CTOR)); // CMD_HTTP
-        f.instruction(&Instruction::Return);
-        f.instruction(&Instruction::End);
+        // (Http requests are manager command LEAVES now; Cmd.map over the Http
+        // manager is the documented mgr_collect cmdMap limitation — the mapping
+        // that used to live here is Elm.Kernel.Http.mapExpect in the source's
+        // cmdMap, not a CMD_HTTP re-wrap.)
         // CMD_TASK_PERFORM (7) / ATTEMPT (8) [toMsg, task]: compose f into toMsg.
         f.instruction(&Instruction::LocalGet(2));
         f.instruction(&Instruction::I32Const(7));
@@ -27876,86 +27860,34 @@ impl<'a> Codegen<'a> {
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // Http.get { url, expect } → CMD_HTTP tag3 [url, expect].
-            // Record fields sorted: expect=0, url=1.
-            ("Http", "get") => {
-                let r = ctx.bind("$httpcfg");
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::LocalSet(r));
-                f.instruction(&Instruction::I32Const(3));
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(1));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(0));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
-            }
-            // Http.post { url, body, expect } → CMD_HTTP [url, expect].
-            // Fields sorted: body=0, expect=1, url=2.
-            ("Http", "post") => {
-                let r = ctx.bind("$httpcfg");
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::LocalSet(r));
-                f.instruction(&Instruction::I32Const(3));
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(2));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(1));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
-            }
-            // Body builders + Http.header — the host shim ignores request bodies
-            // and headers, so any placeholder works (a unit ctor).
-            ("Http", "stringBody")
-            | ("Http", "jsonBody")
-            | ("Http", "bytesBody")
-            | ("Http", "header") => {
+            // Http.get/post/request/riskyRequest come from the bundled Http
+            // effect module now (they build `command (Request ...)` leaves);
+            // the request is dispatched by the manager via Elm.Kernel.Http.toTask.
+            //
+            // Body builders + Elm.Kernel.Http.header — the host shim ignores
+            // request bodies and headers, so any placeholder works (a unit ctor).
+            ("Elm.Kernel.Http", "stringBody")
+            | ("Elm.Kernel.Http", "jsonBody")
+            | ("Elm.Kernel.Http", "bytesBody")
+            | ("Elm.Kernel.Http", "fileBody")
+            | ("Elm.Kernel.Http", "header") => {
                 push_nullary_ctor(f, 0);
             }
-            // Http.request / riskyRequest { method, headers, url, body, expect,
-            // timeout, tracker } → CMD_HTTP [url, expect]. The host shim ignores
-            // method/headers/body/timeout/tracker (issues a GET), like Http.get.
-            // Config fields sorted: body=0, expect=1, headers=2, method=3,
-            // timeout=4, tracker=5, url=6.
-            ("Http", "request") | ("Http", "riskyRequest") => {
-                let r = ctx.bind("$httpcfg");
-                self.emit_expr(&args[0], ctx, f)?;
-                f.instruction(&Instruction::LocalSet(r));
-                f.instruction(&Instruction::I32Const(3));
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(6));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
-                f.instruction(&Instruction::LocalGet(r));
-                f.instruction(&cast_to(T_ARR));
-                f.instruction(&Instruction::I32Const(1));
-                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
-                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
-                f.instruction(&Instruction::StructNew(T_CTOR));
-            }
             // Http.Expect: expectString tag0 [toMsg], expectJson tag1 [toMsg, decoder].
-            ("Http", "expectString") => {
+            ("Elm.Kernel.Http", "expectString") => {
                 f.instruction(&Instruction::I32Const(0));
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            ("Http", "expectJson") => {
+            ("Elm.Kernel.Http", "expectJson") => {
                 f.instruction(&Instruction::I32Const(1));
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 self.emit_expr(&args[1], ctx, f)?; // decoder
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            ("Http", "expectWhatever") => {
+            ("Elm.Kernel.Http", "expectWhatever") => {
                 f.instruction(&Instruction::I32Const(2)); // EXPECT_WHATEVER
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
@@ -27964,7 +27896,7 @@ impl<'a> Codegen<'a> {
             // expectBytes toMsg decoder → Expect tag 3 [toMsg, decoder]. The
             // response body is raw bytes (str_from_mem copies them verbatim into
             // a T_STR, which is exactly a Bytes value), run through the decoder.
-            ("Http", "expectBytes") => {
+            ("Elm.Kernel.Http", "expectBytes") => {
                 f.instruction(&Instruction::I32Const(3)); // EXPECT_BYTES
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 self.emit_expr(&args[1], ctx, f)?; // decoder
@@ -27975,31 +27907,62 @@ impl<'a> Codegen<'a> {
             // shape; the T_STR body doubles as a Bytes value) → Expect tag 4
             // [toMsg, responseToResult]. The handler builds the full
             // Http.Response and lets `responseToResult` map it to a Result.
-            ("Http", "expectStringResponse") | ("Http", "expectBytesResponse") => {
+            ("Elm.Kernel.Http", "expectStringResponse")
+            | ("Elm.Kernel.Http", "expectBytesResponse") => {
                 f.instruction(&Instruction::I32Const(4)); // EXPECT_RESPONSE
                 self.emit_expr(&args[0], ctx, f)?; // toMsg
                 self.emit_expr(&args[1], ctx, f)?; // responseToResult
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
-            // multipart/part builders: the host shim ignores the request body,
-            // so these are inert placeholders (like stringBody/bytesBody).
-            ("Http", "multipartBody")
-            | ("Http", "stringPart")
-            | ("Http", "bytesPart")
-            | ("Http", "filePart") => {
-                push_nullary_ctor(f, 0);
+            // mapExpect f expect (used by the source's cmdMap): rebuild the Expect
+            // ctor with `f` composed into its toMsg (arg0), preserving arg1 (the
+            // decoder / responseToResult) for the 2-arg kinds. Cmd.map over the
+            // Http manager is not actually applied on wasm (the mgr_collect
+            // cmdMap limitation), but the source references this, so it must
+            // compile and be correct if ever reached.
+            ("Elm.Kernel.Http", "mapExpect") => {
+                let fl = ctx.bind("$mef");
+                let ex = ctx.bind("$mee");
+                self.emit_expr(&args[0], ctx, f)?; // f
+                f.instruction(&Instruction::LocalSet(fl));
+                self.emit_expr(&args[1], ctx, f)?; // expect
+                f.instruction(&Instruction::LocalSet(ex));
+                // tag (preserved)
+                ctor_tag(f, ex);
+                // composed = compose3[f][expect.toMsg]
+                self.emit_make_closure(self.compose3_idx, 3, f);
+                f.instruction(&Instruction::LocalGet(fl));
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                ctor_arg0(f, ex); // expect.toMsg
+                f.instruction(&Instruction::Call(self.apply1_idx));
+                // args: [composed] or [composed, arg1] when the kind carries one
+                // (expectJson=1, expectBytes=3, expect*Response=4).
+                ctor_tag(f, ex);
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::I32Ne); // tag != 0 && tag != 2 → has arg1
+                ctor_tag(f, ex);
+                f.instruction(&Instruction::I32Const(2));
+                f.instruction(&Instruction::I32Ne);
+                f.instruction(&Instruction::I32And);
+                f.instruction(&Instruction::If(BlockType::Result(ref_to(T_ARR))));
+                ctor_argn(f, ex, 1); // arg1 (decoder / responseToResult)
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::Else);
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
+                f.instruction(&Instruction::End);
+                f.instruction(&Instruction::StructNew(T_CTOR)); // new Expect
             }
             // Http.stringResolver / bytesResolver toResult → the record {toResult}
             // (a single-field record = T_ARR [toResult]).
-            ("Http", "stringResolver") | ("Http", "bytesResolver") => {
+            ("Elm.Kernel.Http", "stringResolver") | ("Elm.Kernel.Http", "bytesResolver") => {
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 1 });
             }
             // Http.task config → THttp [url, resolver] (Task tag 11). GET only
             // (host_http, like the Cmd path, ignores method/headers/body).
             // config record fields sorted: body,headers,method,resolver,timeout,url.
-            ("Http", "task") | ("Http", "riskyTask") => {
+            ("Elm.Kernel.Http", "task") => {
                 let r = ctx.bind("$httptask");
                 self.emit_expr(&args[0], ctx, f)?;
                 f.instruction(&Instruction::LocalSet(r));
@@ -28012,6 +27975,28 @@ impl<'a> Codegen<'a> {
                 f.instruction(&cast_to(T_ARR));
                 f.instruction(&Instruction::I32Const(3));
                 f.instruction(&Instruction::ArrayGet(T_ARR)); // resolver
+                f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+                f.instruction(&Instruction::StructNew(T_CTOR));
+            }
+            // toTask router sendToApp req → THttpCmd task [expect, url] (Task tag
+            // 18). The Http manager spawns this; task_run registers the expect and
+            // fires host_http, and settlement (alm_http_response) applies the
+            // Expect + dispatches to the app (= sendToApp). router/sendToApp are
+            // unused here. req fields sorted: body=0, expect=1, headers=2,
+            // method=3, timeout=4, tracker=5, url=6.
+            ("Elm.Kernel.Http", "toTask") => {
+                let r = ctx.bind("$httpreq");
+                self.emit_expr(&args[2], ctx, f)?; // req record
+                f.instruction(&Instruction::LocalSet(r));
+                f.instruction(&Instruction::I32Const(18)); // THttpCmd
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(1));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // expect
+                f.instruction(&Instruction::LocalGet(r));
+                f.instruction(&cast_to(T_ARR));
+                f.instruction(&Instruction::I32Const(6));
+                f.instruction(&Instruction::ArrayGet(T_ARR)); // url
                 f.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
                 f.instruction(&Instruction::StructNew(T_CTOR));
             }
@@ -28349,12 +28334,12 @@ impl<'a> Codegen<'a> {
             // wasm trap, not a silent no-op) if the effect is ever invoked.
             //   - File.Download.* / File.Select.* / File.* accessors: a File only
             //     exists via a browser upload, absent headless (Markdown needs a
-            //     CommonMark parser; Http.cancel/fileBody need a live request/File;
-            //     Benchmark/Test.runThunk are runner internals).
+            //     CommonMark parser; Benchmark/Test.runThunk are runner internals).
+            //     (Http.cancel is real Elm now; Http.fileBody delegates to
+            //     Elm.Kernel.Http.fileBody, an inert Body placeholder.)
             ("Elm.Kernel.File", _)
             | ("File", "name" | "size" | "mime" | "lastModified" | "toString" | "toBytes" | "toUrl")
             | ("Elm.Kernel.Markdown", "toHtml" | "toHtmlWith")
-            | ("Http", "cancel" | "fileBody")
             | ("Elm.Kernel.Benchmark", _)
             | ("Elm.Kernel.Test", "runThunk")
             // elm-explorations/webgl: real rendering needs a GPU/DOM `gl` context,

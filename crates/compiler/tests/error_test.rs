@@ -436,9 +436,11 @@ fn alias_used_as_ctor_must_be_record() {
 
 #[test]
 fn builtin_record_alias_as_constructor() {
-    // Http.Metadata is a builtin record alias: usable as a constructor.
+    // Url.Url is a builtin record alias: usable as a constructor. (Http.Metadata
+    // used to be a builtin too, but Http is a bundled effect module now — its
+    // types come from source, unavailable to the single-module compile API.)
     let result = alm_compiler::compile(
-        "module Test exposing (..)\n\nmeta = Http.Metadata \"http://x\" 200 \"OK\" Dict.empty\n\nmain = meta.statusText\n",
+        "module Test exposing (..)\n\nu = Url.Url Url.Https \"example.com\" Nothing \"/\" Nothing Nothing\n\nmain = u.host\n",
     );
     assert!(result.is_ok(), "{:?}", result.err().map(|e| e[0].message.clone()));
 }
