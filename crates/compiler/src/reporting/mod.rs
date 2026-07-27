@@ -1,5 +1,6 @@
 pub mod annotation;
 pub mod doc;
+pub mod render_type;
 pub mod syntax;
 pub mod type_error;
 

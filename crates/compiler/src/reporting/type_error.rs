@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use super::doc::{Color, Doc};
+use super::render_type::{self, Ctx};
 use super::{green, grey, hint, labeled, link, note, sentence, words, yellow};
 use super::{ElmBody, Report, Section};
 use crate::reporting::annotation::Region;
@@ -116,79 +117,9 @@ impl ErrorType {
 
 // ------------------------------------------------------------------- to a doc
 
-/// `Reporting.Render.Type.Context` — whether a type needs parentheses here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ctx {
-    None,
-    Func,
-    App,
-}
-
-fn lambda_doc(ctx: Ctx, arg1: Doc, arg2: Doc, rest: Vec<Doc>) -> Doc {
-    let mut parts = vec![arg1];
-    for a in std::iter::once(arg2).chain(rest) {
-        parts.push(Doc::space(Doc::text("->"), a));
-    }
-    let inner = Doc::align(Doc::sep(parts));
-    match ctx {
-        Ctx::None => inner,
-        Ctx::Func | Ctx::App => Doc::cat(vec![Doc::text("("), inner, Doc::text(")")]),
-    }
-}
-
-fn apply_doc(ctx: Ctx, name: Doc, args: Vec<Doc>) -> Doc {
-    if args.is_empty() {
-        return name;
-    }
-    let mut parts = vec![name];
-    parts.extend(args);
-    let inner = Doc::hang(4, Doc::sep(parts));
-    match ctx {
-        Ctx::App => Doc::cat(vec![Doc::text("("), inner, Doc::text(")")]),
-        Ctx::Func | Ctx::None => inner,
-    }
-}
-
-fn tuple_doc(a: Doc, b: Doc, cs: Vec<Doc>) -> Doc {
-    let mut entries = Vec::new();
-    for (i, part) in std::iter::once(a).chain(std::iter::once(b)).chain(cs).enumerate() {
-        entries.push(Doc::space(Doc::text(if i == 0 { "(" } else { "," }), part));
-    }
-    Doc::align(Doc::sep(vec![Doc::cat(entries), Doc::text(")")]))
-}
-
-fn entry_doc(field: Doc, tipe: Doc) -> Doc {
-    Doc::hang(4, Doc::sep(vec![Doc::space(field, Doc::text(":")), tipe]))
-}
-
-fn record_doc(entries: Vec<(Doc, Doc)>, ext: Option<Doc>) -> Doc {
-    let fields: Vec<Doc> = entries.into_iter().map(|(f, t)| entry_doc(f, t)).collect();
-    match (fields.is_empty(), ext) {
-        (true, None) => Doc::text("{}"),
-        (false, None) => {
-            let mut parts = Vec::new();
-            for (i, f) in fields.into_iter().enumerate() {
-                parts.push(Doc::space(Doc::text(if i == 0 { "{" } else { "," }), f));
-            }
-            Doc::align(Doc::sep(vec![Doc::cat(parts), Doc::text("}")]))
-        }
-        (_, Some(ext)) => {
-            let mut parts = Vec::new();
-            for (i, f) in fields.into_iter().enumerate() {
-                parts.push(Doc::space(Doc::text(if i == 0 { "|" } else { "," }), f));
-            }
-            let head = Doc::hang(
-                4,
-                Doc::sep(vec![Doc::space(Doc::text("{"), ext), Doc::cat(parts)]),
-            );
-            Doc::align(Doc::sep(vec![head, Doc::text("}")]))
-        }
-    }
-}
-
 fn to_doc(ctx: Ctx, tipe: &ErrorType) -> Doc {
     match tipe {
-        ErrorType::Lambda(a, b, rest) => lambda_doc(
+        ErrorType::Lambda(a, b, rest) => render_type::lambda(
             ctx,
             to_doc(Ctx::Func, a),
             to_doc(Ctx::Func, b),
@@ -200,60 +131,22 @@ fn to_doc(ctx: Ctx, tipe: &ErrorType) -> Doc {
         | ErrorType::FlexSuper(_, n)
         | ErrorType::RigidVar(n)
         | ErrorType::RigidSuper(_, n) => Doc::text(n.clone()),
-        ErrorType::Type(_, name, args) => apply_doc(
+        ErrorType::Type(_, name, args) => render_type::apply(
             ctx,
             Doc::text(name.clone()),
             args.iter().map(|t| to_doc(Ctx::App, t)).collect(),
         ),
-        ErrorType::Record(fields, ext) => record_doc(
+        ErrorType::Record(fields, ext) => render_type::record(
             fields.iter().map(|(f, t)| (Doc::text(f.clone()), to_doc(Ctx::None, t))).collect(),
             ext_to_doc(ext),
         ),
         ErrorType::Unit => Doc::text("()"),
-        ErrorType::Tuple(a, b, c) => tuple_doc(
+        ErrorType::Tuple(a, b, c) => render_type::tuple(
             to_doc(Ctx::None, a),
             to_doc(Ctx::None, b),
             c.iter().map(|t| to_doc(Ctx::None, t)).collect(),
         ),
     }
-}
-
-/// `RT.vrecord` — one field per line, always broken.
-fn vrecord_doc(entries: Vec<(Doc, Doc)>, ext: Option<Doc>) -> Doc {
-    let fields: Vec<Doc> = entries.into_iter().map(|(f, t)| entry_doc(f, t)).collect();
-    match (fields.is_empty(), ext) {
-        (true, None) => Doc::text("{}"),
-        (false, None) => {
-            let mut parts = Vec::new();
-            for (i, f) in fields.into_iter().enumerate() {
-                parts.push(Doc::space(Doc::text(if i == 0 { "{" } else { "," }), f));
-            }
-            parts.push(Doc::text("}"));
-            Doc::vcat(parts)
-        }
-        (_, Some(ext)) => {
-            let mut parts = Vec::new();
-            for (i, f) in fields.into_iter().enumerate() {
-                parts.push(Doc::space(Doc::text(if i == 0 { "|" } else { "," }), f));
-            }
-            let head = Doc::hang(
-                4,
-                Doc::vcat(vec![Doc::space(Doc::text("{"), ext), Doc::cat(parts)]),
-            );
-            Doc::vcat(vec![head, Doc::text("}")])
-        }
-    }
-}
-
-/// `RT.vrecordSnippet` — the first few fields then `...`.
-fn vrecord_snippet_doc(first: (Doc, Doc), rest: Vec<(Doc, Doc)>) -> Doc {
-    let mut lines = vec![Doc::space(Doc::text("{"), entry_doc(first.0, first.1))];
-    for (f, t) in rest {
-        lines.push(Doc::space(Doc::text(","), entry_doc(f, t)));
-    }
-    lines.push(Doc::space(Doc::text(","), Doc::text("...")));
-    lines.push(Doc::text("}"));
-    Doc::vcat(lines)
 }
 
 /// `toNearbyRecord` — the record's fields, closest match first, at most four.
@@ -264,11 +157,11 @@ fn nearby_record(fields: &BTreeMap<String, ErrorType>, field: &str, ext: &Extens
         .map(|name| (Doc::text(name.clone()), to_doc(Ctx::None, &fields[name])))
         .collect();
     let doc = if entries.len() <= 4 {
-        vrecord_doc(entries, ext_to_doc(ext))
+        render_type::vrecord(entries, ext_to_doc(ext))
     } else {
         let mut it = entries.into_iter();
         let first = it.next().unwrap();
-        vrecord_snippet_doc(first, it.take(3).collect())
+        render_type::vrecord_snippet(first, it.take(3).collect())
     };
     indented(doc)
 }
@@ -384,13 +277,13 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
                     merge(acc, d.problems.clone())
                 });
                 Diff {
-                    left: lambda_doc(
+                    left: render_type::lambda(
                         ctx,
                         da.left,
                         db.left,
                         rest.iter().map(|d| d.left.clone()).collect(),
                     ),
-                    right: lambda_doc(
+                    right: render_type::lambda(
                         ctx,
                         da.right,
                         db.right,
@@ -419,8 +312,8 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
                 dc.as_ref().and_then(|d| d.problems.clone()),
             );
             Diff {
-                left: tuple_doc(da.left, db.left, dc.iter().map(|d| d.left.clone()).collect()),
-                right: tuple_doc(da.right, db.right, dc.iter().map(|d| d.right.clone()).collect()),
+                left: render_type::tuple(da.left, db.left, dc.iter().map(|d| d.left.clone()).collect()),
+                right: render_type::tuple(da.right, db.right, dc.iter().map(|d| d.right.clone()).collect()),
                 problems: status,
             }
         }
@@ -432,12 +325,12 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
                 a1.iter().zip(a2).map(|(x, y)| to_diff(Ctx::App, x, y)).collect();
             let status = args.iter().fold(None, |acc, d| merge(acc, d.problems.clone()));
             Diff {
-                left: apply_doc(
+                left: render_type::apply(
                     ctx,
                     Doc::text(n1.clone()),
                     args.iter().map(|d| d.left.clone()).collect(),
                 ),
-                right: apply_doc(
+                right: render_type::apply(
                     ctx,
                     Doc::text(n2.clone()),
                     args.iter().map(|d| d.right.clone()).collect(),
@@ -448,7 +341,7 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
 
         (Type(h, n, args), t2v) if h == "Maybe" && n == "Maybe" && args.len() == 1 && to_diff(ctx, &args[0], t2v).is_similar() => {
             Diff::different(
-                apply_doc(
+                render_type::apply(
                     ctx,
                     Doc::color(Color::Yellow, Doc::text("Maybe")),
                     vec![to_doc(Ctx::App, &args[0])],
@@ -460,7 +353,7 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
         (t1v, Type(h, n, args)) if h == "List" && n == "List" && args.len() == 1 && to_diff(ctx, t1v, &args[0]).is_similar() => {
             Diff::different(
                 to_doc(ctx, t1),
-                apply_doc(
+                render_type::apply(
                     ctx,
                     Doc::color(Color::Yellow, Doc::text("List")),
                     vec![to_doc(Ctx::App, &args[0])],
@@ -600,8 +493,8 @@ fn diff_record(
     };
 
     Diff {
-        left: record_doc(left_entries, ext_to_doc(ext1)),
-        right: record_doc(right_entries, ext_to_doc(ext2)),
+        left: render_type::record(left_entries, ext_to_doc(ext1)),
+        right: render_type::record(right_entries, ext_to_doc(ext2)),
         problems: merge(merge(status, ext_status), problems),
     }
 }
