@@ -50,6 +50,16 @@ impl BuildError {
         BuildError { path, source, reports, module: None }
     }
 
+    /// A whole-build failure that quotes no source (and so belongs to no file).
+    fn without_source(report: Report) -> Self {
+        BuildError {
+            path: PathBuf::new(),
+            source: String::new(),
+            reports: vec![report],
+            module: None,
+        }
+    }
+
     fn in_module(mut self, name: &Name) -> Self {
         self.module = Some(name.to_string());
         self
@@ -78,6 +88,25 @@ impl BuildError {
 
     pub fn render(&self) -> String {
         self.render_from(None, false)
+    }
+
+    /// Whether this is a whole-build failure rather than a problem in some
+    /// module: it quotes no source and belongs to no file.
+    pub fn is_whole_build(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+
+    /// The `--report=json` form of a whole-build failure. elm gives these a
+    /// different envelope from module errors: the title and message sit at the
+    /// top level and `path` is null.
+    pub fn to_json_error(&self) -> String {
+        let mut out = String::from("{\"type\":\"error\",\"path\":null,\"title\":");
+        let report = &self.reports[0];
+        crate::reporting::json_str(&report.title, &mut out);
+        out.push_str(",\"message\":");
+        out.push_str(&report.message_json(&self.source));
+        out.push('}');
+        out
     }
 
     /// This module's entry in a `--report=json` `"errors"` array. elm names
@@ -150,7 +179,25 @@ pub struct CheckedProject {
 }
 
 pub fn compile_project(entry: &Path) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    compile_project_with(entry, false)
+}
+
+/// Compile to JavaScript. `optimize` is elm's `--optimize`: it refuses to build
+/// while any `Debug` call survives, because the optimizations it enables strip
+/// out the information `Debug` reports (field names, constructor identities).
+pub fn compile_project_with(
+    entry: &Path,
+    optimize: bool,
+) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let checked = check_project(entry)?;
+    if optimize {
+        let offenders = crate::debug_uses::modules_using_debug(&checked.modules);
+        if !offenders.is_empty() {
+            return Err(vec![BuildError::without_source(
+                crate::debug_uses::debug_remnants_report(&offenders),
+            )]);
+        }
+    }
     // Tree-shake by default; `ALM_NO_DCE=1` emits the whole runtime kernel as a
     // field kill-switch should DCE ever drop something an app needs.
     let dce = std::env::var_os("ALM_NO_DCE").is_none();

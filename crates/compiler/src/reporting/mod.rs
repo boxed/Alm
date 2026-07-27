@@ -29,8 +29,9 @@ pub struct ElmBody {
     pub after: Doc,
     /// Extra sections after the snippet block, each separated by a blank line.
     pub notes: Vec<Section>,
-    /// The span whose source lines are shown (`Render.Code` `region`).
-    pub region: Region,
+    /// The span whose source lines are shown (`Render.Code` `region`), or
+    /// `None` for the few reports that quote no source at all.
+    pub region: Option<Region>,
     /// The sub-region underlined with carets (`Render.Code` highlight); drawn
     /// only when single-line and on the last shown row, matching elm.
     pub highlight: Region,
@@ -242,8 +243,14 @@ impl Report {
             Some(body) => {
                 out.doc(&body.before);
                 out.plain("\n\n");
-                out.extend(render_snippet(source, body.region, body.highlight));
-                out.doc(&body.after);
+                match body.region {
+                    Some(region) => {
+                        out.extend(render_snippet(source, region, body.highlight));
+                        out.doc(&body.after);
+                    }
+                    // No source to quote: the sections carry the whole report.
+                    None => out.doc(&body.after),
+                }
                 for note in &body.notes {
                     out.plain("\n\n");
                     match note {
@@ -310,12 +317,19 @@ impl Chunks {
 }
 
 /// `-- TITLE --------- path`, padded to 80 columns (`Reporting.Report.toDoc`),
-/// in dull cyan.
+/// in dull cyan. A report that belongs to no file (`path` empty) runs the
+/// dashes to the margin with nothing after them, as `Reporting.Exit.Help` does.
 fn header(title: &str, path: &str) -> Doc {
-    // "-- " + title + " " + dashes + " " + path  == WIDTH
-    let fixed = 3 + title.len() + 1 + 1 + path.len();
-    let dashes = WIDTH.saturating_sub(fixed).max(2);
-    Doc::color(Color::Cyan, Doc::text(format!("-- {} {} {}", title, "-".repeat(dashes), path)))
+    let bar = if path.is_empty() {
+        let dashes = WIDTH.saturating_sub(4 + title.chars().count()).max(1);
+        format!("-- {} {}", title, "-".repeat(dashes))
+    } else {
+        // "-- " + title + " " + dashes + " " + path  == WIDTH
+        let fixed = 3 + title.len() + 1 + 1 + path.len();
+        let dashes = WIDTH.saturating_sub(fixed).max(2);
+        format!("-- {} {} {}", title, "-".repeat(dashes), path)
+    };
+    Doc::color(Color::Cyan, Doc::text(bar))
 }
 
 /// Greedy word wrap to 80 columns, matching `Reporting.Doc.reflow`. Blank lines
@@ -419,6 +433,14 @@ fn render_code_snippet(source: &str, region: Region) -> String {
 // strings (unstyled runs) with `{bold, underline, color, string}` objects.
 
 impl Report {
+    /// Just the `"message"` array, for envelopes that carry the title
+    /// themselves.
+    pub fn message_json(&self, source: &str) -> String {
+        let mut out = String::new();
+        chunks_to_json(&self.body_chunks(source), &mut out);
+        out
+    }
+
     /// One entry of a module's `"problems"` array.
     pub fn to_json(&self, source: &str) -> String {
         let mut out = String::new();

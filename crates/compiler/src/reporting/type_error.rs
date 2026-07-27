@@ -1123,7 +1123,7 @@ fn report_highlighting(
         title: title.to_string(),
         region: expr_region,
         message: String::new(),
-        elm: Some(ElmBody { before, after, notes, region, highlight }),
+        elm: Some(ElmBody { before, after, notes, region: Some(region), highlight }),
     }
 }
 
@@ -1712,7 +1712,7 @@ fn op_right_report(
             before: before.into(),
             after: after.into(),
             notes,
-            region,
+            region: Some(region),
             highlight,
         }),
     }

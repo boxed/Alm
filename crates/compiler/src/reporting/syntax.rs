@@ -1814,6 +1814,6 @@ fn snippet_spanned(
         // surroundings (Just region)`). Only `--report=json` exposes the
         // difference, and an editor uses it to place the squiggle.
         region: highlight,
-        elm: Some(ElmBody { before, after, notes, region, highlight }),
+        elm: Some(ElmBody { before, after, notes, region: Some(region), highlight }),
     }
 }

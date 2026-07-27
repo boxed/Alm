@@ -22,7 +22,7 @@ fn print_help() {
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
-         \x20                       [--source-maps] [--dev] [--report=json]\n\n\
+         \x20                       [--source-maps] [--dev] [--optimize] [--report=json]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -30,7 +30,9 @@ fn print_help() {
          `--source-maps` (js and wasm-gc targets) writes a .map beside the\n\
          output so browser devtools show Elm source; tree-shaking still runs,\n\
          so the output is the same size as an ordinary build.\n\
-         `--report=json` writes diagnostics to stderr as JSON for editors."
+         `--optimize` is elm's production build; it refuses to compile while\n\
+         any `Debug` call survives. `--report=json` writes diagnostics to\n\
+         stderr as JSON for editors."
     );
 }
 
@@ -53,6 +55,9 @@ fn make(args: &[String]) -> ExitCode {
     let mut opt = OptLevel::Release;
     // `--report=json`: machine-readable diagnostics for editor plugins.
     let mut report_json = false;
+    // `--optimize`: elm's production build. Refuses to compile while any
+    // `Debug` call survives.
+    let mut optimize = false;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
@@ -60,6 +65,8 @@ fn make(args: &[String]) -> ExitCode {
             source_maps = true;
         } else if arg == "--dev" {
             opt = OptLevel::Debug;
+        } else if arg == "--optimize" {
+            optimize = true;
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
@@ -127,14 +134,16 @@ fn make(args: &[String]) -> ExitCode {
                 },
             )
         }
-        Backend::Js => alm_compiler::project::compile_project(&input).and_then(|(javascript, warnings)| {
-            let output = output.unwrap_or_else(|| input.with_extension("js"));
-            std::fs::write(&output, javascript).map_err(|err| {
-                eprintln!("I could not write {}: {}", output.display(), err);
-                Vec::new()
-            })?;
-            Ok((output, warnings))
-        }),
+        Backend::Js => alm_compiler::project::compile_project_with(&input, optimize).and_then(
+            |(javascript, warnings)| {
+                let output = output.unwrap_or_else(|| input.with_extension("js"));
+                std::fs::write(&output, javascript).map_err(|err| {
+                    eprintln!("I could not write {}: {}", output.display(), err);
+                    Vec::new()
+                })?;
+                Ok((output, warnings))
+            },
+        ),
     };
 
     match result {
@@ -157,12 +166,20 @@ fn make(args: &[String]) -> ExitCode {
             errors.sort_by_key(|e| std::fs::metadata(&e.path).and_then(|m| m.modified()).ok());
 
             if report_json {
-                // One line on stderr, with no trailing newline — as elm writes it.
-                let bodies: Vec<String> = errors.iter().map(|e| e.to_json()).collect();
-                eprint!(
-                    "{{\"type\":\"compile-errors\",\"errors\":[{}]}}",
-                    bodies.join(",")
-                );
+                // One line on stderr, with no trailing newline — as elm writes
+                // it. A whole-build failure gets elm's other envelope.
+                match errors.split_first() {
+                    Some((only, [])) if only.is_whole_build() => {
+                        eprint!("{}", only.to_json_error());
+                    }
+                    _ => {
+                        let bodies: Vec<String> = errors.iter().map(|e| e.to_json()).collect();
+                        eprint!(
+                            "{{\"type\":\"compile-errors\",\"errors\":[{}]}}",
+                            bodies.join(",")
+                        );
+                    }
+                }
                 return ExitCode::FAILURE;
             }
 
