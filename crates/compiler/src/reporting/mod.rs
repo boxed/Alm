@@ -164,6 +164,12 @@ pub fn code_line(indent: usize, pieces: Vec<Doc>) -> Doc {
     Doc::concat(all)
 }
 
+/// A code example emitted as one colored run, newlines and all — elm colors
+/// some examples wholesale rather than token by token.
+pub fn colored_block(style: fn(String) -> Doc, text: &str) -> Section {
+    Section::Para(style(text.to_string()))
+}
+
 /// An indented code example whose keywords, constructors and literals are
 /// colored. elm hand-colors each of these — inside an example a type name
 /// stays plain, while the same name quoted in prose is yellow — so they are

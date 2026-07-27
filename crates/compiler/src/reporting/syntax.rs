@@ -312,8 +312,11 @@ impl SyntaxError {
                 "UNFINISHED IF",
                 *region,
                 "I was expecting to see an `else` branch after this:",
-                "I know what to do when the condition is True, but what happens when it is \
-                 False? Add an else branch to handle that scenario!",
+                marked(
+                    "I know what to do when the condition is True, but what happens when it is \
+                     False? Add an else branch to handle that scenario!",
+                    &[("else", cyan)],
+                ),
                 vec![],
             ),
             SyntaxError::WeirdHex { region } => snippet(
@@ -338,7 +341,10 @@ impl SyntaxError {
                 "The following string uses single quotes:",
                 "Please switch to double quotes instead:",
                 vec![
-                    example(&"    'this' => \"this\"".to_string()),
+                    code_block(vec![code_line(
+                        4,
+                        vec![yellow("'this'"), Doc::text(" => "), green("\"this\"")],
+                    )]),
                     note(words(
                         "Elm uses double quotes for strings like \"hello\", whereas it \
                          uses single quotes for individual characters like 'a' and 'ø'. This \
@@ -360,9 +366,12 @@ impl SyntaxError {
                          this format:"
                             ,
                     )),
-                    example(&
-                        "    [ \"Alice\"\n    , \"Bob\"\n    , \"Chuck\"\n    ]".to_string(),
-                    ),
+                    code_block(vec![
+                        code_line(4, vec![Doc::text("[ "), yellow("\"Alice\"")]),
+                        code_line(4, vec![Doc::text(", "), yellow("\"Bob\"")]),
+                        code_line(4, vec![Doc::text(", "), yellow("\"Chuck\"")]),
+                        Doc::text("    ]"),
+                    ]),
                     Section::para(
                         "Notice that each line starts with some indentation. Usually two or \
                          four spaces. This is the stylistic convention in the Elm ecosystem."
@@ -427,8 +436,11 @@ impl SyntaxError {
                 "UNFINISHED RECORD",
                 *region,
                 "I was partway through parsing a record, but I got stuck here:",
-                "I was expecting to see a closing curly brace next. Try putting a } next \
-                 and see if that helps?",
+                marked(
+                    "I was expecting to see a closing curly brace next. Try putting a } next \
+                     and see if that helps?",
+                    &[("}", green)],
+                ),
                 vec![
                     note(words(
                         "I may be confused by indentation. For example, if you are \
@@ -453,11 +465,11 @@ impl SyntaxError {
                      something there, I can probably give a more specific hint!",
                     &[("42", yellow), ("\"hello\"", yellow)],
                 ),
-                vec![Section::para(format!(
-                    "Note: I may be getting confused by your indentation? The easiest way to \
+                vec![note(words(&format!(
+                    "I may be getting confused by your indentation? The easiest way to \
                      make sure this is not an indentation problem is to put the expression on \
                      the right of the {op} operator on the same line."
-                ))],
+                )))],
             ),
             SyntaxError::CaseOf { region } => snippet(
                 "UNEXPECTED ARROW",
@@ -725,10 +737,10 @@ impl SyntaxError {
                     .concat(),
                 ),
                 "Try renaming it to something else.".to_string(),
-                vec![Section::para(format!(
-                    "Note: The `{word}` keyword has a special meaning in Elm, so it can only \
+                vec![note(words(&format!(
+                    "The `{word}` keyword has a special meaning in Elm, so it can only \
                      be used in certain situations."
-                ))],
+                )))],
             ),
             SyntaxError::LeadingZeros { region } => snippet(
                 "LEADING ZEROS",
@@ -838,8 +850,11 @@ impl SyntaxError {
                 "PROBLEM IN RECORD",
                 *region,
                 "I am partway through parsing a record, but I got stuck here:",
-                "I just saw a field name, so I was expecting to see an equals sign next. So \
-                 try putting an = sign here?",
+                marked(
+                    "I just saw a field name, so I was expecting to see an equals sign next. So \
+                     try putting an = sign here?",
+                    &[("=", green)],
+                ),
                 vec![
                     note(words(
                         "If you are trying to define a record across multiple lines, I \
@@ -904,7 +919,7 @@ impl SyntaxError {
                 "UNFINISHED OPERATOR FUNCTION",
                 *region,
                 "I was expecting a closing parenthesis here:",
-                "Try adding a ) to see if that helps!",
+                marked("Try adding a ) to see if that helps!", &[(")", yellow)]),
                 vec![note(words(
                     "I think I am parsing an operator function right now, so I am \
                      expecting to see something like (+) or (&&) where an operator is \
@@ -916,7 +931,10 @@ impl SyntaxError {
                 "EXPECTING RECORD ACCESSOR",
                 *region,
                 "I am trying to parse a record accessor here:",
-                "Something like .name or .price that accesses a value from a record.",
+                marked(
+                    "Something like .name or .price that accesses a value from a record.",
+                    &[(".name", yellow), (".price", yellow)],
+                ),
                 vec![note(words(
                     "Record field names must start with a lower case letter!",
                 ))],
@@ -1071,16 +1089,22 @@ impl SyntaxError {
                 "UNFINISHED RECORD TYPE",
                 *region,
                 "I was partway through parsing a record type, but I got stuck here:",
-                "I was expecting to see a closing curly brace next. Try putting a } next and \
-                 see if that helps?",
+                marked(
+                    "I was expecting to see a closing curly brace next. Try putting a } next and \
+                     see if that helps?",
+                    &[("}", green)],
+                ),
                 record_type_indent_notes(),
             ),
             SyntaxError::ProblemInRecordType { region } => snippet(
                 "PROBLEM IN RECORD TYPE",
                 *region,
                 "I am partway through parsing a record type, but I got stuck here:",
-                "I was expecting to see another record field defined next, so I am looking \
-                 for a name like userName or plantHeight.",
+                marked(
+                    "I was expecting to see another record field defined next, so I am looking \
+                     for a name like userName or plantHeight.",
+                    &[("userName", yellow), ("plantHeight", yellow)],
+                ),
                 record_type_notes(),
             ),
             SyntaxError::ExpectingTypeName { region } => snippet(
@@ -1202,14 +1226,17 @@ impl SyntaxError {
                 *region,
                 "I was partway through parsing a record pattern, but I got stuck here:",
                 "I was expecting to see a field name next.",
-                vec![Section::para(RECORD_PATTERN_HINT.to_string())],
+                vec![record_pattern_hint()],
             ),
             SyntaxError::RecordPatternEnd { region } => snippet(
                 "UNFINISHED RECORD PATTERN",
                 *region,
                 "I was partway through parsing a record pattern, but I got stuck here:",
-                "I was expecting to see a closing curly brace next. Try adding a } here?",
-                vec![Section::para(RECORD_PATTERN_HINT.to_string())],
+                marked(
+                    "I was expecting to see a closing curly brace next. Try adding a } here?",
+                    &[("}", yellow)],
+                ),
+                vec![record_pattern_hint()],
             ),
             SyntaxError::TuplePatternExpr { region } => snippet(
                 "UNFINISHED TUPLE PATTERN",
@@ -1484,8 +1511,16 @@ fn case_notes() -> Vec<Section> {
     ]
 }
 /// The hint shared by the UNFINISHED RECORD PATTERN errors.
-const RECORD_PATTERN_HINT: &str = "Hint: A record pattern looks like {x,y} or {name,age} \
-     where you list the field names you want to access.";
+fn record_pattern_hint() -> Section {
+    hint(
+        [
+            words("A record pattern looks like"),
+            vec![yellow("{x,y}"), Doc::text("or"), yellow("{name,age}")],
+            words("where you list the field names you want to access."),
+        ]
+        .concat(),
+    )
+}
 
 /// The note shared by both PACKAGES CANNOT HAVE PORTS diagnostics (two
 /// paragraphs; `reflow` wraps each independently).
@@ -1494,9 +1529,6 @@ const PORTS_IN_PACKAGE_NOTE: &str = "Note: One of the major goals of the package
 /// An indented code example with Elm keywords colored, as elm hand-colors the
 /// examples in its syntax diagnostics. Only keywords: constructors and literals
 /// vary per example and are written out at the site that needs them.
-///
-/// `port module` is one cyan run in elm's source rather than two, so it is
-/// matched as a pair before the single keywords.
 fn example(text: &str) -> Section {
     code_block(text.split('\n').map(example_line).collect())
 }
@@ -1519,15 +1551,13 @@ fn example_line(line: &str) -> Doc {
         }
         let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let (word, tail) = rest.split_at(word_end);
-        let pair = word == "port" && tail.starts_with(" module");
-        let keyword = if pair { Some("port module") } else { KEYWORDS.contains(&word).then_some(word) };
-        match keyword {
+        match KEYWORDS.contains(&word).then_some(word) {
             Some(text) => {
                 if !plain.is_empty() {
                     pieces.push(Doc::text(std::mem::take(&mut plain)));
                 }
                 pieces.push(cyan(text));
-                rest = if pair { &tail[" module".len()..] } else { tail };
+                rest = tail;
             }
             None => {
                 plain.push_str(word);
