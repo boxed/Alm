@@ -549,7 +549,8 @@ fn empty_record_alias_constructor() {
         "Main.elm",
         "module Main exposing (main)\n\ntype alias Empty =\n    {}\n\nvoidValue : Empty\nvoidValue = Empty\n\nmain = Debug.toString voidValue\n",
     )]);
-    assert_eq!(result.unwrap(), "{  }");
+    // elm's Debug renderer special-cases the empty record: `{}`, not `{  }`.
+    assert_eq!(result.unwrap(), "{}");
 }
 
 #[test]

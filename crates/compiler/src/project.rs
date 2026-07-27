@@ -1383,3 +1383,138 @@ fn visit(
     order.push(path.clone());
     Ok(())
 }
+
+/// Compile a REPL entry: a synthetic module written to `path`, plus the name
+/// of the one binding whose value should be printed.
+///
+/// Returns the JavaScript to run (nothing to print means nothing to run), or
+/// the build errors. `path` is a scratch file the caller owns; it has to be on
+/// disk because the loader resolves modules by path, and it has to be inside
+/// the project so the walk up to `elm.json` finds the right dependencies.
+///
+/// `unqualified` names the modules whose types may print without their module
+/// prefix — see [`crate::docs::render_type_for`].
+pub fn compile_repl(
+    path: &Path,
+    print: Option<&str>,
+    ansi: bool,
+    unqualified: &HashSet<String>,
+) -> Result<Option<String>, Vec<BuildError>> {
+    let checked = check_project(path)?;
+    let Some(print) = print else {
+        return Ok(None);
+    };
+    let entry = checked.entry.clone();
+    // The inferred type of the binding, which is what the REPL shows beside
+    // the value. A binding the checker did not record is not a failure worth a
+    // report: nothing sensible could be printed, so nothing is.
+    let Some(tipe) = checked.types.get(&entry).and_then(|m| m.get(&Name::from(print))) else {
+        return Ok(None);
+    };
+    // Fold expanded aliases back to their names, so a record that is really a
+    // `Point` prints as one — the same table `--docs` uses.
+    let borrowed: std::collections::BTreeMap<Name, &crate::interface::Interface> =
+        checked.interfaces.iter().map(|(name, i)| (name.clone(), i)).collect();
+    let aliases = crate::docs::AliasNames::preferring(&borrowed, Some(&entry));
+    let type_text =
+        crate::docs::render_type_for(&normalize_vars(tipe), &aliases, unqualified);
+    Ok(Some(generate::generate_repl(
+        &checked.modules,
+        checked.node_types,
+        generate::ReplPrint {
+            module: entry,
+            value: Name::from(print),
+            type_text,
+            ansi,
+        },
+    )))
+}
+
+/// Rename a type's variables the way elm names them when it prints one
+/// definition's type: each scheme is numbered from scratch, so the first
+/// `number` is `number` however many the module already used.
+///
+/// Without this, a REPL session drifts — `x = 42` reports `number`, and then
+/// `x + 1` reports `number2` purely because a variable of that name is already
+/// in the accumulated module.
+fn normalize_vars(tipe: &can::Type) -> can::Type {
+    let mut names: HashMap<Name, Name> = HashMap::new();
+    let mut used: HashMap<String, u32> = HashMap::new();
+    rename_vars(tipe, &mut names, &mut used)
+}
+
+fn rename_vars(
+    tipe: &can::Type,
+    names: &mut HashMap<Name, Name>,
+    used: &mut HashMap<String, u32>,
+) -> can::Type {
+    match tipe {
+        can::Type::Var(name) => {
+            if let Some(renamed) = names.get(name) {
+                return can::Type::Var(renamed.clone());
+            }
+            // A variable the checker invented is renamed from `a` onwards, so
+            // `Nothing` reads `Maybe a` however many variables the accumulated
+            // module used before it. One that carries a name — a constraint
+            // like `number`, or a name written in a type annotation — keeps it
+            // and is only renumbered against others of the same name.
+            let base = var_base(name.as_str());
+            let renamed = if invented(&base) {
+                let next = used.entry(String::new()).or_insert(0);
+                *next += 1;
+                letters(*next - 1)
+            } else {
+                let count = used.entry(base.clone()).or_insert(0);
+                *count += 1;
+                if *count == 1 { base.clone() } else { format!("{base}{}", *count) }
+            };
+            let renamed = Name::from(renamed.as_str());
+            names.insert(name.clone(), renamed.clone());
+            can::Type::Var(renamed)
+        }
+        can::Type::Lambda(arg, body) => can::Type::Lambda(
+            std::rc::Rc::new(rename_vars(arg, names, used)),
+            std::rc::Rc::new(rename_vars(body, names, used)),
+        ),
+        can::Type::Type(home, name, args) => can::Type::Type(
+            home.clone(),
+            name.clone(),
+            std::rc::Rc::new(args.iter().map(|a| rename_vars(a, names, used)).collect()),
+        ),
+        can::Type::Record(fields, ext) => can::Type::Record(
+            std::rc::Rc::new(
+                fields.iter().map(|(f, t)| (f.clone(), rename_vars(t, names, used))).collect(),
+            ),
+            ext.clone(),
+        ),
+        can::Type::Unit => can::Type::Unit,
+        can::Type::Tuple(a, b, c) => can::Type::Tuple(
+            std::rc::Rc::new(rename_vars(a, names, used)),
+            std::rc::Rc::new(rename_vars(b, names, used)),
+            c.as_ref().map(|c| std::rc::Rc::new(rename_vars(c, names, used))),
+        ),
+    }
+}
+
+/// A variable's name without the digits used to tell two of them apart, so
+/// `number3` and `value1` renumber from `number` and `value`.
+fn var_base(name: &str) -> String {
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if base.is_empty() { name.to_string() } else { base.to_string() }
+}
+
+/// Whether a name looks like one the checker made up rather than one someone
+/// wrote. Single letters are the generated sequence; a word came from a type
+/// annotation or is a constraint, and either way it is worth keeping.
+fn invented(base: &str) -> bool {
+    base.chars().count() == 1 && base.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// `a`, `b`, … `z`, `a1`, `b1`, …
+fn letters(index: u32) -> String {
+    let letter = (b'a' + (index % 26) as u8) as char;
+    match index / 26 {
+        0 => letter.to_string(),
+        n => format!("{letter}{n}"),
+    }
+}

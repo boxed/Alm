@@ -629,59 +629,91 @@ function _Debug_addSlashes(str, isChar) {
         .replace(/\0/g, '\\0');
     return isChar ? s.replace(/'/g, "\\'") : s.replace(/"/g, '\\"');
 }
-function _Debug_toString(value) {
-    if (value === true) { return 'True'; }
-    if (value === false) { return 'False'; }
-    if (typeof value === 'number') { return String(value); }
+// elm's Debug value renderer. `ansi` adds the colors the REPL prints values
+// in; `_Debug_toString` is the same walk with them switched off, so the two can
+// never drift apart.
+function _Debug_ctorColor(ansi, s) { return ansi ? '\x1b[96m' + s + '\x1b[0m' : s; }
+function _Debug_numberColor(ansi, s) { return ansi ? '\x1b[95m' + s + '\x1b[0m' : s; }
+function _Debug_stringColor(ansi, s) { return ansi ? '\x1b[93m' + s + '\x1b[0m' : s; }
+function _Debug_charColor(ansi, s) { return ansi ? '\x1b[92m' + s + '\x1b[0m' : s; }
+function _Debug_fadeColor(ansi, s) { return ansi ? '\x1b[37m' + s + '\x1b[0m' : s; }
+function _Debug_internalColor(ansi, s) { return ansi ? '\x1b[36m' + s + '\x1b[0m' : s; }
+function _Debug_toAnsiString(ansi, value) {
+    if (value === true) { return _Debug_ctorColor(ansi, 'True'); }
+    if (value === false) { return _Debug_ctorColor(ansi, 'False'); }
+    if (typeof value === 'number') { return _Debug_numberColor(ansi, String(value)); }
     // A boxed String object is elm's dev-build Char representation → single quotes.
-    if (value instanceof String) { return "'" + _Debug_addSlashes(value.valueOf(), true) + "'"; }
-    if (typeof value === 'string') { return '"' + _Debug_addSlashes(value, false) + '"'; }
-    if (typeof value === 'function') { return '<function>'; }
-    if (value === null || value === undefined) { return '<internal>'; }
+    if (value instanceof String) {
+        return _Debug_charColor(ansi, "'" + _Debug_addSlashes(value.valueOf(), true) + "'");
+    }
+    if (typeof value === 'string') {
+        return _Debug_stringColor(ansi, '"' + _Debug_addSlashes(value, false) + '"');
+    }
+    if (typeof value === 'function') { return _Debug_internalColor(ansi, '<function>'); }
+    if (value === null || value === undefined) { return _Debug_internalColor(ansi, '<internal>'); }
     var tag = value.$;
     if (tag === '#0') { return '()'; }
-    if (tag === '#2') { return '(' + _Debug_toString(value.a) + ',' + _Debug_toString(value.b) + ')'; }
+    if (tag === '#2') {
+        return '(' + _Debug_toAnsiString(ansi, value.a) + ',' + _Debug_toAnsiString(ansi, value.b) + ')';
+    }
     if (tag === '#3') {
-        return '(' + _Debug_toString(value.a) + ',' + _Debug_toString(value.b) + ',' + _Debug_toString(value.c) + ')';
+        return '(' + _Debug_toAnsiString(ansi, value.a) + ',' + _Debug_toAnsiString(ansi, value.b)
+            + ',' + _Debug_toAnsiString(ansi, value.c) + ')';
     }
     if (tag === '[]' || tag === '::') {
-        return '[' + _List_toArray(value).map(_Debug_toString).join(',') + ']';
+        return '[' + _List_toArray(value).map(function (v) {
+            return _Debug_toAnsiString(ansi, v);
+        }).join(',') + ']';
     }
     // Builtin Dict/Set/Array carry collision-proof `_elm_builtin` tags (alm's
     // parser forbids that suffix in user constructor names), so a user type
     // named `Dict`/`Set`/`Array` has tag `'Dict'`/`'Set'`/`'Array'` and falls
     // through to the generic custom-type rendering below.
     if (tag === 'RBNode_elm_builtin' || tag === 'RBEmpty_elm_builtin') {
-        return 'Dict.fromList ' + _Debug_toString($Dict$toList(value));
+        return _Debug_ctorColor(ansi, 'Dict') + _Debug_fadeColor(ansi, '.fromList') + ' '
+            + _Debug_toAnsiString(ansi, $Dict$toList(value));
     }
     if (tag === 'Set_elm_builtin') {
-        return 'Set.fromList ' + _Debug_toString($Dict$keys(value.d));
+        return _Debug_ctorColor(ansi, 'Set') + _Debug_fadeColor(ansi, '.fromList') + ' '
+            + _Debug_toAnsiString(ansi, $Dict$keys(value.d));
     }
     if (tag === 'Array_elm_builtin') {
-        return 'Array.fromList ' + _Debug_toString($Array$toList(value));
+        return _Debug_ctorColor(ansi, 'Array') + _Debug_fadeColor(ansi, '.fromList') + ' '
+            + _Debug_toAnsiString(ansi, $Array$toList(value));
     }
     // Internal scheduler values (Tasks) render as `<internals>`, like elm — its
     // scheduler tags these with a number, ours with `'Task'` plus a `fork`
     // closure or numeric `tag`, which a user `Task` constructor never carries.
     if (tag === 'Task' && (typeof value.fork === 'function' || typeof value.tag === 'number')) {
-        return '<internals>';
+        return _Debug_internalColor(ansi, '<internals>');
     }
     if (tag !== undefined) {
-        var out = tag;
+        var out = _Debug_ctorColor(ansi, tag);
         for (var key in value) {
             if (key === '$') { continue; }
-            var s = _Debug_toString(value[key]);
-            out += ' ' + (/[ ]/.test(s) && s[0] !== '"' && s[0] !== '{' && s[0] !== '(' && s[0] !== '[' ? '(' + s + ')' : s);
+            var s = _Debug_toAnsiString(ansi, value[key]);
+            // Parenthesize by the *rendered* shape. With colors on the string
+            // starts with an escape, so the leading character has to be read
+            // from the uncolored rendering.
+            var plain = ansi ? _Debug_toString(value[key]) : s;
+            var c0 = plain[0];
+            var parenless = c0 === '{' || c0 === '(' || c0 === '[' || c0 === '<'
+                || c0 === '"' || c0 === "'" || plain.indexOf(' ') < 0;
+            out += ' ' + (parenless ? s : '(' + s + ')');
         }
         return out;
     }
     // record — elm renders fields in alphabetical order, not definition order
     var names = [];
     for (var name in value) { names.push(name); }
+    if (names.length === 0) { return '{}'; }
     names.sort();
-    var fields = names.map(function (n) { return n + ' = ' + _Debug_toString(value[n]); });
+    var fields = names.map(function (n) {
+        return _Debug_fadeColor(ansi, n) + ' = ' + _Debug_toAnsiString(ansi, value[n]);
+    });
     return '{ ' + fields.join(', ') + ' }';
 }
+function _Debug_toString(value) { return _Debug_toAnsiString(false, value); }
 var $Debug$toString = _Debug_toString;
 var $Debug$log = F2(function (label, value) {
     console.log(label + ': ' + _Debug_toString(value));

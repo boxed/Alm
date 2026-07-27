@@ -48,7 +48,7 @@ pub fn generate_project_typed_mapped(
     sources: &HashMap<Name, (String, String)>,
 ) -> (String, String) {
     let dce = std::env::var_os("ALM_NO_DCE").is_none();
-    let (js, map) = gen_bundle(modules, node_types, dce, Some(sources));
+    let (js, map) = gen_bundle(modules, node_types, dce, Some(sources), None);
     (js, map.unwrap_or_default())
 }
 
@@ -67,7 +67,28 @@ pub fn generate_project_typed(
     node_types: HashMap<Name, HashMap<Region, can::Type>>,
     dce: bool,
 ) -> String {
-    gen_bundle(modules, node_types, dce, None).0
+    gen_bundle(modules, node_types, dce, None, None).0
+}
+
+/// What the REPL wants printed after the bundle runs: a top-level binding, and
+/// the type to show beside it.
+pub struct ReplPrint {
+    pub module: Name,
+    pub value: Name,
+    /// The type as it should read on screen, already laid out.
+    pub type_text: String,
+    pub ansi: bool,
+}
+
+/// The bundle plus a statement that prints one value with its type — elm's
+/// `JS.generateForRepl`. The statement goes *inside* the bundle so it can see
+/// the value's mangled name and the runtime's printer directly.
+pub fn generate_repl(
+    modules: &[can::Module],
+    node_types: HashMap<Name, HashMap<Region, can::Type>>,
+    print: ReplPrint,
+) -> String {
+    gen_bundle(modules, node_types, false, None, Some(print)).0
 }
 
 /// The bundle generator. With `sources` present, builds a source map alongside
@@ -78,6 +99,7 @@ fn gen_bundle(
     mut node_types: HashMap<Name, HashMap<Region, can::Type>>,
     dce: bool,
     sources: Option<&HashMap<Name, (String, String)>>,
+    repl: Option<ReplPrint>,
 ) -> (String, Option<String>) {
     let maps_on = sources.is_some();
     let mut gen = Generator {
@@ -309,11 +331,14 @@ fn gen_bundle(
     write!(
         gen.out,
         "\nvar Elm = {{ {} }};\n\
-         _Platform_export(this, Elm);\n\
-         }}).call(this);\n",
+         _Platform_export(this, Elm);\n",
         module_objects
     )
     .unwrap();
+    if let Some(print) = repl {
+        gen.out.push_str(&repl_print(&print));
+    }
+    gen.out.push_str("}).call(this);\n");
 
     if dce {
         // Tree-shake, then remap the source map onto the shaken bundle: live
@@ -329,6 +354,24 @@ fn gen_bundle(
         let map = maps_on.then(|| gen.sm.to_json());
         (gen.out, map)
     }
+}
+
+/// elm's REPL print statement: render the value, then put the type after it —
+/// on the same line if it fits in 80 columns, indented underneath if not.
+fn repl_print(print: &ReplPrint) -> String {
+    let value = format!("{}${}", mangle_module(&print.module), sanitize(&print.value));
+    let ansi = if print.ansi { "true" } else { "false" };
+    format!(
+        "var _value = _Debug_toAnsiString({ansi}, {value});\n\
+         var _type = {};\n\
+         function _print(t) {{ console.log(_value + ({ansi} ? '\\x1b[90m' + t + '\\x1b[0m' : t)); }}\n\
+         if (_value.length + 3 + _type.length >= 80 || _type.indexOf('\\n') >= 0) {{\n\
+         \x20   _print('\\n    : ' + _type.split('\\n').join('\\n      '));\n\
+         }} else {{\n\
+         \x20   _print(' : ' + _type);\n\
+         }}\n",
+        js_string(&print.type_text)
+    )
 }
 
 /// Dead-code elimination over the fully-assembled bundle.

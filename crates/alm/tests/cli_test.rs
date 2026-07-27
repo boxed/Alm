@@ -902,3 +902,131 @@ fn publish_refuses_an_application() {
     assert!(!ok);
     assert!(stderr.starts_with("-- CANNOT PUBLISH APPLICATIONS ---"), "stderr: {stderr}");
 }
+
+/// Feed a REPL session in on stdin and return what came back on stdout.
+fn alm_repl(dir: &Path, session: &str) -> (bool, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["repl", "--no-colors"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run alm repl");
+    child.stdin.take().unwrap().write_all(session.as_bytes()).unwrap();
+    let output = child.wait_with_output().expect("wait");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A project for the REPL to run in, so the test never touches the real
+/// `~/.elm`. No dependencies: everything exercised here is builtin.
+fn repl_project(dir: &Path) -> PathBuf {
+    let project = dir.join("repl");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    project
+}
+
+#[test]
+fn repl_evaluates_expressions_with_their_types() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, stderr) = alm_repl(
+        &project,
+        "1 + 1\n\"hello\"\nList.map (\\x -> x * 2) [1,2,3]\n[Just 1, Nothing]\n:exit\n",
+    );
+    assert!(ok, "stderr: {stderr}");
+    // The prompts and the answers share a line, as they do in a terminal.
+    assert!(stdout.contains("> 2 : number"), "stdout: {stdout}");
+    assert!(stdout.contains("> \"hello\" : String"), "stdout: {stdout}");
+    assert!(stdout.contains("> [2,4,6] : List number"), "stdout: {stdout}");
+    assert!(stdout.contains("> [Just 1,Nothing] : List (Maybe number)"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_remembers_definitions_imports_and_types() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, stderr) = alm_repl(
+        &project,
+        "x = 40\nx + 2\ndouble n = n * 2\ndouble 21\n\
+         type Color = Red | Blue\nRed\n\
+         import Dict\nDict.fromList [(1,\"a\")]\n:exit\n",
+    );
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.contains("42 : number"), "stdout: {stdout}");
+    assert!(stdout.contains("Red : Color"), "stdout: {stdout}");
+    // A type from a module imported without `exposing` keeps its prefix, as
+    // elm's localizer does.
+    assert!(
+        stdout.contains("Dict.fromList [(1,\"a\")] : Dict.Dict number String"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn repl_keeps_going_after_a_bad_entry() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, stderr) = alm_repl(&project, "1 + \"a\"\nnope\n2 + 2\n:exit\n");
+    assert!(ok, "stderr: {stderr}");
+    assert!(stderr.contains("TYPE MISMATCH"), "stderr: {stderr}");
+    assert!(stderr.contains("NAMING"), "stderr: {stderr}");
+    // The session survives both.
+    assert!(stdout.contains("4 : number"), "stdout: {stdout}");
+}
+
+/// A definition that failed must not stay in the session, or every later
+/// entry would fail too.
+#[test]
+fn a_failed_definition_is_not_kept() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, _) = alm_repl(&project, "bad = 1 + \"a\"\ngood = 3\ngood\n:exit\n");
+    assert!(ok);
+    assert!(stdout.contains("3 : number"), "stdout: {stdout}");
+}
+
+/// An entry that goes multi-line ends at a blank line, even once it parses —
+/// elm's `ifDone` rule, which is what makes a `let` block work.
+#[test]
+fn repl_reads_multi_line_entries() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, stderr) = alm_repl(&project, "let\n  y = 5\nin\ny * y\n\n:exit\n");
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.contains("| | | | 25 : number"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_commands_work() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, _) = alm_repl(&project, ":help\n:nonsense\nx = 1\n:reset\nx\n:exit\n");
+    assert!(ok);
+    assert!(stdout.contains(":reset   Clear all previous imports and definitions"));
+    assert!(stdout.contains("I do not recognize the :nonsense command."));
+    assert!(stdout.contains("<reset>"));
+    // After a reset the definition is gone, so referring to it is an error
+    // rather than printing 1.
+    assert!(!stdout.contains("1 : number\n> \n"), "stdout: {stdout}");
+}
+
+#[test]
+fn repl_reports_a_port_declaration_it_cannot_run() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, _) = alm_repl(&project, "port send : String -> Cmd msg\n:exit\n");
+    assert!(ok);
+    assert!(stdout.contains("I cannot handle port declarations."), "stdout: {stdout}");
+}

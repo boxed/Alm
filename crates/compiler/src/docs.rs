@@ -163,6 +163,57 @@ pub fn render_type(tipe: &can::Type) -> String {
     render(tipe, Ctx::None, &AliasNames::default())
 }
 
+/// Render for a person rather than for `docs.json`: a type whose home is in
+/// `unqualified` prints as `String`, anything else keeps its `Module.Name`.
+///
+/// This is elm's localizer. Which spelling you get depends on the imports in
+/// scope — `import Dict` alone gives `Dict.Dict`, because nothing brought the
+/// bare name in — so the caller decides what is in scope and passes it here.
+pub fn render_type_for(
+    tipe: &can::Type,
+    aliases: &AliasNames,
+    unqualified: &std::collections::HashSet<String>,
+) -> String {
+    let long = render(tipe, Ctx::None, aliases);
+    shorten(&long, unqualified)
+}
+
+/// Drop the `Module.` in front of each `Module.Name` whose module is in
+/// `unqualified`. Only a dot between an identifier character and an upper-case
+/// letter qualifies a type name, so nothing else in a rendered type can match.
+fn shorten(rendered: &str, unqualified: &std::collections::HashSet<String>) -> String {
+    let chars: Vec<char> = rendered.chars().collect();
+    let mut out = String::with_capacity(rendered.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '.'
+            && i + 1 < chars.len()
+            && chars[i + 1].is_uppercase()
+            && out.chars().next_back().is_some_and(|p| p.is_alphanumeric() || p == '_')
+        {
+            // Find where this qualified name started, and drop the prefix only
+            // if that module's names are in scope unqualified.
+            let mut start = out.len();
+            for (at, p) in out.char_indices().rev() {
+                if p.is_alphanumeric() || p == '_' || p == '.' {
+                    start = at;
+                } else {
+                    break;
+                }
+            }
+            if unqualified.contains(&out[start..]) {
+                out.truncate(start);
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Canonicalization expands type aliases, but `docs.json` publishes the alias
 /// name — `Probe.Point`, not the record it stands for. Fold them back by body.
 ///
