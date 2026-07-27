@@ -3,7 +3,11 @@
 //! corresponds to one elm error and reproduces its title and prose verbatim so
 //! `alm make` output matches `elm make` byte-for-byte.
 
-use super::{hint, note, words, ElmBody, Region, Report, Section};
+use super::{
+    blue, code_block, code_line, cyan, green, hint, marked, note, sentence, words, yellow, Doc,
+    ElmBody,
+    Region, Report, Section,
+};
 
 /// A structured parse error, produced by the parser at the point it got stuck.
 #[derive(Debug, Clone)]
@@ -301,7 +305,7 @@ impl SyntaxError {
                 "UNFINISHED IF",
                 *region,
                 "I was expecting to see more of this `if` expression, but I got stuck here:",
-                "I was expecting to see the then keyword next.",
+                marked("I was expecting to see the then keyword next.", &[("then", cyan)]),
                 vec![],
             ),
             SyntaxError::IfElse { region } => snippet(
@@ -318,7 +322,7 @@ impl SyntaxError {
                 "I thought I was reading a hexidecimal number until I got here:",
                 "Valid hexidecimal digits include 0123456789abcdefABCDEF, so I can only \
                  recognize things like this:",
-                vec![Section::Block("    0x2B\n    0x002B\n    0x00ffb3".to_string())],
+                vec![example(&"    0x2B\n    0x002B\n    0x00ffb3".to_string())],
             ),
             SyntaxError::CharEnd { region } => snippet(
                 "MISSING SINGLE QUOTE",
@@ -334,7 +338,7 @@ impl SyntaxError {
                 "The following string uses single quotes:",
                 "Please switch to double quotes instead:",
                 vec![
-                    Section::Block("    'this' => \"this\"".to_string()),
+                    example(&"    'this' => \"this\"".to_string()),
                     note(words(
                         "Elm uses double quotes for strings like \"hello\", whereas it \
                          uses single quotes for individual characters like 'a' and 'ø'. This \
@@ -348,7 +352,7 @@ impl SyntaxError {
                 "UNFINISHED LIST",
                 *region,
                 "I cannot find the end of this list:",
-                "You can just add a closing ] right here, and I will be all set!",
+                marked("You can just add a closing ] right here, and I will be all set!", &[("]", yellow)]),
                 vec![
                     note(words(
                         "I may be confused by indentation. For example, if you are \
@@ -356,7 +360,7 @@ impl SyntaxError {
                          this format:"
                             ,
                     )),
-                    Section::Block(
+                    example(&
                         "    [ \"Alice\"\n    , \"Bob\"\n    , \"Chuck\"\n    ]".to_string(),
                     ),
                     Section::para(
@@ -370,7 +374,7 @@ impl SyntaxError {
                 "UNFINISHED PARENTHESES",
                 *region,
                 "I was expecting to see a closing parenthesis next:",
-                "Try adding a ) to see if that helps!",
+                marked("Try adding a ) to see if that helps!", &[(")", yellow)]),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so maybe \
                      you have a closing parenthesis but it is not indented enough?"
@@ -389,7 +393,7 @@ impl SyntaxError {
                          multi-line string syntax like this:"
                             ,
                     )),
-                    Section::Block(
+                    example(&
                         "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
                          double quotes\n    - write whatever you want\n    - no need to \
                          escape newlines or double quotes\n    - end with triple double \
@@ -403,8 +407,11 @@ impl SyntaxError {
                 *region,
                 "I just saw the beginning of an anonymous function, so I was expecting to \
                  see an arrow next:",
-                "The syntax for anonymous functions is (\\x -> x + 1) so I am missing the \
-                 arrow and the body of the function.",
+                marked(
+                    "The syntax for anonymous functions is (\\x -> x + 1) so I am missing the \
+                     arrow and the body of the function.",
+                    &[("(\\x -> x + 1)", yellow)],
+                ),
                 // NB: elm's text contains the typo "indetation"; reproduced for byte-exact
                 // output.
                 vec![note(words(
@@ -429,7 +436,7 @@ impl SyntaxError {
                          this format:"
                             ,
                     )),
-                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    record_example(),
                     Section::para(
                         "Notice that each line starts with some indentation. Usually two or \
                          four spaces. This is the stylistic convention in the Elm ecosystem!"
@@ -441,9 +448,11 @@ impl SyntaxError {
                 "MISSING EXPRESSION".to_string(),
                 *region,
                 format!("I was expecting to see an expression after this {op} operator:"),
-                "You can just put anything for now, like 42 or \"hello\". Once there is \
-                 something there, I can probably give a more specific hint!"
-                    .to_string(),
+                marked(
+                    "You can just put anything for now, like 42 or \"hello\". Once there is \
+                     something there, I can probably give a more specific hint!",
+                    &[("42", yellow), ("\"hello\"", yellow)],
+                ),
                 vec![Section::para(format!(
                     "Note: I may be getting confused by your indentation? The easiest way to \
                      make sure this is not an indentation problem is to put the expression on \
@@ -470,7 +479,7 @@ impl SyntaxError {
                          `case` look something like this:"
                             ,
                     )),
-                    Section::Block(CASE_EXAMPLE.to_string()),
+                    case_example(),
                     Section::para(
                         "Notice the indentation! Patterns are aligned with each other. Same \
                          indentation. The expressions after each arrow are all indented a bit \
@@ -485,9 +494,11 @@ impl SyntaxError {
                 Region::new(region.end, region.end),
                 "I was partway through parsing a `let` expression, but I got stuck here:"
                     .to_string(),
-                "Based on the indentation, I was expecting to see the in keyword next. Is \
-                 there a typo?"
-                    .to_string(),
+                marked(
+                    "Based on the indentation, I was expecting to see the in keyword next. Is \
+                     there a typo?",
+                    &[("in", cyan)],
+                ),
                 vec![note(words(
                     "This can also happen if you are trying to define another value \
                      within the `let` but it is not indented enough. Make sure each \
@@ -503,9 +514,7 @@ impl SyntaxError {
                 "When a line has no spaces at the beginning, I expect it to be a declaration \
                  like one of these:",
                 vec![
-                    Section::Block(format!(
-                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
-                    )),
+                    declaration_examples(),
                     Section::para(
                         "Try to make your declaration look like one of those? Or if this is \
                          not supposed to be a declaration, try adding some spaces before it?"
@@ -533,7 +542,7 @@ impl SyntaxError {
                 "I was parsing an `module` declaration until I got stuck here:",
                 "I was expecting to see the module name next, like in these examples:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    module Dict exposing (..)\n    module Maybe exposing (..)\n    \
                          module Html.Attributes exposing (..)\n    module Json.Decode \
                          exposing (..)"
@@ -552,7 +561,7 @@ impl SyntaxError {
                 "I am parsing an `module` declaration, but I got stuck here:",
                 "Here are some examples of valid `module` declarations:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    module Main exposing (..)\n    module Dict exposing (Dict, empty, \
                          get)"
                             .to_string(),
@@ -570,7 +579,10 @@ impl SyntaxError {
                 "UNFINISHED EXPOSING",
                 *region,
                 "I was partway through parsing exposed values, but I got stuck here:",
-                "I was expecting a closing parenthesis. Try adding a ) right here?",
+                marked(
+                    "I was expecting a closing parenthesis. Try adding a ) right here?",
+                    &[(")", green)],
+                ),
                 vec![note(words(
                     "I can get confused when there is not enough indentation, so if you \
                      already have a closing parenthesis, it probably just needs some spaces \
@@ -584,7 +596,7 @@ impl SyntaxError {
                 "I am partway through parsing an import, but I got stuck here:",
                 "Here are some examples of valid `import` declarations:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    import Html\n    import Html as H\n    import Html as H exposing \
                          (..)\n    import Html exposing (Html, div, text)"
                             .to_string(),
@@ -610,7 +622,7 @@ impl SyntaxError {
                         "Here are some example `port` declarations for reference:"
                             ,
                     )),
-                    Section::Block(
+                    example(&
                         "    port send : String -> Cmd msg\n    port receive : (String -> \
                          msg) -> Sub msg"
                             .to_string(),
@@ -630,8 +642,11 @@ impl SyntaxError {
                 "UNEXPECTED PORTS",
                 *region,
                 "You are declaring ports in a normal module.",
-                "Switch this to say port module instead, marking that this module contains \
-                 port declarations.",
+                marked(
+                    "Switch this to say port module instead, marking that this module contains \
+                     port declarations.",
+                    &[("port module", cyan)],
+                ),
                 vec![note(words(
                     "Ports are not a traditional FFI for calling JS functions directly. \
                      They need a different mindset! Read \
@@ -664,8 +679,11 @@ impl SyntaxError {
                 "UNFINISHED TYPE ALIAS",
                 *region,
                 "I am partway through parsing a type alias, but I got stuck here:",
-                "I was expecting to see a type next. Something as simple as Int or Float \
-                 would work!",
+                marked(
+                    "I was expecting to see a type next. Something as simple as Int or Float \
+                     would work!",
+                    &[("Int", yellow), ("Float", yellow)],
+                ),
                 alias_notes(),
             ),
             SyntaxError::TypeAliasEquals { region } => snippet(
@@ -694,9 +712,17 @@ impl SyntaxError {
             SyntaxError::ReservedWord { region, word } => snippet_owned(
                 "RESERVED WORD".to_string(),
                 *region,
-                format!(
-                    "The name `{word}` is reserved in Elm, so it cannot be used as an \
-                     argument here:"
+                sentence(
+                    [
+                        words("The name"),
+                        vec![Doc::concat(vec![
+                            Doc::text("`"),
+                            cyan(word.to_string()),
+                            Doc::text("`"),
+                        ])],
+                        words("is reserved in Elm, so it cannot be used as an argument here:"),
+                    ]
+                    .concat(),
                 ),
                 "Try renaming it to something else.".to_string(),
                 vec![Section::para(format!(
@@ -722,7 +748,7 @@ impl SyntaxError {
                 "WEIRD NUMBER",
                 *region,
                 "Numbers cannot end with a dot like this:",
-                "Switching to 1 or 1.0 will work though!",
+                marked("Switching to 1 or 1.0 will work though!", &[("1", green), ("1.0", green)]),
                 vec![],
             ),
             SyntaxError::NumberEnd { region } => snippet(
@@ -731,7 +757,7 @@ impl SyntaxError {
                 "I thought I was reading a number, but I ran into some weird stuff here:",
                 "I recognize numbers in the following formats:",
                 vec![
-                    Section::Block("    42\n    3.14\n    6.022e23\n    0x002B".to_string()),
+                    example(&"    42\n    3.14\n    6.022e23\n    0x002B".to_string()),
                     Section::para("So is there a way to write it like one of those?".to_string()),
                 ],
             ),
@@ -741,7 +767,7 @@ impl SyntaxError {
                 "Backslashes always start escaped characters, but I do not recognize this one:",
                 "Valid escape characters include:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    \\n\n    \\r\n    \\t\n    \\\"\n    \\'\n    \\\\\n    \\u{003D}"
                             .to_string(),
                     ),
@@ -764,7 +790,7 @@ impl SyntaxError {
                         "I ran into an invalid Unicode escape:",
                         "Here are some examples of valid Unicode escapes:".to_string(),
                         vec![
-                            Section::Block(
+                            example(&
                                 "    \\u{0041}\n    \\u{03BB}\n    \\u{6728}\n    \\u{1F60A}"
                                     .to_string(),
                             ),
@@ -820,7 +846,7 @@ impl SyntaxError {
                          recommend using this format:"
                             ,
                     )),
-                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    record_example(),
                     Section::para(
                         "Notice that each line starts with some indentation. Usually two or \
                          four spaces. This is the stylistic convention in the Elm ecosystem."
@@ -845,7 +871,7 @@ impl SyntaxError {
                         "Here is an example with a valid `let` expression for reference:"
                             ,
                     )),
-                    Section::Block(
+                    example(&
                         "    viewPerson person =\n      let\n        fullName =\n          \
                          person.firstName ++ \" \" ++ person.lastName\n      in\n      div [] [ \
                          text fullName ]"
@@ -901,7 +927,7 @@ impl SyntaxError {
                 "I was parsing an `import` until I got stuck here:",
                 "I was expecting to see a module name next, like in these examples:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    import Dict\n    import Maybe\n    import Html.Attributes as A\n    \
                          import Json.Decode exposing (..)"
                             .to_string(),
@@ -922,7 +948,7 @@ impl SyntaxError {
                 "I was parsing an `import` until I got stuck here:",
                 "I was expecting to see an alias next, like in these examples:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    import Html.Attributes as Attr\n    import WebGL.Texture as \
                          Texture\n    import Json.Decode as D"
                             .to_string(),
@@ -944,7 +970,7 @@ impl SyntaxError {
                 "I do not have an exact recommendation, so here are some valid examples of \
                  `exposing` for reference:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    import Html exposing (..)\n    import Basics exposing (Int, Float, \
                          Bool(..), (+), not, sqrt)"
                             .to_string(),
@@ -961,8 +987,11 @@ impl SyntaxError {
                 "PROBLEM EXPOSING CUSTOM TYPE VARIANTS",
                 *region,
                 "It looks like you are trying to expose the variants of a custom type:",
-                "You need to write something like Status(..) or Entity(..) though. It is all or \
-                 nothing, otherwise `case` expressions could miss a variant and crash!",
+                marked(
+                    "You need to write something like Status(..) or Entity(..) though. It is all \
+                     or nothing, otherwise `case` expressions could miss a variant and crash!",
+                    &[("Status(..)", yellow), ("Entity(..)", yellow)],
+                ),
                 vec![note(words(
                     "It is often best to keep the variants hidden! If someone pattern \
                      matches on the variants, it is a MAJOR change if any new variants are \
@@ -979,7 +1008,7 @@ impl SyntaxError {
                 "I am parsing an `port module` declaration, but I got stuck here:",
                 "Here are some examples of valid `port module` declarations:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    port module WebSockets exposing (send, listen, keepAlive)\n    \
                          port module Maps exposing (Location, goto)"
                             .to_string(),
@@ -1004,7 +1033,14 @@ impl SyntaxError {
                      definition for `{definition}`:"
                 ),
                 "These names do not match! Is there a typo?".to_string(),
-                vec![Section::Block(format!("    {definition} -> {annotation}"))],
+                vec![code_block(vec![code_line(
+                    4,
+                    vec![
+                        yellow(definition.to_string()),
+                        Doc::text(" -> "),
+                        green(annotation.to_string()),
+                    ],
+                )])],
             ),
             SyntaxError::ProblemInDefinition { region, name } => snippet_owned(
                 "PROBLEM IN DEFINITION".to_string(),
@@ -1014,7 +1050,7 @@ impl SyntaxError {
                  an optional type annotation) for reference:"
                     .to_string(),
                 vec![
-                    Section::Block(DEF_EXAMPLE.to_string()),
+                    def_example(),
                     Section::para("Try to use that format!".to_string()),
                 ],
             ),
@@ -1059,40 +1095,50 @@ impl SyntaxError {
                 "EXPECTING TYPE ALIAS NAME",
                 *region,
                 "I am partway through parsing a type alias, but I got stuck here:",
-                "I was expecting a name like Person or Point next. Just make sure it is a \
-                 name that starts with a capital letter!",
+                marked(
+                    "I was expecting a name like Person or Point next. Just make sure it is a \
+                     name that starts with a capital letter!",
+                    &[("Person", yellow), ("Point", yellow)],
+                ),
                 alias_notes(),
             ),
             SyntaxError::ProblemInTypeAlias { region } => snippet(
                 "PROBLEM IN TYPE ALIAS",
                 *region,
                 "I was partway through parsing a type alias, but I got stuck here:",
-                "I was expecting to see a type next. Try putting Int or String for now?",
+                marked(
+                    "I was expecting to see a type next. Try putting Int or String for now?",
+                    &[("Int", yellow), ("String", yellow)],
+                ),
                 vec![],
             ),
             SyntaxError::ProblemInCustomType { region } => snippet(
                 "PROBLEM IN CUSTOM TYPE",
                 *region,
                 "I am partway through parsing a custom type, but I got stuck here:",
-                "I was expecting to see a variant name next. Something like Success or \
-                 Sandwich. Any name that starts with a capital letter really!",
+                marked(
+                    "I was expecting to see a variant name next. Something like Success or \
+                     Sandwich. Any name that starts with a capital letter really!",
+                    &[("Success", yellow), ("Sandwich", yellow)],
+                ),
                 custom_notes(),
             ),
             SyntaxError::PatternStart { region } => snippet(
                 "PROBLEM IN PATTERN",
                 *region,
                 "I wanted to parse a pattern next, but I got stuck here:",
-                "I am not sure why I am getting stuck exactly. I just know that I want a \
-                 pattern next. Something as simple as maybeHeight or result would work!",
+                marked(
+                    "I am not sure why I am getting stuck exactly. I just know that I want a \
+                     pattern next. Something as simple as maybeHeight or result would work!",
+                    &[("maybeHeight", yellow), ("result", yellow)],
+                ),
                 vec![],
             ),
             SyntaxError::PatternAlias { region } => snippet(
                 "UNFINISHED PATTERN",
                 *region,
                 "I was expecting to see a variable name after the `as` keyword:",
-                "The `as` keyword lets you write patterns like ((x,y) as point) so you can \
-                 refer to individual parts of the tuple with x and y or you refer to the \
-                 whole thing with point.",
+                as_pattern_advice(),
                 vec![Section::para(
                     "So I was expecting to see a variable name after the `as` keyword here. \
                      Sometimes people just want to use `as` as a variable name though. Try \
@@ -1104,15 +1150,18 @@ impl SyntaxError {
                 "UNEXPECTED PATTERN",
                 *region,
                 "I cannot pattern match with floating point numbers:",
-                "Equality on floats can be unreliable, so you usually want to check that they \
-                 are nearby with some sort of (abs (actual - expected) < 0.001) check.",
+                marked(
+                    "Equality on floats can be unreliable, so you usually want to check that \
+                     they are nearby with some sort of (abs (actual - expected) < 0.001) check.",
+                    &[("(abs (actual - expected) < 0.001)", yellow)],
+                ),
                 vec![],
             ),
             SyntaxError::ListPatternOpen { region } => snippet(
                 "UNFINISHED LIST PATTERN",
                 *region,
                 "I just saw an open square bracket, but then I got stuck here:",
-                "Try adding a ] to see if that helps?",
+                marked("Try adding a ] to see if that helps?", &[("]", yellow)]),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so maybe \
                      there is something next, but it is not indented enough?"
@@ -1123,14 +1172,14 @@ impl SyntaxError {
                 "UNFINISHED LIST PATTERN",
                 *region,
                 "I was expecting a closing square bracket to end this list pattern:",
-                "Try adding a ] to see if that helps?",
+                marked("Try adding a ] to see if that helps?", &[("]", yellow)]),
                 vec![],
             ),
             SyntaxError::ListPatternIndentEnd { region } => snippet(
                 "UNFINISHED LIST PATTERN",
                 *region,
                 "I was expecting a closing square bracket to end this list pattern:",
-                "Try adding a ] to see if that helps?",
+                marked("Try adding a ] to see if that helps?", &[("]", yellow)]),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so maybe \
                      you have a closing square bracket but it is not indented enough?"
@@ -1180,14 +1229,12 @@ impl SyntaxError {
                 "Declarations always start with a lower-case letter, so I am getting stuck \
                  here:"
                     .to_string(),
-                format!("Try a name like {lower_name} instead?"),
+                marked(&format!("Try a name like {lower_name} instead?"), &[(&lower_name, green)]),
                 vec![
                     note(words(
                         "Here are a couple valid declarations for reference:",
                     )),
-                    Section::Block(format!(
-                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
-                    )),
+                    declaration_examples(),
                     Section::para(
                         "Notice that they always start with a lower-case letter. \
                          Capitalization matters!"
@@ -1203,9 +1250,7 @@ impl SyntaxError {
                  like one of these:"
                     .to_string(),
                 vec![
-                    Section::Block(format!(
-                        "{DEF_EXAMPLE}\n    \n    type User = Anonymous | LoggedIn String"
-                    )),
+                    declaration_examples(),
                     Section::para(
                         "If this is not supposed to be a declaration, try adding some spaces \
                          before it?"
@@ -1237,7 +1282,7 @@ impl SyntaxError {
                  in some languages though, so if you want a string that spans multiple lines, \
                  you can use Elm's multi-line string syntax like this:",
                 vec![
-                    Section::Block(
+                    example(&
                         "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
                          double quotes\n    - write whatever you want\n    - no need to \
                          escape newlines or double quotes\n    - end with triple double \
@@ -1324,7 +1369,7 @@ impl SyntaxError {
                      here. Make the following change, and you should be all set!"
                 ),
                 vec![
-                    Section::Block(format!("    {actual} -> {expected}")),
+                    example(&format!("    {actual} -> {expected}")),
                     note(words(
                         "I require that module names correspond to file paths. This \
                          makes it much easier to explore unfamiliar codebases! So if you want \
@@ -1373,14 +1418,14 @@ impl SyntaxError {
                     "I use a 3rd party GLSL parser for now, and I did my best to extract \
                      their error message:"
                         .to_string(),
-                    vec![Section::Block(block)],
+                    vec![example(&block)],
                 )
             }
             SyntaxError::NoPorts { region } => snippet(
                 "NO PORTS",
                 *region,
                 "This module does not declare any ports, but it says it will:",
-                "Switch this to module and you should be all set!",
+                marked("Switch this to module and you should be all set!", &[("module", cyan)]),
                 vec![],
             ),
             SyntaxError::PackagesCannotHavePorts {
@@ -1411,7 +1456,7 @@ impl SyntaxError {
                          recommend using this format:"
                             ,
                     )),
-                    Section::Block(RECORD_EXAMPLE.to_string()),
+                    record_example(),
                     Section::para(
                         "Notice that each line starts with some indentation. Usually two or \
                          four spaces. This is the stylistic convention in the Elm ecosystem."
@@ -1430,7 +1475,7 @@ fn case_notes() -> Vec<Section> {
         note(words(
             "Here is an example of a valid `case` expression for reference.",
         )),
-        Section::Block(CASE_EXAMPLE.to_string()),
+        case_example(),
         Section::para(
             "Notice the indentation. Each pattern is aligned, and each branch is indented a bit \
              more than the corresponding pattern. That is important!"
@@ -1446,16 +1491,124 @@ const RECORD_PATTERN_HINT: &str = "Hint: A record pattern looks like {x,y} or {n
 /// paragraphs; `reflow` wraps each independently).
 const PORTS_IN_PACKAGE_NOTE: &str = "Note: One of the major goals of the package ecosystem is to be completely written in Elm. This means when you install an Elm package, you can be sure you are safe from security issues on install and that you are not going to get any runtime exceptions coming from your new dependency. This design also sets the ecosystem up to target other platforms more easily (like mobile phones, WebAssembly, etc.) since no community code explicitly depends on JavaScript even existing.\n\nGiven that overall goal, allowing ports in packages would lead to some pretty surprising behavior. If ports were allowed in packages, you could install a package but not realize that it brings in an indirect dependency that defines a port. Now you have a program that does not work and the fix is to realize that some JavaScript needs to be added for a dependency you did not even know about. That would be extremely frustrating! \"So why not allow the package author to include the necessary JS code as well?\" Now we are back in conflict with our overall goal to keep all community packages free from runtime exceptions.";
 
+/// An indented code example with Elm keywords colored, as elm hand-colors the
+/// examples in its syntax diagnostics. Only keywords: constructors and literals
+/// vary per example and are written out at the site that needs them.
+///
+/// `port module` is one cyan run in elm's source rather than two, so it is
+/// matched as a pair before the single keywords.
+fn example(text: &str) -> Section {
+    code_block(text.split('\n').map(example_line).collect())
+}
+
+fn example_line(line: &str) -> Doc {
+    const KEYWORDS: &[&str] = &[
+        "module", "import", "exposing", "as", "port", "type", "alias", "case", "of", "if",
+        "then", "else", "let", "in",
+    ];
+    let mut pieces: Vec<Doc> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = line;
+    while !rest.is_empty() {
+        // Keep leading whitespace with the plain run.
+        let word_start = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        plain.push_str(&rest[..word_start]);
+        rest = &rest[word_start..];
+        if rest.is_empty() {
+            break;
+        }
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(word_end);
+        let pair = word == "port" && tail.starts_with(" module");
+        let keyword = if pair { Some("port module") } else { KEYWORDS.contains(&word).then_some(word) };
+        match keyword {
+            Some(text) => {
+                if !plain.is_empty() {
+                    pieces.push(Doc::text(std::mem::take(&mut plain)));
+                }
+                pieces.push(cyan(text));
+                rest = if pair { &tail[" module".len()..] } else { tail };
+            }
+            None => {
+                plain.push_str(word);
+                rest = tail;
+            }
+        }
+    }
+    if !plain.is_empty() {
+        pieces.push(Doc::text(plain));
+    }
+    Doc::concat(pieces)
+}
+
+/// `((x,y) as point)` — elm colors the bound names yellow and `as` cyan, with
+/// the punctuation between them left plain, so the pieces are written out.
+fn as_pattern_advice() -> Doc {
+    sentence(
+        [
+            words("The `as` keyword lets you write patterns like"),
+            vec![
+                Doc::concat(vec![
+                    Doc::text("(("),
+                    yellow("x"),
+                    Doc::text(","),
+                    yellow("y"),
+                    Doc::text(")"),
+                ]),
+                Doc::concat(vec![cyan("as"), yellow(" point"), Doc::text(")")]),
+            ],
+            words("so you can refer to individual parts of the tuple with"),
+            vec![yellow("x"), Doc::text("and"), yellow("y")],
+            words("or you refer to the whole thing with"),
+            vec![Doc::concat(vec![yellow("point"), Doc::text(".")])],
+        ]
+        .concat(),
+    )
+}
+
 /// The multi-line record example elm shows in several record diagnostics.
-const RECORD_EXAMPLE: &str =
-    "    { name = \"Alice\"\n    , age = 42\n    , height = 1.75\n    }";
+fn record_example() -> Section {
+    code_block(vec![
+        code_line(4, vec![Doc::text("{ name = "), yellow("\"Alice\"")]),
+        code_line(4, vec![Doc::text(", age = "), yellow("42")]),
+        code_line(4, vec![Doc::text(", height = "), yellow("1.75")]),
+        Doc::text("    }"),
+    ])
+}
 
 /// The multi-line `case` example elm shows in several case diagnostics.
-const CASE_EXAMPLE: &str = "    case maybeWidth of\n      Just width ->\n        width + 200\n\n      Nothing ->\n        400";
+fn case_example() -> Section {
+    code_block(vec![
+        code_line(4, vec![cyan("case"), Doc::text(" maybeWidth "), cyan("of")]),
+        code_line(6, vec![blue("Just"), Doc::text(" width ->")]),
+        code_line(8, vec![Doc::text("width + "), yellow("200")]),
+        Doc::text(""),
+        code_line(6, vec![blue("Nothing"), Doc::text(" ->")]),
+        code_line(8, vec![yellow("400")]),
+    ])
+}
 
 /// The `greet` definition example elm shows in several declaration diagnostics.
-const DEF_EXAMPLE: &str =
-    "    greet : String -> String\n    greet name =\n      \"Hello \" ++ name ++ \"!\"";
+fn def_example() -> Section {
+    code_block(def_example_lines())
+}
+
+/// The `greet` definition plus a `type` declaration, shown together where elm
+/// lists what a declaration can look like.
+fn declaration_examples() -> Section {
+    let mut lines = def_example_lines();
+    lines.push(Doc::text("    "));
+    lines.push(code_line(4, vec![cyan("type"), Doc::text(" User = Anonymous | LoggedIn String")]));
+    code_block(lines)
+}
+
+fn def_example_lines() -> Vec<Doc> {
+    vec![
+        Doc::text("    greet : String -> String"),
+        Doc::text("    greet name ="),
+        code_line(6, vec![yellow("\"Hello \""), Doc::text(" ++ name ++ "), yellow("\"!\"")]),
+    ]
+}
 
 /// The example + note shared by the UNFINISHED TYPE ALIAS errors.
 fn alias_notes() -> Vec<Section> {
@@ -1463,7 +1616,7 @@ fn alias_notes() -> Vec<Section> {
         note(words(
             "Here is an example of a valid `type alias` for reference:",
         )),
-        Section::Block(
+        example(&
             "    type alias Person =\n      { name : String\n      , age : Int\n      , height \
              : Float\n      }"
                 .to_string(),
@@ -1483,7 +1636,7 @@ fn custom_notes() -> Vec<Section> {
         note(words(
             "Here is an example of a valid `type` declaration for reference:",
         )),
-        Section::Block(
+        example(&
             "    type Status\n      = Failure\n      | Waiting\n      | Success String"
                 .to_string(),
         ),
@@ -1504,7 +1657,7 @@ fn def_notes() -> Vec<Section> {
         Section::para(
             "Here is a valid definition (with a type annotation) for reference:".to_string(),
         ),
-        Section::Block(DEF_EXAMPLE.to_string()),
+        def_example(),
         Section::para(
             "The top line (called a \"type annotation\") is optional. You can leave it off if \
              you want. As you get more comfortable with Elm and as your project grows, it \
@@ -1537,7 +1690,7 @@ fn record_type_notes() -> Vec<Section> {
              recommend using this format:"
                 ,
         )),
-        Section::Block(RECORD_TYPE_EXAMPLE.to_string()),
+        example(&RECORD_TYPE_EXAMPLE.to_string()),
         record_type_notice(),
     ]
 }
@@ -1550,29 +1703,30 @@ fn record_type_indent_notes() -> Vec<Section> {
              define a record type across multiple lines, I recommend using this format:"
                 ,
         )),
-        Section::Block(RECORD_TYPE_EXAMPLE.to_string()),
+        example(&RECORD_TYPE_EXAMPLE.to_string()),
         record_type_notice(),
     ]
 }
 
-/// Build a `Report` from an elm snippet-style body.
-fn snippet(title: &str, region: Region, before: &str, after: &str, notes: Vec<Section>) -> Report {
-    snippet_owned(
-        title.to_string(),
-        region,
-        before.to_string(),
-        after.to_string(),
-        notes,
-    )
+/// Build a `Report` from an elm snippet-style body. `before`/`after` take
+/// either plain prose (reflowed) or an already-styled `Doc`.
+fn snippet(
+    title: &str,
+    region: Region,
+    before: impl Into<Doc>,
+    after: impl Into<Doc>,
+    notes: Vec<Section>,
+) -> Report {
+    snippet_owned(title.to_string(), region, before, after, notes)
 }
 
-/// As [`snippet`] but taking owned strings, for diagnostics whose text is built
-/// with runtime data (e.g. an operator name).
+/// As [`snippet`] but taking an owned title, for diagnostics whose heading is
+/// built with runtime data (e.g. an operator name).
 fn snippet_owned(
     title: String,
     region: Region,
-    before: String,
-    after: String,
+    before: impl Into<Doc>,
+    after: impl Into<Doc>,
     notes: Vec<Section>,
 ) -> Report {
     // Single-line errors: the shown region and the underline coincide.
@@ -1585,22 +1739,18 @@ fn snippet_spanned(
     title: String,
     region: Region,
     highlight: Region,
-    before: String,
-    after: String,
+    before: impl Into<Doc>,
+    after: impl Into<Doc>,
     notes: Vec<Section>,
 ) -> Report {
+    let (before, after) = (before.into(), after.into());
     Report {
         title,
-        region,
         // A searchable summary (used by substring-based diagnostics tests); the
-        // byte-exact layout lives in `elm` below.
-        message: format!("{before} {after}"),
-        elm: Some(ElmBody {
-            before: crate::reporting::Doc::reflow(&before),
-            after: crate::reporting::Doc::reflow(&after),
-            notes,
-            region,
-            highlight,
-        }),
+        // byte-exact layout lives in `elm` below. Rendered unwrapped so it stays
+        // one line whatever the paragraph would do at 80 columns.
+        message: format!("{} {}", before.render(usize::MAX), after.render(usize::MAX)),
+        region,
+        elm: Some(ElmBody { before, after, notes, region, highlight }),
     }
 }

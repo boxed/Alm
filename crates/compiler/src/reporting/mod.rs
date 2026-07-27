@@ -74,6 +74,11 @@ pub fn cyan(text: impl Into<String>) -> Doc {
     Doc::color(Color::CyanVivid, Doc::text(text))
 }
 
+/// The color elm uses for constructors in example code.
+pub fn blue(text: impl Into<String>) -> Doc {
+    Doc::color(Color::BlueVivid, Doc::text(text))
+}
+
 /// The dimmed color elm uses for illustrative example output.
 pub fn grey(text: impl Into<String>) -> Doc {
     Doc::color(Color::BlackVivid, Doc::text(text))
@@ -105,6 +110,66 @@ pub fn labeled(label: &str, parts: Vec<Doc>) -> Vec<Doc> {
         vec![Doc::cat2(Doc::styled(Style::underline(), Doc::text(label)), Doc::text(":"))];
     out.extend(parts);
     out
+}
+
+/// A filled paragraph in which the given tokens are colored. elm colors
+/// exactly these — a keyword, a literal, a suggested name — and leaves the rest
+/// of the sentence plain.
+///
+/// A token may be several words (`(\x -> x + 1)` is one yellow run in elm, not
+/// five), and may be a prefix of a word, so `Sandwich` colors without dragging
+/// in the sentence's full stop. Longest match wins.
+pub fn marked(text: &str, marks: &[(&str, fn(String) -> Doc)]) -> Doc {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut ordered: Vec<&(&str, fn(String) -> Doc)> = marks.iter().collect();
+    ordered.sort_by_key(|(token, _)| std::cmp::Reverse(token.len()));
+
+    let mut pieces: Vec<Doc> = Vec::new();
+    let mut i = 0;
+    'outer: while i < words.len() {
+        for (token, style) in &ordered {
+            let parts: Vec<&str> = token.split_whitespace().collect();
+            // A run of whole words.
+            if parts.len() > 1 && words[i..].starts_with(&parts[..]) {
+                pieces.push(style(token.to_string()));
+                i += parts.len();
+                continue 'outer;
+            }
+            if parts.len() == 1 && words[i] == *token {
+                pieces.push(style(token.to_string()));
+                i += 1;
+                continue 'outer;
+            }
+            // The token opens this word; the rest of it stays plain.
+            if parts.len() == 1 && words[i].starts_with(token) {
+                pieces.push(Doc::cat2(
+                    style(token.to_string()),
+                    Doc::text(words[i][token.len()..].to_string()),
+                ));
+                i += 1;
+                continue 'outer;
+            }
+        }
+        pieces.push(Doc::text(words[i]));
+        i += 1;
+    }
+    sentence(pieces)
+}
+
+/// One line of a code example, indented `indent` spaces: the pieces butted
+/// together with no wrapping, so the layout elm chose is preserved exactly.
+pub fn code_line(indent: usize, pieces: Vec<Doc>) -> Doc {
+    let mut all = vec![Doc::text(" ".repeat(indent))];
+    all.extend(pieces);
+    Doc::concat(all)
+}
+
+/// An indented code example whose keywords, constructors and literals are
+/// colored. elm hand-colors each of these — inside an example a type name
+/// stays plain, while the same name quoted in prose is yellow — so they are
+/// written out rather than run through a highlighter.
+pub fn code_block(lines: Vec<Doc>) -> Section {
+    Section::Para(Doc::vcat(lines))
 }
 
 /// `D.makeLink`.
