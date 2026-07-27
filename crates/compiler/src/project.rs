@@ -80,6 +80,28 @@ impl BuildError {
         self.render_from(None, false)
     }
 
+    /// This module's entry in a `--report=json` `"errors"` array. elm names
+    /// the file by its *absolute* path here, unlike the human-readable report.
+    pub fn to_json(&self) -> String {
+        let mut out = String::new();
+        out.push_str("{\"path\":");
+        // Always absolute. Modules reached through the loader already are, but
+        // one that failed to parse still carries the path as it was typed.
+        let path = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
+        crate::reporting::json_str(&path.display().to_string(), &mut out);
+        out.push_str(",\"name\":");
+        crate::reporting::json_str(&self.module_name(), &mut out);
+        out.push_str(",\"problems\":[");
+        for (i, report) in self.reports.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&report.to_json(&self.source));
+        }
+        out.push_str("]}");
+        out
+    }
+
     /// The module's name, as the band between two modules' reports shows it.
     pub fn module_name(&self) -> String {
         self.module.clone().unwrap_or_else(|| {

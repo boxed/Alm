@@ -21,14 +21,16 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
-         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc] [--source-maps] [--dev]\n\n\
+         \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
+         \x20                       [--source-maps] [--dev] [--report=json]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
          output defaults to the input file name without an extension).\n\
          `--source-maps` (js and wasm-gc targets) writes a .map beside the\n\
          output so browser devtools show Elm source; tree-shaking still runs,\n\
-         so the output is the same size as an ordinary build."
+         so the output is the same size as an ordinary build.\n\
+         `--report=json` writes diagnostics to stderr as JSON for editors."
     );
 }
 
@@ -49,6 +51,8 @@ fn make(args: &[String]) -> ExitCode {
     // Native/wasm only: skip LLVM's `O2` pipeline (the ~98% of native build time)
     // for fast dev iteration, at the cost of runtime speed. No effect on js/wasm-gc.
     let mut opt = OptLevel::Release;
+    // `--report=json`: machine-readable diagnostics for editor plugins.
+    let mut report_json = false;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
@@ -63,6 +67,14 @@ fn make(args: &[String]) -> ExitCode {
                 "wasm-gc" | "wasmgc" => backend = Backend::WasmGc,
                 other => {
                     eprintln!("Unknown target `{}`. I know js, native, and wasm-gc.", other);
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else if let Some(kind) = arg.strip_prefix("--report=") {
+            match kind {
+                "json" => report_json = true,
+                other => {
+                    eprintln!("Unknown report type `{}`. I only know json.", other);
                     return ExitCode::FAILURE;
                 }
             }
@@ -127,10 +139,14 @@ fn make(args: &[String]) -> ExitCode {
 
     match result {
         Ok((output, warnings)) => {
-            for w in &warnings {
-                eprintln!("{}\n", w.render());
+            // In JSON mode elm reports nothing at all on success — no progress,
+            // no tally — so an editor never has to filter prose out.
+            if !report_json {
+                for w in &warnings {
+                    eprintln!("{}\n", w.render());
+                }
+                println!("Success! Compiled to {}", output.display());
             }
-            println!("Success! Compiled to {}", output.display());
             ExitCode::SUCCESS
         }
         Err(mut errors) => {
@@ -139,6 +155,16 @@ fn make(args: &[String]) -> ExitCode {
             // the file you touched most recently last, nearest the prompt.
             let root = alm_compiler::project::project_root(&input);
             errors.sort_by_key(|e| std::fs::metadata(&e.path).and_then(|m| m.modified()).ok());
+
+            if report_json {
+                // One line on stderr, with no trailing newline — as elm writes it.
+                let bodies: Vec<String> = errors.iter().map(|e| e.to_json()).collect();
+                eprint!(
+                    "{{\"type\":\"compile-errors\",\"errors\":[{}]}}",
+                    bodies.join(",")
+                );
+                return ExitCode::FAILURE;
+            }
 
             // elm counts *modules*, and its build tracker prints the tally on
             // stdout and flushes it before any report reaches stderr — so when

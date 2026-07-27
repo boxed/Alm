@@ -318,3 +318,99 @@ fn render_code_snippet(source: &str, region: Region) -> String {
     }
     out
 }
+
+// ------------------------------------------------------------ --report=json
+//
+// `Reporting.Error.toJson` plus the envelope from `Reporting.Exit.Help`. Editor
+// plugins read this, so the shape is fixed: a message is an array mixing bare
+// strings (unstyled runs) with `{bold, underline, color, string}` objects.
+
+impl Report {
+    /// One entry of a module's `"problems"` array.
+    pub fn to_json(&self, source: &str) -> String {
+        let mut out = String::new();
+        out.push_str("{\"title\":");
+        json_str(&self.title, &mut out);
+        out.push_str(",\"region\":");
+        out.push_str(&region_to_json(self.region));
+        out.push_str(",\"message\":");
+        chunks_to_json(&self.body_chunks(source), &mut out);
+        out.push('}');
+        out
+    }
+}
+
+/// `D.encode` — the message as an array of runs.
+///
+/// elm's encoder flushes a chunk at every style transition and once more at the
+/// end, so an empty *unstyled* run appears wherever two styled runs meet, and
+/// at either end if the message begins or ends styled. Those empty strings are
+/// part of the format, so reproduce them.
+fn chunks_to_json(chunks: &[Chunk], out: &mut String) {
+    let styled = |c: &Chunk| c.style != Style::default();
+    let mut items: Vec<Option<&Chunk>> = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let previous_styled = i.checked_sub(1).map(|j| styled(&chunks[j]));
+        if styled(chunk) && previous_styled.unwrap_or(true) {
+            items.push(None);
+        }
+        items.push(Some(chunk));
+    }
+    match chunks.last() {
+        Some(last) if styled(last) => items.push(None),
+        None => items.push(None),
+        _ => {}
+    }
+
+    out.push('[');
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let Some(chunk) = item else {
+            out.push_str("\"\"");
+            continue;
+        };
+        if chunk.style == Style::default() {
+            json_str(&chunk.text, out);
+            continue;
+        }
+        out.push_str("{\"bold\":");
+        out.push_str(if chunk.style.bold { "true" } else { "false" });
+        out.push_str(",\"underline\":");
+        out.push_str(if chunk.style.underline { "true" } else { "false" });
+        out.push_str(",\"color\":");
+        match chunk.style.color {
+            Some(color) => json_str(color.json_name(), out),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"string\":");
+        json_str(&chunk.text, out);
+        out.push('}');
+    }
+    out.push(']');
+}
+
+fn region_to_json(region: Region) -> String {
+    format!(
+        "{{\"start\":{{\"line\":{},\"column\":{}}},\"end\":{{\"line\":{},\"column\":{}}}}}",
+        region.start.row, region.start.col, region.end.row, region.end.col
+    )
+}
+
+/// Append a JSON string literal for `s` to `out`.
+pub fn json_str(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}

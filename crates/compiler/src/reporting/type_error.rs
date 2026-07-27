@@ -1092,10 +1092,28 @@ fn lone_type(
     (i_am_seeing.into(), notes)
 }
 
+/// A report whose caret sits on the expression being blamed. elm's
+/// `Report.Report title exprRegion` pairs with `Code.toSnippet source region
+/// (Just exprRegion)`: the *report's* region — what `--report=json` publishes —
+/// is the expression, while `region` is the wider span of source shown.
 fn report(
     title: &str,
     expr_region: Region,
     region: Region,
+    before: impl Into<Doc>,
+    after: impl Into<Doc>,
+    notes: Vec<Section>,
+) -> Report {
+    report_highlighting(title, expr_region, region, expr_region, before, after, notes)
+}
+
+/// As [`report`] but underlining something other than the blamed expression —
+/// a record's field, say, while the report still points at the expression.
+fn report_highlighting(
+    title: &str,
+    expr_region: Region,
+    region: Region,
+    highlight: Region,
     before: impl Into<Doc>,
     after: impl Into<Doc>,
     notes: Vec<Section>,
@@ -1105,7 +1123,7 @@ fn report(
         title: title.to_string(),
         region: expr_region,
         message: String::new(),
-        elm: Some(ElmBody { before, after, notes, region, highlight: expr_region }),
+        elm: Some(ElmBody { before, after, notes, region, highlight }),
     }
 }
 
@@ -1370,10 +1388,11 @@ pub fn to_expr_report(
                                     ],
                                 )
                             };
-                            report(
+                            report_highlighting(
                                 "TYPE MISMATCH",
-                                *field_region,
+                                expr_region,
                                 *region,
+                                *field_region,
                                 format!("This {named}record does not have a `{field}` field:"),
                                 after,
                                 notes,
@@ -1393,10 +1412,11 @@ pub fn to_expr_report(
                                     .concat(),
                                 ))],
                             );
-                            report(
+                            report_highlighting(
                                 "TYPE MISMATCH",
-                                *record_region,
+                                expr_region,
                                 *region,
+                                *record_region,
                                 "This is not a record, so it has no fields to access!".to_string(),
                                 after,
                                 notes,
@@ -1453,10 +1473,11 @@ pub fn to_expr_report(
                                         ],
                                     )
                                 };
-                                report(
+                                report_highlighting(
                                     "TYPE MISMATCH",
-                                    *field_region,
+                                    expr_region,
                                     *region,
+                                    *field_region,
                                     format!("The `{record}` record does not have a `{field}` field:"),
                                     after,
                                     notes,
