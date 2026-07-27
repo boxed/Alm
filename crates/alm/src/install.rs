@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
 use std::process::ExitCode;
 
 use alm_compiler::packages::{self, Constraint, Version};

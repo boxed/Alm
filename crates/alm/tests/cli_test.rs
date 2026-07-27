@@ -617,3 +617,109 @@ fn bump_needs_a_package() {
     assert!(!ok);
     assert!(stderr.starts_with("-- CANNOT BUMP APPLICATIONS ---"), "stderr: {stderr}");
 }
+
+/// Boot `alm reactor` on a free port and return the child plus its base URL.
+/// The port comes from binding one and letting it go: a race is possible in
+/// principle, but the alternative is a fixed port that collides with whatever
+/// else is on the machine.
+fn start_reactor(dir: &Path) -> (std::process::Child, u16) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["reactor", &format!("--port={port}")])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start alm reactor");
+    // Wait for it to accept connections rather than sleeping a fixed time.
+    for _ in 0..200 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (child, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("reactor never came up on port {port}");
+}
+
+/// A bare GET, returning (status line, headers, body).
+fn get(port: u16, path: &str) -> (String, String, String) {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let (status, headers) = head.split_once("\r\n").unwrap_or((head, ""));
+    (status.to_string(), headers.to_string(), body.to_string())
+}
+
+#[test]
+fn reactor_serves_compiles_and_refuses_to_escape() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("work/src")).unwrap();
+    let project = dir.join("work");
+    std::fs::write(
+        project.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/Main.elm"),
+        "module Main exposing (main)\n\nmain = \"hi\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("src/Broken.elm"), "module Broken exposing (x)\n\nx = 1 + \"a\"\n")
+        .unwrap();
+    std::fs::write(project.join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(dir.join("secret.txt"), "not yours").unwrap();
+
+    let (mut child, port) = start_reactor(&project);
+
+    // The dashboard lists what is there.
+    let (status, _, body) = get(port, "/");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(body.contains("<a href=\"/src/\">src/</a>"), "{body}");
+
+    // An Elm module compiles and comes back in elm's page.
+    let (status, _, body) = get(port, "/src/Main.elm");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(body.starts_with("<!DOCTYPE HTML>"), "{body}");
+    assert!(
+        body.contains("var app = Elm.Main.init({ node: document.getElementById(\"elm\") });"),
+        "no init call in the page"
+    );
+
+    // A failing module reports instead of serving a broken page.
+    let (status, _, body) = get(port, "/src/Broken.elm");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(body.contains("TYPE MISMATCH"), "{body}");
+
+    // A file with no mime type is shown as source, one with a type is served.
+    let (_, headers, body) = get(port, "/notes.md");
+    assert!(headers.contains("text/html"), "{headers}");
+    assert!(body.contains("# Notes"), "{body}");
+    let (_, headers, body) = get(port, "/elm.json");
+    assert!(headers.contains("application/json"), "{headers}");
+    assert!(body.contains("\"source-directories\""), "{body}");
+
+    let (status, _, _) = get(port, "/nothing-here");
+    assert!(status.starts_with("HTTP/1.1 404"), "{status}");
+
+    // Nothing above the served directory is reachable, however it is spelled.
+    for escape in ["/../secret.txt", "/%2e%2e/secret.txt", "/src/../../secret.txt"] {
+        let (status, _, body) = get(port, escape);
+        assert!(status.starts_with("HTTP/1.1 404"), "{escape}: {status}");
+        assert!(!body.contains("not yours"), "{escape} escaped the root");
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
