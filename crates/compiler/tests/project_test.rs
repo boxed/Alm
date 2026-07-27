@@ -538,9 +538,79 @@ fn qualified_record_alias_constructor() {
             "module Lib exposing (Point)\n\ntype alias Point =\n    { x : Int, tag : String }\n",
         ),
     ]);
-    // Field order in the alias determines constructor argument order —
-    // and Int vs String argument mixups must fail, so use same-typed args.
-    assert!(result.is_err() || result.unwrap() == "4");
+    // Field order in the alias decides constructor argument order, so the 2nd
+    // argument lands in `tag : String` — and an Int there is an error.
+    let err = result.expect_err("an Int in a String field must not compile");
+    assert!(err.contains("TYPE MISMATCH"), "{err}");
+}
+
+/// A record type alias used as a constructor has the type the alias declares.
+/// It used to be inferred instead, which let `Point 1.5 2.5` through against
+/// `type alias Point = { x : Int, y : Int }`.
+#[test]
+fn a_record_alias_constructor_enforces_its_field_types() {
+    let err = check_project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Point =\n    { x : Int, y : Int }\n\nmain = Point 1.5 2.5\n",
+    )])
+    .expect_err("floats in Int fields must not compile");
+    assert!(err.contains("TYPE MISMATCH"), "{err}");
+    // The report names the alias, as elm's does, rather than "this function".
+    assert!(err.contains("`Point` needs the 1st argument to be"), "{err}");
+
+    // The same constructor used correctly still works.
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Point =\n    { x : Int, y : Int }\n\nmain = String.fromInt (Point 3 4).y\n",
+    )]);
+    assert_eq!(result.unwrap(), "4");
+}
+
+/// A parameterized alias stays polymorphic — its variables must not be pinned
+/// by the first use — while both fields still share one type.
+#[test]
+fn a_parameterized_alias_constructor_stays_polymorphic() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Pair a =\n    { first : a, second : a }\n\nints = Pair 1 2\n\nstrings = Pair \"a\" \"b\"\n\nmain = strings.first ++ String.fromInt ints.second\n",
+    )]);
+    assert_eq!(result.unwrap(), "a2");
+
+    let err = check_project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Pair a =\n    { first : a, second : a }\n\nmain = Pair 1 \"a\"\n",
+    )])
+    .expect_err("both fields share one type variable");
+    assert!(err.contains("TYPE MISMATCH"), "{err}");
+}
+
+/// The alias's type variables are renamed apart before being used as an
+/// annotation. Left as written, one sharing a name with a variable in the
+/// enclosing annotation would be tied to it.
+#[test]
+fn an_alias_variable_is_not_captured_by_the_enclosing_annotation() {
+    let result = project(&[(
+        "Main.elm",
+        "module Main exposing (main)\n\ntype alias Pair a =\n    { first : a, second : a }\n\nwrap : a -> Pair a\nwrap v =\n    Pair v v\n\ncount : a -> Int\ncount _ =\n    (Pair 1 2).first\n\nmain = (wrap \"x\").second ++ String.fromInt (count ())\n",
+    )]);
+    assert_eq!(result.unwrap(), "x1");
+}
+
+/// Partial application, use as a plain value, and an alias of an alias all go
+/// through the same annotated definition.
+#[test]
+fn alias_constructors_work_partially_applied_and_through_chains() {
+    let result = project(&[
+        (
+            "Main.elm",
+            "module Main exposing (main)\n\nimport Lib\n\ntype alias Point =\n    { x : Int, y : Int }\n\npartial : Int -> Point\npartial =\n    Point 7\n\nmapped : List Point\nmapped =\n    List.map2 Point [ 1 ] [ 2 ]\n\nchained : Lib.Chain\nchained =\n    Lib.Chain 3\n\nmain =\n    String.fromInt ((partial 8).y + (List.length mapped) + chained.n)\n",
+        ),
+        (
+            "Lib.elm",
+            "module Lib exposing (Chain, Far)\n\ntype alias Far =\n    { n : Int }\n\ntype alias Chain =\n    Far\n",
+        ),
+    ]);
+    assert_eq!(result.unwrap(), "12");
 }
 
 #[test]

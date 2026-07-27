@@ -2,6 +2,7 @@
 //! resolution against the environment.
 
 use super::*;
+use std::rc::Rc;
 use crate::reporting::annotation::Position;
 
 pub(super) fn canonicalize_value(env: &mut Env, value: &src::Value) -> CResult<can::Def> {
@@ -414,10 +415,158 @@ fn record_alias_ctor(
             )
         })
         .collect();
-    Some(can::Expr_::Lambda(
+    let lambda = can::Expr_::Lambda(
         args,
         Box::new(Located::new(bump(1 + n), can::Expr_::Record(fields))),
+    );
+
+    // The lambda alone is inferred, which loses the alias's field types:
+    // `Point 1.5 2.5` would type-check against `type alias Point = {x:Int,
+    // y:Int}`. Annotating a synthetic definition with the type the alias
+    // declares puts them back, and needs no new AST node — every backend
+    // already handles `let`.
+    let Some(annotation) = alias_ctor_annotation(env, qualifier, name, &field_names) else {
+        return Some(lambda);
+    };
+    // Bound under the alias's own name, so a report about a bad argument says
+    // "`Point` needs the 1st argument to be", as elm's does. Nothing can
+    // shadow it: the name is upper-case, which no local binding may be, and
+    // the definition is in scope only for the variable that follows it.
+    let def = can::Def {
+        name: Located::new(bump(2 + n + n), name.clone()),
+        args: Vec::new(),
+        body: Located::new(bump(3 + n + n), lambda),
+        annotation: Some(annotation),
+    };
+    Some(can::Expr_::Let(
+        vec![can::LetDecl::Def(def)],
+        Box::new(Located::new(bump(4 + n + n), can::Expr_::VarLocal(name.clone()))),
     ))
+}
+
+/// `Int -> Int -> { x : Int, y : Int }` for `type alias Point = { x : Int, y :
+/// Int }` — the type the alias declares, as a constructor function.
+///
+/// The alias's own type parameters are renamed apart first. Left as written
+/// they could be captured by a variable of the same name in an enclosing
+/// annotation, which would tie the constructor to that variable instead of
+/// leaving it free.
+fn alias_ctor_annotation(
+    env: &Env,
+    qualifier: Option<&Name>,
+    name: &Name,
+    field_names: &[Name],
+) -> Option<can::Type> {
+    let can::Type::Record(fields, None) = resolve_alias_record_type(env, qualifier, name, 0)?
+    else {
+        return None;
+    };
+    // Argument order follows the fields as the alias declares them, which is
+    // what `field_names` carries; the canonical record may hold them in some
+    // other order.
+    let mut result = can::Type::Record(fields.clone(), None);
+    let mut args = Vec::with_capacity(field_names.len());
+    for field in field_names {
+        args.push(fields.iter().find(|(n, _)| n == field).map(|(_, t)| t.clone())?);
+    }
+    for arg in args.into_iter().rev() {
+        result = can::Type::Lambda(Rc::new(arg), Rc::new(result));
+    }
+    Some(rename_vars_apart(&result))
+}
+
+/// Give every type variable a name no source can collide with.
+fn rename_vars_apart(tipe: &can::Type) -> can::Type {
+    let mut map: HashMap<Name, can::Type> = HashMap::new();
+    collect_vars(tipe, &mut map);
+    if map.is_empty() {
+        return tipe.clone();
+    }
+    super::types::subst_can_type(tipe, &map)
+}
+
+fn collect_vars(tipe: &can::Type, map: &mut HashMap<Name, can::Type>) {
+    match tipe {
+        can::Type::Var(name) => {
+            if !map.contains_key(name) {
+                let fresh = Name::from(format!("_ctor_{name}").as_str());
+                map.insert(name.clone(), can::Type::Var(fresh));
+            }
+        }
+        can::Type::Lambda(a, b) => {
+            collect_vars(a, map);
+            collect_vars(b, map);
+        }
+        can::Type::Type(_, _, args) => args.iter().for_each(|a| collect_vars(a, map)),
+        can::Type::Record(fields, _) => fields.iter().for_each(|(_, t)| collect_vars(t, map)),
+        can::Type::Tuple(a, b, c) => {
+            collect_vars(a, map);
+            collect_vars(b, map);
+            if let Some(c) = c {
+                collect_vars(c, map);
+            }
+        }
+        can::Type::Unit => {}
+    }
+}
+
+/// The canonical record an alias resolves to, following alias chains the same
+/// way [`resolve_alias_record_fields`] follows them for names.
+fn resolve_alias_record_type(
+    env: &Env,
+    qualifier: Option<&Name>,
+    name: &Name,
+    depth: u32,
+) -> Option<can::Type> {
+    if depth > 20 {
+        return None;
+    }
+    match qualifier {
+        None => {
+            if let Some((_, body)) = env.aliases.get(name) {
+                // Canonicalizing expands any aliases inside the body, so what
+                // comes back is the record itself.
+                super::types::canonicalize_type(env, body).ok()
+            } else if let Some(module) = env.exposed_types.get(name) {
+                foreign_alias_type(env, module, name, depth)
+            } else {
+                None
+            }
+        }
+        Some(qualifier) => {
+            let candidates = env.resolve_modules(qualifier);
+            candidates.iter().find_map(|module| {
+                if *module == env.module_name {
+                    super::types::canonicalize_type(env, &env.aliases.get(name)?.1).ok()
+                } else {
+                    foreign_alias_type(env, module, name, depth)
+                }
+            })
+        }
+    }
+}
+
+fn foreign_alias_type(
+    env: &Env,
+    module: &Name,
+    name: &Name,
+    depth: u32,
+) -> Option<can::Type> {
+    let body: can::Type = if let Some(interface) = env.interfaces.get(module) {
+        interface.aliases.get(name).map(|(_, t)| t.clone())?
+    } else if let Some((_, sig)) = builtins::lookup_alias(module.as_str(), name.as_str()) {
+        builtins::parse_signature(sig)
+    } else {
+        return None;
+    };
+    match body {
+        can::Type::Record(_, None) => Some(body),
+        // An alias for another alias: keep following it.
+        can::Type::Type(ref home, ref inner, _) => {
+            foreign_alias_type(env, home, inner, depth + 1)
+        }
+        _ => None,
+    }
 }
 
 /// Field names of the record an alias resolves to, following alias chains

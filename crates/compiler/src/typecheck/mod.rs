@@ -2109,6 +2109,13 @@ fn func_name(func: &can::Expr) -> TMaybeName {
             TMaybeName::FuncName(name.to_string())
         }
         VarCtor(_, _, ctor) => TMaybeName::CtorName(ctor.name.to_string()),
+        // A record type alias used as a constructor is canonicalized into a
+        // `let` binding the alias's name (see `record_alias_ctor`). Look
+        // through it, so a report names `Point` rather than "this function".
+        Let(_, body) => match &body.value {
+            VarLocal(name) => TMaybeName::CtorName(name.to_string()),
+            _ => TMaybeName::NoName,
+        },
         _ => TMaybeName::NoName,
     }
 }

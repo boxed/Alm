@@ -74,13 +74,20 @@ impl BuildError {
             .unwrap_or(&self.path)
             .display()
             .to_string();
+        self.render_named(&displayed, color)
+    }
+
+    /// Render with an explicit name in the header bar, for source that is not
+    /// a file anyone has: the REPL's accumulated module is shown as `REPL`,
+    /// because `Elm_Repl.elm` is an implementation detail.
+    pub fn render_named(&self, displayed: &str, color: bool) -> String {
         self.reports
             .iter()
             .map(|r| {
                 if color {
-                    r.render_ansi(&displayed, &self.source)
+                    r.render_ansi(displayed, &self.source)
                 } else {
-                    r.render(&displayed, &self.source)
+                    r.render(displayed, &self.source)
                 }
             })
             .collect::<String>()

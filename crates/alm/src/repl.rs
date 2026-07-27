@@ -226,10 +226,10 @@ fn evaluate(
         &next.unqualified(),
     ) {
         Err(errors) => {
-            // The reports quote the synthetic module, whose line numbers mean
-            // nothing to someone at a prompt. Only the message is any use.
+            // The accumulated module is an implementation detail, so the
+            // header says `REPL` rather than naming the scratch file.
             for error in &errors {
-                eprint!("{}", error.render_from(Some(scratch), color));
+                eprint!("{}", error.render_named("REPL", color));
             }
             // A failed entry is discarded; the previous state is what the
             // reports were checked against and stays valid.

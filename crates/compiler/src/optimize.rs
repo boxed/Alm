@@ -80,6 +80,17 @@ fn simplify(e: &mut can::Expr) {
                 }
             }
             simplify(body);
+            // `let x = e in x` is just `e`. Canonicalization builds exactly
+            // this shape for a record type-alias constructor so the alias's
+            // declared type can ride along as an annotation into the type
+            // checker. Once checking is done the wrapper is dead weight, and
+            // dropping it puts the plain lambda back where the backends can
+            // recognize it — the JS one memoizes it, see `_Record_ctor`.
+            // Spliced verbatim, region and all, as the invariant above
+            // requires: the lambda keeps the region its own type is keyed by.
+            if let Some(inner) = trivial_let_body(decls, body) {
+                *e = inner;
+            }
         }
         Case(scrut, branches) => {
             simplify(scrut);
@@ -414,5 +425,65 @@ mod tests {
         // 2^53 + 2^53 would lose precision as a double; leave it for the runtime.
         let big = (1i64 << 53) as i64;
         assert!(matches!(run(bin("+", int(big), int(big))), Expr_::Binop(..)));
+    }
+}
+
+/// The bound expression of a `let x = e in x`, when that is the whole shape:
+/// one non-recursive, argument-less definition, returned unchanged.
+///
+/// `e` must not mention `x` — a definition may refer to itself, and inlining
+/// one that does would leave a dangling variable.
+fn trivial_let_body(
+    decls: &[can::LetDecl],
+    body: &can::Expr,
+) -> Option<can::Expr> {
+    let [can::LetDecl::Def(def)] = decls else {
+        return None;
+    };
+    if !def.args.is_empty() {
+        return None;
+    }
+    let can::Expr_::VarLocal(used) = &body.value else {
+        return None;
+    };
+    if *used != def.name.value || mentions(&def.body, used) {
+        return None;
+    }
+    Some(def.body.clone())
+}
+
+/// Whether `name` occurs as a local variable anywhere in `e`. Shadowing is not
+/// tracked: a false positive only means the rewrite is skipped.
+fn mentions(e: &can::Expr, name: &crate::data::Name) -> bool {
+    use can::Expr_::*;
+    let any = |xs: &[can::Expr]| xs.iter().any(|x| mentions(x, name));
+    match &e.value {
+        VarLocal(n) => n == name,
+        Negate(x) | Access(x, _) => mentions(x, name),
+        Binop(_, _, _, l, r) => mentions(l, name) || mentions(r, name),
+        Lambda(_, body) => mentions(body, name),
+        Call(f, args) => mentions(f, name) || any(args),
+        If(branches, otherwise) => {
+            branches.iter().any(|(c, t)| mentions(c, name) || mentions(t, name))
+                || mentions(otherwise, name)
+        }
+        Let(decls, body) => {
+            decls.iter().any(|d| match d {
+                can::LetDecl::Def(def) => mentions(&def.body, name),
+                can::LetDecl::Recursive(defs) => defs.iter().any(|d| mentions(&d.body, name)),
+                can::LetDecl::Destruct(_, value) => mentions(value, name),
+            }) || mentions(body, name)
+        }
+        Case(scrut, branches) => {
+            mentions(scrut, name) || branches.iter().any(|(_, b)| mentions(b, name))
+        }
+        List(items) => any(items),
+        Update(record, fields) => {
+            mentions(record, name) || fields.iter().any(|(_, v)| mentions(v, name))
+        }
+        Record(fields) => fields.iter().any(|(_, v)| mentions(v, name)),
+        Tuple(a, b, rest) => mentions(a, name) || mentions(b, name) || any(rest),
+        VarTopLevel(_) | VarForeign(_, _) | VarCtor(..) | Chr(_) | Str(_) | Int(_)
+        | Float(_) | Accessor(_) | Unit | Shader(_) => false,
     }
 }
