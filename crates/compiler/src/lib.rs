@@ -16,6 +16,7 @@ pub mod nitpick;
 pub mod debug_uses;
 pub mod docs;
 pub mod optimize;
+pub mod packages;
 pub mod parse;
 pub mod project;
 pub mod reporting;

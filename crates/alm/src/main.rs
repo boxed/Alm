@@ -1,3 +1,5 @@
+mod init;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -5,6 +7,13 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("make") => make(&args[1..]),
+        Some("init") => {
+            if args.len() > 1 {
+                eprintln!("`alm init` takes no arguments.");
+                return ExitCode::FAILURE;
+            }
+            init::run(use_color())
+        }
         Some("--help" | "-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -21,10 +30,14 @@ fn print_help() {
     println!(
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
+         \x20   alm init\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
-         Compiles an Elm module. The default target is JavaScript, with\n\
+         `init` starts a project: it writes an elm.json and creates src/.\n\
+         Dependencies are resolved from the packages already in ~/.elm, so it\n\
+         works offline and downloads nothing.\n\n\
+         `make` compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
          output defaults to the input file name without an extension).\n\

@@ -120,9 +120,14 @@ fn make_prints_compile_errors_and_counts() {
         "module Bad exposing (..)\n\nx : String\nx = 1\n\ny = alsoMissing\n",
     )
     .unwrap();
-    let (ok, _, stderr) = alm(&["make", elm.to_str().unwrap()]);
+    let (ok, stdout, stderr) = alm(&["make", elm.to_str().unwrap()]);
     assert!(!ok);
-    assert!(stderr.contains("problem"), "got: {}", stderr);
+    // The reports go to stderr and the tally to stdout, as elm splits them.
+    assert!(stderr.contains("NAMING PROBLEM"), "stderr: {stderr}");
+    assert!(
+        stdout.contains("Detected problems in 1 module."),
+        "the tally belongs on stdout, got: {stdout}"
+    );
 }
 
 #[test]
@@ -137,4 +142,91 @@ fn output_write_failure_is_reported() {
     ]);
     assert!(!ok);
     assert!(stderr.contains("could not write"));
+}
+
+/// `alm init` in `dir`, answering the prompt with `answer`.
+fn alm_init(dir: &Path, answer: &str) -> (bool, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .arg("init")
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run alm init");
+    child.stdin.take().unwrap().write_all(answer.as_bytes()).unwrap();
+    let output = child.wait_with_output().expect("wait");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn init_creates_a_project() {
+    let dir = temp_dir();
+    let (ok, stdout, stderr) = alm_init(&dir, "Y\n");
+    assert!(ok, "init failed: {stderr}");
+    assert!(stdout.contains("Okay, I created it."), "stdout: {stdout}");
+    assert!(dir.join("src").is_dir(), "src/ should exist");
+
+    let outline = std::fs::read_to_string(dir.join("elm.json")).expect("elm.json");
+    // The three packages elm starts a project with, and the shape it writes.
+    for package in ["elm/browser", "elm/core", "elm/html"] {
+        assert!(outline.contains(package), "{package} missing from:\n{outline}");
+    }
+    assert!(outline.contains("\"type\": \"application\""), "outline:\n{outline}");
+    assert!(outline.contains("\"source-directories\""), "outline:\n{outline}");
+    assert!(outline.ends_with("}\n"), "should end with a newline");
+    // The project it produces must actually build.
+    std::fs::write(
+        dir.join("src/Main.elm"),
+        "module Main exposing (main)\n\nimport Html\n\n\nmain : Html.Html msg\nmain =\n    Html.text \"hi\"\n",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["make", "src/Main.elm", "--output=/dev/null"])
+        .current_dir(&*dir)
+        .output()
+        .expect("run alm make");
+    assert!(
+        built.status.success(),
+        "the initialized project should compile:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+}
+
+/// Answering "n" leaves the directory untouched. Anything else, including a
+/// bare Enter, is a yes.
+#[test]
+fn init_respects_the_answer() {
+    let dir = temp_dir();
+    let (ok, stdout, _) = alm_init(&dir, "n\n");
+    assert!(ok, "declining is not an error");
+    assert!(stdout.contains("Okay, I did not make any changes!"), "stdout: {stdout}");
+    assert!(!dir.join("elm.json").exists(), "nothing should have been written");
+
+    let dir = temp_dir();
+    let (ok, _, _) = alm_init(&dir, "\n");
+    assert!(ok);
+    assert!(dir.join("elm.json").is_file(), "a bare Enter means yes");
+}
+
+/// A second `init` refuses, on stderr, without touching the existing file.
+#[test]
+fn init_refuses_to_overwrite() {
+    let dir = temp_dir();
+    assert!(alm_init(&dir, "Y\n").0);
+    let before = std::fs::read_to_string(dir.join("elm.json")).unwrap();
+
+    let (ok, _, stderr) = alm_init(&dir, "Y\n");
+    assert!(!ok, "should exit nonzero");
+    assert!(stderr.starts_with("-- EXISTING PROJECT ---"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("elm.json")).unwrap(),
+        before,
+        "the existing elm.json must be left alone"
+    );
 }
