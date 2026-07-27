@@ -70,7 +70,7 @@ fn print_help() {
          \x20   alm publish\n\
          \x20   alm repl [--interpreter=node] [--no-colors]\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
-         \x20                       [--live [--port=8000] [--no-hot-reload]]\n\
+         \x20                       [--live [--port=8413] [--no-hot-reload]]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
          `init` starts a project: it writes an elm.json and creates src/.\n\
@@ -132,7 +132,9 @@ fn make(args: &[String]) -> ExitCode {
     // `--live`: serve the program instead of writing it, rebuilding as its
     // sources change. `--no-hot-reload` keeps the server but stops it pushing.
     let mut live = false;
-    let mut live_port: u16 = 8000;
+    // 8413 — "8" then alm in leetspeak. `alm reactor` keeps elm's 8000, since
+    // that is the port anyone coming from `elm reactor` will try.
+    let mut live_port: u16 = 8413;
     let mut updating = true;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {

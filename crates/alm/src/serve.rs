@@ -20,9 +20,9 @@ struct Build {
     /// The compiled program, kept from the last build that worked so a broken
     /// edit does not take the page down with it.
     javascript: Option<String>,
-    /// The type of the program's `Model`, which decides whether a running
-    /// model can be carried across a swap.
-    model_type: Option<String>,
+    /// A fingerprint of the program's `Model` type, which decides whether a
+    /// running model can be carried across a swap.
+    model_fingerprint: Option<String>,
     /// Reports from the most recent build, if it failed.
     errors: Option<String>,
 }
@@ -108,8 +108,8 @@ impl State {
             };
         }
         // The compiled program on its own, for a hot swap to fetch. The model
-        // type rides along in a header so the page can tell whether the model
-        // it is holding still fits.
+        // fingerprint rides along in a header so the page can tell whether the
+        // model it is holding still fits.
         if request.path == BUNDLE {
             let build = self.build.lock().unwrap_or_else(|e| e.into_inner());
             let Some(javascript) = &build.javascript else {
@@ -122,8 +122,10 @@ impl State {
                 headers: Vec::new(),
                 body: http::Body::Bytes(javascript.clone().into_bytes()),
             };
-            if let Some(model) = &build.model_type {
-                response.headers.push((MODEL_TYPE_HEADER.to_string(), model.clone()));
+            if let Some(fingerprint) = &build.model_fingerprint {
+                response
+                    .headers
+                    .push((MODEL_HEADER.to_string(), fingerprint.clone()));
             }
             return response;
         }
@@ -152,7 +154,7 @@ impl State {
             self.mode,
             &self.module,
             BUNDLE,
-            build.model_type.as_deref(),
+            build.model_fingerprint.as_deref(),
             build.errors.as_deref(),
         );
         Response::html(live::inject(&html, &shim))
@@ -162,17 +164,19 @@ impl State {
 /// Where the bare program is served for a swap to fetch.
 const BUNDLE: &str = "/_alm/bundle.js";
 
-/// Carries the `Model` type of the build the bundle came from.
-pub const MODEL_TYPE_HEADER: &str = "X-Alm-Model-Type";
+/// Carries a fingerprint of the `Model` type the bundle was built with. A
+/// fingerprint rather than the type as written: a real `Model` renders to
+/// kilobytes, and Elm allows field names that no header value may carry.
+pub const MODEL_HEADER: &str = "X-Alm-Model-Fingerprint";
 
 fn compile(entry: &Path, root: &Path, color: bool) -> Build {
     match alm_compiler::project::compile_project_live(entry) {
-        Ok((javascript, model_type, _warnings)) => {
-            Build { javascript: Some(javascript), model_type, errors: None }
+        Ok((javascript, model_fingerprint, _warnings)) => {
+            Build { javascript: Some(javascript), model_fingerprint, errors: None }
         }
         Err(errors) => Build {
             javascript: None,
-            model_type: None,
+            model_fingerprint: None,
             errors: Some(errors.iter().map(|e| e.render_from(Some(root), color)).collect()),
         },
     }

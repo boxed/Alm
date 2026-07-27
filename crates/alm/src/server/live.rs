@@ -157,7 +157,7 @@ pub fn client_js_for(
     mode: Mode,
     module: &str,
     bundle: &str,
-    model_type: Option<&str>,
+    model_fingerprint: Option<&str>,
     errors: Option<&str>,
 ) -> String {
     let hot = mode == Mode::HotSwap && !bundle.is_empty();
@@ -166,7 +166,7 @@ pub fn client_js_for(
   var HOT = {hot};
   var MODULE = {module:?};
   var BUNDLE = {bundle:?};
-  var MODEL_TYPE = {model_type};
+  var MODEL = {model_fingerprint};
   var source = new EventSource({endpoint:?});
   var reloading = false;
 
@@ -198,7 +198,7 @@ pub fn client_js_for(
     }}
     return fetch(BUNDLE, {{ cache: 'no-store' }}).then(function (res) {{
       if (!res.ok) throw new Error('the new build is not available');
-      var freshType = res.headers.get({header:?});
+      var fresh = res.headers.get({header:?});
       return res.text().then(function (js) {{
         // Evaluate the new bundle against its own scope, so its runtime is
         // separate from the one still running.
@@ -210,7 +210,7 @@ pub fn client_js_for(
         // Only carry the model across if the new build still agrees about
         // what a Model is. Restoring one into a program that reads it
         // differently is how a hot reload corrupts your session.
-        var keep = MODEL_TYPE !== null && freshType !== null && freshType === MODEL_TYPE;
+        var keep = MODEL !== null && fresh !== null && fresh === MODEL;
         var model = keep ? app.__alm_model() : undefined;
 
         // Mounting replaced the original node with the program's own root, so
@@ -234,7 +234,7 @@ pub fn client_js_for(
           opts.node = slot;
         }}
         window.__alm_app__ = mod.init(opts);
-        MODEL_TYPE = freshType;
+        MODEL = fresh;
         if (!keep) console.info('[alm] Model changed, started fresh');
       }});
     }});
@@ -259,12 +259,12 @@ pub fn client_js_for(
         hot = if hot { "true" } else { "false" },
         module = module,
         bundle = bundle,
-        model_type = match model_type {
-            Some(t) => format!("{t:?}"),
+        model_fingerprint = match model_fingerprint {
+            Some(f) => format!("{f:?}"),
             None => "null".to_string(),
         },
         endpoint = ENDPOINT,
-        header = crate::serve::MODEL_TYPE_HEADER,
+        header = crate::serve::MODEL_HEADER,
         // A page served while the build is broken shows the reports at once,
         // rather than looking fine until the next save.
         initial = match errors {
@@ -347,21 +347,21 @@ mod tests {
     #[test]
     fn the_shim_only_swaps_when_it_can() {
         let swapping =
-            client_js_for(Mode::HotSwap, "Main", "/_alm/bundle.js", Some("Int"), None);
+            client_js_for(Mode::HotSwap, "Main", "/_alm/bundle.js", Some("abc123"), None);
         assert!(swapping.contains("var HOT = true"), "{swapping}");
-        assert!(swapping.contains(r#"var MODEL_TYPE = "Int""#), "{swapping}");
+        assert!(swapping.contains(r#"var MODEL = "abc123""#), "{swapping}");
 
         let reloading =
-            client_js_for(Mode::Reload, "Main", "/_alm/bundle.js", Some("Int"), None);
+            client_js_for(Mode::Reload, "Main", "/_alm/bundle.js", Some("abc123"), None);
         assert!(reloading.contains("var HOT = false"));
 
         // No bundle to fetch, so no swap however the mode is set.
         assert!(client_js(Mode::HotSwap).contains("var HOT = false"));
         assert!(client_js(Mode::Reload).contains("var HOT = false"));
 
-        // An unknown model type must not be mistaken for a matching one.
+        // An unknown fingerprint must not be mistaken for a matching one.
         let unknown = client_js_for(Mode::HotSwap, "Main", "/b.js", None, None);
-        assert!(unknown.contains("var MODEL_TYPE = null"), "{unknown}");
+        assert!(unknown.contains("var MODEL = null"), "{unknown}");
     }
 
     /// A page served while the build is broken shows the reports at once.

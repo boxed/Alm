@@ -228,12 +228,12 @@ pub fn compile_project_with(
     ))
 }
 
-/// Compile for the live-reload server: the JavaScript, plus the type of the
-/// program's `Model` when there is one.
+/// Compile for the live-reload server: the JavaScript, plus a fingerprint of
+/// the program's `Model` type when there is one.
 ///
-/// The model type is what makes a hot swap safe to attempt. Carrying a running
-/// model into a new build is only sound if the new build still means the same
-/// thing by `Model`; comparing the rendered type before and after is a cheap,
+/// The fingerprint is what makes a hot swap safe to attempt. Carrying a
+/// running model into a new build is only sound if the new build still means
+/// the same thing by `Model`; comparing before and after is a cheap,
 /// conservative way to know. When it cannot be determined the caller gets
 /// `None` and should reload rather than guess.
 pub fn compile_project_live(
@@ -247,7 +247,14 @@ pub fn compile_project_live(
     Ok((javascript, model_type, warnings))
 }
 
-/// The `model` in the entry module's `main : Program flags model msg`.
+/// A fingerprint of the `model` in the entry module's
+/// `main : Program flags model msg`.
+///
+/// The type is hashed rather than sent as written for two reasons: a real
+/// application's `Model` renders to kilobytes, and it may contain characters
+/// no HTTP header should carry (Elm allows non-ASCII field names, and header
+/// values are Latin-1). A consumer only ever asks whether two builds agree, so
+/// a fixed-width hex digest answers the question exactly as well.
 fn model_type_of(checked: &CheckedProject) -> Option<String> {
     let main = checked.types.get(&checked.entry)?.get(&Name::from("main"))?;
     let can::Type::Type(_, name, args) = main else {
@@ -258,7 +265,21 @@ fn model_type_of(checked: &CheckedProject) -> Option<String> {
     if name.as_str() != "Program" || args.len() != 3 {
         return None;
     }
-    Some(crate::docs::render_type(&args[1]))
+    Some(fingerprint(&crate::docs::render_type(&args[1])))
+}
+
+/// FNV-1a, 128-bit. Not a cryptographic hash and does not need to be: it
+/// distinguishes two builds of one program minutes apart, where the width is
+/// what rules out an accidental collision.
+fn fingerprint(text: &str) -> String {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut hash = OFFSET;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u128;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{hash:032x}")
 }
 
 /// Generate a package's `docs.json` (elm's `--docs`). Returns the JSON, or the
@@ -1556,5 +1577,41 @@ fn letters(index: u32) -> String {
     match index / 26 {
         0 => letter.to_string(),
         n => format!("{letter}{n}"),
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::fingerprint;
+
+    /// The fingerprint stands in for the type, so it has to separate types
+    /// that differ and agree for ones that do not.
+    #[test]
+    fn a_fingerprint_tracks_the_type_it_came_from() {
+        assert_eq!(fingerprint("Basics.Int"), fingerprint("Basics.Int"));
+        assert_ne!(fingerprint("Basics.Int"), fingerprint("String.String"));
+        // A field added, removed, renamed or retyped must all show up.
+        let base = "{ a : Basics.Int }";
+        for other in [
+            "{ a : Basics.Int, b : Basics.Int }",
+            "{ }",
+            "{ b : Basics.Int }",
+            "{ a : String.String }",
+        ] {
+            assert_ne!(fingerprint(base), fingerprint(other), "{other} looked unchanged");
+        }
+    }
+
+    /// It also has to be safe to put in an HTTP header, which the rendered
+    /// type is not: a real `Model` runs to kilobytes, and Elm allows field
+    /// names outside ASCII.
+    #[test]
+    fn a_fingerprint_is_always_short_ascii_hex() {
+        let huge: String = (0..500).map(|i| format!("{{ f{i} : Basics.Int }}")).collect();
+        for text in ["Basics.Int", "{ nästa : String.String }", "{ 名前 : Int }", &huge] {
+            let digest = fingerprint(text);
+            assert_eq!(digest.len(), 32, "{text}");
+            assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "{digest}");
+        }
     }
 }
