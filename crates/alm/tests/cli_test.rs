@@ -484,3 +484,136 @@ fn diff_refuses_an_application() {
     assert!(!ok);
     assert!(stderr.starts_with("-- CANNOT DIFF APPLICATIONS ---"), "stderr: {stderr}");
 }
+
+fn alm_bump(dir: &Path, home: &Path, answer: &str) -> (bool, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .arg("bump")
+        .current_dir(dir)
+        .env("ELM_HOME", home)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run alm bump");
+    child.stdin.take().unwrap().write_all(answer.as_bytes()).unwrap();
+    let output = child.wait_with_output().expect("wait");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A working copy of `acme/thing` whose API is `one` plus whatever `extra`
+/// adds, at version `version`.
+fn work_dir(dir: &Path, version: &str, extra: &str) -> PathBuf {
+    let project = dir.join("work");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("elm.json"),
+        format!(
+            r#"{{ "type": "package", "name": "acme/thing", "version": "{version}",
+                  "exposed-modules": ["Thing"], "dependencies": {{}} }}"#
+        ),
+    )
+    .unwrap();
+    let exposing = if extra.is_empty() { "one" } else { "one, two" };
+    let docs = if extra.is_empty() { "@docs one" } else { "@docs one, two" };
+    std::fs::write(
+        project.join("src/Thing.elm"),
+        format!(
+            "module Thing exposing ({exposing})\n\n\
+             {{-| Doc.\n\n{docs}\n-}}\n\n\
+             {{-| one -}}\none : Int\none = 1\n{extra}"
+        ),
+    )
+    .unwrap();
+    project
+}
+
+#[test]
+fn bump_raises_the_version_the_api_change_calls_for() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    cache_package(&home, "acme/thing", "1.0.0", V1);
+    let project = work_dir(&dir, "1.0.0", "\n{-| two -}\ntwo : String\ntwo = \"two\"\n");
+
+    // Declining leaves elm.json alone.
+    let (ok, stdout, stderr) = alm_bump(&project, &home, "n\n");
+    assert!(ok, "stderr: {stderr}");
+    assert!(
+        stdout.starts_with(
+            "Based on your new API, this should be a MINOR change (1.0.0 => 1.1.0)\n"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.ends_with("Okay, I did not change anything!\n"), "stdout: {stdout}");
+    let outline = std::fs::read_to_string(project.join("elm.json")).unwrap();
+    assert!(outline.contains("\"version\": \"1.0.0\""));
+
+    let (ok, stdout, _) = alm_bump(&project, &home, "Y\n");
+    assert!(ok);
+    assert!(stdout.ends_with("Version changed to 1.1.0!\n"), "stdout: {stdout}");
+    let outline = std::fs::read_to_string(project.join("elm.json")).unwrap();
+    assert!(outline.contains("\"version\": \"1.1.0\""), "outline: {outline}");
+    // Nothing else about the file moved.
+    assert!(outline.contains("\"exposed-modules\": [\"Thing\"]"), "outline: {outline}");
+}
+
+#[test]
+fn bump_refuses_a_version_nothing_could_depend_on() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    cache_package(&home, "acme/thing", "1.0.0", V1);
+    let project = work_dir(&dir, "3.4.5", "");
+
+    let (ok, _, stderr) = alm_bump(&project, &home, "Y\n");
+    assert!(!ok);
+    assert!(stderr.starts_with("-- CANNOT BUMP ---"), "stderr: {stderr}");
+    assert!(stderr.contains("relative to version 3.4.5"), "stderr: {stderr}");
+    assert!(stderr.trim_end().ends_with("1.0.0"), "stderr: {stderr}");
+}
+
+#[test]
+fn bump_explains_versioning_for_an_unpublished_package() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    std::fs::create_dir_all(home.join("0.19.1/packages")).unwrap();
+    let project = work_dir(&dir, "1.0.0", "");
+
+    let (ok, stdout, stderr) = alm_bump(&project, &home, "");
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.starts_with("This package has never been published before."));
+    assert!(stdout.ends_with(
+        "The version number in elm.json is correct so you are all set!\n"
+    ));
+
+    // A version other than 1.0.0 is offered a correction.
+    let project = work_dir(&dir, "2.0.0", "");
+    let (ok, stdout, _) = alm_bump(&project, &home, "Y\n");
+    assert!(ok);
+    assert!(stdout.contains("change it back to 1.0.0? [Y/n] "), "stdout: {stdout}");
+    let outline = std::fs::read_to_string(project.join("elm.json")).unwrap();
+    assert!(outline.contains("\"version\": \"1.0.0\""), "outline: {outline}");
+}
+
+#[test]
+fn bump_needs_a_package() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    let (ok, _, stderr) = alm_bump(&dir, &home, "");
+    assert!(!ok);
+    assert!(stderr.starts_with("-- BUMP WHAT? ---"), "stderr: {stderr}");
+
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    let (ok, _, stderr) = alm_bump(&dir, &home, "");
+    assert!(!ok);
+    assert!(stderr.starts_with("-- CANNOT BUMP APPLICATIONS ---"), "stderr: {stderr}");
+}

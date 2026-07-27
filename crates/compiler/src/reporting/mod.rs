@@ -243,14 +243,20 @@ impl Report {
         match &self.elm {
             Some(body) => {
                 out.doc(&body.before);
-                out.plain("\n\n");
                 match body.region {
                     Some(region) => {
+                        out.plain("\n\n");
                         out.extend(render_snippet(source, region, body.highlight));
                         out.doc(&body.after);
                     }
                     // No source to quote: the sections carry the whole report.
-                    None => out.doc(&body.after),
+                    // A one-paragraph report stops there rather than
+                    // separating off an empty second paragraph.
+                    None if body.after.render(usize::MAX).is_empty() => {}
+                    None => {
+                        out.plain("\n\n");
+                        out.doc(&body.after);
+                    }
                 }
                 for note in &body.notes {
                     out.plain("\n\n");

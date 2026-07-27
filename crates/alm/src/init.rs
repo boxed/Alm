@@ -131,6 +131,18 @@ fn no_solution(package: &str, color: bool) -> String {
 /// header bar that runs to the margin, then two paragraphs. With no source
 /// snippet, `after` is simply the second paragraph.
 pub fn report(title: &str, before: Doc, after: Doc, color: bool) -> String {
+    report_about("", title, before, after, color)
+}
+
+/// The same, for a report elm attributes to a file — the header bar then ends
+/// with that name instead of running to the margin.
+pub fn report_about(
+    path: &str,
+    title: &str,
+    before: Doc,
+    after: Doc,
+    color: bool,
+) -> String {
     let report = alm_compiler::reporting::Report {
         title: title.to_string(),
         region: alm_compiler::reporting::Region::ZERO,
@@ -144,9 +156,9 @@ pub fn report(title: &str, before: Doc, after: Doc, color: bool) -> String {
         }),
     };
     if color {
-        report.render_ansi("", "")
+        report.render_ansi(path, "")
     } else {
-        report.render("", "")
+        report.render(path, "")
     }
 }
 
