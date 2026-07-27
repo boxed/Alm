@@ -1,0 +1,10 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The (++) operator can append List and String values, but not [33mnumber[0m values like
+this:
+
+6|     1 ++ "two"
+       [91m^[0m
+Try using [92mString.fromInt[0m to turn it into a string? Or put it in [] to make it a
+list? Or switch to the (::) operator?
+

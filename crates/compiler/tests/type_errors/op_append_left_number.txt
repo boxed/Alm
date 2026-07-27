@@ -1,0 +1,10 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The (++) operator can append List and String values, but not number values like
+this:
+
+6|     1 ++ "two"
+       ^
+Try using String.fromInt to turn it into a string? Or put it in [] to make it a
+list? Or switch to the (::) operator?
+

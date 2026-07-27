@@ -1,0 +1,13 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I need both sides of (+) to be the exact same type. Both Int or both Float.
+
+16|     x + n
+        ^^^^^
+But I see a Float on the left and an Int on the right.
+
+Use round on the left (or toFloat on the right) to make both sides match!
+
+Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats.
+

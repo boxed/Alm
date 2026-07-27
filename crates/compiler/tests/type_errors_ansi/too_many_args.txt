@@ -1,0 +1,8 @@
+[36m-- TOO MANY ARGS -------------------------------------------------- src/Main.elm[0m
+
+The `greet` function expects 1 argument, but it got 2 instead.
+
+11|     greet "a" "b"
+        [91m^^^^^[0m
+Are there any missing commas? Or missing parentheses?
+

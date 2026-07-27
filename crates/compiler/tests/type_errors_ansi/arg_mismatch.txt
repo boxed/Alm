@@ -1,0 +1,16 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The 1st argument to `greet` is not what I expect:
+
+11|     greet 5
+              [91m^[0m
+This argument is a number of type:
+
+    [33mnumber[0m
+
+But `greet` needs the 1st argument to be:
+
+    [33mString[0m
+
+[4mHint[0m: Try using [92mString.fromInt[0m to convert it to a string?
+

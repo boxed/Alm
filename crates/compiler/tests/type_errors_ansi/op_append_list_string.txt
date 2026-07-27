@@ -1,0 +1,9 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The (++) operator needs the same type of value on both sides:
+
+6|     [ 1, 2 ] ++ "three"
+       [91m^^^^^^^^^^^^^^^^^^^[0m
+I see a [33mList[0m on the left and a [33mString[0m on the right. Which should it be? Does the
+string need [] around it to become a list?
+

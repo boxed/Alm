@@ -1,0 +1,16 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+6|     ( 1, 2 )
+       [91m^^^^^^^^[0m
+The body is a tuple of type:
+
+    ( Int, [33mnumber[0m )
+
+But the type annotation on `bad` says it should be:
+
+    ( Int, [33mString[0m )
+
+[4mHint[0m: Try using [92mString.fromInt[0m to convert it to a string?
+

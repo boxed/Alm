@@ -1,0 +1,17 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The (//) operator is specifically for integer division:
+
+11|     x // 2
+        [91m^[0m
+The left side of (//) must be an [33mInt[0m, but I am seeing a [33mFloat[0m. I recommend doing
+the conversion explicitly with one of these functions:
+
+[92mround[0m 3.5     == 4
+[92mfloor[0m 3.5     == 3
+[92mceiling[0m 3.5   == 4
+[92mtruncate[0m 3.5  == 3
+
+[4mNote[0m: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats.
+

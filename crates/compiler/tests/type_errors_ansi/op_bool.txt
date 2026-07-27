@@ -1,0 +1,12 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I am struggling with this boolean operation:
+
+6|     True && 5
+               [91m^[0m
+Both sides of (&&) must be [33mBool[0m values, but the right side is:
+
+    [33mnumber[0m
+
+[4mHint[0m: Only [92mInt[0m and [92mFloat[0m values work as numbers.
+

@@ -1,0 +1,16 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+11|     greet "x"
+        [91m^^^^^^^^^[0m
+This `greet` call produces:
+
+    [33mString[0m
+
+But the type annotation on `bad` says it should be:
+
+    [33mInt[0m
+
+[4mHint[0m: Want to convert a String into an Int? Use the [92mString.toInt[0m function!
+

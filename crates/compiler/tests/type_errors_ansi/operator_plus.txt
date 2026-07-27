@@ -1,0 +1,10 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I cannot do addition with [33mString[0m values like this one:
+
+6|     1 + "two"
+           [91m^^^^^[0m
+The (+) operator only works with [33mInt[0m and [33mFloat[0m values.
+
+[4mHint[0m: Switch to the [92m(++)[0m operator to append strings!
+

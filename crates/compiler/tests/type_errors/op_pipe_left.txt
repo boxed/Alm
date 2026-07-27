@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The left side of (<|) needs to be a function so I can pipe arguments to it!
+
+6|     5 <| 3
+       ^
+I am seeing a number of type:
+
+    number
+
+This needs to be some kind of function though!
+
+Hint: Only Int and Float values work as numbers.
+

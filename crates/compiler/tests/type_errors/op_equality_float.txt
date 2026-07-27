@@ -1,0 +1,19 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I need both sides of (==) to be the same type:
+
+6|     1.5 == "x"
+       ^^^^^^^^^^
+The left side of (==) is:
+
+    Float
+
+But the right side is:
+
+    String
+
+Note: Equality on floats is not 100% reliable due to the design of IEEE 754. I
+recommend a check like (abs (x - y) < 0.0001) instead.
+
+Hint: Want to convert a Float into a String? Use the String.fromFloat function!
+

@@ -1,0 +1,14 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+10|     "Clicked"
+        [91m^^^^^^^^^[0m
+The body is a string of type:
+
+    [33mString[0m
+
+But the type annotation on `bad` says it should be:
+
+    [33mMsg[0m
+

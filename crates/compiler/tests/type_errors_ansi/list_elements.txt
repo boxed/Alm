@@ -1,0 +1,20 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The 3rd element of this list does not match all the previous elements:
+
+6|     [ 1, 2, "three" ]
+               [91m^^^^^^^[0m
+The 3rd element is a string of type:
+
+    [33mString[0m
+
+But all the previous elements in the list are:
+
+    [33mnumber[0m
+
+[4mHint[0m: Everything in a list must be the same type of value. This way, we never
+run into unexpected values partway through a List.map, List.foldl, etc. Read
+<https://elm-lang.org/0.19.1/custom-types> to learn how to “mix” types.
+
+[4mHint[0m: Try using [92mString.toInt[0m to convert it to an integer?
+

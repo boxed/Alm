@@ -1,0 +1,16 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+6|     \n -> n
+       [91m^^^^^^^[0m
+The body is an anonymous function of type:
+
+    Int -> [33mInt[0m
+
+But the type annotation on `bad` says it should be:
+
+    Int -> [33mString[0m
+
+[4mHint[0m: Want to convert an Int into a String? Use the [92mString.fromInt[0m function!
+

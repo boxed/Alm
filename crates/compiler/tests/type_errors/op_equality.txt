@@ -1,0 +1,18 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I need both sides of (==) to be the same type:
+
+6|     "a" == 5
+       ^^^^^^^^
+The left side of (==) is:
+
+    String
+
+But the right side is:
+
+    number
+
+Different types can never be equal though! Which side is messed up?
+
+Hint: Try using String.toInt to convert it to an integer?
+

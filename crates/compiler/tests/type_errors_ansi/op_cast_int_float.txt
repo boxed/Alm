@@ -1,0 +1,13 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I need both sides of (+) to be the exact same type. Both Int or both Float.
+
+16|     x + n
+        [91m^^^^^[0m
+But I see a [33mFloat[0m on the left and an [33mInt[0m on the right.
+
+Use [92mround[0m on the left (or [92mtoFloat[0m on the right) to make both sides match!
+
+[4mNote[0m: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats.
+

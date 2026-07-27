@@ -138,17 +138,11 @@ fn make(args: &[String]) -> ExitCode {
             // and modules are ordered by when they were last edited — elm shows
             // the file you touched most recently last, nearest the prompt.
             let root = alm_compiler::project::project_root(&input);
-            errors.sort_by_key(|e| {
-                std::fs::metadata(&e.path).and_then(|m| m.modified()).ok()
-            });
-            for (i, error) in errors.iter().enumerate() {
-                if i > 0 {
-                    eprint!("{}", module_separator(&errors[i - 1].module_name(), &error.module_name()));
-                }
-                eprint!("{}", error.render_from(Some(&root)));
-            }
-            // elm counts *modules*, and prints the tally on stdout so a piped
-            // stderr holds nothing but the reports themselves.
+            errors.sort_by_key(|e| std::fs::metadata(&e.path).and_then(|m| m.modified()).ok());
+
+            // elm counts *modules*, and its build tracker prints the tally on
+            // stdout and flushes it before any report reaches stderr — so when
+            // both are the same terminal the summary comes first.
             let modules: std::collections::BTreeSet<_> =
                 errors.iter().map(|e| e.path.clone()).collect();
             match modules.len() {
@@ -156,19 +150,51 @@ fn make(args: &[String]) -> ExitCode {
                 1 => println!("Detected problems in 1 module."),
                 n => println!("Detected problems in {} modules.", n),
             }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+
+            let color = use_color();
+            for (i, error) in errors.iter().enumerate() {
+                if i > 0 {
+                    let separator = module_separator(
+                        &errors[i - 1].module_name(),
+                        &error.module_name(),
+                        color,
+                    );
+                    eprint!("{separator}");
+                }
+                eprint!("{}", error.render_from(Some(&root), color));
+            }
             ExitCode::FAILURE
         }
     }
 }
 
-/// The band elm draws between two modules' error reports.
-fn module_separator(before: &str, after: &str) -> String {
-    let before = format!("{before}  \u{2191}    ");
-    let indent = 80usize.saturating_sub(before.chars().count());
-    format!(
-        "{}{}\n====o======================================================================o====\n    \u{2193}  {}\n\n\n",
+/// Whether to write ANSI escapes on stderr. elm's rule is simply "is the handle
+/// a terminal"; `NO_COLOR` and `CLICOLOR_FORCE` are the conventional overrides
+/// (<https://no-color.org>), which elm does not implement but which cost
+/// nothing and are what someone setting them expects.
+fn use_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0") {
+        return true;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+/// The band elm draws between two modules' error reports, in dull red.
+fn module_separator(before: &str, after: &str, color: bool) -> String {
+    use alm_compiler::reporting::{Color, Doc};
+    let head = format!("{before}  \u{2191}    ");
+    let indent = 80usize.saturating_sub(head.chars().count());
+    let band = format!(
+        "{}{}\n====o======================================================================o====\n    \u{2193}  {}",
         " ".repeat(indent),
-        before,
+        head,
         after
-    )
+    );
+    let doc = Doc::color(Color::Red, Doc::text(band));
+    let rendered = if color { doc.render_ansi(usize::MAX) } else { doc.render(usize::MAX) };
+    format!("{rendered}\n\n\n")
 }

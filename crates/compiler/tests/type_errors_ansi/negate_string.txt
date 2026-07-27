@@ -1,0 +1,14 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I do not know how to negate this type of value:
+
+6|     -"x"
+        [91m^^^[0m
+It is a string of type:
+
+    [33mString[0m
+
+But I only now how to negate [33mInt[0m and [33mFloat[0m values.
+
+[4mHint[0m: Try using [92mString.toInt[0m to convert it to an integer?
+

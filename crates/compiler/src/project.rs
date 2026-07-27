@@ -58,7 +58,7 @@ impl BuildError {
     /// Render every report in this module. `root` is the project directory, so
     /// the header names the file the way elm does — `src/Main.elm`, not an
     /// absolute path.
-    pub fn render_from(&self, root: Option<&Path>) -> String {
+    pub fn render_from(&self, root: Option<&Path>, color: bool) -> String {
         let displayed = root
             .and_then(|root| self.path.strip_prefix(root).ok())
             .unwrap_or(&self.path)
@@ -66,12 +66,18 @@ impl BuildError {
             .to_string();
         self.reports
             .iter()
-            .map(|r| r.render(&displayed, &self.source))
+            .map(|r| {
+                if color {
+                    r.render_ansi(&displayed, &self.source)
+                } else {
+                    r.render(&displayed, &self.source)
+                }
+            })
             .collect::<String>()
     }
 
     pub fn render(&self) -> String {
-        self.render_from(None)
+        self.render_from(None, false)
     }
 
     /// The module's name, as the band between two modules' reports shows it.

@@ -1,0 +1,14 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The left side of (<|) needs to be a function so I can pipe arguments to it!
+
+6|     5 <| 3
+       [91m^[0m
+I am seeing a number of type:
+
+    [33mnumber[0m
+
+This needs to be some kind of function though!
+
+[4mHint[0m: Only [92mInt[0m and [92mFloat[0m values work as numbers.
+

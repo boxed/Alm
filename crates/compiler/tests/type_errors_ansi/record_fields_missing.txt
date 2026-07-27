@@ -1,0 +1,16 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The 1st argument to `needs` is not what I expect:
+
+11|     needs { x = 1 }
+              [91m^^^^^^^^^[0m
+This argument is a record of type:
+
+    { x : number }
+
+But `needs` needs the 1st argument to be:
+
+    { x : Int, [33my[0m : Int, [33mz[0m : Int }
+
+[4mHint[0m: Looks like fields [92my[0m and [92mz[0m are missing.
+

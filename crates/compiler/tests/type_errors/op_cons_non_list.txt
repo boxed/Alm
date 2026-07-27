@@ -1,0 +1,12 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The (::) operator can only add elements onto lists.
+
+6|     1 :: 2
+            ^
+The right side is a number of type:
+
+    number
+
+But (::) needs a List on the right.
+

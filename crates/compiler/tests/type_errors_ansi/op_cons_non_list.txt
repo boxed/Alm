@@ -1,0 +1,12 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The (::) operator can only add elements onto lists.
+
+6|     1 :: 2
+            [91m^[0m
+The right side is a number of type:
+
+    number
+
+But (::) needs a [33mList[0m on the right.
+

@@ -1,0 +1,35 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+10|     f
+        [91m^[0m
+This `f` value is a:
+
+    [33m? -> a[0m
+
+But the type annotation on `bad` says it should be:
+
+    [33ma[0m
+
+[4mHint[0m: Your type annotation uses type variable `a` which means ANY type of value
+can flow through, but your code is saying it specifically wants a function.
+Maybe change your type annotation to be more specific? Maybe change the code to
+be more general?
+
+Read <https://elm-lang.org/0.19.1/type-annotations> for more advice!
+
+[36m-- INFINITE TYPE -------------------------------------------------- src/Main.elm[0m
+
+I am inferring a weird self-referential type for x:
+
+7|         f x =
+             [91m^[0m
+Here is my best effort at writing down the type. You will see ∞ for parts of the
+type that repeat something already printed out infinitely.
+
+    [33m∞ -> a[0m
+
+Staring at this type is usually not so helpful, so I recommend reading the hints
+at <https://elm-lang.org/0.19.1/infinite-type> to get unstuck!
+

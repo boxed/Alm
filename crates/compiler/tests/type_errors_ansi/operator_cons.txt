@@ -1,0 +1,34 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+6|     "a" :: [ 1, 2 ]
+       [91m^^^^^^^^^^^^^^^[0m
+The body is:
+
+    List [33mString[0m
+
+But the type annotation on `bad` says it should be:
+
+    List [33mInt[0m
+
+[4mHint[0m: Want to convert a String into an Int? Use the [92mString.toInt[0m function!
+
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I am having trouble with this (::) operator:
+
+6|     "a" :: [ 1, 2 ]
+       [91m^^^^^^^^^^^^^^^[0m
+The left side of (::) is:
+
+    [33mString[0m
+
+But you are trying to put that into a list filled with:
+
+    [33mnumber[0m
+
+Lists need ALL elements to be the same type though.
+
+[4mHint[0m: Try using [92mString.toInt[0m to convert it to an integer?
+

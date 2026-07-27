@@ -4,6 +4,7 @@ pub mod syntax;
 pub mod type_error;
 
 pub use annotation::{Located, Position, Region};
+pub use doc::{Chunk, Color, Doc, Style};
 
 /// A rendered compiler error, in the spirit of Elm's friendly error messages.
 ///
@@ -22,10 +23,10 @@ pub struct Report {
 /// snippet plus trailing notes that `Reporting.Error.Syntax` builds.
 #[derive(Debug, Clone)]
 pub struct ElmBody {
-    /// Reflowed paragraph shown before the source snippet.
-    pub before: String,
-    /// Reflowed paragraph shown immediately after the snippet (no blank line).
-    pub after: String,
+    /// Paragraph shown before the source snippet.
+    pub before: Doc,
+    /// Paragraph shown immediately after the snippet (no blank line).
+    pub after: Doc,
     /// Extra sections after the snippet block, each separated by a blank line.
     pub notes: Vec<Section>,
     /// The span whose source lines are shown (`Render.Code` `region`).
@@ -38,59 +39,131 @@ pub struct ElmBody {
 /// One element of a diagnostic body below the snippet.
 #[derive(Debug, Clone)]
 pub enum Section {
-    /// A word-wrapped paragraph (reflowed to 80 columns).
-    Para(String),
+    /// A word-wrapped paragraph (filled to 80 columns), possibly with styled
+    /// words inside it.
+    Para(Doc),
     /// A verbatim block (indented code examples), emitted as-is.
     Block(String),
+}
+
+impl Section {
+    /// A plain word-wrapped paragraph.
+    pub fn para(text: impl AsRef<str>) -> Section {
+        Section::Para(Doc::reflow(text.as_ref()))
+    }
 }
 
 const WIDTH: usize = 80;
 
 impl Report {
+    /// The report as plain text, the way a redirected `alm make` prints it.
     pub fn render(&self, path: &str, source: &str) -> String {
-        match &self.elm {
-            Some(body) => render_elm(&self.title, body, path, source),
-            None => self.render_legacy(path, source),
-        }
+        self.chunks(path, source).into_iter().map(|c| c.text).collect()
     }
 
-    fn render_legacy(&self, path: &str, source: &str) -> String {
+    /// The report with ANSI escapes, for a terminal.
+    pub fn render_ansi(&self, path: &str, source: &str) -> String {
         let mut out = String::new();
-        out.push_str(&header(&self.title, path));
-        out.push_str("\n\n");
-        out.push_str(&render_code_snippet(source, self.region));
-        out.push('\n');
-        out.push_str(&self.message);
-        out.push('\n');
+        for chunk in self.chunks(path, source) {
+            out.push_str(&chunk.render_ansi());
+        }
         out
+    }
+
+    /// The report as styled runs — the form `--report=json` encodes and the
+    /// other two renderings are folded down from.
+    pub fn chunks(&self, path: &str, source: &str) -> Vec<Chunk> {
+        let mut out = Chunks::new();
+        out.doc(&header(&self.title, path));
+        out.plain("\n\n");
+        out.extend(self.body_chunks(source));
+        out.plain("\n\n");
+        out.finish()
+    }
+
+    /// The body only — no `-- TITLE ---` bar and no trailing blank line.
+    /// `--report=json` carries the title as its own field, so the message must
+    /// not repeat it.
+    pub fn body_chunks(&self, source: &str) -> Vec<Chunk> {
+        let mut out = Chunks::new();
+        match &self.elm {
+            Some(body) => {
+                out.doc(&body.before);
+                out.plain("\n\n");
+                out.extend(render_snippet(source, body.region, body.highlight));
+                out.doc(&body.after);
+                for note in &body.notes {
+                    out.plain("\n\n");
+                    match note {
+                        Section::Para(p) => out.doc(p),
+                        Section::Block(b) => out.plain(b),
+                    }
+                }
+            }
+            None => {
+                out.plain(&render_code_snippet(source, self.region));
+                out.plain("\n");
+                out.plain(&self.message);
+            }
+        }
+        out.finish()
     }
 }
 
-/// `-- TITLE --------- path`, padded to 80 columns (`Reporting.Report.toDoc`).
-fn header(title: &str, path: &str) -> String {
+impl Chunk {
+    /// This run wrapped in its ANSI escapes (nothing if it is unstyled).
+    pub fn render_ansi(&self) -> String {
+        if self.style == Style::default() {
+            return self.text.clone();
+        }
+        Doc::styled(self.style, Doc::text(self.text.clone())).render_ansi(usize::MAX)
+    }
+}
+
+/// Accumulates styled runs, merging neighbours that share a style.
+struct Chunks(Vec<Chunk>);
+
+impl Chunks {
+    fn new() -> Chunks {
+        Chunks(Vec::new())
+    }
+
+    fn push(&mut self, style: Style, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match self.0.last_mut() {
+            Some(last) if last.style == style => last.text.push_str(text),
+            _ => self.0.push(Chunk { style, text: text.to_string() }),
+        }
+    }
+
+    fn plain(&mut self, text: &str) {
+        self.push(Style::default(), text);
+    }
+
+    fn doc(&mut self, doc: &Doc) {
+        self.extend(doc.chunks(WIDTH));
+    }
+
+    fn extend(&mut self, chunks: Vec<Chunk>) {
+        for chunk in chunks {
+            self.push(chunk.style, &chunk.text);
+        }
+    }
+
+    fn finish(self) -> Vec<Chunk> {
+        self.0
+    }
+}
+
+/// `-- TITLE --------- path`, padded to 80 columns (`Reporting.Report.toDoc`),
+/// in dull cyan.
+fn header(title: &str, path: &str) -> Doc {
     // "-- " + title + " " + dashes + " " + path  == WIDTH
     let fixed = 3 + title.len() + 1 + 1 + path.len();
     let dashes = WIDTH.saturating_sub(fixed).max(2);
-    format!("-- {} {} {}", title, "-".repeat(dashes), path)
-}
-
-fn render_elm(title: &str, body: &ElmBody, path: &str, source: &str) -> String {
-    let mut out = String::new();
-    out.push_str(&header(title, path));
-    out.push_str("\n\n");
-    out.push_str(&reflow(&body.before));
-    out.push_str("\n\n");
-    out.push_str(&render_snippet(source, body.region, body.highlight));
-    out.push_str(&reflow(&body.after));
-    for note in &body.notes {
-        out.push_str("\n\n");
-        match note {
-            Section::Para(p) => out.push_str(&reflow(p)),
-            Section::Block(b) => out.push_str(b),
-        }
-    }
-    out.push_str("\n\n");
-    out
+    Doc::color(Color::Cyan, Doc::text(format!("-- {} {} {}", title, "-".repeat(dashes), path)))
 }
 
 /// Greedy word wrap to 80 columns, matching `Reporting.Doc.reflow`. Blank lines
@@ -124,7 +197,7 @@ pub fn reflow(text: &str) -> String {
 /// `region`, with an `n| ` gutter; underline `highlight` with carets, but only
 /// when it is single-line and sits on the last shown row (otherwise elm draws no
 /// caret line).
-fn render_snippet(source: &str, region: Region, highlight: Region) -> String {
+fn render_snippet(source: &str, region: Region, highlight: Region) -> Vec<Chunk> {
     let lines: Vec<&str> = source.split('\n').collect();
     let start_row = region.start.row.max(1);
     let end_row = region.end.row.max(start_row);
@@ -133,29 +206,32 @@ fn render_snippet(source: &str, region: Region, highlight: Region) -> String {
     // highlight is anywhere else, elm marks each highlighted line by turning
     // its gutter into `n|>` instead of underlining.
     let underlined = highlight.start.row == highlight.end.row && highlight.end.row == end_row;
-    let mut out = String::new();
+    let marker = Style::color(Color::RedVivid);
+    let mut out = Chunks::new();
     for row in start_row..=end_row {
         let idx = (row - 1) as usize;
         let text = lines.get(idx).copied().unwrap_or("");
-        let marker = if !underlined && highlight.start.row <= row && row <= highlight.end.row {
-            '>'
+        out.plain(&format!("{:>gutter$}|", row, gutter = gutter));
+        if !underlined && highlight.start.row <= row && row <= highlight.end.row {
+            out.push(marker, ">");
         } else {
-            ' '
-        };
-        out.push_str(&format!("{:>gutter$}|{}{}\n", row, marker, text, gutter = gutter));
+            out.plain(" ");
+        }
+        out.plain(text);
+        out.plain("\n");
     }
     if underlined {
         let from = highlight.start.col.max(1) as usize;
         let to = (highlight.end.col as usize).max(from + 1);
-        out.push_str(&" ".repeat(gutter + 2 + (from - 1)));
-        out.push_str(&"^".repeat(to - from));
-        out.push('\n');
+        out.plain(&" ".repeat(gutter + 2 + (from - 1)));
+        out.push(marker, &"^".repeat(to - from));
+        out.plain("\n");
     } else {
         // elm's snippet ends with an empty final line where the carets would
         // have gone, which separates the code from the text that follows.
-        out.push('\n');
+        out.plain("\n");
     }
-    out
+    out.finish()
 }
 
 fn render_code_snippet(source: &str, region: Region) -> String {

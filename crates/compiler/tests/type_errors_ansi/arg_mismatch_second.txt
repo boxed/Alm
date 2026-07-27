@@ -1,0 +1,20 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+The 2nd argument to `pair` is not what I expect:
+
+11|     pair "x" "y"
+                 [91m^^^[0m
+This argument is a string of type:
+
+    [33mString[0m
+
+But `pair` needs the 2nd argument to be:
+
+    [33mInt[0m
+
+[4mHint[0m: I always figure out the argument types from left to right. If an argument
+is acceptable, I assume it is “correct” and move on. So the problem may actually
+be in one of the previous arguments!
+
+[4mHint[0m: Want to convert a String into an Int? Use the [92mString.toInt[0m function!
+

@@ -1,0 +1,18 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+Something is off with the body of the `bad` definition:
+
+6|     5.5
+       [91m^^^[0m
+The body is a float of type:
+
+    [33mFloat[0m
+
+But the type annotation on `bad` says it should be:
+
+    [33mInt[0m
+
+[4mNote[0m: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats. Use [92mtoFloat[0m and [92mround[0m to do explicit
+conversions.
+

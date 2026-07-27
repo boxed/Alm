@@ -1,0 +1,17 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I cannot do a comparison with this value:
+
+6|     (\x -> x) < identity
+        [91m^^^^^^^[0m
+The left side of (<) is an anonymous function of type:
+
+    [33ma -> a[0m
+
+But (<) only works on [33mInt[0m, [33mFloat[0m, [33mChar[0m, and [33mString[0m values. It can work on lists
+and tuples of comparable values as well, but it is usually better to find a
+different path.
+
+[4mHint[0m: I only know how to compare ints, floats, chars, strings, lists of
+comparable values, and tuples of comparable values.
+

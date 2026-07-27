@@ -1,0 +1,12 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+I am struggling with this boolean operation:
+
+6|     True && 5
+               ^
+Both sides of (&&) must be Bool values, but the right side is:
+
+    number
+
+Hint: Only Int and Float values work as numbers.
+

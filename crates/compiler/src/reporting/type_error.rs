@@ -8,11 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use super::doc::Doc;
+use super::doc::{Color, Doc};
 use super::{ElmBody, Report, Section};
 use crate::reporting::annotation::Region;
-
-const WIDTH: usize = 80;
 
 // ---------------------------------------------------------------- error types
 
@@ -22,17 +20,6 @@ pub enum Super {
     Comparable,
     Appendable,
     CompAppend,
-}
-
-impl Super {
-    fn name(self) -> &'static str {
-        match self {
-            Super::Number => "number",
-            Super::Comparable => "comparable",
-            Super::Appendable => "appendable",
-            Super::CompAppend => "compappend",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,7 +256,7 @@ fn vrecord_snippet_doc(first: (Doc, Doc), rest: Vec<(Doc, Doc)>) -> Doc {
 }
 
 /// `toNearbyRecord` — the record's fields, closest match first, at most four.
-fn nearby_record(fields: &BTreeMap<String, ErrorType>, field: &str, ext: &Extension) -> String {
+fn nearby_record(fields: &BTreeMap<String, ErrorType>, field: &str, ext: &Extension) -> Doc {
     let order = nearby_names(field, &fields.keys().cloned().collect::<Vec<_>>());
     let entries: Vec<(Doc, Doc)> = order
         .iter()
@@ -282,7 +269,7 @@ fn nearby_record(fields: &BTreeMap<String, ErrorType>, field: &str, ext: &Extens
         let first = it.next().unwrap();
         vrecord_snippet_doc(first, it.take(3).collect())
     };
-    render_type(&doc)
+    indented(doc)
 }
 
 fn ext_to_doc(ext: &Extension) -> Option<Doc> {
@@ -331,8 +318,17 @@ impl Diff {
     fn similar(left: Doc, right: Doc) -> Diff {
         Diff { left, right, problems: None }
     }
+    /// The two sides differ. Callers style the docs themselves: elm marks
+    /// only the part that is actually wrong, so a nested mismatch shows
+    /// `List ` plain with just the element type yellow, and a missing record
+    /// field yellows the field *name* and not its type.
     fn different(left: Doc, right: Doc, problems: Vec<Problem>) -> Diff {
         Diff { left, right, problems: Some(problems) }
+    }
+
+    /// Both sides wrong outright — the common case, both dull yellow.
+    fn mismatch(left: Doc, right: Doc, problems: Vec<Problem>) -> Diff {
+        Diff::different(Doc::color(Color::Yellow, left), Doc::color(Color::Yellow, right), problems)
     }
     fn is_similar(&self) -> bool {
         self.problems.is_none()
@@ -351,15 +347,65 @@ fn merge(a: Option<Vec<Problem>>, b: Option<Vec<Problem>>) -> Option<Vec<Problem
 }
 
 /// Render both types, marking where they differ, and report how they differ.
-pub fn to_comparison(actual: &ErrorType, expected: &ErrorType) -> (String, String, Vec<Problem>) {
+pub fn to_comparison(actual: &ErrorType, expected: &ErrorType) -> (Doc, Doc, Vec<Problem>) {
     let diff = to_diff(Ctx::None, actual, expected);
     let problems = diff.problems.unwrap_or_default();
-    (render_type(&diff.left), render_type(&diff.right), problems)
+    (indented(diff.left), indented(diff.right), problems)
 }
 
 /// A type as it appears in a report: indented four columns, wrapped at 80.
-fn render_type(doc: &Doc) -> String {
-    Doc::indent(4, doc.clone()).render(WIDTH)
+fn indented(doc: Doc) -> Doc {
+    Doc::indent(4, doc)
+}
+
+/// A word in the color elm uses for "this is the type at fault".
+fn yellow(text: impl Into<String>) -> Doc {
+    Doc::color(Color::Yellow, Doc::text(text))
+}
+
+/// A word in the color elm uses for "use this instead".
+fn green(text: impl Into<String>) -> Doc {
+    Doc::color(Color::GreenVivid, Doc::text(text))
+}
+
+/// The dimmed color elm uses for illustrative example output.
+fn grey(text: impl Into<String>) -> Doc {
+    Doc::color(Color::BlackVivid, Doc::text(text))
+}
+
+/// Plain prose split into words, for mixing with styled ones in `fill_sep`.
+fn words(text: &str) -> Vec<Doc> {
+    text.split_whitespace().map(Doc::text).collect()
+}
+
+/// Build a filled paragraph out of alternating plain and styled pieces.
+fn sentence(parts: Vec<Doc>) -> Doc {
+    Doc::fill_sep(parts)
+}
+
+/// `D.toFancyHint` — an underlined `Hint` label, then the words. The colon is
+/// outside the underline.
+fn hint(parts: Vec<Doc>) -> Section {
+    Section::Para(sentence(labeled("Hint", parts)))
+}
+
+/// `D.toFancyNote`.
+fn note(parts: Vec<Doc>) -> Section {
+    Section::Para(sentence(labeled("Note", parts)))
+}
+
+fn labeled(label: &str, parts: Vec<Doc>) -> Vec<Doc> {
+    let mut out = vec![Doc::cat2(
+        Doc::styled(super::doc::Style::underline(), Doc::text(label)),
+        Doc::text(":"),
+    )];
+    out.extend(parts);
+    out
+}
+
+/// `D.makeLink`.
+fn link(page: &str) -> Doc {
+    Doc::text(format!("<https://elm-lang.org/0.19.1/{page}>"))
 }
 
 fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
@@ -402,7 +448,7 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
                     problems: status,
                 }
             } else {
-                Diff::different(
+                Diff::mismatch(
                     to_doc(ctx, t1),
                     to_doc(ctx, t2),
                     vec![Problem::ArityMismatch(2 + cs.len(), 2 + zs.len())],
@@ -449,11 +495,27 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
             }
         }
 
-        (Type(h, n, args), t2) if h == "Maybe" && n == "Maybe" && args.len() == 1 && to_diff(ctx, &args[0], t2).is_similar() => {
-            Diff::different(to_doc(ctx, t1), to_doc(ctx, t2), vec![Problem::AnythingFromMaybe])
+        (Type(h, n, args), t2v) if h == "Maybe" && n == "Maybe" && args.len() == 1 && to_diff(ctx, &args[0], t2v).is_similar() => {
+            Diff::different(
+                apply_doc(
+                    ctx,
+                    Doc::color(Color::Yellow, Doc::text("Maybe")),
+                    vec![to_doc(Ctx::App, &args[0])],
+                ),
+                to_doc(ctx, t2),
+                vec![Problem::AnythingFromMaybe],
+            )
         }
         (t1v, Type(h, n, args)) if h == "List" && n == "List" && args.len() == 1 && to_diff(ctx, t1v, &args[0]).is_similar() => {
-            Diff::different(to_doc(ctx, t1), to_doc(ctx, t2), vec![])
+            Diff::different(
+                to_doc(ctx, t1),
+                apply_doc(
+                    ctx,
+                    Doc::color(Color::Yellow, Doc::text("List")),
+                    vec![to_doc(Ctx::App, &args[0])],
+                ),
+                vec![],
+            )
         }
 
         _ => {
@@ -493,7 +555,7 @@ fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {
                 }
                 _ => vec![],
             };
-            Diff::different(left, right, problems)
+            Diff::mismatch(left, right, problems)
         }
     }
 }
@@ -526,6 +588,9 @@ fn diff_record(
         // sides list their own fields in name order.
         let mut left: BTreeMap<&String, Doc> = BTreeMap::new();
         let mut right: BTreeMap<&String, Doc> = BTreeMap::new();
+        // Fields present on only one side: elm dull-yellows the *name*.
+        let mut unknown_left: std::collections::BTreeSet<&String> = Default::default();
+        let mut unknown_right: std::collections::BTreeSet<&String> = Default::default();
         for (name, t1) in fields1 {
             if let Some(t2) = fields2.get(name) {
                 let d = to_diff(Ctx::None, t1, t2);
@@ -533,17 +598,33 @@ fn diff_record(
                 left.insert(name, d.left);
                 right.insert(name, d.right);
             } else {
+                unknown_left.insert(name);
                 left.insert(name, to_doc(Ctx::None, t1));
             }
         }
         for (name, t2) in fields2 {
             if !fields1.contains_key(name) {
+                unknown_right.insert(name);
                 right.insert(name, to_doc(Ctx::None, t2));
             }
         }
         status = merge(status, Some(vec![]));
-        left_entries = left.into_iter().map(|(n, d)| (Doc::text(n.clone()), d)).collect();
-        right_entries = right.into_iter().map(|(n, d)| (Doc::text(n.clone()), d)).collect();
+        let name_doc = |n: &String, unknown: bool| {
+            let text = Doc::text(n.clone());
+            if unknown {
+                Doc::color(Color::Yellow, text)
+            } else {
+                text
+            }
+        };
+        left_entries = left
+            .into_iter()
+            .map(|(n, d)| (name_doc(n, unknown_left.contains(n)), d))
+            .collect();
+        right_entries = right
+            .into_iter()
+            .map(|(n, d)| (name_doc(n, unknown_right.contains(n)), d))
+            .collect();
     }
 
     let ext_status = ext_to_status(ext1, ext2);
@@ -717,59 +798,99 @@ fn problems_to_hint(problems: &[Problem]) -> Vec<Section> {
 }
 
 fn problem_to_hint(problem: &Problem) -> Vec<Section> {
-    let hint = |text: &str| vec![Section::Para(format!("Hint: {text}"))];
     match problem {
-        Problem::IntFloat => vec![Section::Para(
-            "Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does not \
-             implicitly convert Ints to Floats. Use toFloat and round to do explicit conversions."
-                .to_string(),
+        Problem::IntFloat => vec![note(
+            [
+                words("Read"),
+                vec![link("implicit-casts")],
+                words("to learn why Elm does not implicitly convert Ints to Floats. Use"),
+                vec![green("toFloat"), Doc::text("and"), green("round")],
+                words("to do explicit conversions."),
+            ]
+            .concat(),
         )],
-        Problem::StringFromInt => {
-            hint("Want to convert an Int into a String? Use the String.fromInt function!")
-        }
-        Problem::StringFromFloat => {
-            hint("Want to convert a Float into a String? Use the String.fromFloat function!")
-        }
-        Problem::StringToInt => {
-            hint("Want to convert a String into an Int? Use the String.toInt function!")
-        }
-        Problem::StringToFloat => {
-            hint("Want to convert a String into a Float? Use the String.toFloat function!")
-        }
-        Problem::AnythingToBool => hint(
-            "Elm does not have “truthiness” such that ints and strings and lists are\
-             \u{a0}automatically converted to booleans. Do that conversion explicitly!",
-        ),
-        Problem::AnythingFromMaybe => hint(
-            "Use Maybe.withDefault to handle possible errors. Longer term, it is usually\
-             \u{a0}better to write out the full `case` though!",
-        ),
-        Problem::ArityMismatch(x, y) => hint(&if x < y {
+        Problem::StringFromInt => vec![hint(
+            [
+                words("Want to convert an Int into a String? Use the"),
+                vec![green("String.fromInt")],
+                words("function!"),
+            ]
+            .concat(),
+        )],
+        Problem::StringFromFloat => vec![hint(
+            [
+                words("Want to convert a Float into a String? Use the"),
+                vec![green("String.fromFloat")],
+                words("function!"),
+            ]
+            .concat(),
+        )],
+        Problem::StringToInt => vec![hint(
+            [
+                words("Want to convert a String into an Int? Use the"),
+                vec![green("String.toInt")],
+                words("function!"),
+            ]
+            .concat(),
+        )],
+        Problem::StringToFloat => vec![hint(
+            [
+                words("Want to convert a String into a Float? Use the"),
+                vec![green("String.toFloat")],
+                words("function!"),
+            ]
+            .concat(),
+        )],
+        Problem::AnythingToBool => vec![hint(words(
+            "Elm does not have “truthiness” such that ints and strings and lists are \
+             automatically converted to booleans. Do that conversion explicitly!",
+        ))],
+        Problem::AnythingFromMaybe => vec![hint(words(
+            "Use Maybe.withDefault to handle possible errors. Longer term, it is usually \
+             better to write out the full `case` though!",
+        ))],
+        Problem::ArityMismatch(x, y) => vec![hint(words(&if x < y {
             format!("It looks like it takes too few arguments. I was expecting {} more.", y - x)
         } else {
             format!("It looks like it takes too many arguments. I see {} extra.", x - y)
-        }),
+        }))],
         Problem::FieldTypo(typo, possibilities) => {
             match nearby_names(typo, possibilities).first() {
                 Some(nearest) => vec![
-                    Section::Para(format!(
-                        "Hint: Seems like a record field typo. Maybe {typo} should be {nearest}?"
-                    )),
-                    Section::Para(
-                        "Hint: Can more type annotations be added? Type annotations always help me                          give more specific messages, and I think they could help a lot in this                          case!"
-                            .to_string(),
+                    hint(
+                        [
+                            words("Seems like a record field typo. Maybe"),
+                            vec![yellow(typo.clone()), Doc::text("should"), Doc::text("be")],
+                            vec![Doc::cat2(green(nearest.clone()), Doc::text("?"))],
+                        ]
+                        .concat(),
                     ),
+                    hint(words(
+                        "Can more type annotations be added? Type annotations always help me give \
+                         more specific messages, and I think they could help a lot in this case!",
+                    )),
                 ],
                 None => vec![],
             }
         }
         Problem::FieldsMissing(fields) => match fields.split_first() {
             None => vec![],
-            Some((f, [])) => hint(&format!("Looks like the {f} field is missing.")),
-            Some(_) => hint(&format!(
-                "Looks like fields {} are missing.",
-                comma_sep("and", fields)
-            )),
+            Some((f, [])) => vec![hint(
+                [
+                    words("Looks like the"),
+                    vec![green(f.clone())],
+                    words("field is missing."),
+                ]
+                .concat(),
+            )],
+            Some(_) => vec![hint(
+                [
+                    words("Looks like fields"),
+                    comma_sep("and", &fields.iter().map(|f| green(f.clone())).collect::<Vec<_>>()),
+                    words("are missing."),
+                ]
+                .concat(),
+            )],
         },
         Problem::BadFlexSuper(direction, super_, _, tipe) => match tipe {
             ErrorType::Infinite | ErrorType::Error | ErrorType::FlexVar(_) => vec![],
@@ -801,122 +922,21 @@ fn problem_to_hint(problem: &Problem) -> Vec<Section> {
     }
 }
 
-/// `D.commaSep` — "a, b, and c" (and "a and b" for two).
-fn comma_sep(conjunction: &str, items: &[String]) -> String {
+/// `D.commaSep` — "a, b, and c" (and "a and b" for two). The commas are
+/// appended outside each item's styling, as elm does.
+fn comma_sep(conjunction: &str, items: &[Doc]) -> Vec<Doc> {
     match items {
-        [] => String::new(),
-        [a] => a.clone(),
-        [a, b] => format!("{a} {conjunction} {b}"),
+        [] => vec![],
+        [a] => vec![a.clone()],
+        [a, b] => vec![a.clone(), Doc::text(conjunction), b.clone()],
         _ => {
             let (last, rest) = items.split_last().unwrap();
-            format!("{}, {conjunction} {last}", rest.join(", "))
+            let mut out: Vec<Doc> =
+                rest.iter().map(|d| Doc::cat2(d.clone(), Doc::text(","))).collect();
+            out.push(Doc::text(conjunction));
+            out.push(last.clone());
+            out
         }
-    }
-}
-
-fn a_super_thing(super_: Super) -> String {
-    match super_ {
-        Super::Number => "a `number` value",
-        Super::Comparable => "a `comparable` value",
-        Super::CompAppend => "a `compappend` value",
-        Super::Appendable => "an `appendable` value",
-    }
-    .to_string()
-}
-
-fn bad_rigid_var(name: &str, a_thing: &str) -> Vec<Section> {
-    vec![
-        Section::Para(format!(
-            "Hint: Your type annotation uses type variable `{name}` which means ANY type of value              can flow through, but your code is saying it specifically wants {a_thing}. Maybe              change your type annotation to be more specific? Maybe change the code to be more              general?"
-        )),
-        Section::Para(
-            "Read <https://elm-lang.org/0.19.1/type-annotations> for more advice!".to_string(),
-        ),
-    ]
-}
-
-fn bad_double_rigid(x: &str, y: &str) -> Vec<Section> {
-    vec![
-        Section::Para(format!(
-            "Hint: Your type annotation uses `{x}` and `{y}` as separate type variables. Your code              seems to be saying they are the same though. Maybe they should be the same in your              type annotation? Maybe your code uses them in a weird way?"
-        )),
-        Section::Para(
-            "Read <https://elm-lang.org/0.19.1/type-annotations> for more advice!".to_string(),
-        ),
-    ]
-}
-
-fn bad_rigid_super(super_: Super, a_thing: &str) -> Vec<Section> {
-    let (super_type, many_things) = match super_ {
-        Super::Number => ("number", "ints AND floats"),
-        Super::Comparable => ("comparable", "ints, floats, chars, strings, lists, and tuples"),
-        Super::Appendable => ("appendable", "strings AND lists"),
-        Super::CompAppend => ("compappend", "strings AND lists"),
-    };
-    vec![
-        Section::Para(format!(
-            "Hint: The `{super_type}` in your type annotation is saying that {many_things} can flow              through, but your code is saying it specifically wants {a_thing}. Maybe change your              type annotation to be more specific? Maybe change the code to be more general?"
-        )),
-        Section::Para(
-            "Read <https://elm-lang.org/0.19.1/type-annotations> for more advice!".to_string(),
-        ),
-    ]
-}
-
-fn bad_flex_flex_super(s1: Super, s2: Super) -> Vec<Section> {
-    let like_this = |s: Super| match s {
-        Super::Number => "a number",
-        Super::Comparable => "comparable",
-        Super::CompAppend => "a compappend",
-        Super::Appendable => "appendable",
-    };
-    vec![Section::Para(format!(
-        "Hint: There are no values in Elm that are both {} and {}.",
-        like_this(s1),
-        like_this(s2)
-    ))]
-}
-
-fn bad_flex_super(direction: Direction, super_: Super, tipe: &ErrorType) -> Vec<Section> {
-    match super_ {
-        Super::Comparable => match tipe {
-            ErrorType::Record(..) => vec![Section::Para(
-                "Hint: I do not know how to compare records. I can only compare ints, floats,                  chars, strings, lists of comparable values, and tuples of comparable values. Check                  out <https://elm-lang.org/0.19.1/comparing-records> for ideas on how to proceed."
-                    .to_string(),
-            )],
-            ErrorType::Type(_, name, _) => vec![
-                Section::Para(format!(
-                    "Hint: I do not know how to compare `{name}` values. I can only compare ints,                      floats, chars, strings, lists of comparable values, and tuples of comparable                      values."
-                )),
-                Section::Para(
-                    "Check out <https://elm-lang.org/0.19.1/comparing-custom-types> for ideas on                      how to proceed."
-                        .to_string(),
-                ),
-            ],
-            _ => vec![Section::Para(
-                "Hint: I only know how to compare ints, floats, chars, strings, lists of                  comparable values, and tuples of comparable values."
-                    .to_string(),
-            )],
-        },
-        Super::Appendable => vec![Section::Para(
-            "Hint: I only know how to append strings and lists.".to_string(),
-        )],
-        Super::CompAppend => vec![Section::Para(
-            "Hint: Only strings and lists are both comparable and appendable.".to_string(),
-        )],
-        Super::Number => match tipe {
-            ErrorType::Type(..) if tipe.is_string() => match direction {
-                Direction::Have => vec![Section::Para(
-                    "Hint: Try using String.fromInt to convert it to a string?".to_string(),
-                )],
-                Direction::Need => vec![Section::Para(
-                    "Hint: Try using String.toInt to convert it to an integer?".to_string(),
-                )],
-            },
-            _ => vec![Section::Para(
-                "Hint: Only Int and Float values work as numbers.".to_string(),
-            )],
-        },
     }
 }
 
@@ -944,42 +964,192 @@ fn distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+fn a_super_thing(super_: Super) -> String {
+    match super_ {
+        Super::Number => "a `number` value",
+        Super::Comparable => "a `comparable` value",
+        Super::CompAppend => "a `compappend` value",
+        Super::Appendable => "an `appendable` value",
+    }
+    .to_string()
+}
+
+fn bad_rigid_var(name: &str, a_thing: &str) -> Vec<Section> {
+    vec![
+        hint(words(&format!(
+            "Your type annotation uses type variable `{name}` which means ANY type of value can \
+             flow through, but your code is saying it specifically wants {a_thing}. Maybe change \
+             your type annotation to be more specific? Maybe change the code to be more general?"
+        ))),
+        Section::Para(sentence(
+            [words("Read"), vec![link("type-annotations")], words("for more advice!")].concat(),
+        )),
+    ]
+}
+
+fn bad_double_rigid(x: &str, y: &str) -> Vec<Section> {
+    vec![
+        hint(words(&format!(
+            "Your type annotation uses `{x}` and `{y}` as separate type variables. Your code seems \
+             to be saying they are the same though. Maybe they should be the same in your type \
+             annotation? Maybe your code uses them in a weird way?"
+        ))),
+        Section::Para(sentence(
+            [words("Read"), vec![link("type-annotations")], words("for more advice!")].concat(),
+        )),
+    ]
+}
+
+fn bad_rigid_super(super_: Super, a_thing: &str) -> Vec<Section> {
+    let (super_type, many_things) = match super_ {
+        Super::Number => ("number", "ints AND floats"),
+        Super::Comparable => ("comparable", "ints, floats, chars, strings, lists, and tuples"),
+        Super::Appendable => ("appendable", "strings AND lists"),
+        Super::CompAppend => ("compappend", "strings AND lists"),
+    };
+    vec![
+        hint(words(&format!(
+            "The `{super_type}` in your type annotation is saying that {many_things} can flow \
+             through, but your code is saying it specifically wants {a_thing}. Maybe change your \
+             type annotation to be more specific? Maybe change the code to be more general?"
+        ))),
+        Section::Para(sentence(
+            [words("Read"), vec![link("type-annotations")], words("for more advice!")].concat(),
+        )),
+    ]
+}
+
+fn bad_flex_flex_super(s1: Super, s2: Super) -> Vec<Section> {
+    let like_this = |s: Super| match s {
+        Super::Number => "a number",
+        Super::Comparable => "comparable",
+        Super::CompAppend => "a compappend",
+        Super::Appendable => "appendable",
+    };
+    vec![hint(words(&format!(
+        "There are no values in Elm that are both {} and {}.",
+        like_this(s1),
+        like_this(s2)
+    )))]
+}
+
+fn bad_flex_super(direction: Direction, super_: Super, tipe: &ErrorType) -> Vec<Section> {
+    match super_ {
+        Super::Comparable => match tipe {
+            ErrorType::Record(..) => vec![Section::Para(sentence(
+                [
+                    labeled(
+                        "Hint",
+                        words(
+                            "I do not know how to compare records. I can only compare ints, \
+                             floats, chars, strings, lists of comparable values, and tuples of \
+                             comparable values. Check out",
+                        ),
+                    ),
+                    vec![link("comparing-records")],
+                    words("for ideas on how to proceed."),
+                ]
+                .concat(),
+            ))],
+            ErrorType::Type(_, name, _) => vec![
+                hint(words(&format!(
+                    "I do not know how to compare `{name}` values. I can only compare ints, \
+                     floats, chars, strings, lists of comparable values, and tuples of comparable \
+                     values."
+                ))),
+                Section::Para(sentence(
+                    [
+                        words("Check out"),
+                        vec![link("comparing-custom-types")],
+                        words("for ideas on how to proceed."),
+                    ]
+                    .concat(),
+                )),
+            ],
+            _ => vec![hint(words(
+                "I only know how to compare ints, floats, chars, strings, lists of comparable \
+                 values, and tuples of comparable values.",
+            ))],
+        },
+        Super::Appendable => vec![hint(words("I only know how to append strings and lists."))],
+        Super::CompAppend => {
+            vec![hint(words("Only strings and lists are both comparable and appendable."))]
+        }
+        Super::Number => match tipe {
+            ErrorType::Type(..) if tipe.is_string() => match direction {
+                Direction::Have => vec![hint(
+                    [
+                        words("Try using"),
+                        vec![green("String.fromInt")],
+                        words("to convert it to a string?"),
+                    ]
+                    .concat(),
+                )],
+                Direction::Need => vec![hint(
+                    [
+                        words("Try using"),
+                        vec![green("String.toInt")],
+                        words("to convert it to an integer?"),
+                    ]
+                    .concat(),
+                )],
+            },
+            _ => vec![hint(
+                [
+                    words("Only"),
+                    vec![green("Int"), Doc::text("and"), green("Float")],
+                    words("values work as numbers."),
+                ]
+                .concat(),
+            )],
+        },
+    }
+}
+
 // -------------------------------------------------------------- the report
 
 /// `typeComparison`: what I found, what was wanted, then any hints.
 fn type_comparison(
     actual: &ErrorType,
     expected: &ErrorType,
-    i_am_seeing: String,
-    instead_of: String,
+    i_am_seeing: impl Into<Doc>,
+    instead_of: impl Into<Doc>,
     context_hints: Vec<Section>,
-) -> (String, Vec<Section>) {
+) -> (Doc, Vec<Section>) {
     let (actual_doc, expected_doc, problems) = to_comparison(actual, expected);
     let mut notes = vec![
-        Section::Block(actual_doc),
-        Section::Para(instead_of),
-        Section::Block(expected_doc),
+        Section::Para(actual_doc),
+        Section::Para(instead_of.into()),
+        Section::Para(expected_doc),
     ];
     notes.extend(context_hints);
     notes.extend(problems_to_hint(&problems));
-    (i_am_seeing, notes)
+    (i_am_seeing.into(), notes)
 }
 
 /// `loneType`: only what I found, then further details.
 fn lone_type(
     actual: &ErrorType,
     expected: &ErrorType,
-    i_am_seeing: String,
+    i_am_seeing: impl Into<Doc>,
     further: Vec<Section>,
-) -> (String, Vec<Section>) {
+) -> (Doc, Vec<Section>) {
     let (actual_doc, _, problems) = to_comparison(actual, expected);
-    let mut notes = vec![Section::Block(actual_doc)];
+    let mut notes = vec![Section::Para(actual_doc)];
     notes.extend(further);
     notes.extend(problems_to_hint(&problems));
-    (i_am_seeing, notes)
+    (i_am_seeing.into(), notes)
 }
 
-fn report(title: &str, expr_region: Region, region: Region, before: String, after: String, notes: Vec<Section>) -> Report {
+fn report(
+    title: &str,
+    expr_region: Region,
+    region: Region,
+    before: impl Into<Doc>,
+    after: impl Into<Doc>,
+    notes: Vec<Section>,
+) -> Report {
+    let (before, after) = (before.into(), after.into());
     Report {
         title: title.to_string(),
         region: expr_region,
@@ -1066,12 +1236,17 @@ pub fn to_expr_report(
                         format!("The {ith} element of this list does not match all the previous elements:"),
                         format!("The {ith} element is"),
                         "But all the previous elements in the list are:".to_string(),
-                        vec![Section::Para(
-                            "Hint: Everything in a list must be the same type of value. This way, we \
-                             never run into unexpected values partway through a List.map, List.foldl, \
-                             etc. Read <https://elm-lang.org/0.19.1/custom-types> to learn how to \
-                             “mix” types."
-                                .to_string(),
+                        vec![hint(
+                            [
+                                words(
+                                    "Everything in a list must be the same type of value. This way, we never run \
+                                     into unexpected values partway through a List.map, List.foldl, etc. \
+                                     Read",
+                                ),
+                                vec![link("custom-types")],
+                                words("to learn how to “mix” types."),
+                            ]
+                            .concat(),
                         )],
                     )
                 }
@@ -1079,18 +1254,28 @@ pub fn to_expr_report(
                 Context::Negate => bad_type(
                     "I do not know how to negate this type of value:".to_string(),
                     "It is".to_string(),
-                    vec![Section::Para(
-                        "But I only now how to negate Int and Float values.".to_string(),
-                    )],
+                    vec![Section::Para(sentence(
+                        [
+                            words("But I only now how to negate"),
+                            vec![yellow("Int"), Doc::text("and"), yellow("Float")],
+                            words("values."),
+                        ]
+                        .concat(),
+                    ))],
                 ),
 
                 Context::IfCondition => bad_type(
                     "This `if` condition does not evaluate to a boolean value, True or False."
                         .to_string(),
                     "It is".to_string(),
-                    vec![Section::Para(
-                        "But I need this `if` condition to be a Bool value.".to_string(),
-                    )],
+                    vec![Section::Para(sentence(
+                        [
+                            words("But I need this `if` condition to be a"),
+                            vec![yellow("Bool")],
+                            words("value."),
+                        ]
+                        .concat(),
+                    ))],
                 ),
 
                 Context::IfBranch(index) => {
@@ -1099,12 +1284,17 @@ pub fn to_expr_report(
                         format!("The {ith} branch of this `if` does not match all the previous branches:"),
                         format!("The {ith} branch is"),
                         "But all the previous branches result in:".to_string(),
-                        vec![Section::Para(
-                            "Hint: All branches in an `if` must produce the same type of values. This \
-                             way, no matter which branch we take, the result is always a consistent \
-                             shape. Read <https://elm-lang.org/0.19.1/custom-types> to learn how to \
-                             “mix” types."
-                                .to_string(),
+                        vec![hint(
+                            [
+                                words(
+                                    "All branches in an `if` must produce the same type of values. This way, no \
+                                     matter which branch we take, the result is always a consistent shape. \
+                                     Read",
+                                ),
+                                vec![link("custom-types")],
+                                words("to learn how to “mix” types."),
+                            ]
+                            .concat(),
                         )],
                     )
                 }
@@ -1115,12 +1305,17 @@ pub fn to_expr_report(
                         format!("The {ith} branch of this `case` does not match all the previous branches:"),
                         format!("The {ith} branch is"),
                         "But all the previous branches result in:".to_string(),
-                        vec![Section::Para(
-                            "Hint: All branches in a `case` must produce the same type of values. This \
-                             way, no matter which branch we take, the result is always a consistent \
-                             shape. Read <https://elm-lang.org/0.19.1/custom-types> to learn how to \
-                             “mix” types."
-                                .to_string(),
+                        vec![hint(
+                            [
+                                words(
+                                    "All branches in a `case` must produce the same type of values. This way, no \
+                                     matter which branch we take, the result is always a consistent shape. \
+                                     Read",
+                                ),
+                                vec![link("custom-types")],
+                                words("to learn how to “mix” types."),
+                            ]
+                            .concat(),
                         )],
                     )
                 }
@@ -1170,12 +1365,11 @@ pub fn to_expr_report(
                     let further = if *index == 1 {
                         vec![]
                     } else {
-                        vec![Section::Para(
-                            "Hint: I always figure out the argument types from left to right. If an \
+                        vec![hint(words(
+                            "I always figure out the argument types from left to right. If an \
                              argument is acceptable, I assume it is “correct” and move on. So the \
-                             problem may actually be in one of the previous arguments!"
-                                .to_string(),
-                        )]
+                             problem may actually be in one of the previous arguments!",
+                        ))]
                     };
                     mismatch(
                         format!("The {ith} argument to {this_function} is not what I expect:"),
@@ -1206,8 +1400,22 @@ pub fn to_expr_report(
                                         "This is usually a typo. Here are the {named}fields that are most similar:"
                                     ),
                                     vec![
-                                        Section::Block(nearby_record(fields, field, ext)),
-                                        Section::Para(format!("So maybe {field} should be {nearest}?")),
+                                        Section::Para(nearby_record(fields, field, ext)),
+                                        Section::Para(sentence(
+                                            [
+                                                words("So maybe"),
+                                                vec![
+                                                    yellow(field.clone()),
+                                                    Doc::text("should"),
+                                                    Doc::text("be"),
+                                                    Doc::cat2(
+                                                        green(nearest.clone()),
+                                                        Doc::text("?"),
+                                                    ),
+                                                ],
+                                            ]
+                                            .concat(),
+                                        )),
                                     ],
                                 )
                             };
@@ -1225,8 +1433,13 @@ pub fn to_expr_report(
                                 tipe,
                                 expected_type,
                                 add_category("It is", category),
-                                vec![Section::Para(format!(
-                                    "But I need a record with a {field} field!"
+                                vec![Section::Para(sentence(
+                                    [
+                                        words("But I need a record with a"),
+                                        vec![yellow(field.clone())],
+                                        words("field!"),
+                                    ]
+                                    .concat(),
                                 ))],
                             );
                             report(
@@ -1248,7 +1461,7 @@ pub fn to_expr_report(
                                 "Something is off with this record update:".to_string(),
                                 format!("The `{record}` record is"),
                                 "But this update needs it to be compatable with:".to_string(),
-                                vec![Section::Para(
+                                vec![Section::para(
                                     "Do you mind creating an <http://sscce.org/> that produces this                                      error message and sharing it at                                      <https://github.com/elm/error-message-catalog/issues> so we can                                      try to give better advice here?"
                                         .to_string(),
                                 )],
@@ -1270,9 +1483,21 @@ pub fn to_expr_report(
                                             "This is usually a typo. Here are the `{record}` fields that are most similar:"
                                         ),
                                         vec![
-                                            Section::Block(nearby_record(actual_fields, field, ext)),
-                                            Section::Para(format!(
-                                                "So maybe {field} should be {nearest}?"
+                                            Section::Para(nearby_record(actual_fields, field, ext)),
+                                            Section::Para(sentence(
+                                                [
+                                                    words("So maybe"),
+                                                    vec![
+                                                        yellow(field.clone()),
+                                                        Doc::text("should"),
+                                                        Doc::text("be"),
+                                                        Doc::cat2(
+                                                            green(nearest.clone()),
+                                                            Doc::text("?"),
+                                                        ),
+                                                    ],
+                                                ]
+                                                .concat(),
                                             )),
                                         ],
                                     )
@@ -1291,7 +1516,7 @@ pub fn to_expr_report(
                     _ => bad_type(
                         "This is not a record, so it has no fields to update!".to_string(),
                         "It is".to_string(),
-                        vec![Section::Para("But I need a record!".to_string())],
+                        vec![Section::para("But I need a record!".to_string())],
                     ),
                 },
 
@@ -1299,10 +1524,11 @@ pub fn to_expr_report(
                     format!("I cannot update the `{field}` field like this:"),
                     format!("You are trying to update `{field}` to be"),
                     "But it should be:".to_string(),
-                    vec![Section::Para(
-                        "Note: The record update syntax does not allow you to change the type of                          fields. You can achieve that with record constructors or the record                          literal syntax."
-                            .to_string(),
-                    )],
+                    vec![note(words(
+                        "The record update syntax does not allow you to change the type of fields. \
+                         You can achieve that with record constructors or the record literal \
+                         syntax.",
+                    ))],
                 ),
 
                 Context::Destructure => {
@@ -1328,7 +1554,7 @@ pub fn to_expr_report(
 }
 
 /// The `(before, after, notes)` triple an operator report renders to.
-type Docs = (String, String, Vec<Section>);
+type Docs = (Doc, Doc, Vec<Section>);
 
 /// `opLeftToDocs`.
 fn op_left_report(
@@ -1357,11 +1583,12 @@ fn op_left_report(
                 tipe,
                 expected,
                 add_category("I am seeing", category),
-                vec![Section::Para("This needs to be some kind of function though!".to_string())],
+                vec![Section::para("This needs to be some kind of function though!".to_string())],
             );
             (
-                "The left side of (<|) needs to be a function so I can pipe arguments to it!"
-                    .to_string(),
+                Doc::reflow(
+                    "The left side of (<|) needs to be a function so I can pipe arguments to it!",
+                ),
                 after,
                 notes,
             )
@@ -1374,7 +1601,7 @@ fn op_left_report(
                 format!("But ({op}) needs the left argument to be:"),
                 vec![],
             );
-            (format!("The left argument of ({op}) is causing problems:"), after, notes)
+            (Doc::reflow(&format!("The left argument of ({op}) is causing problems:")), after, notes)
         }
     };
     report("TYPE MISMATCH", expr_region, region, before, after, notes)
@@ -1391,27 +1618,42 @@ fn op_right_report(
     expected: &ErrorType,
 ) -> Report {
     let cast = |op: &str, float_then_int: bool| -> (bool, Docs) {
-        let (seen_left, seen_right, fix_left, fix_right) = if float_then_int {
-            ("a Float", "an Int", "round", "toFloat")
-        } else {
-            ("an Int", "a Float", "toFloat", "round")
-        };
+        // `badCastHelp`: name the two sides in yellow and the two conversion
+        // functions in green.
+        let (left_article, left_type, right_article, right_type, fix_left, fix_right) =
+            if float_then_int {
+                ("a", "Float", "an", "Int", "round", "toFloat")
+            } else {
+                ("an", "Int", "a", "Float", "toFloat", "round")
+            };
         (
             false,
             (
-                format!(
+                Doc::reflow(&format!(
                     "I need both sides of ({op}) to be the exact same type. Both Int or both Float."
+                )),
+                sentence(
+                    [
+                        words("But I see"),
+                        vec![Doc::text(left_article), yellow(left_type)],
+                        words("on the left and"),
+                        vec![Doc::text(right_article), yellow(right_type)],
+                        words("on the right."),
+                    ]
+                    .concat(),
                 ),
-                format!("But I see {seen_left} on the left and {seen_right} on the right."),
                 vec![
-                    Section::Para(format!(
-                        "Use {fix_left} on the left (or {fix_right} on the right) to make both sides match!"
+                    Section::Para(sentence(
+                        [
+                            words("Use"),
+                            vec![green(fix_left)],
+                            words("on the left (or"),
+                            vec![green(fix_right)],
+                            words("on the right) to make both sides match!"),
+                        ]
+                        .concat(),
                     )),
-                    Section::Para(
-                        "Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm \
-                         does not implicitly convert Ints to Floats."
-                            .to_string(),
-                    ),
+                    implicit_casts_note(),
                 ],
             ),
         )
@@ -1442,7 +1684,7 @@ fn op_right_report(
                 "But (<|) is piping it to a function that expects:".to_string(),
                 vec![],
             );
-            (true, ("I cannot send this through the (<|) pipe:".to_string(), after, notes))
+            (true, (Doc::reflow("I cannot send this through the (<|) pipe:"), after, notes))
         }
         "|>" => match (tipe, expected) {
             (ErrorType::Lambda(expected_arg, _, _), ErrorType::Lambda(arg, _, _)) => {
@@ -1456,8 +1698,9 @@ fn op_right_report(
                 (
                     true,
                     (
-                        "This function cannot handle the argument sent through the (|>) pipe:"
-                            .to_string(),
+                        Doc::reflow(
+                            "This function cannot handle the argument sent through the (|>) pipe:",
+                        ),
                         after,
                         notes,
                     ),
@@ -1473,8 +1716,10 @@ fn op_right_report(
                 (
                     true,
                     (
-                        "The right side of (|>) needs to be a function so I can pipe arguments to it!"
-                            .to_string(),
+                        Doc::reflow(
+                            "The right side of (|>) needs to be a function so I can pipe arguments \
+                             to it!",
+                        ),
                         after,
                         notes,
                     ),
@@ -1491,35 +1736,55 @@ fn op_right_report(
         title: "TYPE MISMATCH".to_string(),
         region: expr_region,
         message: String::new(),
-        elm: Some(ElmBody { before, after, notes, region, highlight }),
+        elm: Some(ElmBody {
+            before: before.into(),
+            after: after.into(),
+            notes,
+            region,
+            highlight,
+        }),
     }
 }
 
 fn is_list1(tipe: &ErrorType) -> bool {
     matches!(tipe, ErrorType::Type(h, n, args) if h == "List" && n == "List" && args.len() == 1)
 }
-
 fn bad_op_right_fallback(category: &Category, op: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
     let (after, notes) = type_comparison(
         tipe,
         expected,
         add_category("The right argument is", category),
         format!("But ({op}) needs the right argument to be:"),
-        vec![Section::Para(format!(
-            "Hint: With operators like ({op}) I always check the left side first. If it seems \
-             fine, I assume it is correct and check the right side. So the problem may be in how \
-             the left and right arguments interact!"
-        ))],
+        vec![hint(words(&format!(
+            "With operators like ({op}) I always check the left side first. If it seems fine, I \
+             assume it is correct and check the right side. So the problem may be in how the left \
+             and right arguments interact!"
+        )))],
     );
-    (format!("The right argument of ({op}) is causing problems."), after, notes)
+    (Doc::reflow(&format!("The right argument of ({op}) is causing problems.")), after, notes)
 }
 
 fn bad_string_add() -> Docs {
     (
-        "I cannot do addition with String values like this one:".to_string(),
-        "The (+) operator only works with Int and Float values.".to_string(),
-        vec![Section::Para(
-            "Hint: Switch to the (++) operator to append strings!".to_string(),
+        sentence(
+            [
+                words("I cannot do addition with"),
+                vec![yellow("String")],
+                words("values like this one:"),
+            ]
+            .concat(),
+        ),
+        sentence(
+            [
+                words("The (+) operator only works with"),
+                vec![yellow("Int"), Doc::text("and"), yellow("Float")],
+                words("values."),
+            ]
+            .concat(),
+        ),
+        vec![hint(
+            [words("Switch to the"), vec![green("(++)")], words("operator to append strings!")]
+                .concat(),
         )],
     )
 }
@@ -1528,13 +1793,23 @@ fn bad_list_add(category: &Category, direction: &str, tipe: &ErrorType, expected
     let (after, notes) = lone_type(
         tipe,
         expected,
-        add_category(&format!("The {direction} side of (+) is"), category),
+        Doc::reflow(&add_category(&format!("The {direction} side of (+) is"), category)),
         vec![
-            Section::Para("But (+) only works with Int and Float values.".to_string()),
-            Section::Para("Hint: Switch to the (++) operator to append lists!".to_string()),
+            Section::Para(sentence(
+                [
+                    words("But (+) only works with"),
+                    vec![yellow("Int"), Doc::text("and"), yellow("Float")],
+                    words("values."),
+                ]
+                .concat(),
+            )),
+            hint(
+                [words("Switch to the"), vec![green("(++)")], words("operator to append lists!")]
+                    .concat(),
+            ),
         ],
     );
-    ("I cannot do addition with lists:".to_string(), after, notes)
+    (Doc::reflow("I cannot do addition with lists:"), after, notes)
 }
 
 fn bad_list_mul(category: &Category, direction: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
@@ -1545,8 +1820,13 @@ fn bad_list_mul(category: &Category, direction: &str, tipe: &ErrorType, expected
         "*",
         tipe,
         expected,
-        vec![Section::Para(
-            "Hint: Maybe you want List.repeat to build a list of repeated values?".to_string(),
+        vec![hint(
+            [
+                words("Maybe you want"),
+                vec![green("List.repeat")],
+                words("to build a list of repeated values?"),
+            ]
+            .concat(),
         )],
     )
 }
@@ -1560,148 +1840,220 @@ fn bad_math(
     expected: &ErrorType,
     other_hints: Vec<Section>,
 ) -> Docs {
-    let mut further = vec![Section::Para(format!(
-        "But ({op}) only works with Int and Float values."
+    let mut further = vec![Section::Para(sentence(
+        [
+            words(&format!("But ({op}) only works with")),
+            vec![yellow("Int"), Doc::text("and"), yellow("Float")],
+            words("values."),
+        ]
+        .concat(),
     ))];
     further.extend(other_hints);
     let (after, notes) = lone_type(
         tipe,
         expected,
-        add_category(&format!("The {direction} side of ({op}) is"), category),
+        Doc::reflow(&add_category(&format!("The {direction} side of ({op}) is"), category)),
         further,
     );
-    (format!("{operation} does not work with this value:"), after, notes)
+    (Doc::reflow(&format!("{operation} does not work with this value:")), after, notes)
 }
 
 fn bad_fdiv(direction: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
+    let before = Doc::reflow("The (/) operator is specifically for floating-point division:");
     if tipe.is_int() {
         (
-            "The (/) operator is specifically for floating-point division:".to_string(),
-            format!(
-                "The {direction} side of (/) must be a Float, but I am seeing an Int. I recommend:"
+            before,
+            sentence(
+                [
+                    words(&format!("The {direction} side of (/) must be a")),
+                    vec![
+                        Doc::cat2(yellow("Float"), Doc::text(",")),
+                        Doc::text("but"),
+                        Doc::text("I"),
+                        Doc::text("am"),
+                        Doc::text("seeing"),
+                        Doc::text("an"),
+                        Doc::cat2(yellow("Int"), Doc::text(".")),
+                    ],
+                    words("I recommend:"),
+                ]
+                .concat(),
             ),
             vec![
-                Section::Block(
-                    "toFloat for explicit conversions     (toFloat 5 / 2) == 2.5\n\
-                     (//)    for integer division         (5 // 2)        == 2"
-                        .to_string(),
-                ),
-                Section::Para(
-                    "Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does \
-                     not implicitly convert Ints to Floats."
-                        .to_string(),
-                ),
+                Section::Para(Doc::vcat(vec![
+                    Doc::cat2(
+                        green("toFloat"),
+                        Doc::cat2(
+                            Doc::text(" for explicit conversions     "),
+                            grey("(toFloat 5 / 2) == 2.5"),
+                        ),
+                    ),
+                    Doc::cat2(
+                        green("(//)   "),
+                        Doc::cat2(
+                            Doc::text(" for integer division         "),
+                            grey("(5 // 2)        == 2"),
+                        ),
+                    ),
+                ])),
+                implicit_casts_note(),
             ],
         )
     } else {
         let (after, notes) = lone_type(
             tipe,
             expected,
-            format!("The {direction} side of (/) must be a Float, but instead I am seeing:"),
+            sentence(
+                [
+                    words(&format!("The {direction} side of (/) must be a")),
+                    vec![Doc::cat2(yellow("Float"), Doc::text(","))],
+                    words("but instead I am seeing:"),
+                ]
+                .concat(),
+            ),
             vec![],
         );
-        ("The (/) operator is specifically for floating-point division:".to_string(), after, notes)
+        (before, after, notes)
     }
 }
 
 fn bad_idiv(direction: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
+    let before = Doc::reflow("The (//) operator is specifically for integer division:");
     if tipe.is_float() {
         (
-            "The (//) operator is for integer division:".to_string(),
-            format!(
-                "The {direction} side of (//) must be an Int, but I am seeing a Float. I recommend:"
+            before,
+            sentence(
+                [
+                    words(&format!("The {direction} side of (//) must be an")),
+                    vec![
+                        Doc::cat2(yellow("Int"), Doc::text(",")),
+                        Doc::text("but"),
+                        Doc::text("I"),
+                        Doc::text("am"),
+                        Doc::text("seeing"),
+                        Doc::text("a"),
+                        Doc::cat2(yellow("Float"), Doc::text(".")),
+                    ],
+                    words("I recommend doing the conversion explicitly with one of these functions:"),
+                ]
+                .concat(),
             ),
             vec![
-                Section::Block(
-                    "round for explicit conversions     (round 5.0 // 2) == 2\n\
-                     (/)   for floating-point division  (5.0 / 2)        == 2.5"
-                        .to_string(),
-                ),
-                Section::Para(
-                    "Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does \
-                     not implicitly convert Ints to Floats."
-                        .to_string(),
-                ),
+                Section::Para(Doc::vcat(vec![
+                    Doc::cat2(green("round"), Doc::text(" 3.5     == 4")),
+                    Doc::cat2(green("floor"), Doc::text(" 3.5     == 3")),
+                    Doc::cat2(green("ceiling"), Doc::text(" 3.5   == 4")),
+                    Doc::cat2(green("truncate"), Doc::text(" 3.5  == 3")),
+                ])),
+                implicit_casts_note(),
             ],
         )
     } else {
         let (after, notes) = lone_type(
             tipe,
             expected,
-            format!("The {direction} side of (//) must be an Int, but instead I am seeing:"),
+            sentence(
+                [
+                    words(&format!("The {direction} side of (//) must be an")),
+                    vec![Doc::cat2(yellow("Int"), Doc::text(","))],
+                    words("but instead I am seeing:"),
+                ]
+                .concat(),
+            ),
             vec![],
         );
-        ("The (//) operator is only for Int values:".to_string(), after, notes)
+        (before, after, notes)
     }
+}
+
+/// `D.link "Note" "Read" "implicit-casts" ...`, shared by the division and cast
+/// reports.
+fn implicit_casts_note() -> Section {
+    note(
+        [
+            words("Read"),
+            vec![link("implicit-casts")],
+            words("to learn why Elm does not implicitly convert Ints to Floats."),
+        ]
+        .concat(),
+    )
 }
 
 fn bad_bool(op: &str, direction: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
     let (after, notes) = lone_type(
         tipe,
         expected,
-        format!("The {direction} side of ({op}) must be a Bool, but instead I am seeing:"),
+        sentence(
+            [
+                words(&format!("Both sides of ({op}) must be")),
+                vec![yellow("Bool")],
+                words(&format!("values, but the {direction} side is:")),
+            ]
+            .concat(),
+        ),
         vec![],
     );
-    (format!("I am struggling with this boolean operation:"), after, notes)
+    (Doc::reflow("I am struggling with this boolean operation:"), after, notes)
 }
 
 fn bad_comp_left(category: &Category, op: &str, direction: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
     let (after, notes) = lone_type(
         tipe,
         expected,
-        add_category(&format!("The {direction} side of ({op}) is"), category),
-        vec![Section::Para(format!(
-            "But ({op}) only works on Int, Float, Char, and String values. It can work on lists \
-             and tuples of comparable values as well, but it is usually better to find a different \
-             path."
+        Doc::reflow(&add_category(&format!("The {direction} side of ({op}) is"), category)),
+        vec![Section::Para(sentence(
+            [
+                words(&format!("But ({op}) only works on")),
+                vec![
+                    Doc::cat2(yellow("Int"), Doc::text(",")),
+                    Doc::cat2(yellow("Float"), Doc::text(",")),
+                    Doc::cat2(yellow("Char"), Doc::text(",")),
+                    Doc::text("and"),
+                    yellow("String"),
+                ],
+                words(
+                    "values. It can work on lists and tuples of comparable values as well, but it \
+                     is usually better to find a different path.",
+                ),
+            ]
+            .concat(),
         ))],
     );
-    (format!("I cannot do a comparison with this value:"), after, notes)
+    (Doc::reflow("I cannot do a comparison with this value:"), after, notes)
 }
 
 fn bad_comp_right(op: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
+    // elm compares expected-then-actual here, so the left operand (already
+    // inferred) is shown first and the right one second.
     let (after, notes) = type_comparison(
-        tipe,
         expected,
+        tipe,
         format!("The left side of ({op}) is:"),
         "But the right side is:".to_string(),
-        vec![Section::Para(format!(
-            "Hint: I always check the left side of an operator first. If it seems fine, I assume \
-             it is correct and check the right side. So the problem may be in how the left and \
-             right arguments interact!"
+        vec![Section::para(format!(
+            "I cannot compare different types though! Which side of ({op}) is the problem?"
         ))],
     );
-    (
-        format!("I need both sides of ({op}) to be the same type:"),
-        after,
-        notes,
-    )
+    (Doc::reflow(&format!("I need both sides of ({op}) to be the same type:")), after, notes)
 }
 
 fn bad_equality(op: &str, tipe: &ErrorType, expected: &ErrorType) -> Docs {
-    let (after, mut notes) = type_comparison(
-        tipe,
+    let advice = if tipe.is_float() || expected.is_float() {
+        note(words(
+            "Equality on floats is not 100% reliable due to the design of IEEE 754. I recommend a \
+             check like (abs (x - y) < 0.0001) instead.",
+        ))
+    } else {
+        Section::para("Different types can never be equal though! Which side is messed up?")
+    };
+    let (after, notes) = type_comparison(
         expected,
+        tipe,
         format!("The left side of ({op}) is:"),
         "But the right side is:".to_string(),
-        vec![],
+        vec![advice],
     );
-    notes.push(Section::Para(if tipe.is_float() || expected.is_float() {
-        "Note: Equality on floats is not 100% reliable due to the design of IEEE 754. I \
-         recommend a check like (abs (x - y) < 0.0001) instead."
-            .to_string()
-    } else {
-        format!(
-            "Hint: Did you want to compare these two values? I always check the left side of an \
-             operator first. If it seems fine, I assume it is correct and check the right side. So \
-             the problem may be in how the left and right arguments interact!"
-        )
-    }));
-    (
-        format!("I need both sides of ({op}) to be the same type:"),
-        after,
-        notes,
-    )
+    (Doc::reflow(&format!("I need both sides of ({op}) to be the same type:")), after, notes)
 }
 
 fn bad_cons_right(category: &Category, tipe: &ErrorType, expected: &ErrorType) -> (bool, Docs) {
@@ -1710,16 +2062,12 @@ fn bad_cons_right(category: &Category, tipe: &ErrorType, expected: &ErrorType) -
             if let ErrorType::Type(h2, n2, expected_args) = expected {
                 if h2 == "List" && n2 == "List" && expected_args.len() == 1 {
                     let further = if is_list1(&expected_args[0]) {
-                        vec![Section::Para(
-                            "Hint: Are you trying to append two lists? The (++) operator appends \
-                             lists, whereas the (::) operator is only for adding ONE element to a \
-                             list."
-                                .to_string(),
-                        )]
+                        vec![hint(words(
+                            "Are you trying to append two lists? The (++) operator appends lists, \
+                             whereas the (::) operator is only for adding ONE element to a list.",
+                        ))]
                     } else {
-                        vec![Section::Para(
-                            "Lists need ALL elements to be the same type though.".to_string(),
-                        )]
+                        vec![Section::para("Lists need ALL elements to be the same type though.")]
                     };
                     let (after, notes) = type_comparison(
                         &expected_args[0],
@@ -1730,7 +2078,11 @@ fn bad_cons_right(category: &Category, tipe: &ErrorType, expected: &ErrorType) -
                     );
                     return (
                         false,
-                        ("I am having trouble with this (::) operator:".to_string(), after, notes),
+                        (
+                            Doc::reflow("I am having trouble with this (::) operator:"),
+                            after,
+                            notes,
+                        ),
                     );
                 }
             }
@@ -1740,10 +2092,15 @@ fn bad_cons_right(category: &Category, tipe: &ErrorType, expected: &ErrorType) -
     let (after, notes) = lone_type(
         tipe,
         expected,
-        add_category("The right side is", category),
-        vec![Section::Para("But (::) needs a List on the right.".to_string())],
+        Doc::reflow(&add_category("The right side is", category)),
+        vec![Section::Para(sentence(
+            [words("But (::) needs a"), vec![yellow("List")], words("on the right.")].concat(),
+        ))],
     );
-    (true, ("The (::) operator can only add elements onto lists.".to_string(), after, notes))
+    (
+        true,
+        (Doc::reflow("The (::) operator can only add elements onto lists."), after, notes),
+    )
 }
 
 /// `toAppendType`: what kind of thing is being appended.
@@ -1768,12 +2125,24 @@ fn to_append_type(tipe: &ErrorType) -> AppendType {
 fn bad_append_left(category: &Category, tipe: &ErrorType, expected: &ErrorType) -> Docs {
     match to_append_type(tipe) {
         AppendType::ANumber(thing, string_from_thing) => (
-            format!(
-                "The (++) operator can append List and String values, but not {thing} values like this:"
+            sentence(
+                [
+                    words("The (++) operator can append List and String values, but not"),
+                    vec![yellow(thing)],
+                    words("values like this:"),
+                ]
+                .concat(),
             ),
-            format!(
-                "Try using {string_from_thing} to turn it into a string? Or put it in [] to make \
-                 it a list? Or switch to the (::) operator?"
+            sentence(
+                [
+                    words("Try using"),
+                    vec![green(string_from_thing)],
+                    words(
+                        "to turn it into a string? Or put it in [] to make it a list? Or switch to \
+                         the (::) operator?",
+                    ),
+                ]
+                .concat(),
             ),
             vec![],
         ),
@@ -1781,14 +2150,17 @@ fn bad_append_left(category: &Category, tipe: &ErrorType, expected: &ErrorType) 
             let (after, notes) = lone_type(
                 tipe,
                 expected,
-                add_category("I am seeing", category),
-                vec![Section::Para(
-                    "But the (++) operator is only for appending List and String values. Maybe put \
-                     this value in [] to make it a list?"
-                        .to_string(),
-                )],
+                Doc::reflow(&add_category("I am seeing", category)),
+                vec![Section::Para(sentence(
+                    [
+                        words("But the (++) operator is only for appending"),
+                        vec![yellow("List"), Doc::text("and"), yellow("String")],
+                        words("values. Maybe put this value in [] to make it a list?"),
+                    ]
+                    .concat(),
+                ))],
             );
-            ("The (++) operator cannot append this type of value:".to_string(), after, notes)
+            (Doc::reflow("The (++) operator cannot append this type of value:"), after, notes)
         }
     }
 }
@@ -1798,38 +2170,81 @@ fn bad_append_right(category: &Category, tipe: &ErrorType, expected: &ErrorType)
         (AppendType::AString, AppendType::ANumber(thing, string_from_thing)) => (
             true,
             (
-                format!(
-                    "I thought I was appending String values here, not {thing} values like this:"
+                sentence(
+                    [
+                        words("I thought I was appending"),
+                        vec![yellow("String")],
+                        words("values here, not"),
+                        vec![yellow(thing)],
+                        words("values like this:"),
+                    ]
+                    .concat(),
                 ),
-                format!("Try using {string_from_thing} to turn it into a string?"),
+                sentence(
+                    [
+                        words("Try using"),
+                        vec![green(string_from_thing)],
+                        words("to turn it into a string?"),
+                    ]
+                    .concat(),
+                ),
                 vec![],
             ),
         ),
         (AppendType::AList, AppendType::ANumber(thing, _)) => (
             true,
             (
-                format!("I thought I was appending List values here, not {thing} values like this:"),
-                "Try putting it in [] to make it a list?".to_string(),
+                sentence(
+                    [
+                        words("I thought I was appending"),
+                        vec![yellow("List")],
+                        words("values here, not"),
+                        vec![yellow(thing)],
+                        words("values like this:"),
+                    ]
+                    .concat(),
+                ),
+                Doc::reflow("Try putting it in [] to make it a list?"),
                 vec![],
             ),
         ),
         (AppendType::AString, AppendType::AList) => (
             false,
             (
-                "The (++) operator needs the same type of value on both sides:".to_string(),
-                "I see a String on the left and a List on the right. Which should it be? Does the \
-                 string need [] around it to become a list?"
-                    .to_string(),
+                Doc::reflow("The (++) operator needs the same type of value on both sides:"),
+                sentence(
+                    [
+                        words("I see a"),
+                        vec![yellow("String")],
+                        words("on the left and a"),
+                        vec![yellow("List")],
+                        words(
+                            "on the right. Which should it be? Does the string need [] around it \
+                             to become a list?",
+                        ),
+                    ]
+                    .concat(),
+                ),
                 vec![],
             ),
         ),
         (AppendType::AList, AppendType::AString) => (
             false,
             (
-                "The (++) operator needs the same type of value on both sides:".to_string(),
-                "I see a List on the left and a String on the right. Which should it be? Does the \
-                 string need [] around it to become a list?"
-                    .to_string(),
+                Doc::reflow("The (++) operator needs the same type of value on both sides:"),
+                sentence(
+                    [
+                        words("I see a"),
+                        vec![yellow("List")],
+                        words("on the left and a"),
+                        vec![yellow("String")],
+                        words(
+                            "on the right. Which should it be? Does the string need [] around it \
+                             to become a list?",
+                        ),
+                    ]
+                    .concat(),
+                ),
                 vec![],
             ),
         ),
@@ -1843,7 +2258,7 @@ fn bad_append_right(category: &Category, tipe: &ErrorType, expected: &ErrorType)
             );
             (
                 false,
-                ("The (++) operator cannot append these two values:".to_string(), after, notes),
+                (Doc::reflow("The (++) operator cannot append these two values:"), after, notes),
             )
         }
     }
@@ -1901,19 +2316,19 @@ fn add_pattern_category(trying_to_match: &str, category: &PCategory) -> String {
 fn pattern_type_comparison(
     actual: &ErrorType,
     expected: &ErrorType,
-    i_am_seeing: String,
-    instead_of: String,
+    i_am_seeing: impl Into<Doc>,
+    instead_of: impl Into<Doc>,
     context_hints: Vec<Section>,
-) -> (String, Vec<Section>) {
+) -> (Doc, Vec<Section>) {
     let (actual_doc, expected_doc, problems) = to_comparison(actual, expected);
     let mut notes = vec![
-        Section::Block(actual_doc),
-        Section::Para(instead_of),
-        Section::Block(expected_doc),
+        Section::Para(actual_doc),
+        Section::Para(instead_of.into()),
+        Section::Para(expected_doc),
     ];
     notes.extend(problems_to_hint(&problems));
     notes.extend(context_hints);
-    (i_am_seeing, notes)
+    (i_am_seeing.into(), notes)
 }
 
 /// `Reporting.Error.Type.toPatternReport`.
@@ -1958,7 +2373,7 @@ pub fn to_pattern_report(
                     "The 1st pattern in this `case` causing a mismatch:".to_string(),
                     add_pattern_category("The first pattern is trying to match", category),
                     "But the expression between `case` and `of` is:".to_string(),
-                    vec![Section::Para(
+                    vec![Section::para(
                         "These can never match! Is the pattern the problem? Or is it the                          expression?"
                             .to_string(),
                     )],
@@ -1969,7 +2384,7 @@ pub fn to_pattern_report(
                         format!("The {ith} pattern in this `case` does not match the previous ones."),
                         add_pattern_category(&format!("The {ith} pattern is trying to match"), category),
                         "But all the previous patterns match:".to_string(),
-                        vec![Section::Para(
+                        vec![Section::para(
                             "Note: A `case` expression can only handle one type of value, so you                              may want to use <https://elm-lang.org/0.19.1/custom-types> to handle                              “mixing” types."
                                 .to_string(),
                         )],
@@ -1990,7 +2405,7 @@ pub fn to_pattern_report(
                         format!("The {ith} pattern in this list does not match all the previous ones:"),
                         add_pattern_category(&format!("The {ith} pattern is trying to match"), category),
                         "But all the previous patterns in the list are:".to_string(),
-                        vec![Section::Para(
+                        vec![Section::para(
                             "Hint: Everything in a list must be the same type of value. This way,                              we never run into unexpected values partway through a List.map,                              List.foldl, etc. Read <https://elm-lang.org/0.19.1/custom-types> to                              learn how to “mix” types."
                                 .to_string(),
                         )],

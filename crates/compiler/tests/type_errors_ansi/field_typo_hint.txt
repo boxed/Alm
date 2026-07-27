@@ -1,0 +1,13 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+This `point` record does not have a `nmae` field:
+
+11|     point.nmae
+              [91m^^^^[0m
+This is usually a typo. Here are the `point` fields that are most similar:
+
+    { name : String
+    }
+
+So maybe [33mnmae[0m should be [92mname[0m?
+

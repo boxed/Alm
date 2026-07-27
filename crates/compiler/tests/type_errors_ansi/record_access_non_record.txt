@@ -1,0 +1,14 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+This is not a record, so it has no fields to access!
+
+6|     (5).name
+        [91m^[0m
+It is a number of type:
+
+    [33mnumber[0m
+
+But I need a record with a [33mname[0m field!
+
+[4mHint[0m: Only [92mInt[0m and [92mFloat[0m values work as numbers.
+

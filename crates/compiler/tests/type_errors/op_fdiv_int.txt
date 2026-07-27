@@ -1,0 +1,14 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The (/) operator is specifically for floating-point division:
+
+11|     n / 2
+        ^
+The left side of (/) must be a Float, but I am seeing an Int. I recommend:
+
+toFloat for explicit conversions     (toFloat 5 / 2) == 2.5
+(//)    for integer division         (5 // 2)        == 2
+
+Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats.
+

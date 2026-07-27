@@ -1,0 +1,9 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The (++) operator needs the same type of value on both sides:
+
+6|     [ 1, 2 ] ++ "three"
+       ^^^^^^^^^^^^^^^^^^^
+I see a List on the left and a String on the right. Which should it be? Does the
+string need [] around it to become a list?
+

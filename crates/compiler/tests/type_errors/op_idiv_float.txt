@@ -1,0 +1,17 @@
+-- TYPE MISMATCH -------------------------------------------------- src/Main.elm
+
+The (//) operator is specifically for integer division:
+
+11|     x // 2
+        ^
+The left side of (//) must be an Int, but I am seeing a Float. I recommend doing
+the conversion explicitly with one of these functions:
+
+round 3.5     == 4
+floor 3.5     == 3
+ceiling 3.5   == 4
+truncate 3.5  == 3
+
+Note: Read <https://elm-lang.org/0.19.1/implicit-casts> to learn why Elm does
+not implicitly convert Ints to Floats.
+

@@ -1,0 +1,18 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+This `if` condition does not evaluate to a boolean value, True or False.
+
+ 6|[91m>[0m    if 1 then
+ 7|         1
+ 8| 
+ 9|     else
+10|         2
+
+It is a number of type:
+
+    [33mnumber[0m
+
+But I need this `if` condition to be a [33mBool[0m value.
+
+[4mHint[0m: Only [92mInt[0m and [92mFloat[0m values work as numbers.
+

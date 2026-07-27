@@ -1,0 +1,19 @@
+[36m-- TYPE MISMATCH -------------------------------------------------- src/Main.elm[0m
+
+I cannot update the `x` field like this:
+
+11|     { point | x = "one" }
+                      [91m^^^^^[0m
+You are trying to update `x` to be a string of type:
+
+    [33mString[0m
+
+But it should be:
+
+    [33mInt[0m
+
+[4mNote[0m: The record update syntax does not allow you to change the type of fields.
+You can achieve that with record constructors or the record literal syntax.
+
+[4mHint[0m: Want to convert a String into an Int? Use the [92mString.toInt[0m function!
+
