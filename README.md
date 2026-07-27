@@ -60,7 +60,8 @@ app.ports.somePort.subscribe(function (value) { ... });
   `effect module` misuse, and application/package port validation all render
   identically to the official compiler — pinned by a differential test suite
   of 89 fixtures that diffs alm against `elm make` 0.19.1 output
-  byte-for-byte. Malformed GLSL in a `[glsl|…|]` block is also caught
+  byte-for-byte, in plain text, in color, and as `--report=json`.
+  Malformed GLSL in a `[glsl|…|]` block is also caught
   (`SHADER PROBLEM`), via a vendored Rust GLSL parser; its embedded message
   differs from elm's, which delegates to a different 3rd-party parser, so
   that one report is not byte-exact.
@@ -74,10 +75,20 @@ app.ports.somePort.subscribe(function (value) { ... });
   element of a list, which side of which operator, which field of a record
   update, which pattern in a `case`. All of a module's errors are reported,
   not just the first, and several failing modules are separated the way elm
-  separates them. Pinned by a differential suite of 30 fixtures; 29 match
+  separates them. Pinned by a differential suite of 42 fixtures; 41 match
   `elm make` byte-for-byte on both stdout and stderr. The exception is the
   occurs check: alm has none, so a self-referential type is reported as an
   ordinary mismatch rather than elm's `INFINITE TYPE`.
+- **Color and `--report=json`**: in a terminal the reports are colored
+  exactly as elm colors them — a dull-cyan header bar, vivid-red carets,
+  dull-yellow for the thing at fault, vivid green for what to use instead,
+  vivid cyan for Elm keywords quoted in prose, an underlined `Hint`/`Note`
+  label — and piped output stays plain, matching elm's "is stderr a
+  terminal" rule (`NO_COLOR`/`CLICOLOR_FORCE` are honored too, which elm
+  does not do). `--report=json` emits the machine-readable form editor
+  plugins consume, with each message an array of styled runs. Both are held
+  to the same fixtures as the plain text: every syntax-error fixture matches
+  byte-for-byte in all three renderings.
 - **Multi-module + package builds**: dependency-ordered compilation
   against module interfaces; pure packages (Json.Decode.Pipeline,
   Round, maybe-extra, elm-sentry, html-extra, ...) compile from their
