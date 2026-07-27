@@ -55,7 +55,7 @@ pub fn run(color: bool) -> ExitCode {
 }
 
 /// `[Y/n]` — anything but an explicit "n"/"no" is yes, including just Enter.
-fn approved() -> bool {
+pub fn approved() -> bool {
     let mut answer = String::new();
     if std::io::stdin().read_line(&mut answer).is_err() {
         return false;
@@ -94,7 +94,7 @@ fn question() -> String {
 }
 
 fn already_exists(color: bool) -> String {
-    render(
+    report(
         "EXISTING PROJECT",
         Doc::reflow(
             "You already have an elm.json file, so there is nothing for me to initialize!",
@@ -112,7 +112,7 @@ fn already_exists(color: bool) -> String {
 }
 
 fn no_solution(package: &str, color: bool) -> String {
-    render(
+    report(
         "NO OFFLINE SOLUTION",
         Doc::reflow(&format!(
             "I could not find a version of {package} in your ~/.elm package cache that fits \
@@ -130,7 +130,7 @@ fn no_solution(package: &str, color: bool) -> String {
 /// A whole-command report, in the shape `Reporting.Exit.Help` gives one: a
 /// header bar that runs to the margin, then two paragraphs. With no source
 /// snippet, `after` is simply the second paragraph.
-fn render(title: &str, before: Doc, after: Doc, color: bool) -> String {
+pub fn report(title: &str, before: Doc, after: Doc, color: bool) -> String {
     let report = alm_compiler::reporting::Report {
         title: title.to_string(),
         region: alm_compiler::reporting::Region::ZERO,

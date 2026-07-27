@@ -202,8 +202,45 @@ pub fn solve(
     Err(SolveError::Unsatisfiable("(constraints do not settle)".to_string()))
 }
 
+/// The string value of a top-level `"key": "value"`.
+pub fn json_string<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let at = json.find(&format!("\"{key}\""))?;
+    let rest = &json[at + key.len() + 2..];
+    let colon = rest.find(':')?;
+    let after = &rest[colon + 1..];
+    let open = after.find('"')?;
+    let value = &after[open + 1..];
+    let end = value.find('"')?;
+    Some(&value[..end])
+}
+
+/// Replace the body of the `{ … }` following `"key":`, keeping the rest of the
+/// document byte-for-byte. An elm.json may carry fields alm does not model, so
+/// rewriting only the block that changed is safer than regenerating the file.
+pub fn replace_object_block(json: &str, key: &str, body: &str) -> Option<String> {
+    let at = json.find(&format!("\"{key}\""))?;
+    let rest = &json[at..];
+    let open = rest.find('{')?;
+    let mut depth = 0;
+    for (i, byte) in rest.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let start = at + open + 1;
+                    let end = at + open + i;
+                    return Some(format!("{}{}{}", &json[..start], body, &json[end..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The `{ … }` following `"key":`, without its braces.
-fn object_block<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+pub fn object_block<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let at = json.find(&format!("\"{key}\""))?;
     let rest = &json[at..];
     let open = rest.find('{')?;
@@ -224,7 +261,7 @@ fn object_block<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// The `"key": "value"` pairs directly inside an object body.
-fn pairs(block: &str) -> Vec<(&str, &str)> {
+pub fn pairs(block: &str) -> Vec<(&str, &str)> {
     let mut out = Vec::new();
     let mut rest = block;
     while let Some(start) = rest.find('"') {

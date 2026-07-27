@@ -230,3 +230,112 @@ fn init_refuses_to_overwrite() {
         "the existing elm.json must be left alone"
     );
 }
+
+/// `alm install <package>` in `dir`, answering the prompt with `answer`.
+fn alm_install(dir: &Path, package: &str, answer: &str) -> (bool, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["install", package])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run alm install");
+    child.stdin.take().unwrap().write_all(answer.as_bytes()).unwrap();
+    let output = child.wait_with_output().expect("wait");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn dependencies(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("elm.json")).expect("elm.json")
+}
+
+#[test]
+fn install_adds_a_package_and_what_it_needs() {
+    let dir = temp_dir();
+    assert!(alm_init(&dir, "Y\n").0);
+
+    let (ok, stdout, stderr) = alm_install(&dir, "elm/http", "Y\n");
+    assert!(ok, "install failed: {stderr}");
+    assert!(stdout.starts_with("Here is my plan:"), "stdout: {stdout}");
+    assert!(stdout.ends_with("Success!\n"), "stdout: {stdout}");
+
+    let outline = dependencies(&dir);
+    assert!(outline.contains("\"elm/http\""), "http should be a dependency:\n{outline}");
+    // Its own requirements come along as indirect dependencies.
+    for needed in ["elm/bytes", "elm/file"] {
+        assert!(outline.contains(needed), "{needed} should have come along:\n{outline}");
+    }
+    // The project still builds afterwards.
+    std::fs::write(
+        dir.join("src/Main.elm"),
+        "module Main exposing (main)\n\nimport Html\nimport Http\n\n\n\
+         main : Html.Html msg\nmain =\n    Html.text (Debug.toString Http.emptyBody)\n",
+    )
+    .unwrap();
+    let built = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["make", "src/Main.elm", "--output=/dev/null"])
+        .current_dir(&*dir)
+        .output()
+        .expect("run alm make");
+    assert!(
+        built.status.success(),
+        "the project should still compile:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+}
+
+/// A package already in `direct` needs no work; one in `indirect` is offered a
+/// promotion instead of a re-solve.
+#[test]
+fn install_recognizes_what_is_already_there() {
+    let dir = temp_dir();
+    assert!(alm_init(&dir, "Y\n").0);
+
+    let (ok, stdout, _) = alm_install(&dir, "elm/core", "");
+    assert!(ok);
+    assert_eq!(stdout, "It is already installed!\n");
+
+    // elm/json arrives as an indirect dependency of the defaults.
+    let before = dependencies(&dir);
+    assert!(before.contains("elm/json"));
+    let (ok, stdout, _) = alm_install(&dir, "elm/json", "Y\n");
+    assert!(ok);
+    assert!(
+        stdout.starts_with("I found it in your elm.json file, but in the \"indirect\""),
+        "stdout: {stdout}"
+    );
+    let after = dependencies(&dir);
+    let direct_block = after.split("\"indirect\"").next().unwrap();
+    assert!(direct_block.contains("elm/json"), "should have moved to direct:\n{after}");
+}
+
+#[test]
+fn install_leaves_things_alone_when_declined() {
+    let dir = temp_dir();
+    assert!(alm_init(&dir, "Y\n").0);
+    let before = dependencies(&dir);
+
+    let (ok, stdout, _) = alm_install(&dir, "elm/http", "n\n");
+    assert!(ok, "declining is not an error");
+    assert!(stdout.contains("Okay, I did not change anything!"), "stdout: {stdout}");
+    assert_eq!(dependencies(&dir), before, "elm.json must be untouched");
+}
+
+#[test]
+fn install_needs_a_project_and_a_real_name() {
+    let dir = temp_dir();
+    let (ok, _, stderr) = alm_install(&dir, "elm/http", "Y\n");
+    assert!(!ok);
+    assert!(stderr.starts_with("-- NO elm.json FILE ---"), "stderr: {stderr}");
+
+    assert!(alm_init(&dir, "Y\n").0);
+    let (ok, _, stderr) = alm_install(&dir, "nonsense", "Y\n");
+    assert!(!ok);
+    assert!(stderr.starts_with("-- BAD PACKAGE NAME ---"), "stderr: {stderr}");
+}

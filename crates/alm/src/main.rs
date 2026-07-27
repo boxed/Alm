@@ -1,4 +1,5 @@
 mod init;
+mod install;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -14,6 +15,13 @@ fn main() -> ExitCode {
             }
             init::run(use_color())
         }
+        Some("install") => match &args[1..] {
+            [package] => install::run(package, use_color()),
+            _ => {
+                eprintln!("Usage: alm install <author/package>");
+                ExitCode::FAILURE
+            }
+        },
         Some("--help" | "-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -31,12 +39,14 @@ fn print_help() {
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
          \x20   alm init\n\
+         \x20   alm install <author/package>\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
          `init` starts a project: it writes an elm.json and creates src/.\n\
          Dependencies are resolved from the packages already in ~/.elm, so it\n\
-         works offline and downloads nothing.\n\n\
+         works offline and downloads nothing, and `install` adds a package\n\
+         to an existing elm.json the same way.\n\n\
          `make` compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
