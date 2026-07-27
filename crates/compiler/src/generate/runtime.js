@@ -5318,7 +5318,12 @@ function _Platform_initialize(program, opts) {
 
     var model;
     var initialCmd = null;
-    if (isSandbox) {
+    // A hot swap hands the running model back in. `init` is skipped entirely:
+    // re-running it would redo whatever the program does on startup, and its
+    // initial Cmd would fire a second time.
+    if (opts && opts.__alm_model !== undefined) {
+        model = opts.__alm_model;
+    } else if (isSandbox) {
         model = impl.init;
     } else if (program.kind === 'application') {
         var key = { $: 'Key' };
@@ -5599,5 +5604,47 @@ function _Platform_initialize(program, opts) {
         }
     });
 
-    return { ports: ports };
+    // Hooks the live-reload shim uses to swap this program for a new build.
+    // Detaching the document-level listeners and stopping the scheduled work
+    // is what keeps a swapped-out program from going on reacting to events
+    // behind its replacement.
+    function teardown() {
+        for (var i = 0; i < activeDomSubs.length; i++) {
+            var sub = activeDomSubs[i];
+            if (doc) { doc.removeEventListener(sub.name, sub.handler); }
+        }
+        activeDomSubs = [];
+        activePortSubs = {};
+        if (animationFrame !== null) {
+            if (typeof cancelAnimationFrame === 'function') {
+                cancelAnimationFrame(animationFrame);
+            }
+            animationFrame = null;
+        }
+        // An effect manager owns real resources (Time's intervals, Http's
+        // in-flight requests). Handing it an empty effect set is how it is
+        // told to let them go — the same message it gets when the last
+        // subscription disappears. Its route back into the app is cut too, so
+        // anything already in flight cannot reach the program being replaced.
+        for (var h = 0; h < managerHomes.length; h++) {
+            var proc = managerProcs[managerHomes[h]];
+            if (!proc) { continue; }
+            _Platform_sendToManager(proc, {
+                type: 'fx', cmds: _List_fromArray([]), subs: _List_fromArray([])
+            });
+            proc.router.sendToApp = function () {};
+        }
+        managerProcs = {};
+    }
+
+    return {
+        ports: ports,
+        __alm_model: function () { return model; },
+        // Mounting *replaces* `opts.node` with the rendered root, so the node
+        // the caller passed in is detached the moment the program starts. A
+        // swap has to be told where the program actually lives.
+        __alm_root: function () { return root; },
+        __alm_kind: program.kind,
+        __alm_teardown: teardown
+    };
 }

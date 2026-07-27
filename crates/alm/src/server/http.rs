@@ -20,6 +20,8 @@ pub struct Response {
     pub status: u16,
     pub reason: &'static str,
     pub content_type: String,
+    /// Extra headers, for the few things that do not fit in a content type.
+    pub headers: Vec<(String, String)>,
     pub body: Body,
 }
 
@@ -27,6 +29,10 @@ pub enum Body {
     Bytes(Vec<u8>),
     /// A file to stream, so serving a large asset does not read it all in.
     File(std::path::PathBuf, u64),
+    /// An open-ended stream of Server-Sent Events. There is no
+    /// `Content-Length`: the response stays open until the browser goes away,
+    /// which is how the page hears about a rebuild.
+    Events(std::sync::mpsc::Receiver<String>),
 }
 
 impl Response {
@@ -35,6 +41,7 @@ impl Response {
             status: 200,
             reason: "OK",
             content_type: "text/html;charset=utf-8".to_string(),
+            headers: Vec::new(),
             body: Body::Bytes(body.into_bytes()),
         }
     }
@@ -48,7 +55,28 @@ impl Response {
             status: 200,
             reason: "OK",
             content_type: content_type.to_string(),
+            headers: Vec::new(),
             body: Body::File(path.to_path_buf(), length),
+        }
+    }
+
+    pub fn events(stream: std::sync::mpsc::Receiver<String>) -> Response {
+        Response {
+            status: 200,
+            reason: "OK",
+            content_type: "text/event-stream".to_string(),
+            headers: Vec::new(),
+            body: Body::Events(stream),
+        }
+    }
+
+    pub fn text(status: u16, reason: &'static str, body: &str) -> Response {
+        Response {
+            status,
+            reason,
+            content_type: "text/plain;charset=utf-8".to_string(),
+            headers: Vec::new(),
+            body: Body::Bytes(body.as_bytes().to_vec()),
         }
     }
 }
@@ -84,18 +112,27 @@ where
             status: 405,
             reason: "Method Not Allowed",
             content_type: "text/plain;charset=utf-8".to_string(),
+            headers: Vec::new(),
             body: Body::Bytes(b"Only GET is supported.".to_vec()),
         },
     };
 
     let length = match &response.body {
-        Body::Bytes(bytes) => bytes.len() as u64,
-        Body::File(_, length) => *length,
+        Body::Bytes(bytes) => Some(bytes.len() as u64),
+        Body::File(_, length) => Some(*length),
+        Body::Events(_) => None,
     };
+    let framing = match length {
+        Some(length) => format!("Content-Length: {length}\r\n"),
+        None => String::new(),
+    };
+    let extra: String =
+        response.headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
     let head = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
-         Content-Length: {length}\r\n\
+         {framing}\
+         {extra}\
          Cache-Control: no-store\r\n\
          Connection: close\r\n\r\n",
         response.status, response.reason, response.content_type
@@ -109,6 +146,14 @@ where
         Body::File(path, _) => {
             let mut file = std::fs::File::open(path)?;
             std::io::copy(&mut file, &mut stream)?;
+        }
+        Body::Events(events) => {
+            // Runs until the browser disconnects, which surfaces as a write
+            // error — the ordinary way one of these ends.
+            for event in events {
+                stream.write_all(event.as_bytes())?;
+                stream.flush()?;
+            }
         }
     }
     stream.flush()

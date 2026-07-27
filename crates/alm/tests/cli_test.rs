@@ -693,7 +693,7 @@ fn reactor_serves_compiles_and_refuses_to_escape() {
     assert!(status.starts_with("HTTP/1.1 200"), "{status}");
     assert!(body.starts_with("<!DOCTYPE HTML>"), "{body}");
     assert!(
-        body.contains("var app = Elm.Main.init({ node: document.getElementById(\"elm\") });"),
+        body.contains("var app = Elm.Main.init({ node: node });"),
         "no init call in the page"
     );
 
@@ -1050,4 +1050,186 @@ fn repl_keeps_an_annotation_with_its_definition() {
     assert!(stdout.contains("3 : Int"), "stdout: {stdout}");
     // The annotation survived, so floats are rejected.
     assert!(stderr.contains("`f` needs the 1st argument to be"), "stderr: {stderr}");
+}
+
+/// Read from an SSE stream until `count` events have arrived or the deadline
+/// passes, returning what was received.
+fn read_events(port: u16, count: usize, deadline: std::time::Duration) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
+    stream
+        .write_all(
+            b"GET /_alm/live HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n",
+        )
+        .unwrap();
+    let start = std::time::Instant::now();
+    let mut text = String::new();
+    let mut buf = [0u8; 4096];
+    while start.elapsed() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(_) => {}
+        }
+        if text.matches("event: ").count() >= count {
+            break;
+        }
+    }
+    text
+}
+
+fn start(dir: &Path, args: &[&str]) -> (std::process::Child, u16) {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    all.push(format!("--port={port}"));
+    let child = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(&all)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start alm");
+    for _ in 0..200 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return (child, port);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("server never came up on port {port}");
+}
+
+/// A counter program, so a swap has state worth preserving.
+fn counter_project(dir: &Path) -> PathBuf {
+    let project = dir.join("live");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/Main.elm"),
+        "module Main exposing (main)\n\nmain = \"one\"\n",
+    )
+    .unwrap();
+    project
+}
+
+#[test]
+fn live_updating_tells_the_page_when_sources_change() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) = start(&project, &["reactor"]);
+
+    // The shim is in the page and points at the live endpoint.
+    let (_, _, body) = get(port, "/src/Main.elm");
+    assert!(body.contains("/_alm/live"), "no shim in the page");
+    assert!(body.contains("EventSource"), "no shim in the page");
+
+    // An edit produces an event on the stream.
+    let source = project.join("src/Main.elm");
+    let reader = std::thread::spawn(move || {
+        read_events(port, 1, std::time::Duration::from_secs(8))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    std::fs::write(&source, "module Main exposing (main)\n\nmain = \"two\"\n").unwrap();
+    let events = reader.join().unwrap();
+    assert!(events.contains(": connected"), "no greeting: {events}");
+    assert!(events.contains("event: changed"), "no change event: {events}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn no_hot_reload_turns_the_whole_thing_off() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) = start(&project, &["reactor", "--no-hot-reload"]);
+
+    let (_, _, body) = get(port, "/src/Main.elm");
+    assert!(!body.contains("_alm/live"), "the page must not be given a shim");
+    assert!(!body.contains("__alm_app__"), "no swap handles either");
+    let (status, _, _) = get(port, "/_alm/live");
+    assert!(status.starts_with("HTTP/1.1 404"), "the endpoint must be gone: {status}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn make_live_serves_the_program_and_its_bundle() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) = start(&project, &["make", "src/Main.elm", "--live"]);
+
+    let (status, _, body) = get(port, "/");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(body.contains("Elm.Main.init"), "the program is not on the page");
+    assert!(body.contains("/_alm/bundle.js"), "the shim has nowhere to fetch from");
+
+    // The bundle is the program on its own, so a swap can evaluate it.
+    let (status, headers, bundle) = get(port, "/_alm/bundle.js");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(headers.contains("text/javascript"), "{headers}");
+    assert!(bundle.contains("_Platform_export"), "that is not a bundle");
+    assert!(!bundle.contains("<!DOCTYPE"), "the bundle must not be a page");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A build that fails is reported on the stream rather than taking the server
+/// down, and the last good program stays available.
+#[test]
+fn a_failed_rebuild_is_reported_and_the_last_good_build_survives() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) = start(&project, &["make", "src/Main.elm", "--live"]);
+
+    let source = project.join("src/Main.elm");
+    let reader =
+        std::thread::spawn(move || read_events(port, 1, std::time::Duration::from_secs(10)));
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    std::fs::write(&source, "module Main exposing (main)\n\nmain = 1 + \"nope\"\n").unwrap();
+    let events = reader.join().unwrap();
+    assert!(events.contains("event: failed"), "no failure event: {events}");
+    assert!(events.contains("TYPE MISMATCH"), "the reports are not in the event: {events}");
+    // The reports must survive being put in a `data:` field.
+    assert!(
+        !events.split("event: failed").nth(1).unwrap().starts_with("\ndata:\n"),
+        "the data field is empty"
+    );
+
+    // The program from the last build that worked is still being served.
+    let (status, _, bundle) = get(port, "/_alm/bundle.js");
+    assert!(status.starts_with("HTTP/1.1 200"), "the good build should still serve: {status}");
+    assert!(bundle.contains("_Platform_export"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn make_live_rejects_flags_that_describe_an_output() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    for flag in ["--output=out.js", "--optimize", "--target=native", "--source-maps"] {
+        let (ok, _, stderr) = {
+            let output = Command::new(env!("CARGO_BIN_EXE_alm"))
+                .args(["make", "src/Main.elm", "--live", flag])
+                .current_dir(&project)
+                .output()
+                .expect("run alm");
+            (output.status.success(), (), String::from_utf8_lossy(&output.stderr).into_owned())
+        };
+        assert!(!ok, "{flag} should be refused");
+        assert!(stderr.contains("does not go with `--live`"), "{flag}: {stderr}");
+    }
 }

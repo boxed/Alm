@@ -5,6 +5,8 @@ mod install;
 mod publish;
 mod reactor;
 mod repl;
+mod serve;
+mod server;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -64,10 +66,11 @@ fn print_help() {
          \x20   alm install <author/package>\n\
          \x20   alm diff [<package>] [<version> [<version>]]\n\
          \x20   alm bump\n\
-         \x20   alm reactor [--port=8000]\n\
+         \x20   alm reactor [--port=8000] [--no-hot-reload]\n\
          \x20   alm publish\n\
          \x20   alm repl [--interpreter=node] [--no-colors]\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
+         \x20                       [--live [--port=8000] [--no-hot-reload]]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
          `init` starts a project: it writes an elm.json and creates src/.\n\
@@ -79,7 +82,8 @@ fn print_help() {
          code here against the newest release in ~/.elm, and `bump` sets\n\
          the version in elm.json to whatever that change calls for.\n\
          `reactor` serves the current directory: browse to an Elm file and it\n\
-         compiles and runs.\n\
+         compiles and runs; open pages reload themselves when you\n\
+         edit. `--no-hot-reload` turns all live updating off, for both.\n\
          `publish` runs every pre-publication check that can be answered\n\
          locally; alm never uploads, so `elm publish` still does the register.\n\
          `repl` is an interactive prompt: it compiles each entry and runs it\n\
@@ -94,7 +98,10 @@ fn print_help() {
          `--optimize` is elm's production build; it refuses to compile while\n\
          any `Debug` call survives. `--report=json` writes diagnostics to\n\
          stderr as JSON for editors. `--docs=<file>` writes a package's\n\
-         docs.json."
+         docs.json.\n\
+         `--live` serves the program instead of writing it, rebuilding and\n\
+         updating the open page whenever a source changes; the model is kept\n\
+         across the swap when the new build still agrees what a Model is."
     );
 }
 
@@ -122,6 +129,11 @@ fn make(args: &[String]) -> ExitCode {
     let mut optimize = false;
     // `--docs=<file>`: write a package's docs.json.
     let mut docs: Option<PathBuf> = None;
+    // `--live`: serve the program instead of writing it, rebuilding as its
+    // sources change. `--no-hot-reload` keeps the server but stops it pushing.
+    let mut live = false;
+    let mut live_port: u16 = 8000;
+    let mut updating = true;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
@@ -133,6 +145,18 @@ fn make(args: &[String]) -> ExitCode {
             optimize = true;
         } else if let Some(path) = arg.strip_prefix("--docs=") {
             docs = Some(PathBuf::from(path));
+        } else if arg == "--live" {
+            live = true;
+        } else if arg == "--no-hot-reload" {
+            updating = false;
+        } else if let Some(value) = arg.strip_prefix("--port=") {
+            match value.parse() {
+                Ok(parsed) => live_port = parsed,
+                Err(_) => {
+                    eprintln!("`{value}` is not a port number.");
+                    return ExitCode::FAILURE;
+                }
+            }
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
@@ -166,6 +190,30 @@ fn make(args: &[String]) -> ExitCode {
         eprintln!("Which .elm file should I compile? For example:\n\n    alm make src/Main.elm");
         return ExitCode::FAILURE;
     };
+
+    if live {
+        // Serving is what `--live` does instead of writing an output file, so
+        // the flags that describe an output have nothing to act on.
+        for (flag, set) in [
+            ("--output", output.is_some()),
+            ("--docs", docs.is_some()),
+            ("--target", !matches!(backend, Backend::Js)),
+            ("--source-maps", source_maps),
+            ("--optimize", optimize),
+        ] {
+            if set {
+                eprintln!("`{flag}` does not go with `--live`: it serves the program rather \
+                           than writing one out.");
+                return ExitCode::FAILURE;
+            }
+        }
+        return serve::run(serve::Options {
+            entry: input,
+            port: live_port,
+            updating,
+            color: use_color(),
+        });
+    }
 
     if let Some(docs_path) = &docs {
         match alm_compiler::project::generate_docs(&input) {

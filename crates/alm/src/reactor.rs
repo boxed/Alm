@@ -9,32 +9,45 @@
 //! alm renders the same pages on the server instead. The routing, the compile
 //! behaviour and the page a compiled program is served in are elm's; the
 //! chrome around them is alm's own, and there is no `/_elm/` asset route.
-
-mod http;
-mod index;
+//!
+//! Beyond elm: the pages it serves watch their sources and update themselves.
+//! See [`crate::server::live`]; `--no-hot-reload` turns it off entirely.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use http::{Request, Response};
+use crate::server::http::{self, Request, Response};
+use crate::server::live::{self, Live, Mode};
+use crate::server::pages;
 
 const DEFAULT_PORT: u16 = 8000;
 
 pub fn run(args: &[String], color: bool) -> ExitCode {
     let mut port = DEFAULT_PORT;
+    let mut mode = Mode::HotSwap;
+    let mut updating = true;
     for arg in args {
-        let Some(value) = arg.strip_prefix("--port=") else {
-            eprintln!("Unknown flag `{arg}`.\n\nUsage: alm reactor [--port=8000]");
-            return ExitCode::FAILURE;
-        };
-        match value.parse() {
-            Ok(parsed) => port = parsed,
-            Err(_) => {
-                eprintln!("`{value}` is not a port number.");
-                return ExitCode::FAILURE;
+        if arg == "--no-hot-reload" {
+            updating = false;
+        } else if let Some(value) = arg.strip_prefix("--port=") {
+            match value.parse() {
+                Ok(parsed) => port = parsed,
+                Err(_) => {
+                    eprintln!("`{value}` is not a port number.");
+                    return ExitCode::FAILURE;
+                }
             }
+        } else {
+            eprintln!(
+                "Unknown flag `{arg}`.\n\nUsage: alm reactor [--port=8000] [--no-hot-reload]"
+            );
+            return ExitCode::FAILURE;
         }
+    }
+    if !updating {
+        mode = Mode::Reload;
     }
 
     let root = match std::env::current_dir() {
@@ -55,32 +68,64 @@ pub fn run(args: &[String], color: bool) -> ExitCode {
         }
     };
     println!("Go to http://localhost:{port} to see your project dashboard.");
-    http::serve(listener, move |request| handle(&root, request, color));
+
+    // With updating off nothing is watched and no page is given the shim, so
+    // the server behaves exactly as it did before any of this existed.
+    let live = updating.then(|| {
+        let live = Live::new();
+        live::heartbeat(live.clone());
+        let watched = live.clone();
+        live::watch(&root, move || watched.broadcast("changed", "null"));
+        live
+    });
+    http::serve(listener, move |request| handle(&root, request, live.as_ref(), mode, color));
 }
 
 /// elm's route order: an existing file first (compiled if it is Elm, served by
 /// its mime type if it has one, shown as source if it does not), then a
 /// directory listing, then 404.
-fn handle(root: &Path, request: &Request, color: bool) -> Response {
+fn handle(
+    root: &Path,
+    request: &Request,
+    live: Option<&Arc<Live>>,
+    mode: Mode,
+    color: bool,
+) -> Response {
+    if request.path == live::ENDPOINT {
+        return match live {
+            Some(live) => Response::events(live.subscribe()),
+            None => Response::text(404, "Not Found", "Live updating is off."),
+        };
+    }
     let Some(path) = safe_path(root, &request.path) else {
-        return Response::not_found(index::not_found(&request.path));
+        return Response::not_found(pages::not_found(&request.path));
     };
     if path.is_file() {
         if path.extension().is_some_and(|e| e == "elm") {
-            return serve_elm(root, &path, color);
+            return serve_elm(root, &path, mode, live.is_some(), color);
         }
-        return match mime_type(&path) {
-            Some(mime) => match std::fs::metadata(&path) {
-                Ok(meta) => Response::file(&path, mime, meta.len()),
-                Err(_) => Response::not_found(index::not_found(&request.path)),
-            },
-            None => Response::html(index::source(&request.path, &path)),
+        return match static_file(root, &request.path) {
+            Some(response) => response,
+            None => Response::html(pages::source(&request.path, &path)),
         };
     }
     if path.is_dir() {
-        return Response::html(index::directory(root, &path, &request.path));
+        return Response::html(pages::directory(root, &path, &request.path));
     }
-    Response::not_found(index::not_found(&request.path))
+    Response::not_found(pages::not_found(&request.path))
+}
+
+/// An existing file under `root` served by its mime type, or `None` when it
+/// is not a file or has no type alm knows — which is what makes browsing to a
+/// README show its contents rather than download it.
+pub fn static_file(root: &Path, request_path: &str) -> Option<Response> {
+    let path = safe_path(root, request_path)?;
+    if !path.is_file() {
+        return None;
+    }
+    let mime = mime_type(&path)?;
+    let length = std::fs::metadata(&path).ok()?.len();
+    Some(Response::file(&path, mime, length))
 }
 
 /// Resolve a request path under `root`, refusing anything that escapes it.
@@ -104,23 +149,36 @@ fn safe_path(root: &Path, request_path: &str) -> Option<PathBuf> {
 
 /// Compile the module and serve it in elm's page: the program mounted on a
 /// `<pre id="elm">`, with initialization errors surfaced rather than swallowed.
-fn serve_elm(root: &Path, path: &Path, color: bool) -> Response {
+fn serve_elm(
+    root: &Path,
+    path: &Path,
+    mode: Mode,
+    updating: bool,
+    color: bool,
+) -> Response {
     let name = declared_module_name(path)
         .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into_owned());
+    let with_shim = |html: String| {
+        if updating {
+            Response::html(live::inject(&html, &live::client_js(mode)))
+        } else {
+            Response::html(html)
+        }
+    };
     match alm_compiler::project::compile_project(path) {
-        Ok((javascript, _warnings)) => Response::html(sandwich(&name, &javascript)),
+        Ok((javascript, _warnings)) => with_shim(sandwich(&name, &javascript, updating)),
         Err(errors) => {
             let reports: String =
                 errors.iter().map(|e| e.render_from(Some(root), false)).collect();
             let _ = color;
-            Response::html(index::errors(&name, &reports))
+            with_shim(pages::errors(&name, &reports))
         }
     }
 }
 
 /// The name in `module X exposing (…)`, which is what the generated bundle
 /// exposes as `Elm.X` — not the file name, which can differ from it.
-fn declared_module_name(path: &Path) -> Option<String> {
+pub fn declared_module_name(path: &Path) -> Option<String> {
     let source = std::fs::read_to_string(path).ok()?;
     // A file may open with comments, so this scans rather than reading the
     // first line. `effect module X where { … } exposing (…)` still names X
@@ -135,8 +193,16 @@ fn declared_module_name(path: &Path) -> Option<String> {
     })
 }
 
-/// `Generate.Html.sandwich`, byte for byte.
-fn sandwich(name: &str, javascript: &str) -> String {
+/// `Generate.Html.sandwich`, byte for byte — unless `hooks` is set, which adds
+/// the two handles the live-reload shim needs to swap the running program.
+/// With live updating off the page is exactly the one elm serves.
+pub fn sandwich(name: &str, javascript: &str, hooks: bool) -> String {
+    let handles = if hooks {
+        "\x20 // Handle for the live-reload shim; without it, it just reloads.\n\
+         \x20 window.__alm_app__ = app;\n"
+    } else {
+        ""
+    };
     format!(
         "<!DOCTYPE HTML>\n\
          <html>\n\
@@ -154,7 +220,9 @@ fn sandwich(name: &str, javascript: &str) -> String {
          try {{\n\
          {javascript}\n\
          \n\
-         \x20 var app = Elm.{name}.init({{ node: document.getElementById(\"elm\") }});\n\
+         \x20 var node = document.getElementById(\"elm\");\n\
+         \x20 var app = Elm.{name}.init({{ node: node }});\n\
+         {handles}\
          }}\n\
          catch (e)\n\
          {{\n\
@@ -275,14 +343,21 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The page a compiled program is served in is elm's, unchanged.
+    /// With live updating off, the page a compiled program is served in is
+    /// elm's, unchanged.
     #[test]
     fn the_sandwich_is_elms() {
-        let page = sandwich("Main", "// code");
+        let page = sandwich("Main", "// code", false);
+        assert!(!page.contains("__alm_app__"), "no hooks without live updating");
         assert!(page.starts_with("<!DOCTYPE HTML>\n<html>\n<head>\n  <meta charset=\"UTF-8\">\n  <title>Main</title>"));
         assert!(page.contains("<pre id=\"elm\"></pre>"));
         assert!(page
-            .contains("  var app = Elm.Main.init({ node: document.getElementById(\"elm\") });"));
+            .contains("  var app = Elm.Main.init({ node: node });"));
+
+        // With it on, the shim gets the two handles it needs and nothing else.
+        let live = sandwich("Main", "// code", true);
+        assert!(live.contains("window.__alm_app__ = app;"), "{live}");
+        assert!(!live.contains("__alm_node__"), "the node is detached on mount, so it is no use");
         assert!(page.contains("header.innerText = \"Initialization Error\";"));
         assert!(page.ends_with("</body>\n</html>"));
     }

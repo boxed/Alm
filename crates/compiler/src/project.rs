@@ -228,6 +228,39 @@ pub fn compile_project_with(
     ))
 }
 
+/// Compile for the live-reload server: the JavaScript, plus the type of the
+/// program's `Model` when there is one.
+///
+/// The model type is what makes a hot swap safe to attempt. Carrying a running
+/// model into a new build is only sound if the new build still means the same
+/// thing by `Model`; comparing the rendered type before and after is a cheap,
+/// conservative way to know. When it cannot be determined the caller gets
+/// `None` and should reload rather than guess.
+pub fn compile_project_live(
+    entry: &Path,
+) -> Result<(String, Option<String>, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    let checked = check_project(entry)?;
+    let model_type = model_type_of(&checked);
+    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let javascript =
+        generate::generate_project_typed(&checked.modules, checked.node_types, std::env::var_os("ALM_NO_DCE").is_none());
+    Ok((javascript, model_type, warnings))
+}
+
+/// The `model` in the entry module's `main : Program flags model msg`.
+fn model_type_of(checked: &CheckedProject) -> Option<String> {
+    let main = checked.types.get(&checked.entry)?.get(&Name::from("main"))?;
+    let can::Type::Type(_, name, args) = main else {
+        return None;
+    };
+    // `Program flags model msg`. A `main` that is not a program (the reactor
+    // will happily serve a `main : String`) has no model to preserve.
+    if name.as_str() != "Program" || args.len() != 3 {
+        return None;
+    }
+    Some(crate::docs::render_type(&args[1]))
+}
+
 /// Generate a package's `docs.json` (elm's `--docs`). Returns the JSON, or the
 /// build errors that stopped it.
 pub fn generate_docs(entry: &Path) -> Result<String, Vec<BuildError>> {
