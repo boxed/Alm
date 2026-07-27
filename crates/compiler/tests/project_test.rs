@@ -1328,3 +1328,63 @@ main =
         r#"(18,Just (65,1000000,3.5),(Just "brød",Just [7,8,9],Nothing))"#
     );
 }
+
+#[test]
+fn a_package_project_resolves_its_own_version_ranges() {
+    // An application elm.json pins exact versions, but a package's states
+    // ranges — nothing to look up. Compiling the package itself (for
+    // `alm make`, `--docs` or `alm diff`) has to resolve them, or none of its
+    // dependencies are on the search path and every import of one is a
+    // MODULE NOT FOUND.
+    let dir = common::test_dir("alm-pkgranges", "t");
+    let src = dir.join("src");
+    let pkgs = dir.join("elm-home/0.19.1/packages");
+    let dep = pkgs.join("acme/tools/1.2.0");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(dep.join("src")).unwrap();
+    // An older version is present too, so picking the newest allowed one is
+    // an actual choice rather than the only option.
+    std::fs::create_dir_all(pkgs.join("acme/tools/1.0.0/src")).unwrap();
+    std::fs::write(
+        pkgs.join("acme/tools/1.0.0/elm.json"),
+        r#"{ "type": "package", "name": "acme/tools", "version": "1.0.0", "exposed-modules": ["Acme"], "dependencies": {} }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        pkgs.join("acme/tools/1.0.0/src/Acme.elm"),
+        "module Acme exposing (shout)\n\nshout : String -> String\nshout s = s\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep.join("elm.json"),
+        r#"{ "type": "package", "name": "acme/tools", "version": "1.2.0", "exposed-modules": ["Acme"], "dependencies": {} }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dep.join("src/Acme.elm"),
+        "module Acme exposing (shout)\n\nshout : String -> String\nshout s = String.toUpper s ++ \"!\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{
+    "type": "package",
+    "name": "me/mine",
+    "version": "1.0.0",
+    "exposed-modules": ["Main"],
+    "dependencies": { "acme/tools": "1.1.0 <= v < 2.0.0" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("Main.elm"),
+        "module Main exposing (main)\n\nimport Acme\n\nmain = Acme.shout \"pkg\"\n",
+    )
+    .unwrap();
+
+    let _guard = ELM_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ELM_HOME", dir.join("elm-home"));
+    let result = compile_and_run(&src.join("Main.elm"));
+    std::env::remove_var("ELM_HOME");
+    assert_eq!(result.unwrap(), "PKG!");
+}

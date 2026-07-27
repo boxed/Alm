@@ -846,8 +846,8 @@ fn packages_root() -> PathBuf {
 }
 
 /// Map every `"author/name": "1.2.3"` pinned in elm.json to its `src` dir on
-/// disk. Version *ranges* (as used in a package elm.json) are ignored — we
-/// only pin exact versions.
+/// disk, plus — for a package outline, which pins nothing — the versions its
+/// ranges resolve to in the local cache.
 fn installed_packages(elm_json: &str) -> HashMap<String, PathBuf> {
     let packages = packages_root();
     let mut installed = HashMap::new();
@@ -864,17 +864,45 @@ fn installed_packages(elm_json: &str) -> HashMap<String, PathBuf> {
             installed.insert(key.to_string(), src);
         }
     }
+
+    // A package elm.json states ranges rather than versions: which version to
+    // build against is settled when something depends on it. Compiling the
+    // package itself — for `alm make`, `--docs` or `alm diff` — has to settle
+    // them here instead, by the same resolution `alm install` uses and against
+    // the same local cache.
+    if is_package_project(elm_json) {
+        if let Some(deps) = object_block(elm_json, "dependencies") {
+            let roots: std::collections::BTreeMap<String, crate::packages::Constraint> =
+                crate::packages::pairs(deps)
+                    .into_iter()
+                    .filter_map(|(name, range)| {
+                        Some((name.to_string(), crate::packages::Constraint::parse(range)?))
+                    })
+                    .collect();
+            if let Ok(solution) = crate::packages::solve(&roots) {
+                for (key, version) in solution {
+                    let Some((author, name)) = key.split_once('/') else { continue };
+                    let src =
+                        packages.join(author).join(name).join(version.to_string()).join("src");
+                    if src.is_dir() {
+                        installed.insert(key.clone(), src);
+                    }
+                }
+            }
+        }
+    }
     installed
 }
 
-/// The `"author/name"` keys listed under `dependencies.direct` of an
-/// application elm.json. Returns `None` if there is no such block (e.g. a
-/// package elm.json, or a minimal test elm.json).
+/// The `"author/name"` keys a project imports directly: `dependencies.direct`
+/// for an application, and all of `dependencies` for a package, where every
+/// listed dependency is one the package's own modules may import. Returns
+/// `None` when there is no dependencies block at all.
 fn direct_dependency_names(elm_json: &str) -> Option<Vec<String>> {
     let deps = object_block(elm_json, "dependencies")?;
-    let direct = object_block(deps, "direct")?;
+    let listed = object_block(deps, "direct").unwrap_or(deps);
     Some(
-        quoted_strings(direct)
+        quoted_strings(listed)
             .filter(|s| s.contains('/'))
             .map(str::to_string)
             .collect(),
