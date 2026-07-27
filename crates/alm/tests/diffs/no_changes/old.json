@@ -1,0 +1,1 @@
+[{"name":"NoBrokenParserFunctions","comment":"\n\n@docs rule\n\n","unions":[],"aliases":[],"values":[{"name":"rule","comment":" Check for usages of the broken parser functions.\n","type":"Review.Rule.Rule"}],"binops":[]}]

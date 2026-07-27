@@ -1,0 +1,59 @@
+This is a MAJOR change.
+
+---- ADDED MODULES - MINOR ----
+
+    Jwt.Http
+
+
+---- Jwt - MAJOR ----
+
+    Added:
+        errorToString : JwtError -> String
+        getTokenExpirationMillis : String -> Result JwtError Int
+        getTokenHeader : String -> Result JwtError String
+    
+    Removed:
+        createRequest :
+            String -> String -> String -> Body -> Decoder a -> Request a
+        createRequestObject :
+            String
+            -> String
+            -> String
+            -> Body
+            -> Decoder a
+            -> { method : String
+               , headers : List Header
+               , url : String
+               , body : Body
+               , expect : Expect a
+               , timeout : Maybe Float
+               , withCredentials : Bool
+               }
+        delete : String -> String -> Decoder a -> Request a
+        get : String -> String -> Decoder a -> Request a
+        handleError : String -> Error -> Task Never JwtError
+        post : String -> String -> Body -> Decoder a -> Request a
+        promote401 : Error -> JwtError
+        put : String -> String -> Body -> Decoder a -> Request a
+        send : (Result JwtError a -> msg) -> Request a -> Cmd msg
+        sendCheckExpired :
+            String -> (Result JwtError a -> msg) -> Request a -> Cmd msg
+    
+    Changed:
+      - type JwtError 
+            = Unauthorized
+            | TokenExpired
+            | TokenNotExpired
+            | TokenProcessingError String
+            | TokenDecodeError Error
+            | HttpError Error
+      + type JwtError 
+            = TokenProcessingError String
+            | TokenDecodeError Error
+            | TokenHeaderError
+    
+      - checkTokenExpiry : String -> Task Never JwtError
+      + checkTokenExpiry : String -> Task JwtError Bool
+    
+
+

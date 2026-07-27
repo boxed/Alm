@@ -1,0 +1,21 @@
+This is a MAJOR change.
+
+---- ADDED MODULES - MINOR ----
+
+    Bits
+
+
+---- REMOVED MODULES - MAJOR ----
+
+    BitArray
+
+
+---- Bit - MAJOR ----
+
+    Removed:
+        fromN : N (In min_ (Up maxTo1_ To N1)) -> Bit
+        fuzz : Fuzzer Bit
+        random : Generator Bit
+        toN : Bit -> N (In (Up0 minX_) (Up1 maxX_))
+
+

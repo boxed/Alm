@@ -339,3 +339,148 @@ fn install_needs_a_project_and_a_real_name() {
     assert!(!ok);
     assert!(stderr.starts_with("-- BAD PACKAGE NAME ---"), "stderr: {stderr}");
 }
+
+/// Run `alm diff` in a directory built to look like a package cache, so the
+/// test does not depend on what happens to be in the developer's ~/.elm.
+fn alm_diff(dir: &Path, home: &Path, args: &[&str]) -> (bool, String, String) {
+    let mut all = vec!["diff"];
+    all.extend(args);
+    let output = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(&all)
+        .current_dir(dir)
+        .env("ELM_HOME", home)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run alm diff");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Put a package version into a fake cache: an outline, a `src` and the
+/// `docs.json` a diff reads.
+fn cache_package(home: &Path, name: &str, version: &str, docs: &str) -> PathBuf {
+    let dir = home.join("0.19.1/packages").join(name).join(version);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("elm.json"),
+        format!(
+            r#"{{ "type": "package", "name": "{name}", "version": "{version}",
+                  "exposed-modules": ["Thing"], "dependencies": {{}} }}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("docs.json"), docs).unwrap();
+    dir
+}
+
+const V1: &str = r#"[{"name":"Thing","comment":" Doc.\n\n@docs one\n","unions":[],
+    "aliases":[],"binops":[],
+    "values":[{"name":"one","comment":" one ","type":"Basics.Int"}]}]"#;
+
+const V2: &str = r#"[{"name":"Thing","comment":" Doc.\n\n@docs one, two\n","unions":[],
+    "aliases":[],"binops":[],
+    "values":[{"name":"one","comment":" one ","type":"Basics.Int"},
+              {"name":"two","comment":" two ","type":"String.String"}]}]"#;
+
+#[test]
+fn diff_compares_two_published_versions() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    cache_package(&home, "acme/thing", "1.0.0", V1);
+    cache_package(&home, "acme/thing", "1.1.0", V2);
+
+    let (ok, stdout, stderr) = alm_diff(&dir, &home, &["acme/thing", "1.0.0", "1.1.0"]);
+    assert!(ok, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "This is a MINOR change.\n\n\
+         ---- Thing - MINOR ----\n\n\
+         \x20   Added:\n        two : String\n\n\n"
+    );
+
+    // Comparing a version with itself is a PATCH, and the versions are sorted
+    // rather than taken in the order given.
+    let (ok, same, _) = alm_diff(&dir, &home, &["acme/thing", "1.0.0", "1.0.0"]);
+    assert!(ok);
+    assert_eq!(same, "No API changes detected, so this is a PATCH change.\n");
+    let (_, backwards, _) = alm_diff(&dir, &home, &["acme/thing", "1.1.0", "1.0.0"]);
+    assert_eq!(backwards, stdout);
+}
+
+#[test]
+fn diff_compares_local_code_against_a_release() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    cache_package(&home, "acme/thing", "1.0.0", V1);
+
+    // A working copy of the package, one value ahead of the release.
+    let project = dir.join("work");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("elm.json"),
+        r#"{ "type": "package", "name": "acme/thing", "version": "1.1.0",
+             "exposed-modules": ["Thing"], "dependencies": {} }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/Thing.elm"),
+        "module Thing exposing (one, two)\n\n\
+         {-| Doc.\n\n@docs one, two\n-}\n\n\
+         {-| one -}\none : Int\none = 1\n\n\
+         {-| two -}\ntwo : String\ntwo = \"two\"\n",
+    )
+    .unwrap();
+
+    // With no version it compares against the newest release in the cache.
+    let (ok, stdout, stderr) = alm_diff(&project, &home, &[]);
+    assert!(ok, "stderr: {stderr}");
+    // Docs generated from source keep their qualifiers, as elm's do.
+    assert!(stdout.contains("two : String.String"), "stdout: {stdout}");
+    assert!(stdout.starts_with("This is a MINOR change."), "stdout: {stdout}");
+
+    let (ok, explicit, _) = alm_diff(&project, &home, &["1.0.0"]);
+    assert!(ok);
+    assert_eq!(explicit, stdout);
+}
+
+#[test]
+fn diff_says_what_it_cannot_find() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    cache_package(&home, "acme/thing", "1.0.0", V1);
+
+    let (ok, _, stderr) = alm_diff(&dir, &home, &["acme/thing", "1.0.0", "9.9.9"]);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- UNKNOWN VERSION ---"), "stderr: {stderr}");
+
+    let (ok, _, stderr) = alm_diff(&dir, &home, &["who/what", "1.0.0", "2.0.0"]);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- UNKNOWN PACKAGE ---"), "stderr: {stderr}");
+
+    let (ok, _, stderr) = alm_diff(&dir, &home, &["acme/thing", "1.0.0", "one"]);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- BAD ARGUMENT ---"), "stderr: {stderr}");
+
+    // No elm.json here, so there is nothing local to compare.
+    let (ok, _, stderr) = alm_diff(&dir, &home, &[]);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- DIFF WHAT? ---"), "stderr: {stderr}");
+}
+
+#[test]
+fn diff_refuses_an_application() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    let (ok, _, stderr) = alm_diff(&dir, &home, &[]);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- CANNOT DIFF APPLICATIONS ---"), "stderr: {stderr}");
+}

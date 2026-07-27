@@ -1,0 +1,109 @@
+This is a MAJOR change.
+
+---- DoubleSlider - MAJOR ----
+
+    Added:
+        type DoubleSlider msg
+        fetchHighValue : DoubleSlider msg -> Float
+        fetchLowValue : DoubleSlider msg -> Float
+        init :
+            { min : Float
+            , max : Float
+            , step : Float
+            , lowValue : Float
+            , highValue : Float
+            , onLowChange : Float -> msg
+            , onHighChange : Float -> msg
+            }
+            -> DoubleSlider msg
+        updateHighValue : Float -> DoubleSlider msg -> DoubleSlider msg
+        updateLowValue : Float -> DoubleSlider msg -> DoubleSlider msg
+        withCurrentRangeFormatter :
+            (
+            { lowValue : Float, highValue : Float, min : Float, max : Float }
+            -> String
+            )
+            -> DoubleSlider msg
+            -> DoubleSlider msg
+        withHighValueFormatter :
+            (Float -> Float -> String) -> DoubleSlider msg -> DoubleSlider msg
+        withLowValueFormatter :
+            (Float -> Float -> String) -> DoubleSlider msg -> DoubleSlider msg
+        withMaxFormatter :
+            (Float -> String) -> DoubleSlider msg -> DoubleSlider msg
+        withMinFormatter :
+            (Float -> String) -> DoubleSlider msg -> DoubleSlider msg
+        withOverlapThreshold : Float -> DoubleSlider msg -> DoubleSlider msg
+    
+    Removed:
+        type Msg 
+        type alias Model =
+            { min : Float
+            , max : Float
+            , step : Int
+            , lowValue : Float
+            , highValue : Float
+            , overlapThreshold : Float
+            , minFormatter : Float -> String
+            , maxFormatter : Float -> String
+            , currentRangeFormatter : Float -> Float -> Float -> Float -> String
+            }
+        defaultModel : Model
+        fallbackView : Model -> Html Msg
+        formatCurrentRange : Model -> String
+        subscriptions : Model -> Sub Msg
+        update : Msg -> Model -> ( Model, Cmd Msg, Bool )
+    
+    Changed:
+      - view : Model -> Html Msg
+      + view : DoubleSlider msg -> Html msg
+    
+
+
+---- SingleSlider - MAJOR ----
+
+    Added:
+        type SingleSlider msg
+        fetchValue : SingleSlider msg -> Float
+        init :
+            { min : Float
+            , max : Float
+            , step : Float
+            , value : Float
+            , onChange : Float -> msg
+            }
+            -> SingleSlider msg
+        withMaxFormatter :
+            (Float -> String) -> SingleSlider msg -> SingleSlider msg
+        withMinFormatter :
+            (Float -> String) -> SingleSlider msg -> SingleSlider msg
+        withValueFormatter :
+            (Float -> Float -> String) -> SingleSlider msg -> SingleSlider msg
+    
+    Removed:
+        type Msg  = TrackClicked String | OnInput String Bool | OnChange String
+        type ProgressDirection  = ProgressLeft | ProgressRight
+        type alias Model =
+            { min : Float
+            , max : Float
+            , step : Float
+            , value : Float
+            , minFormatter : Float -> String
+            , maxFormatter : Float -> String
+            , currentValueFormatter : Float -> Float -> String
+            , disabled : Bool
+            , progressDirection : ProgressDirection
+            , reversed : Bool
+            }
+        defaultModel : Model
+        subscriptions : Model -> Sub Msg
+    
+    Changed:
+      - update : Msg -> Model -> ( Model, Cmd Msg, Bool )
+      + update : Float -> SingleSlider msg -> SingleSlider msg
+    
+      - view : Model -> Html Msg
+      + view : SingleSlider msg -> Html msg
+    
+
+

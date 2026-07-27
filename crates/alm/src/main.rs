@@ -1,3 +1,4 @@
+mod diff;
 mod init;
 mod install;
 
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("diff") => diff::run(&args[1..], use_color()),
         Some("--help" | "-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -40,6 +42,7 @@ fn print_help() {
          Usage:\n\
          \x20   alm init\n\
          \x20   alm install <author/package>\n\
+         \x20   alm diff [<package>] [<version> [<version>]]\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
@@ -47,6 +50,9 @@ fn print_help() {
          Dependencies are resolved from the packages already in ~/.elm, so it\n\
          works offline and downloads nothing, and `install` adds a package\n\
          to an existing elm.json the same way.\n\n\
+         `diff` compares two versions of a package's API and says whether the\n\
+         change is PATCH, MINOR or MAJOR. With no versions it compares the\n\
+         code here against the newest release in ~/.elm.\n\n\
          `make` compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\

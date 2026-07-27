@@ -7,6 +7,12 @@
 //! over the string and, like it, keeps only the last segment of a qualified
 //! name. So `"Basics.Int"` reads back as `Int`, which is why `alm diff` prints
 //! short names where `docs.json` holds long ones.
+//!
+//! [`Names`] exists because elm only takes that path for *published* docs.
+//! Docs generated from source on the spot never go through the string form at
+//! all, so they keep their qualifiers, and `elm diff` prints a package's own
+//! new code qualified while printing the release it is compared against short.
+//! Reproducing that means being able to read a `docs.json` both ways.
 
 use std::collections::BTreeMap;
 
@@ -69,7 +75,16 @@ pub struct Module {
 /// A whole package's API: every exposed module, by name.
 pub type Documentation = BTreeMap<String, Module>;
 
-pub fn parse(text: &str) -> Option<Documentation> {
+/// Whether to keep the module qualifier on a type name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Names {
+    /// `Basics.Int` reads back as `Int`, as elm's decoder does it.
+    Short,
+    /// `Basics.Int` stays `Basics.Int`, as freshly generated docs are.
+    Qualified,
+}
+
+pub fn parse(text: &str, names: Names) -> Option<Documentation> {
     let modules = crate::json::parse(text)?;
     let mut docs = Documentation::new();
     for module in modules.as_array()? {
@@ -85,13 +100,17 @@ pub fn parse(text: &str) -> Option<Documentation> {
                         .filter_map(|case| {
                             let pair = case.as_array()?;
                             let name = pair.first()?.as_str()?.to_string();
-                            let args =
-                                pair.get(1)?.as_array()?.iter().map(read_type).collect::<Vec<_>>();
+                            let args = pair
+                                .get(1)?
+                                .as_array()?
+                                .iter()
+                                .map(|t| read_type(t, names))
+                                .collect::<Vec<_>>();
                             Some((name, args))
                         })
                         .collect();
                     let union =
-                        Union { comment: u.string("comment"), args: names(u, "args"), cases };
+                        Union { comment: u.string("comment"), args: string_list(u, "args"), cases };
                     (u.string("name"), union)
                 })
                 .collect(),
@@ -101,8 +120,8 @@ pub fn parse(text: &str) -> Option<Documentation> {
                 .map(|a| {
                     let alias = Alias {
                         comment: a.string("comment"),
-                        args: names(a, "args"),
-                        tipe: read_type(a.get("type").unwrap_or(&Json::Null)),
+                        args: string_list(a, "args"),
+                        tipe: read_type(a.get("type").unwrap_or(&Json::Null), names),
                     };
                     (a.string("name"), alias)
                 })
@@ -113,7 +132,7 @@ pub fn parse(text: &str) -> Option<Documentation> {
                 .map(|v| {
                     let value = Value {
                         comment: v.string("comment"),
-                        tipe: read_type(v.get("type").unwrap_or(&Json::Null)),
+                        tipe: read_type(v.get("type").unwrap_or(&Json::Null), names),
                     };
                     (v.string("name"), value)
                 })
@@ -124,7 +143,7 @@ pub fn parse(text: &str) -> Option<Documentation> {
                 .map(|b| {
                     let binop = Binop {
                         comment: b.string("comment"),
-                        tipe: read_type(b.get("type").unwrap_or(&Json::Null)),
+                        tipe: read_type(b.get("type").unwrap_or(&Json::Null), names),
                         associativity: b.string("associativity"),
                         precedence: b.get("precedence").and_then(Json::as_f64).unwrap_or(0.0) as i64,
                     };
@@ -137,7 +156,7 @@ pub fn parse(text: &str) -> Option<Documentation> {
     Some(docs)
 }
 
-fn names(value: &Json, key: &str) -> Vec<String> {
+fn string_list(value: &Json, key: &str) -> Vec<String> {
     value.array(key).iter().filter_map(|n| n.as_str().map(str::to_string)).collect()
 }
 
@@ -145,18 +164,23 @@ fn names(value: &Json, key: &str) -> Vec<String> {
 /// type it could not work out. A `docs.json` in the cache is machine-written,
 /// so this only fires on a corrupt file, and there it is better to show the
 /// rest of the diff than to refuse the whole thing.
-fn read_type(value: &Json) -> Type {
+fn read_type(value: &Json, names: Names) -> Type {
     value
         .as_str()
-        .and_then(parse_type)
+        .and_then(|text| parse_type_with(text, names))
         .unwrap_or_else(|| Type::Type("?".to_string(), Vec::new()))
 }
 
 // ------------------------------------------------------------- parsing a type
 
-/// Parse the Elm type expression a `docs.json` string holds.
+/// Parse the Elm type expression a `docs.json` string holds, dropping module
+/// qualifiers the way elm's decoder does.
 pub fn parse_type(text: &str) -> Option<Type> {
-    let mut p = TypeParser { chars: text.chars().collect(), at: 0 };
+    parse_type_with(text, Names::Short)
+}
+
+pub fn parse_type_with(text: &str, names: Names) -> Option<Type> {
+    let mut p = TypeParser { chars: text.chars().collect(), at: 0, names };
     p.spaces();
     let tipe = p.expression()?;
     p.spaces();
@@ -166,6 +190,7 @@ pub fn parse_type(text: &str) -> Option<Type> {
 struct TypeParser {
     chars: Vec<char>,
     at: usize,
+    names: Names,
 }
 
 impl TypeParser {
@@ -303,9 +328,10 @@ impl TypeParser {
         (self.at > start).then(|| self.chars[start..self.at].iter().collect())
     }
 
-    /// `Dict.Dict` and `Dict` both name the same thing here: elm's decoder
-    /// throws the qualifier away, so a diff never sees one.
+    /// `Dict.Dict` and `Dict` both name the same thing here, so a comparison
+    /// has to allow for either spelling however this is read.
     fn qualified_name(&mut self) -> Option<String> {
+        let start = self.at;
         let mut last = self.name()?;
         while self.peek() == Some('.') {
             // Only a following uppercase letter continues the name; a `.` in
@@ -317,7 +343,10 @@ impl TypeParser {
             self.at += 1;
             last = self.name()?;
         }
-        Some(last)
+        Some(match self.names {
+            Names::Short => last,
+            Names::Qualified => self.chars[start..self.at].iter().collect(),
+        })
     }
 }
 
@@ -439,7 +468,7 @@ mod tests {
                 for version in versions.flatten() {
                     let path = version.path().join("docs.json");
                     let Ok(text) = std::fs::read_to_string(&path) else { continue };
-                    let docs = parse(&text)
+                    let docs = parse(&text, Names::Short)
                         .unwrap_or_else(|| panic!("could not read {}", path.display()));
                     for (module, api) in &docs {
                         let where_ = || format!("{} {module}", path.display());

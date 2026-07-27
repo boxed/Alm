@@ -1,0 +1,30 @@
+This is a MAJOR change.
+
+---- Delay - MAJOR ----
+
+    Added:
+        type alias Millis = Int
+        type alias ToUnit = Millis -> Millis
+        hours : Millis -> Millis
+        minutes : Millis -> Millis
+        seconds : Millis -> Millis
+    
+    Removed:
+        type TimeUnit  = Millisecond | Second | Minute | Hour
+    
+    Changed:
+      - after : Float -> TimeUnit -> msg -> Cmd msg
+      + after : Millis -> msg -> Cmd msg
+    
+      - sequence : List ( Float, TimeUnit, msg ) -> Cmd msg
+      + sequence : List ( Millis, msg ) -> Cmd msg
+    
+      - sequenceIf : Bool -> List ( Float, TimeUnit, msg ) -> Cmd msg
+      + sequenceIf : Bool -> List ( Millis, msg ) -> Cmd msg
+    
+      - withUnit :
+            TimeUnit -> List ( Float, msg ) -> List ( Float, TimeUnit, msg )
+      + withUnit : ToUnit -> List ( Millis, msg ) -> List ( Millis, msg )
+    
+
+

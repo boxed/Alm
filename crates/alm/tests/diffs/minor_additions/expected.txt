@@ -1,0 +1,12 @@
+This is a MINOR change.
+
+---- Color.Colormaps - MINOR ----
+
+    Added:
+        cividis : Colormap
+        fromFloatData : List ( Float, Float, Float ) -> Colormap
+        fromFloatListData : List (List Float) -> Colormap
+        fromIntData : List ( Int, Int, Int ) -> Colormap
+        fromIntListData : List (List Int) -> Colormap
+
+

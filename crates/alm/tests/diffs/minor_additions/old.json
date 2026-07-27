@@ -1,0 +1,43 @@
+[
+    {
+        "name": "Color.Colormaps",
+        "comment": "\n\n\n# Colormap\n\n@docs Colormap\n\n\n# fromData\n\n@docs fromData\n\n\n# Magma\n\n@docs magma\n\n\n# Inferno\n\n@docs inferno\n\n\n# Plasma\n\n@docs plasma\n\n\n# Viridis\n\n@docs viridis\n\n",
+        "unions": [],
+        "aliases": [
+            {
+                "name": "Colormap",
+                "comment": " Type alias for a function that takes a floating point number (unsually in the range [0, 1]) and returns a Color.\n",
+                "args": [],
+                "type": "Float -> Color"
+            }
+        ],
+        "values": [
+            {
+                "name": "fromData",
+                "comment": " Gives a `Colormap` for a list of 3-tuples, where each element corresponds to an RGB value between (0, 0, 0) and (255, 255, 255).\n\nNote: the colors are currently not interpolated, so the resulting colormap is as coarse or fine-grained as there are datapoints.\n\n",
+                "type": "List ( Int, Int, Int ) -> Colormap"
+            },
+            {
+                "name": "inferno",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "magma",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "plasma",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "viridis",
+                "comment": " ",
+                "type": "Colormap"
+            }
+        ],
+        "binops": []
+    }
+]

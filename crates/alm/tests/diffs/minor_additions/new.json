@@ -1,0 +1,68 @@
+[
+    {
+        "name": "Color.Colormaps",
+        "comment": "\n\n\n# Colormap\n\n@docs Colormap\n\n\n# fromData\n\n@docs fromData\n\n\n# fromIntData\n\n@docs fromIntData\n\n\n# fromIntListData\n\n@docs fromIntListData\n\n\n# fromFloatData\n\n@docs fromFloatData\n\n\n# fromFloatListData\n\n@docs fromFloatListData\n\n\n# Magma\n\n@docs magma\n\n\n# Inferno\n\n@docs inferno\n\n\n# Plasma\n\n@docs plasma\n\n\n# Viridis\n\n@docs viridis\n\n\n# Cividis\n\n@docs cividis\n\n",
+        "unions": [],
+        "aliases": [
+            {
+                "name": "Colormap",
+                "comment": " `Colormap` is an alias for `Float -> Color`, so it is simply a function that takes a floating point number between 0 and 1 and returns a Color.\n",
+                "args": [],
+                "type": "Float -> Color"
+            }
+        ],
+        "values": [
+            {
+                "name": "cividis",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "fromData",
+                "comment": " Gives a `Colormap` for a list of integer 3-tuples, where each element corresponds to an RGB value between (0, 0, 0) and (255, 255, 255).\n\nThe colors will not get interpolated, so the resulting colormap is as coarse or fine-grained as the datapoints that are provided.\n\n",
+                "type": "List ( Int, Int, Int ) -> Colormap"
+            },
+            {
+                "name": "fromFloatData",
+                "comment": " Similar to `fromIntData`, for cases where the RGB values are given as tuples of floating point numbers between 0 and 1.\n",
+                "type": "List ( Float, Float, Float ) -> Colormap"
+            },
+            {
+                "name": "fromFloatListData",
+                "comment": " The same functionality as `fromIntListData` where the RGB values floating point numbers between 0 and 1.\n",
+                "type": "List (List Float) -> Colormap"
+            },
+            {
+                "name": "fromIntData",
+                "comment": " The unambiguous name for `fromData`.\n",
+                "type": "List ( Int, Int, Int ) -> Colormap"
+            },
+            {
+                "name": "fromIntListData",
+                "comment": " Similar to `fromIntData`, for cases where the RGB values are provided as a list of lists. In this case the sublists are expected to contain 3 values, corresponding to the red, green and blue color channels.\n",
+                "type": "List (List Int) -> Colormap"
+            },
+            {
+                "name": "inferno",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "magma",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "plasma",
+                "comment": " ",
+                "type": "Colormap"
+            },
+            {
+                "name": "viridis",
+                "comment": " ",
+                "type": "Colormap"
+            }
+        ],
+        "binops": []
+    }
+]
