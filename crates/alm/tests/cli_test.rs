@@ -1030,3 +1030,24 @@ fn repl_reports_a_port_declaration_it_cannot_run() {
     assert!(ok);
     assert!(stdout.contains("I cannot handle port declarations."), "stdout: {stdout}");
 }
+
+/// A type annotation is not a declaration on its own — the definition has to
+/// follow. Ending the entry at the annotation stored it under the name it
+/// annotates, and the definition then replaced it, so the types were silently
+/// dropped and `f 1.5 2.5` was accepted for `f : Int -> Int -> Int`.
+#[test]
+fn repl_keeps_an_annotation_with_its_definition() {
+    let dir = temp_dir();
+    let project = repl_project(&dir);
+    let (ok, stdout, stderr) =
+        alm_repl(&project, "f : Int -> Int -> Int\nf a b = a + b\n\nf 1 2\nf 1.5 2.5\n:exit\n");
+    assert!(ok, "stderr: {stderr}");
+    // The annotation and the definition are one entry, so the prompt
+    // continues to the definition and then to the blank line that ends it.
+    assert!(stdout.contains("> | | "), "stdout: {stdout}");
+    // `Int`, not `number` — the annotation is what makes it concrete.
+    assert!(stdout.contains("<function> : Int -> Int -> Int"), "stdout: {stdout}");
+    assert!(stdout.contains("3 : Int"), "stdout: {stdout}");
+    // The annotation survived, so floats are rejected.
+    assert!(stderr.contains("`f` needs the 1st argument to be"), "stderr: {stderr}");
+}

@@ -502,8 +502,41 @@ fn is_complete(entry: &str) -> bool {
         return false;
     }
     let last_word = last_line.split_whitespace().next_back().unwrap_or("");
-    !matches!(last_word, "=" | "->" | "let" | "in" | "of" | "if" | "then" | "else" | "case" | "|")
-        && !last_line.ends_with(',')
+    if matches!(last_word, "=" | "->" | "let" | "in" | "of" | "if" | "then" | "else" | "case" | "|")
+        || last_line.ends_with(',')
+    {
+        return false;
+    }
+    // A type annotation on its own is not a declaration — the definition has
+    // to follow. Taking it as one would store it under the name it annotates
+    // and then let the definition replace it, silently dropping the types
+    // just asked for. elm keeps reading here too.
+    !is_bare_annotation(entry)
+}
+
+/// Whether the entry opens with `name : …` and never goes on to define
+/// `name`. A definition starts in the first column; anything indented is
+/// still part of the annotation.
+fn is_bare_annotation(entry: &str) -> bool {
+    let mut lines = entry.lines();
+    let Some(first) = lines.next() else { return false };
+    if first.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let Some((name, rest)) = first.split_once(':') else { return false };
+    let name = name.trim();
+    // `x :: xs` is an operator, not an annotation, and only a lower-case
+    // simple name can be annotated.
+    if rest.starts_with(':') || name.contains(char::is_whitespace) {
+        return false;
+    }
+    if !name.starts_with(|c: char| c.is_lowercase() || c == '_') {
+        return false;
+    }
+    !lines.any(|line| {
+        line.strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_whitespace() || c == '='))
+    })
 }
 
 // -------------------------------------------------------------------- printing
