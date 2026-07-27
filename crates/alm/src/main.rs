@@ -2,6 +2,7 @@ mod bump;
 mod diff;
 mod init;
 mod install;
+mod publish;
 mod reactor;
 
 use std::path::PathBuf;
@@ -27,6 +28,13 @@ fn main() -> ExitCode {
         },
         Some("diff") => diff::run(&args[1..], use_color()),
         Some("reactor") => reactor::run(&args[1..], use_color()),
+        Some("publish") => {
+            if args.len() > 1 {
+                eprintln!("`alm publish` takes no arguments.");
+                return ExitCode::FAILURE;
+            }
+            publish::run(use_color())
+        }
         Some("bump") => {
             if args.len() > 1 {
                 eprintln!("`alm bump` takes no arguments.");
@@ -55,6 +63,7 @@ fn print_help() {
          \x20   alm diff [<package>] [<version> [<version>]]\n\
          \x20   alm bump\n\
          \x20   alm reactor [--port=8000]\n\
+         \x20   alm publish\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
          \x20                       [--source-maps] [--dev] [--optimize]\n\
          \x20                       [--report=json] [--docs=<file>]\n\n\
@@ -67,7 +76,9 @@ fn print_help() {
          code here against the newest release in ~/.elm, and `bump` sets\n\
          the version in elm.json to whatever that change calls for.\n\
          `reactor` serves the current directory: browse to an Elm file and it\n\
-         compiles and runs.\n\n\
+         compiles and runs.\n\
+         `publish` runs every pre-publication check that can be answered\n\
+         locally; alm never uploads, so `elm publish` still does the register.\n\n\
          `make` compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\

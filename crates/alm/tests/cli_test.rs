@@ -723,3 +723,182 @@ fn reactor_serves_compiles_and_refuses_to_escape() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+fn alm_publish(dir: &Path, home: &Path) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .arg("publish")
+        .current_dir(dir)
+        .env("ELM_HOME", home)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("failed to run alm publish");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git")
+        .status
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// A package that passes every check: summary, README, LICENSE, buildable
+/// docs, a correctly bumped version, and a matching tag.
+fn publishable(dir: &Path, home: &Path) -> PathBuf {
+    cache_package(home, "acme/thing", "1.0.0", V1);
+    let project = dir.join("pub");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("elm.json"),
+        r#"{ "type": "package", "name": "acme/thing", "summary": "Does a thing well",
+             "license": "BSD-3-Clause", "version": "1.1.0",
+             "exposed-modules": ["Thing"], "elm-version": "0.19.0 <= v < 0.20.0",
+             "dependencies": {}, "test-dependencies": {} }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/Thing.elm"),
+        "module Thing exposing (one, two)\n\n\
+         {-| Doc.\n\n@docs one, two\n-}\n\n\
+         {-| one -}\none : Int\none = 1\n\n\
+         {-| two -}\ntwo : String\ntwo = \"two\"\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("LICENSE"), "BSD-3-Clause\n").unwrap();
+    std::fs::write(project.join("README.md"), "# Thing\n\n".to_string() + &"x".repeat(400))
+        .unwrap();
+    git(&project, &["init", "-q", "."]);
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-qm", "release"]);
+    git(&project, &["tag", "1.1.0"]);
+    project
+}
+
+#[test]
+fn publish_runs_every_local_check_then_stops() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    let project = publishable(&dir, &home);
+
+    let (ok, stdout, stderr) = alm_publish(&project, &home);
+    assert!(ok, "stderr: {stderr}");
+    assert!(stdout.starts_with("Verifying acme/thing 1.1.0 ...\n"), "stdout: {stdout}");
+    for step in [
+        "Found README.md",
+        "Found LICENSE",
+        "Verified documentation",
+        "Version number 1.1.0 verified (MINOR change, 1.0.0 => 1.1.0)",
+        "Version 1.1.0 is tagged",
+        "No uncommitted changes in local code",
+    ] {
+        assert!(stdout.contains(step), "missing step {step:?} in:\n{stdout}");
+    }
+    // It stops short of registering, and says so rather than claiming success.
+    assert!(stdout.contains("-- READY, BUT NOT PUBLISHED --"), "stdout: {stdout}");
+    assert!(!stdout.contains("Success!"), "stdout: {stdout}");
+}
+
+#[test]
+fn publish_catches_the_things_it_is_there_to_catch() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    let project = publishable(&dir, &home);
+    let outline = std::fs::read_to_string(project.join("elm.json")).unwrap();
+    let restore = || std::fs::write(project.join("elm.json"), &outline).unwrap();
+
+    // A version that has already gone out.
+    std::fs::write(project.join("elm.json"), outline.replace("1.1.0", "1.0.0")).unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- ALREADY PUBLISHED --"), "stderr: {stderr}");
+
+    // A version number that does not match the change.
+    std::fs::write(project.join("elm.json"), outline.replace("\"1.1.0\"", "\"2.0.0\"")).unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- INVALID VERSION --"), "stderr: {stderr}");
+    assert!(stderr.contains("it should be 1.1.0"), "stderr: {stderr}");
+    restore();
+
+    // The placeholder summary elm init leaves behind.
+    std::fs::write(
+        project.join("elm.json"),
+        outline.replace(
+            "Does a thing well",
+            "helpful summary of your project, less than 80 characters",
+        ),
+    )
+    .unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- NO SUMMARY --"), "stderr: {stderr}");
+    restore();
+
+    // A README too short to say anything.
+    std::fs::write(project.join("README.md"), "# Thing\n").unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- SHORT README --"), "stderr: {stderr}");
+    std::fs::write(project.join("README.md"), "# Thing\n\n".to_string() + &"x".repeat(400))
+        .unwrap();
+
+    // No LICENSE.
+    std::fs::remove_file(project.join("LICENSE")).unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- NO LICENSE FILE --"), "stderr: {stderr}");
+    std::fs::write(project.join("LICENSE"), "BSD-3-Clause\n").unwrap();
+
+    // Code that differs from what was tagged.
+    std::fs::write(
+        project.join("src/Thing.elm"),
+        "module Thing exposing (one, two)\n\n\
+         {-| Doc.\n\n@docs one, two\n-}\n\n\
+         {-| one -}\none : Int\none = 2\n\n\
+         {-| two -}\ntwo : String\ntwo = \"two\"\n",
+    )
+    .unwrap();
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- LOCAL CHANGES --"), "stderr: {stderr}");
+}
+
+#[test]
+fn publish_needs_a_tag() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    let project = publishable(&dir, &home);
+    git(&project, &["tag", "-d", "1.1.0"]);
+
+    let (ok, _, stderr) = alm_publish(&project, &home);
+    assert!(!ok);
+    assert!(stderr.contains("-- NO TAG --"), "stderr: {stderr}");
+    assert!(stderr.contains("git tag -a 1.1.0"), "stderr: {stderr}");
+}
+
+#[test]
+fn publish_refuses_an_application() {
+    let dir = temp_dir();
+    let home = dir.join("elm-home");
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"],
+             "dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .unwrap();
+    let (ok, _, stderr) = alm_publish(&dir, &home);
+    assert!(!ok);
+    assert!(stderr.starts_with("-- CANNOT PUBLISH APPLICATIONS ---"), "stderr: {stderr}");
+}

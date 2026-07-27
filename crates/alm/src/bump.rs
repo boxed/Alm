@@ -17,7 +17,7 @@ use alm_compiler::reporting::{sentence, words, yellow};
 use crate::init;
 
 /// What elm prints for a package that has never been published.
-const NEW_PACKAGE_OVERVIEW: &str = "\
+pub const NEW_PACKAGE_OVERVIEW: &str = "\
 This package has never been published before. Here's how things work:
 
   - Versions all have exactly three parts: MAJOR.MINOR.PATCH
@@ -108,7 +108,7 @@ fn new_package(root: &std::path::Path, outline: &str, version: Version) -> ExitC
 /// The versions elm will bump *from*: the newest release, plus the last
 /// release of each major line (a minor bump) and of each minor line (a patch
 /// bump). Anything else is a version nobody can be depending on.
-fn bumpable_versions(published: &[Version]) -> Vec<Version> {
+pub fn bumpable_versions(published: &[Version]) -> Vec<Version> {
     let last_of = |same: fn(&Version, &Version) -> bool| -> Vec<Version> {
         let mut out: Vec<Version> = Vec::new();
         for version in published {
@@ -129,7 +129,7 @@ fn bumpable_versions(published: &[Version]) -> Vec<Version> {
     all
 }
 
-fn bump_to(version: Version, magnitude: Magnitude) -> Version {
+pub fn bump_to(version: Version, magnitude: Magnitude) -> Version {
     match magnitude {
         Magnitude::Major => Version { major: version.major + 1, minor: 0, patch: 0 },
         Magnitude::Minor => Version { minor: version.minor + 1, patch: 0, ..version },
