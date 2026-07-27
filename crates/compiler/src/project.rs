@@ -185,6 +185,17 @@ pub fn compile_project(entry: &Path) -> Result<(String, Vec<crate::lint::Warning
 /// Compile to JavaScript. `optimize` is elm's `--optimize`: it refuses to build
 /// while any `Debug` call survives, because the optimizations it enables strip
 /// out the information `Debug` reports (field names, constructor identities).
+///
+/// The two code-size optimizations themselves — shortening record field names
+/// and turning constructor tags into ints — are **not** implemented. Both are
+/// blocked on the same thing: alm's runtime is hand-written JavaScript that
+/// reads Elm records and constructors directly (`impl.init`, `impl.update`,
+/// `node.$ === 'VNode'`), so renaming them means rewriting the runtime to use
+/// the renamed forms, as elm does by marking its kernel sources. Worth perhaps
+/// 1% of bundle size before minification, against a real chance of a silently
+/// broken bundle, and alm already tree-shakes to well under elm's output size.
+/// The `Debug` rule is enforced regardless, so a project that builds with
+/// `--optimize` under elm builds here too.
 pub fn compile_project_with(
     entry: &Path,
     optimize: bool,

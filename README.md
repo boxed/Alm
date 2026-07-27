@@ -22,8 +22,13 @@ and render.
 alm make src/Main.elm --output=main.js
 ```
 
-`--target=js|native|wasm-gc` selects the backend (default `js`), and
-`--source-maps` writes a `.map` beside the JavaScript or WasmGC output.
+`--target=js|native|wasm-gc` selects the backend (default `js`),
+`--source-maps` writes a `.map` beside the JavaScript or WasmGC output,
+`--report=json` writes diagnostics as JSON for editors, and `--optimize`
+enforces elm's production rule that no `Debug` call may survive. (The two
+code-size optimizations elm couples to that flag — shortening record field
+names and numbering constructor tags — are not implemented; alm's runtime
+reads those names directly, so renaming them would mean rewriting it.)
 
 Projects are discovered through `elm.json` (`source-directories`), and
 package dependencies compile directly from the `~/.elm` cache — pure Elm
