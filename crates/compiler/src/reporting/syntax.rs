@@ -1809,7 +1809,11 @@ fn snippet_spanned(
         // byte-exact layout lives in `elm` below. Rendered unwrapped so it stays
         // one line whatever the paragraph would do at 80 columns.
         message: format!("{} {}", before.render(usize::MAX), after.render(usize::MAX)),
-        region,
+        // elm reports the *error* position, not the span of source it prints
+        // around it (`Report.Report title region … Code.toSnippet source
+        // surroundings (Just region)`). Only `--report=json` exposes the
+        // difference, and an editor uses it to place the squiggle.
+        region: highlight,
         elm: Some(ElmBody { before, after, notes, region, highlight }),
     }
 }

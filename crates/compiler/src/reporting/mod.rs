@@ -492,6 +492,13 @@ fn region_to_json(region: Region) -> String {
 }
 
 /// Append a JSON string literal for `s` to `out`.
+///
+/// Deliberately stricter than elm, which escapes only `\r`, `\n`, `"` and `\\`
+/// and passes every other control character through raw. A source file
+/// containing a tab therefore makes elm's own `--report=json` invalid JSON that
+/// `JSON.parse` and Python's `json` both reject. Escaping properly can only
+/// help a consumer: a lenient parser reads the same string either way, and a
+/// strict one reads ours where elm's fails.
 pub fn json_str(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {

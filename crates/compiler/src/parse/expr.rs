@@ -788,7 +788,13 @@ pub(crate) fn definition(p: &mut Parser) -> PResult<Located<Def>> {
             return Err(super::ParseError::from_syntax(
                 crate::reporting::syntax::SyntaxError::NameMismatch {
                     region: crate::reporting::Region::new(name.region.start, def_name.region.end),
-                    highlight: def_name.region,
+                    // elm points at the position the definition starts, not the
+                    // span of its name. The caret is one column either way; the
+                    // difference shows up in `--report=json`.
+                    highlight: crate::reporting::Region::new(
+                        def_name.region.start,
+                        def_name.region.start,
+                    ),
                     annotation: name.value.as_str().to_string(),
                     definition: def_name.value.as_str().to_string(),
                 },
