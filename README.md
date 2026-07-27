@@ -83,8 +83,10 @@ app.ports.somePort.subscribe(function (value) { ... });
   not just the first, and several failing modules are separated the way elm
   separates them. Pinned by a differential suite of 42 fixtures; 41 match
   `elm make` byte-for-byte on both stdout and stderr. The exception is the
-  occurs check: alm has none, so a self-referential type is reported as an
-  ordinary mismatch rather than elm's `INFINITE TYPE`.
+  self-referential type: both compilers detect the cycle, but alm's unifier
+  refuses to build it and blames the unification, where elm builds it and
+  checks each binding afterwards, reporting `INFINITE TYPE` against the
+  binding.
 - **Color and `--report=json`**: in a terminal the reports are colored
   exactly as elm colors them — a dull-cyan header bar, vivid-red carets,
   dull-yellow for the thing at fault, vivid green for what to use instead,

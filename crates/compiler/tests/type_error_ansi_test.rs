@@ -15,7 +15,8 @@ use std::fs;
 use std::path::Path;
 
 const KNOWN_DIFFERENT: &[&str] = &[
-    // No occurs check, so this reports a different error entirely.
+    // Reports a mismatch where elm reports INFINITE TYPE; see
+    // `type_error_test` for why.
     "infinite_type",
 ];
 

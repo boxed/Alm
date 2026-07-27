@@ -14,8 +14,13 @@ use std::path::Path;
 /// Fixtures alm does not yet render exactly like elm. Each entry is a category
 /// of `Reporting.Error.Type` that has not been ported.
 const KNOWN_DIFFERENT: &[&str] = &[
-    // alm has no occurs check, so a self-referential type (`x x`) is reported
-    // as an ordinary argument mismatch instead of elm's INFINITE TYPE report.
+    // A self-referential type (`x x`) is reported as an ordinary argument
+    // mismatch rather than elm's separate INFINITE TYPE report. Both compilers
+    // detect the cycle; they differ in *when*. alm's unifier refuses to build
+    // the cycle and blames the unification that would have created it, while
+    // elm builds it and checks each let/lambda binding afterwards, reporting
+    // the binding. Matching elm means letting unification succeed and deferring
+    // the check — a change to the core of the type checker, not a missing pass.
     "infinite_type",
 ];
 
