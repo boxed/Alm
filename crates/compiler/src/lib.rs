@@ -15,6 +15,8 @@ pub mod lint;
 pub mod nitpick;
 pub mod debug_uses;
 pub mod docs;
+pub mod docs_json;
+pub mod json;
 pub mod optimize;
 pub mod packages;
 pub mod parse;
