@@ -14,6 +14,7 @@ pub mod ir;
 pub mod lint;
 pub mod nitpick;
 pub mod debug_uses;
+pub mod docs;
 pub mod optimize;
 pub mod parse;
 pub mod project;

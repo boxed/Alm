@@ -221,6 +221,52 @@ pub fn compile_project_with(
     ))
 }
 
+/// Generate a package's `docs.json` (elm's `--docs`). Returns the JSON, or the
+/// build errors that stopped it.
+pub fn generate_docs(entry: &Path) -> Result<String, Vec<BuildError>> {
+    let root = project_root(entry);
+    let elm_json = std::fs::read_to_string(root.join("elm.json")).unwrap_or_default();
+    let exposed = exposed_modules(&elm_json);
+
+    // Every exposed module is documented, not just the ones the entry file
+    // happens to import — `elm make --docs` compiles the whole published API.
+    // Each is checked from its own file and the results merged; a module
+    // compiles the same whichever root reached it.
+    let scopes = resolve_scopes(entry);
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for name in &exposed {
+        if let Some((path, _)) = find_module_file(name, &scopes.app_search) {
+            roots.push(path);
+        }
+    }
+    if roots.is_empty() {
+        roots.push(entry.to_path_buf());
+    }
+
+    let mut modules: Vec<can::Module> = Vec::new();
+    let mut interfaces: std::collections::BTreeMap<Name, crate::interface::Interface> =
+        Default::default();
+    let mut sources: std::collections::BTreeMap<Name, String> = Default::default();
+    for root_path in &roots {
+        let checked = check_project(root_path)?;
+        for module in checked.modules {
+            if !modules.iter().any(|m| m.name == module.name) {
+                modules.push(module);
+            }
+        }
+        for (name, interface) in checked.interfaces.iter() {
+            interfaces.entry(name.clone()).or_insert_with(|| interface.clone());
+        }
+        for (name, (_, text)) in checked.sources {
+            sources.entry(name).or_insert(text);
+        }
+    }
+
+    let borrowed: std::collections::BTreeMap<Name, &crate::interface::Interface> =
+        interfaces.iter().map(|(name, i)| (name.clone(), i)).collect();
+    Ok(crate::docs::generate(&modules, &borrowed, &sources, &exposed))
+}
+
 /// Compile to JS with a Source Map v3. Returns `(javascript, source_map_json)`.
 /// Tree-shaking runs as usual and the map is remapped onto the shaken bundle, so
 /// the JS is the same size as an ordinary build. The caller writes the `.map`
@@ -683,6 +729,46 @@ fn register_bundled_deps(dir_search: &mut HashMap<PathBuf, Vec<PathBuf>>) -> Vec
         }
         None => Vec::new(),
     }
+}
+
+/// The modules a package `elm.json` lists under `"exposed-modules"`. elm
+/// allows either a flat array or an object grouping them under headings; both
+/// shapes reduce to the same set of names.
+pub fn exposed_modules(elm_json: &str) -> Vec<Name> {
+    let Some(i) = elm_json.find("\"exposed-modules\"") else {
+        return Vec::new();
+    };
+    let rest = &elm_json[i + "\"exposed-modules\"".len()..];
+    let Some(open) = rest.find(['[', '{']) else {
+        return Vec::new();
+    };
+    let closer = if rest.as_bytes()[open] == b'[' { b']' } else { b'}' };
+    let mut depth = 0i32;
+    let mut end = open;
+    for (k, byte) in rest.as_bytes()[open..].iter().enumerate() {
+        match byte {
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + k;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let _ = closer;
+    quoted_strings(&rest[open..=end])
+        // In the grouped shape the headings are quoted too, but a heading is
+        // never a module name: module names start with an upper-case letter
+        // and contain only identifier characters and dots.
+        .filter(|s| {
+            s.starts_with(char::is_uppercase)
+                && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        })
+        .map(Name::from)
+        .collect()
 }
 
 /// Whether an `elm.json` declares `"type": "package"`.

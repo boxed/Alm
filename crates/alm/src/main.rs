@@ -22,7 +22,8 @@ fn print_help() {
         "alm — an Elm compiler written in Rust\n\n\
          Usage:\n\
          \x20   alm make <file.elm> [--output=<file>] [--target=js|native|wasm-gc]\n\
-         \x20                       [--source-maps] [--dev] [--optimize] [--report=json]\n\n\
+         \x20                       [--source-maps] [--dev] [--optimize]\n\
+         \x20                       [--report=json] [--docs=<file>]\n\n\
          Compiles an Elm module. The default target is JavaScript, with\n\
          the output defaulting to the input file name with a .js\n\
          extension. `--target=native` compiles to a binary instead (the\n\
@@ -32,7 +33,8 @@ fn print_help() {
          so the output is the same size as an ordinary build.\n\
          `--optimize` is elm's production build; it refuses to compile while\n\
          any `Debug` call survives. `--report=json` writes diagnostics to\n\
-         stderr as JSON for editors."
+         stderr as JSON for editors. `--docs=<file>` writes a package's\n\
+         docs.json."
     );
 }
 
@@ -58,6 +60,8 @@ fn make(args: &[String]) -> ExitCode {
     // `--optimize`: elm's production build. Refuses to compile while any
     // `Debug` call survives.
     let mut optimize = false;
+    // `--docs=<file>`: write a package's docs.json.
+    let mut docs: Option<PathBuf> = None;
     for arg in args {
         if let Some(path) = arg.strip_prefix("--output=") {
             output = Some(PathBuf::from(path));
@@ -67,6 +71,8 @@ fn make(args: &[String]) -> ExitCode {
             opt = OptLevel::Debug;
         } else if arg == "--optimize" {
             optimize = true;
+        } else if let Some(path) = arg.strip_prefix("--docs=") {
+            docs = Some(PathBuf::from(path));
         } else if let Some(target) = arg.strip_prefix("--target=") {
             match target {
                 "js" => backend = Backend::Js,
@@ -100,6 +106,25 @@ fn make(args: &[String]) -> ExitCode {
         eprintln!("Which .elm file should I compile? For example:\n\n    alm make src/Main.elm");
         return ExitCode::FAILURE;
     };
+
+    if let Some(docs_path) = &docs {
+        match alm_compiler::project::generate_docs(&input) {
+            Ok(json) => {
+                if let Err(err) = std::fs::write(docs_path, json) {
+                    eprintln!("I could not write {}: {}", docs_path.display(), err);
+                    return ExitCode::FAILURE;
+                }
+            }
+            Err(errors) => {
+                let root = alm_compiler::project::project_root(&input);
+                let color = use_color();
+                for error in &errors {
+                    eprint!("{}", error.render_from(Some(&root), color));
+                }
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let result = match backend {
         Backend::Native => {
