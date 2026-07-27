@@ -1,0 +1,13 @@
+[36m-- UNEXPECTED PORTS ----------------------------------------------- src/Main.elm[0m
+
+You are declaring ports in a normal module.
+
+1| module Main exposing (..)
+   [91m^^^^^^[0m
+Switch this to say [96mport module[0m instead, marking that this module contains port
+declarations.
+
+[4mNote[0m: Ports are not a traditional FFI for calling JS functions directly. They
+need a different mindset! Read <https://elm-lang.org/0.19.1/ports> to learn the
+syntax and how to use it effectively.
+

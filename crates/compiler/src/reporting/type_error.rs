@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use super::doc::{Color, Doc};
+use super::{green, grey, hint, labeled, link, note, sentence, words, yellow};
 use super::{ElmBody, Report, Section};
 use crate::reporting::annotation::Region;
 
@@ -356,56 +357,6 @@ pub fn to_comparison(actual: &ErrorType, expected: &ErrorType) -> (Doc, Doc, Vec
 /// A type as it appears in a report: indented four columns, wrapped at 80.
 fn indented(doc: Doc) -> Doc {
     Doc::indent(4, doc)
-}
-
-/// A word in the color elm uses for "this is the type at fault".
-fn yellow(text: impl Into<String>) -> Doc {
-    Doc::color(Color::Yellow, Doc::text(text))
-}
-
-/// A word in the color elm uses for "use this instead".
-fn green(text: impl Into<String>) -> Doc {
-    Doc::color(Color::GreenVivid, Doc::text(text))
-}
-
-/// The dimmed color elm uses for illustrative example output.
-fn grey(text: impl Into<String>) -> Doc {
-    Doc::color(Color::BlackVivid, Doc::text(text))
-}
-
-/// Plain prose split into words, for mixing with styled ones in `fill_sep`.
-fn words(text: &str) -> Vec<Doc> {
-    text.split_whitespace().map(Doc::text).collect()
-}
-
-/// Build a filled paragraph out of alternating plain and styled pieces.
-fn sentence(parts: Vec<Doc>) -> Doc {
-    Doc::fill_sep(parts)
-}
-
-/// `D.toFancyHint` — an underlined `Hint` label, then the words. The colon is
-/// outside the underline.
-fn hint(parts: Vec<Doc>) -> Section {
-    Section::Para(sentence(labeled("Hint", parts)))
-}
-
-/// `D.toFancyNote`.
-fn note(parts: Vec<Doc>) -> Section {
-    Section::Para(sentence(labeled("Note", parts)))
-}
-
-fn labeled(label: &str, parts: Vec<Doc>) -> Vec<Doc> {
-    let mut out = vec![Doc::cat2(
-        Doc::styled(super::doc::Style::underline(), Doc::text(label)),
-        Doc::text(":"),
-    )];
-    out.extend(parts);
-    out
-}
-
-/// `D.makeLink`.
-fn link(page: &str) -> Doc {
-    Doc::text(format!("<https://elm-lang.org/0.19.1/{page}>"))
 }
 
 fn to_diff(ctx: Ctx, t1: &ErrorType, t2: &ErrorType) -> Diff {

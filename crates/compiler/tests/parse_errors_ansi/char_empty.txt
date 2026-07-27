@@ -1,0 +1,15 @@
+[36m-- NEEDS DOUBLE QUOTES -------------------------------------------- src/Main.elm[0m
+
+The following string uses single quotes:
+
+3| x = ''
+       [91m^^[0m
+Please switch to double quotes instead:
+
+    [33m'this'[0m => [92m"this"[0m
+
+[4mNote[0m: Elm uses double quotes for strings like "hello", whereas it uses single
+quotes for individual characters like 'a' and 'ø'. This distinction helps with
+code like (String.any (\c -> c == 'X') "90210") where you are inspecting
+individual characters.
+

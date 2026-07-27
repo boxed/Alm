@@ -1,0 +1,20 @@
+[36m-- UNFINISHED RECORD TYPE ----------------------------------------- src/Main.elm[0m
+
+I was partway through parsing a record type, but I got stuck here:
+
+2| x : { a : Int
+                [91m^[0m
+I was expecting to see a closing curly brace next. Try putting a [92m}[0m next and see
+if that helps?
+
+[4mNote[0m: I may be confused by indentation. For example, if you are trying to define
+a record type across multiple lines, I recommend using this format:
+
+    { name : String
+    , age : Int
+    , height : Float
+    }
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+

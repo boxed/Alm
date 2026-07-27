@@ -1,0 +1,9 @@
+[36m-- UNEXPECTED PATTERN --------------------------------------------- src/Main.elm[0m
+
+I cannot pattern match with floating point numbers:
+
+4|   1.5 -> 1
+     [91m^^^[0m
+Equality on floats can be unreliable, so you usually want to check that they are
+nearby with some sort of [33m(abs (actual - expected) < 0.001)[0m check.
+

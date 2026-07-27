@@ -1,0 +1,8 @@
+[36m-- TOO MUCH INDENTATION ------------------------------------------- src/Main.elm[0m
+
+This `import` should not have any spaces before it:
+
+3|   import String
+     [91m^[0m
+Delete the spaces before `import` until there are none left!
+

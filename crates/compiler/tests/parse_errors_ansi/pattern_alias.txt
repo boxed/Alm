@@ -1,0 +1,14 @@
+[36m-- UNFINISHED PATTERN --------------------------------------------- src/Main.elm[0m
+
+I was expecting to see a variable name after the `as` keyword:
+
+4|   a as -> 1
+          [91m^[0m
+The `as` keyword lets you write patterns like (([33mx[0m,[33my[0m) [96mas[0m[33m point[0m) so you can refer
+to individual parts of the tuple with [33mx[0m and [33my[0m or you refer to the whole thing
+with [33mpoint[0m.
+
+So I was expecting to see a variable name after the `as` keyword here. Sometimes
+people just want to use `as` as a variable name though. Try using a different
+name in that case!
+

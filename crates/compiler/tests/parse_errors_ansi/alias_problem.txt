@@ -1,0 +1,8 @@
+[36m-- PROBLEM IN TYPE ALIAS ------------------------------------------ src/Main.elm[0m
+
+I was partway through parsing a type alias, but I got stuck here:
+
+2| type alias X = @
+                  [91m^[0m
+I was expecting to see a type next. Try putting [33mInt[0m or [33mString[0m for now?
+

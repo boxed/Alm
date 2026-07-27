@@ -1,0 +1,16 @@
+[36m-- PROBLEM IN EXPOSING -------------------------------------------- src/Main.elm[0m
+
+I got stuck while parsing these exposed values:
+
+1| module Main exposing (a,,b)
+                           [91m^[0m
+I do not have an exact recommendation, so here are some valid examples of
+`exposing` for reference:
+
+    [96mimport[0m Html [96mexposing[0m (..)
+    [96mimport[0m Basics [96mexposing[0m (Int, Float, Bool(..), (+), not, sqrt)
+
+These examples show how to expose types, variants, operators, and functions.
+Everything should be some permutation of these examples, just with different
+names.
+

@@ -1,0 +1,9 @@
+[36m-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm[0m
+
+This code point has too many digits:
+
+3| x = "\u{0000041}"
+        [91m^^^^^^^^^^^[0m
+Valid code points are between [92m\u{0000}[0m and [92m\u{10FFFF}[0m, so try trimming any
+leading zeros until you have between four and six digits.
+

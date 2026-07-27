@@ -1,0 +1,18 @@
+[36m-- WEIRD DECLARATION ---------------------------------------------- src/Main.elm[0m
+
+I am trying to parse a declaration, but I am getting stuck here:
+
+3| = 1
+   [91m^[0m
+When a line has no spaces at the beginning, I expect it to be a declaration like
+one of these:
+
+    greet : String -> String
+    greet name =
+      [33m"Hello "[0m ++ name ++ [33m"!"[0m
+    
+    [96mtype[0m User = Anonymous | LoggedIn String
+
+Try to make your declaration look like one of those? Or if this is not supposed
+to be a declaration, try adding some spaces before it?
+

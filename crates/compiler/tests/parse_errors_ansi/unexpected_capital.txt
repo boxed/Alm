@@ -1,0 +1,18 @@
+[36m-- UNEXPECTED CAPITAL LETTER -------------------------------------- src/Main.elm[0m
+
+Declarations always start with a lower-case letter, so I am getting stuck here:
+
+2| Y = 2
+   [91m^[0m
+Try a name like [92my[0m instead?
+
+[4mNote[0m: Here are a couple valid declarations for reference:
+
+    greet : String -> String
+    greet name =
+      [33m"Hello "[0m ++ name ++ [33m"!"[0m
+    
+    [96mtype[0m User = Anonymous | LoggedIn String
+
+Notice that they always start with a lower-case letter. Capitalization matters!
+

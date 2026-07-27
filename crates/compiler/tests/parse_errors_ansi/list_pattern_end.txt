@@ -1,0 +1,8 @@
+[36m-- UNFINISHED LIST PATTERN ---------------------------------------- src/Main.elm[0m
+
+I was expecting a closing square bracket to end this list pattern:
+
+4|   [a b] -> 1
+        [91m^[0m
+Try adding a [33m][0m to see if that helps?
+

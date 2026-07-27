@@ -1,0 +1,19 @@
+[36m-- UNFINISHED DEFINITION ------------------------------------------ src/Main.elm[0m
+
+I got stuck while parsing the `x` type annotation:
+
+3| x : 
+      [91m^[0m
+I just saw a colon, so I am expecting to see a type next.
+
+Here is a valid definition (with a type annotation) for reference:
+
+    greet : String -> String
+    greet name =
+      [33m"Hello "[0m ++ name ++ [33m"!"[0m
+
+The top line (called a "type annotation") is optional. You can leave it off if
+you want. As you get more comfortable with Elm and as your project grows, it
+becomes more and more valuable to add them though! They work great as
+compiler-verified documentation, and they often improve error messages!
+

@@ -1,0 +1,11 @@
+[36m-- UNFINISHED RECORD PATTERN -------------------------------------- src/Main.elm[0m
+
+I was partway through parsing a record pattern, but I got stuck here:
+
+4|   { a
+        [91m^[0m
+I was expecting to see a closing curly brace next. Try adding a [33m}[0m here?
+
+[4mHint[0m: A record pattern looks like [33m{x,y}[0m or [33m{name,age}[0m where you list the field
+names you want to access.
+

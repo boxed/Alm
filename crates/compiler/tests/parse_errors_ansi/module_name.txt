@@ -1,0 +1,15 @@
+[36m-- EXPECTING MODULE NAME ------------------------------------------ src/Main.elm[0m
+
+I was parsing an `module` declaration until I got stuck here:
+
+1| module 1 exposing (..)
+          [91m^[0m
+I was expecting to see the module name next, like in these examples:
+
+    [96mmodule[0m Dict [96mexposing[0m (..)
+    [96mmodule[0m Maybe [96mexposing[0m (..)
+    [96mmodule[0m Html.Attributes [96mexposing[0m (..)
+    [96mmodule[0m Json.Decode [96mexposing[0m (..)
+
+Notice that the module names all start with capital letters. That is required!
+

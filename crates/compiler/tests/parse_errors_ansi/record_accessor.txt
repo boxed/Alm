@@ -1,0 +1,10 @@
+[36m-- EXPECTING RECORD ACCESSOR -------------------------------------- src/Main.elm[0m
+
+I am trying to parse a record accessor here:
+
+2| x = .
+        [91m^[0m
+Something like [33m.name[0m or [33m.price[0m that accesses a value from a record.
+
+[4mNote[0m: Record field names must start with a lower case letter!
+

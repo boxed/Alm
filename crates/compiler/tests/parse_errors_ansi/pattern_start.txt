@@ -1,0 +1,9 @@
+[36m-- PROBLEM IN PATTERN --------------------------------------------- src/Main.elm[0m
+
+I wanted to parse a pattern next, but I got stuck here:
+
+4|   @ -> 1
+     [91m^[0m
+I am not sure why I am getting stuck exactly. I just know that I want a pattern
+next. Something as simple as [33mmaybeHeight[0m or [33mresult[0m would work!
+

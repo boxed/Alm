@@ -1,0 +1,18 @@
+[36m-- UNFINISHED IMPORT ---------------------------------------------- src/Main.elm[0m
+
+I am partway through parsing an import, but I got stuck here:
+
+3| import Foo as 
+                [91m^[0m
+Here are some examples of valid `import` declarations:
+
+    [96mimport[0m Html
+    [96mimport[0m Html [96mas[0m H
+    [96mimport[0m Html [96mas[0m H [96mexposing[0m (..)
+    [96mimport[0m Html [96mexposing[0m (Html, div, text)
+
+You are probably trying to import a different module, but try to make it look
+like one of these examples!
+
+Read <https://elm-lang.org/0.19.1/imports> to learn more.
+

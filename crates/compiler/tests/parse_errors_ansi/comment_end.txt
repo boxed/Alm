@@ -1,0 +1,12 @@
+[36m-- ENDLESS COMMENT ------------------------------------------------ src/Main.elm[0m
+
+I cannot find the end of this multi-line comment:
+
+3| {- unterminated
+   [91m^^[0m
+Add a -} somewhere after this to end the comment.
+
+[4mHint[0m: Multi-line comments can be nested in Elm, so {- {- -} -} is a comment that
+happens to contain another comment. Like parentheses and curly braces, the start
+and end markers must always be balanced. Maybe that is the problem?
+

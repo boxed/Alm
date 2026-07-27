@@ -1,0 +1,16 @@
+[36m-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm[0m
+
+I ran into an invalid Unicode escape:
+
+3| x = "\u{zz}"
+        [91m^^^[0m
+Here are some examples of valid Unicode escapes:
+
+[33m    \u{0041}
+    \u{03BB}
+    \u{6728}
+    \u{1F60A}[0m
+
+Notice that the code point is always surrounded by curly braces. Maybe you are
+missing the opening or closing curly brace?
+

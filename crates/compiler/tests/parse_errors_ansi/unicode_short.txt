@@ -1,0 +1,8 @@
+[36m-- BAD UNICODE ESCAPE --------------------------------------------- src/Main.elm[0m
+
+Every code point needs at least four digits:
+
+3| x = "\u{12}"
+        [91m^^^^^^[0m
+Try [92m\u{0012}[0m instead?
+

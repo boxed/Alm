@@ -1,0 +1,13 @@
+[36m-- UNFINISHED TUPLE ----------------------------------------------- src/Main.elm[0m
+
+I think I am in the middle of parsing a tuple. I just saw a comma, so I was
+expecting to see an expression next.
+
+2| x = (1,
+          [91m^[0m
+A tuple looks like [33m(3,4)[0m or [33m("Tom",42)[0m, so I think there is an expression
+missing here?
+
+[4mNote[0m: I can get confused by indentation in cases like this, so maybe you have an
+expression but it is not indented enough?
+

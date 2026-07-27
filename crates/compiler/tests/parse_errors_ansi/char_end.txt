@@ -1,0 +1,9 @@
+[36m-- MISSING SINGLE QUOTE ------------------------------------------- src/Main.elm[0m
+
+I thought I was parsing a character, but I got to the end of the line without
+seeing the closing single quote:
+
+3| x = 'a
+         [91m^[0m
+Add a closing single quote here!
+

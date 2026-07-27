@@ -1,0 +1,19 @@
+[36m-- UNFINISHED LIST ------------------------------------------------ src/Main.elm[0m
+
+I cannot find the end of this list:
+
+4|     [ 1, 2
+             [91m^[0m
+You can just add a closing [33m][0m right here, and I will be all set!
+
+[4mNote[0m: I may be confused by indentation. For example, if you are trying to define
+a list across multiple lines, I recommend using this format:
+
+    [ [33m"Alice"[0m
+    , [33m"Bob"[0m
+    , [33m"Chuck"[0m
+    ]
+
+Notice that each line starts with some indentation. Usually two or four spaces.
+This is the stylistic convention in the Elm ecosystem.
+

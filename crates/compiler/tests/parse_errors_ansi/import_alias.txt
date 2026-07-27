@@ -1,0 +1,16 @@
+[36m-- EXPECTING IMPORT ALIAS ----------------------------------------- src/Main.elm[0m
+
+I was parsing an `import` until I got stuck here:
+
+2| import Html as 5
+                  [91m^[0m
+I was expecting to see an alias next, like in these examples:
+
+    [96mimport[0m Html.Attributes [96mas[0m Attr
+    [96mimport[0m WebGL.Texture [96mas[0m Texture
+    [96mimport[0m Json.Decode [96mas[0m D
+
+Notice that the alias always starts with a capital letter. That is required!
+
+Read <https://elm-lang.org/0.19.1/imports> to learn more.
+

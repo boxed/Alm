@@ -1,0 +1,8 @@
+[36m-- UNFINISHED IF -------------------------------------------------- src/Main.elm[0m
+
+I was expecting to see more of this `if` expression, but I got stuck here:
+
+4|     if True 1 else 2
+                 [91m^[0m
+I was expecting to see the [96mthen[0m keyword next.
+

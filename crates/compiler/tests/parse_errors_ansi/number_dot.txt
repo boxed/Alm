@@ -1,0 +1,8 @@
+[36m-- WEIRD NUMBER --------------------------------------------------- src/Main.elm[0m
+
+Numbers cannot end with a dot like this:
+
+3| x = 1.
+        [91m^[0m
+Switching to [92m1[0m or [92m1.0[0m will work though!
+

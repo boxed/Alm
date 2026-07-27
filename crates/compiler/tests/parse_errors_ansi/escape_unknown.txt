@@ -1,0 +1,22 @@
+[36m-- UNKNOWN ESCAPE ------------------------------------------------- src/Main.elm[0m
+
+Backslashes always start escaped characters, but I do not recognize this one:
+
+3| x = "\q"
+        [91m^^[0m
+Valid escape characters include:
+
+[33m    \n
+    \r
+    \t
+    \"
+    \'
+    \\
+    \u{003D}[0m
+
+Do you want one of those instead? Maybe you need \\ to escape a backslash?
+
+[4mNote[0m: The last style lets encode ANY character by its Unicode code point. That
+means \u{0009} and \t are the same. You can use that style for anything not
+covered by the other six escapes!
+

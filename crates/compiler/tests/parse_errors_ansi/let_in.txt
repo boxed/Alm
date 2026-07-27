@@ -1,0 +1,14 @@
+[36m-- LET PROBLEM ---------------------------------------------------- src/Main.elm[0m
+
+I was partway through parsing a `let` expression, but I got stuck here:
+
+4|     let a = 1
+5|     a
+       [91m^[0m
+Based on the indentation, I was expecting to see the [96min[0m keyword next. Is there a
+typo?
+
+[4mNote[0m: This can also happen if you are trying to define another value within the
+`let` but it is not indented enough. Make sure each definition has exactly the
+same amount of spaces before it. They should line up exactly!
+

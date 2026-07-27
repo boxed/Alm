@@ -1,0 +1,15 @@
+[36m-- MODULE NAME MISMATCH ------------------------------------------- src/Main.elm[0m
+
+It looks like this module name is out of sync:
+
+1| module Wrong exposing (..)
+          [91m^^^^^[0m
+I need it to match the file path, so I was expecting to see `Main` here. Make
+the following change, and you should be all set!
+
+    [33mWrong[0m -> [92mMain[0m
+
+[4mNote[0m: I require that module names correspond to file paths. This makes it much
+easier to explore unfamiliar codebases! So if you want to keep the current
+module name, try renaming the file instead.
+

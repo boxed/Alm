@@ -1,0 +1,13 @@
+[36m-- UNFINISHED PORT MODULE DECLARATION ----------------------------- src/Main.elm[0m
+
+I am parsing an `port module` declaration, but I got stuck here:
+
+1| port modxule Main exposing (..)
+        [91m^[0m
+Here are some examples of valid `port module` declarations:
+
+    [96mport[0m [96mmodule[0m WebSockets [96mexposing[0m (send, listen, keepAlive)
+    [96mport[0m [96mmodule[0m Maps [96mexposing[0m (Location, goto)
+
+[4mNote[0m: Read <https://elm-lang.org/0.19.1/ports> for more help.
+

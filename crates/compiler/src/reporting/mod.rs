@@ -53,6 +53,65 @@ impl Section {
     }
 }
 
+// ---------------------------------------------------------- styled prose bits
+//
+// elm's reports color individual words: the thing at fault in dull yellow, the
+// thing to use instead in vivid green, an Elm keyword in vivid cyan, and an
+// underlined `Hint`/`Note` label. These build those pieces.
+
+/// A word in the color elm uses for "this is the thing at fault".
+pub fn yellow(text: impl Into<String>) -> Doc {
+    Doc::color(Color::Yellow, Doc::text(text))
+}
+
+/// A word in the color elm uses for "use this instead".
+pub fn green(text: impl Into<String>) -> Doc {
+    Doc::color(Color::GreenVivid, Doc::text(text))
+}
+
+/// The color elm uses for Elm keywords quoted inside prose.
+pub fn cyan(text: impl Into<String>) -> Doc {
+    Doc::color(Color::CyanVivid, Doc::text(text))
+}
+
+/// The dimmed color elm uses for illustrative example output.
+pub fn grey(text: impl Into<String>) -> Doc {
+    Doc::color(Color::BlackVivid, Doc::text(text))
+}
+
+/// Plain prose split into words, for mixing with styled ones.
+pub fn words(text: &str) -> Vec<Doc> {
+    text.split_whitespace().map(Doc::text).collect()
+}
+
+/// Build a filled paragraph out of alternating plain and styled pieces.
+pub fn sentence(parts: Vec<Doc>) -> Doc {
+    Doc::fill_sep(parts)
+}
+
+/// `D.toFancyHint` — an underlined `Hint` label, then the words. The colon sits
+/// outside the underline.
+pub fn hint(parts: Vec<Doc>) -> Section {
+    Section::Para(sentence(labeled("Hint", parts)))
+}
+
+/// `D.toFancyNote`.
+pub fn note(parts: Vec<Doc>) -> Section {
+    Section::Para(sentence(labeled("Note", parts)))
+}
+
+pub fn labeled(label: &str, parts: Vec<Doc>) -> Vec<Doc> {
+    let mut out =
+        vec![Doc::cat2(Doc::styled(Style::underline(), Doc::text(label)), Doc::text(":"))];
+    out.extend(parts);
+    out
+}
+
+/// `D.makeLink`.
+pub fn link(page: &str) -> Doc {
+    Doc::text(format!("<https://elm-lang.org/0.19.1/{page}>"))
+}
+
 const WIDTH: usize = 80;
 
 impl Report {

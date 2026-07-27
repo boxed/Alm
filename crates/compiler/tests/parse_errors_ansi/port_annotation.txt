@@ -1,0 +1,20 @@
+[36m-- UNFINISHED PORT ------------------------------------------------ src/Main.elm[0m
+
+I just saw the start of a `port` declaration, but then I got stuck here:
+
+3| port foo 
+           [91m^[0m
+I was expecting to see a colon next. And then a type that tells me what type of
+values are going to flow through.
+
+[4mNote[0m: Here are some example `port` declarations for reference:
+
+    [96mport[0m send : String -> Cmd msg
+    [96mport[0m receive : (String -> msg) -> Sub msg
+
+The first line defines a `send` port so you can send strings out to JavaScript.
+Maybe you send them on a WebSocket or put them into IndexedDB. The second line
+defines a `receive` port so you can receive strings from JavaScript. Maybe you
+get receive messages when new WebSocket messages come in or when the IndexedDB
+is changed for some external reason.
+

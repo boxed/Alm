@@ -1,0 +1,8 @@
+[36m-- UNEXPECTED SYMBOL ---------------------------------------------- src/Main.elm[0m
+
+I got stuck on this symbol:
+
+2| x = 1 @ 2
+         [91m^[0m
+It is not used for anything in Elm syntax. Try removing it?
+

@@ -1,0 +1,8 @@
+[36m-- NO PORTS ------------------------------------------------------- src/Main.elm[0m
+
+This module does not declare any ports, but it says it will:
+
+1| port module Main exposing (..)
+   [91m^^^^^^^^^^^[0m
+Switch this to [96mmodule[0m and you should be all set!
+

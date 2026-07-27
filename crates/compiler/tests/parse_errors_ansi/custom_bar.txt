@@ -1,0 +1,22 @@
+[36m-- UNFINISHED CUSTOM TYPE ----------------------------------------- src/Main.elm[0m
+
+I am partway through parsing a custom type, but I got stuck here:
+
+3| type Foo = A B | 
+                   [91m^[0m
+I just saw a vertical bar, so I was expecting to see another variant defined
+next.
+
+[4mNote[0m: Here is an example of a valid `type` declaration for reference:
+
+    [96mtype[0m Status
+      = Failure
+      | Waiting
+      | Success String
+
+This defines a new `Status` type with three variants. This could be useful if we
+are waiting for an HTTP request. Maybe we start with `Waiting` and then switch
+to `Failure` or `Success "message from server"` depending on how things go.
+Notice that the Success variant has some associated data, allowing us to store a
+String if the request goes well!
+

@@ -1,0 +1,21 @@
+[36m-- UNEXPECTED CHARACTER ------------------------------------------- src/Main.elm[0m
+
+I got stuck on this character:
+
+2| x = 1 ` 2
+         [91m^[0m
+It is not used for anything in Elm syntax. It is used for multi-line strings in
+some languages though, so if you want a string that spans multiple lines, you
+can use Elm's multi-line string syntax like this:
+
+[33m    """
+    # Multi-line Strings
+    
+    - start with triple double quotes
+    - write whatever you want
+    - no need to escape newlines or double quotes
+    - end with triple double quotes
+    """[0m
+
+Otherwise I do not know what is going on! Try removing the character?
+

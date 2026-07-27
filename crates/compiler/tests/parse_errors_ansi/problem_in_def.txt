@@ -1,0 +1,15 @@
+[36m-- PROBLEM IN DEFINITION ------------------------------------------ src/Main.elm[0m
+
+I got stuck while parsing the `f` definition:
+
+2| f x@ = 1
+      [91m^[0m
+I am not sure what is going wrong exactly, so here is a valid definition (with
+an optional type annotation) for reference:
+
+    greet : String -> String
+    greet name =
+      [33m"Hello "[0m ++ name ++ [33m"!"[0m
+
+Try to use that format!
+

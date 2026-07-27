@@ -1,0 +1,8 @@
+[36m-- NO TABS -------------------------------------------------------- src/Main.elm[0m
+
+I ran into a tab, but tabs are not allowed in Elm files.
+
+3| x =	1
+      [91m^[0m
+Replace the tab with spaces.
+

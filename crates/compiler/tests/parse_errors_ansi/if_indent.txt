@@ -1,0 +1,9 @@
+[36m-- UNFINISHED IF -------------------------------------------------- src/Main.elm[0m
+
+I was expecting to see an `else` branch after this:
+
+4|     if True then 1
+                     [91m^[0m
+I know what to do when the condition is True, but what happens when it is False?
+Add an [96melse[0m branch to handle that scenario!
+
