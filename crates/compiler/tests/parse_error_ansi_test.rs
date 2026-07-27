@@ -4,14 +4,15 @@
 //! Each `parse_errors_ansi/<name>.txt` is `elm make` 0.19.1's exact terminal
 //! output for the matching `parse_errors/<name>.elm`, captured under a pty.
 //!
-//! The shared chrome — dull-cyan header bar, vivid-red carets and `>` markers,
-//! underlined `Hint`/`Note` labels — is done. What remains is per-report: elm
-//! also colors Elm keywords quoted in prose (vivid cyan), code fragments and
-//! type names (dull yellow), suggested syntax (vivid green) and a few
-//! constructor names (vivid blue), and which words those are is a decision made
-//! separately in each of the ~90 reports in `Reporting.Error.Syntax`. Fixtures
-//! still needing that are listed in `NEEDS_INLINE_COLOR`; the test fails both
-//! if a listed one starts matching (delete it) and if an unlisted one breaks.
+//! Besides the shared chrome — dull-cyan header bar, vivid-red carets and `>`
+//! markers, underlined `Hint`/`Note` labels — elm colors words inside the
+//! reports: Elm keywords (vivid cyan), code fragments and type names (dull
+//! yellow), suggested syntax (vivid green) and constructors in example code
+//! (vivid blue). Which words those are is decided separately in each report of
+//! `Reporting.Error.Syntax`, so they are written out rather than inferred.
+//!
+//! `NEEDS_INLINE_COLOR` is empty: every fixture matches. The test still fails
+//! if a listed one starts matching, so the list cannot silently rot.
 //!
 //! `pkg_*` fixtures are excluded: they need a package `elm.json`, which the
 //! plain-text suite handles by compiling them differently.
@@ -19,25 +20,9 @@
 use std::fs;
 use std::path::Path;
 
-/// Fixtures whose bodies still need elm's inline word coloring.
-const NEEDS_INLINE_COLOR: &[&str] = &[
-    "alias_body", "alias_eq", "alias_name", "alias_problem", "case_arrow", "case_of",
-    "char_empty", "custom_bar", "custom_problem", "custom_type", "def_body", "def_equals",
-    "escape_unknown", "exposing_comma", "exposing_end", "exposing_value",
-    "exposing_variants", "if_indent", "if_then", "import_alias", "import_as",
-    "import_expecting_name", "import_name", "lambda_arrow", "let_eq", "let_in", "list_end",
-    "list_pattern_end", "list_pattern_indent", "list_pattern_open", "module_exposing",
-    "module_mismatch", "module_name", "name_mismatch", "need_more_indent", "no_ports",
-    "number_dot", "op_function", "operator_bad", "paren_end", "pattern_alias",
-    "pattern_float", "pattern_start", "port_annotation", "port_in_normal",
-    "port_module_decl", "problem_in_def", "record_accessor", "record_end", "record_eq",
-    "record_pattern_end", "record_pattern_field", "record_pattern_indent",
-    "record_type_problem", "record_type_unfinished", "string_end", "tuple_pattern_expr",
-    "tuple_type_unfinished", "type_ann", "type_name", "unexpected_backtick",
-    "unexpected_capital", "unexpected_equals", "unexpected_symbol_decl", "unfinished_case",
-    "unfinished_expr", "unfinished_let", "unfinished_tuple", "unicode_bad", "unicode_long",
-    "unicode_short", "weird_decl",
-];
+/// Fixtures whose bodies do not yet match. Empty — kept so a regression can
+/// be quarantined deliberately rather than by deleting the assertion.
+const NEEDS_INLINE_COLOR: &[&str] = &[];
 
 fn render_ansi(source: &str, is_package: bool) -> String {
     match alm_compiler::compile_named_typed(source, "Main", is_package) {

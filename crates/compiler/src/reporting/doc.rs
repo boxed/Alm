@@ -339,7 +339,10 @@ fn interleave(docs: Vec<Doc>, separator: Doc) -> Doc {
 /// Would `doc` flattened, followed by the pending work, reach the next line
 /// break within the width budget?
 fn fits_flat(width: usize, column: usize, doc: &Doc, rest: &[(usize, bool, Style, &Doc)]) -> bool {
-    let mut budget = width as isize - column as isize;
+    // Clamp before the signed conversion: callers pass `usize::MAX` to mean
+    // "never wrap", and `usize::MAX as isize` is -1, which would make every
+    // group break instead.
+    let mut budget = width.min(isize::MAX as usize) as isize - column as isize;
     if budget < 0 {
         return false;
     }
@@ -524,6 +527,15 @@ mod fill_tests {
 
     /// Adjacent text in the same style becomes one run, so `Hint` + `:` do not
     /// split a chunk when they share styling.
+    /// `usize::MAX` means "never wrap" — used to render a report's searchable
+    /// one-line summary. A naive `as isize` makes that -1 and breaks every
+    /// line instead.
+    #[test]
+    fn a_huge_width_never_wraps() {
+        let doc = Doc::reflow("one two three four five six seven eight nine ten");
+        assert_eq!(doc.render(usize::MAX), "one two three four five six seven eight nine ten");
+    }
+
     #[test]
     fn adjacent_runs_of_one_style_merge() {
         let doc = Doc::cat2(

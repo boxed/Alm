@@ -129,19 +129,34 @@ pub fn marked(text: &str, marks: &[(&str, fn(String) -> Doc)]) -> Doc {
     'outer: while i < words.len() {
         for (token, style) in &ordered {
             let parts: Vec<&str> = token.split_whitespace().collect();
-            // A run of whole words.
-            if parts.len() > 1 && words[i..].starts_with(&parts[..]) {
-                pieces.push(style(token.to_string()));
-                i += parts.len();
-                continue 'outer;
+            // A run of words. The last of them may carry trailing punctuation
+            // that stays plain — `(name, _).` colors `(name, _)` and not the
+            // sentence's full stop.
+            if parts.len() > 1 && i + parts.len() <= words.len() {
+                let (last, leading) = parts.split_last().unwrap();
+                if words[i..i + leading.len()] == *leading {
+                    let tail_word = words[i + leading.len()];
+                    if tail_word.starts_with(last)
+                        && is_trailing_punctuation(&tail_word[last.len()..])
+                    {
+                        pieces.push(Doc::cat2(
+                            style(token.to_string()),
+                            Doc::text(tail_word[last.len()..].to_string()),
+                        ));
+                        i += parts.len();
+                        continue 'outer;
+                    }
+                }
             }
             if parts.len() == 1 && words[i] == *token {
                 pieces.push(style(token.to_string()));
                 i += 1;
                 continue 'outer;
             }
-            // The token opens this word; the rest of it stays plain.
-            if parts.len() == 1 && words[i].starts_with(token) {
+            // The token opens this word and only punctuation follows, so the
+            // sentence's own comma or full stop stays plain. Requiring
+            // punctuation is what keeps `in` from matching "indentation".
+            if parts.len() == 1 && words[i].starts_with(token) && is_trailing_punctuation(&words[i][token.len()..]) {
                 pieces.push(Doc::cat2(
                     style(token.to_string()),
                     Doc::text(words[i][token.len()..].to_string()),
@@ -154,6 +169,13 @@ pub fn marked(text: &str, marks: &[(&str, fn(String) -> Doc)]) -> Doc {
         i += 1;
     }
     sentence(pieces)
+}
+
+/// Whether a matched token ends the word, or is followed only by punctuation
+/// the sentence owns rather than by more of a longer word. Requiring this is
+/// what stops `in` from matching inside "indentation".
+fn is_trailing_punctuation(rest: &str) -> bool {
+    rest.chars().all(|c| c.is_ascii_punctuation())
 }
 
 /// One line of a code example, indented `indent` spaces: the pieces butted

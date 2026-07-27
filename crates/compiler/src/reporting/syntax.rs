@@ -4,9 +4,8 @@
 //! `alm make` output matches `elm make` byte-for-byte.
 
 use super::{
-    blue, code_block, code_line, cyan, green, hint, marked, note, sentence, words, yellow, Doc,
-    ElmBody,
-    Region, Report, Section,
+    blue, code_block, code_line, colored_block, cyan, green, hint, marked, note, sentence, words,
+    yellow, Doc, ElmBody, Region, Report, Section,
 };
 
 /// A structured parse error, produced by the parser at the point it got stuck.
@@ -394,21 +393,18 @@ impl SyntaxError {
                 "ENDLESS STRING",
                 *region,
                 "I got to the end of the line without seeing the closing double quote:",
-                "Strings look like \"this\" with double quotes on each end. Is the closing \
-                 double quote missing in your code?",
+                marked(
+                    "Strings look like \"this\" with double quotes on each end. Is the closing \
+                     double quote missing in your code?",
+                    &[("\"this\"", green)],
+                ),
                 vec![
                     note(words(
                         "For a string that spans multiple lines, you can use the \
                          multi-line string syntax like this:"
                             ,
                     )),
-                    example(&
-                        "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
-                         double quotes\n    - write whatever you want\n    - no need to \
-                         escape newlines or double quotes\n    - end with triple double \
-                         quotes\n    \"\"\""
-                            .to_string(),
-                    ),
+                    colored_block(yellow, MULTILINE_STRING_EXAMPLE),
                 ],
             ),
             SyntaxError::UnfinishedLambda { region } => snippet(
@@ -779,9 +775,9 @@ impl SyntaxError {
                 "Backslashes always start escaped characters, but I do not recognize this one:",
                 "Valid escape characters include:",
                 vec![
-                    example(&
-                        "    \\n\n    \\r\n    \\t\n    \\\"\n    \\'\n    \\\\\n    \\u{003D}"
-                            .to_string(),
+                    colored_block(
+                        yellow,
+                        "    \\n\n    \\r\n    \\t\n    \\\"\n    \\'\n    \\\\\n    \\u{003D}",
                     ),
                     Section::para(
                         "Do you want one of those instead? Maybe you need \\\\ to escape a \
@@ -797,14 +793,14 @@ impl SyntaxError {
                 ],
             ),
             SyntaxError::BadUnicodeEscape { region, problem } => {
-                let (before, after, notes): (&str, String, Vec<Section>) = match problem {
+                let (before, after, notes): (&str, Doc, Vec<Section>) = match problem {
                     BadUnicode::Format => (
                         "I ran into an invalid Unicode escape:",
-                        "Here are some examples of valid Unicode escapes:".to_string(),
+                        Doc::reflow("Here are some examples of valid Unicode escapes:"),
                         vec![
-                            example(&
-                                "    \\u{0041}\n    \\u{03BB}\n    \\u{6728}\n    \\u{1F60A}"
-                                    .to_string(),
+                            colored_block(
+                                yellow,
+                                "    \\u{0041}\n    \\u{03BB}\n    \\u{6728}\n    \\u{1F60A}",
                             ),
                             Section::para(
                                 "Notice that the code point is always surrounded by curly braces. \
@@ -815,19 +811,25 @@ impl SyntaxError {
                     ),
                     BadUnicode::Code => (
                         "This is not a valid code point:",
-                        "The valid code points are between 0 and 10FFFF inclusive.".to_string(),
+                        Doc::reflow("The valid code points are between 0 and 10FFFF inclusive."),
                         vec![],
                     ),
                     BadUnicode::TooShort { padded } => (
                         "Every code point needs at least four digits:",
-                        format!("Try \\u{{{padded}}} instead?"),
+                        marked(
+                            &format!("Try \\u{{{padded}}} instead?"),
+                            &[(&format!("\\u{{{padded}}}"), green)],
+                        ),
                         vec![],
                     ),
                     BadUnicode::TooLong => (
                         "This code point has too many digits:",
-                        "Valid code points are between \\u{0000} and \\u{10FFFF}, so try trimming \
-                         any leading zeros until you have between four and six digits."
-                            .to_string(),
+                        marked(
+                            "Valid code points are between \\u{0000} and \\u{10FFFF}, so try \
+                             trimming any leading zeros until you have between four and six \
+                             digits.",
+                            &[("\\u{0000}", green), ("\\u{10FFFF}", green)],
+                        ),
                         vec![],
                     ),
                 };
@@ -886,12 +888,21 @@ impl SyntaxError {
                         "Here is an example with a valid `let` expression for reference:"
                             ,
                     )),
-                    example(&
-                        "    viewPerson person =\n      let\n        fullName =\n          \
-                         person.firstName ++ \" \" ++ person.lastName\n      in\n      div [] [ \
-                         text fullName ]"
-                            .to_string(),
-                    ),
+                    code_block(vec![
+                        Doc::text("    viewPerson person ="),
+                        code_line(6, vec![cyan("let")]),
+                        Doc::text("        fullName ="),
+                        code_line(
+                            10,
+                            vec![
+                                Doc::text("person.firstName ++ "),
+                                yellow("\" \""),
+                                Doc::text(" ++ person.lastName"),
+                            ],
+                        ),
+                        code_line(6, vec![cyan("in")]),
+                        Doc::text("      div [] [ text fullName ]"),
+                    ]),
                     Section::para(
                         "Here we defined a `viewPerson` function that turns a person into some \
                          HTML. We use a `let` expression to define the `fullName` we want to \
@@ -907,8 +918,11 @@ impl SyntaxError {
                 *region,
                 "I think I am in the middle of parsing a tuple. I just saw a comma, so I was \
                  expecting to see an expression next.",
-                "A tuple looks like (3,4) or (\"Tom\",42), so I think there is an expression \
-                 missing here?",
+                marked(
+                    "A tuple looks like (3,4) or (\"Tom\",42), so I think there is an expression \
+                     missing here?",
+                    &[("(3,4)", yellow), ("(\"Tom\",42)", yellow)],
+                ),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so maybe you \
                      have an expression but it is not indented enough?"
@@ -1077,8 +1091,11 @@ impl SyntaxError {
                 *region,
                 "I think I am in the middle of parsing a tuple type. I just saw a comma, so \
                  I was expecting to see a type next.",
-                "A tuple type looks like (Float,Float) or (String,Int), so I think there is \
-                 a type missing here?",
+                marked(
+                    "A tuple type looks like (Float,Float) or (String,Int), so I think there is \
+                     a type missing here?",
+                    &[("(Float,Float)", yellow), ("(String,Int)", yellow)],
+                ),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so maybe \
                      you have an expression but it is not indented enough?"
@@ -1111,8 +1128,11 @@ impl SyntaxError {
                 "EXPECTING TYPE NAME",
                 *region,
                 "I think I am parsing a type declaration, but I got stuck here:",
-                "I was expecting a name like Status or Style next. Just make sure it is a \
-                 name that starts with a capital letter!",
+                marked(
+                    "I was expecting a name like Status or Style next. Just make sure it is a \
+                     name that starts with a capital letter!",
+                    &[("Status", yellow), ("Style", yellow)],
+                ),
                 custom_notes(),
             ),
             SyntaxError::ExpectingTypeAliasName { region } => snippet(
@@ -1242,8 +1262,11 @@ impl SyntaxError {
                 "UNFINISHED TUPLE PATTERN",
                 *region,
                 "I am partway through parsing a tuple pattern, but I got stuck here:",
-                "I was expecting to see a pattern next. I am expecting the final result to be \
-                 something like (x,y) or (name, _).",
+                marked(
+                    "I was expecting to see a pattern next. I am expecting the final result to \
+                     be something like (x,y) or (name, _).",
+                    &[("(x,y)", yellow), ("(name, _)", yellow)],
+                ),
                 vec![note(words(
                     "I can get confused by indentation in cases like this, so the \
                      problem may be that the next part is not indented enough?"
@@ -1309,13 +1332,7 @@ impl SyntaxError {
                  in some languages though, so if you want a string that spans multiple lines, \
                  you can use Elm's multi-line string syntax like this:",
                 vec![
-                    example(&
-                        "    \"\"\"\n    # Multi-line Strings\n    \n    - start with triple \
-                         double quotes\n    - write whatever you want\n    - no need to \
-                         escape newlines or double quotes\n    - end with triple double \
-                         quotes\n    \"\"\""
-                            .to_string(),
-                    ),
+                    colored_block(yellow, MULTILINE_STRING_EXAMPLE),
                     Section::para(
                         "Otherwise I do not know what is going on! Try removing the character?"
                             .to_string(),
@@ -1353,16 +1370,16 @@ impl SyntaxError {
                 ))],
             ),
             SyntaxError::UnexpectedEquals { region, name } => {
-                let note = match name {
+                let advice = match name {
                     Some(n) => format!(
-                        "Note: I may be getting confused by your indentation. I think I am \
-                         still parsing the `{n}` definition. Is this supposed to be part of a \
+                        "I may be getting confused by your indentation. I think I am still \
+                         parsing the `{n}` definition. Is this supposed to be part of a \
                          definition after that? If so, the problem may be a bit before the \
                          equals sign. I need all definitions to be indented exactly the same \
                          amount, so the problem may be that this new definition has too many \
                          spaces in front of it."
                     ),
-                    None => "Note: I may be getting confused by your indentation. I need all \
+                    None => "I may be getting confused by your indentation. I need all \
                              definitions to be indented exactly the same amount, so if this is \
                              meant to be a new definition, it may have too many spaces in \
                              front of it."
@@ -1373,7 +1390,7 @@ impl SyntaxError {
                     *region,
                     "I was not expecting to see this equals sign:".to_string(),
                     "Maybe you want == instead? To check if two values are equal?".to_string(),
-                    vec![Section::para(note)],
+                    vec![note(words(&advice))],
                 )
             }
             SyntaxError::TooMuchIndentation { region, keyword } => snippet_owned(
@@ -1396,7 +1413,14 @@ impl SyntaxError {
                      here. Make the following change, and you should be all set!"
                 ),
                 vec![
-                    example(&format!("    {actual} -> {expected}")),
+                    code_block(vec![code_line(
+                        4,
+                        vec![
+                            yellow(actual.to_string()),
+                            Doc::text(" -> "),
+                            green(expected.to_string()),
+                        ],
+                    )]),
                     note(words(
                         "I require that module names correspond to file paths. This \
                          makes it much easier to explore unfamiliar codebases! So if you want \
@@ -1510,6 +1534,11 @@ fn case_notes() -> Vec<Section> {
         ),
     ]
 }
+/// elm shows this whole example in dull yellow, newlines included.
+const MULTILINE_STRING_EXAMPLE: &str = "    \"\"\"\n    # Multi-line Strings\n    \n    - start \
+     with triple double quotes\n    - write whatever you want\n    - no need to escape newlines \
+     or double quotes\n    - end with triple double quotes\n    \"\"\"";
+
 /// The hint shared by the UNFINISHED RECORD PATTERN errors.
 fn record_pattern_hint() -> Section {
     hint(
