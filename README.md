@@ -146,32 +146,40 @@ app.ports.somePort.subscribe(function (value) { ... });
 
 ## Benchmark
 
-Compile speed for the JavaScript target. Apple Silicon, production
-codebase, median of 5 runs (3 for suites). One 8,357-line entry point
-and its 13-module graph:
+Compile speed for the JavaScript target, measured by
+`compile-bench/run.py`. Apple Silicon, production codebase, median of 5
+runs (3 for suites). One 8,357-line entry point and its module graph:
 
 | | median | best |
 |---|---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 738 ms | 727 ms |
-| elm 0.19.1, incremental (entry file touched) | 293 ms | 208 ms |
-| elm 0.19.1, no-op (nothing changed at all) | 108 ms | 105 ms |
-| **alm, full rebuild, no cache** | **131 ms** | **129 ms** |
+| elm 0.19.1, project-cold (elm-stuff wiped) | 754 ms | 742 ms |
+| elm 0.19.1, incremental (entry file touched) | 189 ms | 173 ms |
+| elm 0.19.1, no-op (nothing changed at all) | 118 ms | 114 ms |
+| **alm, full rebuild, no cache** | **223 ms** | **215 ms** |
 
-All 19 entry points of the same codebase (~40k lines):
+All 19 entry points of the same codebase (~39k lines):
 
 | | median |
 |---|---|
-| elm 0.19.1, project-cold | 2.81 s |
-| elm 0.19.1, all sources touched (warm elm-stuff) | 2.22 s |
-| **alm, full rebuild every time, no cache** | **0.84 s** |
+| elm 0.19.1, project-cold | 2.91 s |
+| elm 0.19.1, all sources touched (warm elm-stuff) | 2.31 s |
+| **alm, full rebuild every time, no cache** | **1.53 s** |
 
-A full alm rebuild is 2.2x faster than an incremental official rebuild
-and takes barely longer than the official compiler doing *nothing*
-(its no-op check alone costs ~108 ms; alm compiles everything in
-131 ms). Across the whole suite alm is 2.7-3.4x faster while redoing
-all work every run. (The official compiler reuses
-per-package artifacts from `~/.elm` even when project-cold; alm
-recompiles package sources every run.)
+alm keeps no cache, so its one number has to be read against all three
+of elm's. A full alm rebuild is 3.4x faster than a full official
+rebuild, and roughly matches elm's *incremental* path (223 ms against
+189 ms) while redoing every module rather than the one that changed.
+Across the whole suite alm is 1.9x faster than a cold official build and
+1.5x faster than one where every source was touched. (The official
+compiler reuses per-package artifacts from `~/.elm` even when
+project-cold; alm recompiles package sources every run.)
+
+These numbers are worse than they once were: alm's full rebuild was
+131 ms and the suite 0.84 s several hundred commits ago, against
+essentially identical elm figures on the same machine. The compile-time
+regression is real and untriaged — the front end has gained a great deal
+since (byte-exact error reporting, the lint pass, decision trees), and
+none of it has been profiled.
 
 Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm
 `--optimize` 631 KB (all pre-minification).
