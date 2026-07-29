@@ -114,7 +114,12 @@ def runtime_section(data):
             "columns": [label for _, label in present],
             "rows": rows, "decimals": 1, "unit": "",
         })
-    return {"title": "Runtime — keyed table app", "tables": tables}
+    return {
+        "title": "Runtime",
+        "link": {"text": "js-framework-benchmark",
+                 "href": "https://github.com/krausest/js-framework-benchmark"},
+        "tables": tables,
+    }
 
 
 def compute_section(data):
