@@ -30,42 +30,39 @@
          line-height: 1.5; -webkit-font-smoothing: antialiased; }
   .wrap { max-width: 1060px; margin: 0 auto; padding: 40px 24px 80px; }
 
-  header { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 26px; }
-  .eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); margin: 0 0 10px; }
-  h1 { font-size: clamp(24px, 3.6vw, 34px); line-height: 1.1; margin: 0 0 12px;
-       letter-spacing: -.02em; text-wrap: balance; font-weight: 680; }
-  .method { color: var(--ink-soft); max-width: 74ch; margin: 0 0 12px; font-size: 15px; }
-  .method code { font-family: var(--mono); font-size: .88em; background: var(--track);
-                 padding: 1px 5px; border-radius: 4px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 26px; }
+  h1 { font-size: clamp(22px, 3.2vw, 30px); line-height: 1.15; margin: 0 0 8px;
+       letter-spacing: -.02em; font-weight: 680; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); margin: 0; }
 
-  .scale { display: flex; align-items: center; gap: 10px; margin-top: 18px;
-           font-size: 12.5px; color: var(--ink-faint); font-family: var(--mono); }
-  .scale .grad { width: 180px; height: 9px; border: 1px solid var(--line-strong); flex: none;
+  .scale { display: flex; align-items: center; gap: 10px; margin-top: 16px;
+           font-size: 12px; color: var(--ink-faint); font-family: var(--mono); }
+  .scale .grad { width: 160px; height: 9px; border: 1px solid var(--line-strong); flex: none;
     background: linear-gradient(to right, rgb(55,168,119), rgb(215,168,58), rgb(221,97,85)); }
 
-  section { margin-bottom: 38px; }
+  section { margin-bottom: 40px; }
   .sec-head { display: flex; align-items: baseline; justify-content: space-between;
-              gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
-  h2.sec { font-size: 15px; letter-spacing: -.01em; margin: 0; font-weight: 640; }
-  .sec-note { font-size: 12.5px; color: var(--ink-faint); }
-  .sub { font-size: 12.5px; font-family: var(--mono); color: var(--ink-faint); margin: 22px 0 6px; }
+              gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  h2 { font-size: 16px; letter-spacing: -.01em; margin: 0; font-weight: 640; }
+  .caption { font-size: 12px; font-family: var(--mono); color: var(--ink-faint);
+             margin: 20px 0 6px; }
+  .facts { font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint);
+           margin: 0 0 10px; }
 
   .stamp { font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
            border: 1px solid var(--line-strong); color: var(--ink-faint); white-space: nowrap; }
-  .stamp.stale { background: var(--stale-bg); color: var(--stale-ink);
-                 border-color: var(--stale-line); }
-  .stamp.missing { background: var(--stale-bg); color: var(--stale-ink);
-                   border-color: var(--stale-line); }
+  .stamp.stale, .stamp.missing { background: var(--stale-bg); color: var(--stale-ink);
+                                 border-color: var(--stale-line); }
 
   .tbl-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
-  table.wide { min-width: 960px; }
   thead th { font-family: var(--mono); font-size: 12px; font-weight: 500; padding: 7px 12px;
              border-bottom: 1px solid var(--line-strong); color: var(--ink-faint); }
-  th.op { text-align: left; width: 20%; }
+  th.op { text-align: left; width: 22%; }
   th.grp { text-align: center; color: var(--ink); border-left: 2px solid var(--line-strong); }
   td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  td.op { text-align: left; font-size: 14px; color: var(--ink); font-weight: 520; white-space: nowrap; }
+  td.op { text-align: left; font-size: 14px; color: var(--ink); font-weight: 520;
+          white-space: nowrap; }
   td.c-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
              font-size: 13px; color: var(--ink-soft); white-space: nowrap;
              border-left: 2px solid var(--line-strong); padding-right: 5px; }
@@ -78,413 +75,355 @@
           border: 1px solid var(--line-strong); overflow: hidden; }
   .heatfill { display: block; height: 100%; min-width: 2px; }
 
-  .absent { color: var(--ink-faint); font-style: italic; padding: 12px 0; }
-
-  footer { border-top: 1px solid var(--line); margin-top: 42px; padding-top: 20px;
-           color: var(--ink-faint); font-size: 12.5px; }
-  footer p { margin: 0 0 10px; max-width: 84ch; }
-  footer code { font-family: var(--mono); }
+  .absent { color: var(--ink-faint); font-style: italic; padding: 10px 0; font-size: 13px; }
 </style>
 
-<div class="wrap">
-  <header>
-    <p class="eyebrow">generated 2026-07-29 17:07 CEST · every figure read from a harness's results.json</p>
-    <h1>alm — runtime, computation and compile speed</h1>
-    <p class="method">
-      <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
-      WebAssembly-GC and native. Each section below compares it against the official
-      <strong>elm 0.19.1</strong> compiler on identical Elm source, and where it makes sense
-      against React and Svelte. Lower is better everywhere; in each row the bar shows the result
-      as a share of that row's best (fullest = fastest).
-    </p>
-    <p class="method">
-      This page is generated by <code>bench-report/generate.py</code> from the JSON each harness
-      writes. Nothing here is typed in by hand, and each section carries the date it was measured
-      — so a section that has fallen behind the others says so instead of quietly looking current.
-    </p>
-    <div class="scale">
-      <span>at best</span><span class="grad"></span><span>3× or slower / larger</span>
-    </div>
-  </header>
-
-  <section id="runtime">
-    <div class="sec-head">
-      <h2 class="sec">Runtime — keyed table app</h2>
-      <span class="sec-note" id="stamp-runtime"></span>
-    </div>
-    <p class="method">
-      A keyed js-framework-benchmark app — create/append rows, update every 10th, swap, select,
-      remove, clear — built five ways. elm, alm-js and alm-wasm compile the <em>same</em>
-      <code>Main.elm</code>. Timing is paint-inclusive: from the click to a task scheduled after
-      the next frame's paint, so it counts the framework's work <em>and</em> the browser's
-      layout and paint. <strong>(opt)</strong> adds each framework's idiomatic memoization —
-      <code>Html.Lazy</code> for elm and alm, <code>React.memo</code> for React; Svelte's
-      fine-grained reactivity needs none.
-    </p>
-    <p class="sub">Bulk render</p>
-    <div class="tbl-scroll"><table class="wide" id="t-bulk"></table></div>
-    <p class="sub">Incremental updates</p>
-    <div class="tbl-scroll"><table class="wide" id="t-incr"></table></div>
-  </section>
-
-  <section id="compute">
-    <div class="sec-head">
-      <h2 class="sec">Computation — no DOM</h2>
-      <span class="sec-note" id="stamp-compute"></span>
-    </div>
-    <p class="method">
-      The benchmark above is DOM-bound, which hides the compute backend. These are pure
-      workloads running the same Elm source through the official compiler and all three
-      alm backends. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
-      elm — it emits the same shape of JavaScript. On collections it pulls away, because alm
-      represents <code>List</code> as a growable vector rather than cons cells and fuses
-      <code>map</code>/<code>filter</code>/<code>fold</code> into specialized loops. WasmGC goes
-      further by storing <code>List Int</code> and <code>List Float</code> as contiguous unboxed
-      arrays.
-    </p>
-    <p class="method">
-      <strong>About the native column.</strong> It is <code>--target=native</code>, which
-      today is alm's <em>uniform boxed</em> backend. The unboxed, monomorphized native
-      backend — the one that used to lead most of these rows — was deleted along with
-      <code>generate/typed.rs</code> when the LLVM wasm target was retired in favour of
-      WasmGC; only WasmGC consumes the monomorphizer now. So these are not the native
-      figures published before that change, and they should not be read as a regression in
-      the same compiler: it is a different one. Boxing costs most where the work is scalar
-      and allocation-heavy — <em>mandelbrot</em> and <em>float-list sum</em> are the extreme
-      cases — while <em>sort</em> still beats every other column. Native is timed as the
-      minimum of 12 process runs minus a measured no-work startup floor, so it is
-      compute-only like the warm in-process JS and wasm figures.
-    </p>
-    <div class="tbl-scroll"><table id="t-compute"></table></div>
-  </section>
-
-  <section id="compile">
-    <div class="sec-head">
-      <h2 class="sec">Compile speed</h2>
-      <span class="sec-note" id="stamp-compile"></span>
-    </div>
-    <p class="method">
-      How fast the compiler itself is. Each row is a project — a small application
-      importing a package's whole public surface, so the package and everything under it
-      has to be compiled — built by each compiler in turn. <strong>alm</strong> keeps no
-      incremental cache, so every alm column is a full build of the whole graph every time.
-      elm gets two columns because it has two speeds: <code>elm (full)</code> with
-      <code>elm-stuff</code> cleared, which is the like-for-like comparison, and
-      <code>elm (incr.)</code> with its cache warm, which is what you actually wait for
-      when editing. The native column pays LLVM's optimizer.
-    </p>
-    <div class="tbl-scroll"><table class="wide" id="t-compile"></table></div>
-    <p class="sub" id="caching-sub">Against elm's cache, on a production application</p>
-    <p class="method" id="compile-blurb"></p>
-    <div class="tbl-scroll"><table class="wide" id="t-caching"></table></div>
-  </section>
-
-  <footer>
-    <p><strong>Reproducing any of this.</strong>
-      <code>dom-bench/</code> drives system Chrome headless through puppeteer-core in real time
-      (no virtual clock); each figure is the median of 3 page reloads, each the median of 15
-      timed iterations. <code>compute-bench/</code> builds each workload with all four
-      compilers, checks they return the same result, then times the median of 25 calls after 10
-      warmups; the native figure subtracts a measured process-startup floor so all columns are
-      compute-only. <code>compile-bench/run.py</code> times <code>make</code> against a real
-      ~40k-line codebase, writing to a real file rather than <code>/dev/null</code> — the
-      official compiler skips code generation entirely for <code>/dev/null</code>, which would
-      flatter it by the whole back end.</p>
-    <p><strong>Why alm gets one compile-speed row and elm gets three.</strong> alm keeps no
-      incremental cache: every invocation recompiles the whole module graph, package sources
-      included. The official compiler caches aggressively, so its cold, incremental and no-op
-      times are all shown and alm's single number has to be read against all three.</p>
-  </footer>
-</div>
+<div class="wrap"><div id="report"></div></div>
 
 <script>
+  // This file is presentation only: CSS and the renderer below. Every word the
+  // page displays — titles, column headers, dates, the facts line — comes from
+  // DATA, which generate.py builds from the harnesses' results.json.
+  //
+  // Do not add authored copy here. Prose describing measurements goes stale the
+  // moment a benchmark is re-run, and this report has already been through
+  // that: it ended up describing numbers it was no longer showing.
   const DATA = {
-  "freshness": {
-    "runtime": {
-      "state": "fresh",
-      "note": "measured 2026-07-29"
+  "title": "alm \u2014 runtime, computation and compile speed",
+  "generated": "generated 2026-07-29 17:38 CEST by make report",
+  "sections": [
+    {
+      "title": "Runtime \u2014 keyed table app",
+      "tables": [
+        {
+          "caption": "bulk render \u00b7 milliseconds, paint-inclusive",
+          "columns": [
+            "elm",
+            "elm (lazy)",
+            "alm-js",
+            "alm-js (lazy)",
+            "alm-wasm",
+            "alm-wasm (lazy)",
+            "react",
+            "react (memo)",
+            "svelte"
+          ],
+          "rows": [
+            {
+              "op": "create 1k",
+              "elm": 16.4,
+              "elm (lazy)": 16.7,
+              "alm-js": 16.5,
+              "alm-js (lazy)": 16.6,
+              "alm-wasm": 17.8,
+              "alm-wasm (lazy)": 17.3,
+              "react": 16.6,
+              "react (memo)": 16.9,
+              "svelte": 15.8
+            },
+            {
+              "op": "replace 1k",
+              "elm": 15.6,
+              "elm (lazy)": 16.3,
+              "alm-js": 15.6,
+              "alm-js (lazy)": 15.8,
+              "alm-wasm": 18.6,
+              "alm-wasm (lazy)": 18.9,
+              "react": 19.8,
+              "react (memo)": 20.4,
+              "svelte": 16.5
+            },
+            {
+              "op": "create 10k",
+              "elm": 161.4,
+              "elm (lazy)": 163.5,
+              "alm-js": 164.7,
+              "alm-js (lazy)": 164,
+              "alm-wasm": 205.7,
+              "alm-wasm (lazy)": 198.1,
+              "react": 260.1,
+              "react (memo)": 262.6,
+              "svelte": 171.3
+            },
+            {
+              "op": "clear 1k",
+              "elm": 1.5,
+              "elm (lazy)": 1.5,
+              "alm-js": 1.6,
+              "alm-js (lazy)": 1.6,
+              "alm-wasm": 1.5,
+              "alm-wasm (lazy)": 1.6,
+              "react": 3.1,
+              "react (memo)": 3.2,
+              "svelte": 1.8
+            }
+          ],
+          "decimals": 1,
+          "unit": ""
+        },
+        {
+          "caption": "incremental updates \u00b7 milliseconds, paint-inclusive",
+          "columns": [
+            "elm",
+            "elm (lazy)",
+            "alm-js",
+            "alm-js (lazy)",
+            "alm-wasm",
+            "alm-wasm (lazy)",
+            "react",
+            "react (memo)",
+            "svelte"
+          ],
+          "rows": [
+            {
+              "op": "select",
+              "elm": 1,
+              "elm (lazy)": 0.2,
+              "alm-js": 1,
+              "alm-js (lazy)": 0.2,
+              "alm-wasm": 0.8,
+              "alm-wasm (lazy)": 0.1,
+              "react": 1.5,
+              "react (memo)": 0.4,
+              "svelte": 0.4
+            },
+            {
+              "op": "update 10th",
+              "elm": 5.2,
+              "elm (lazy)": 4.2,
+              "alm-js": 5,
+              "alm-js (lazy)": 4.2,
+              "alm-wasm": 4.8,
+              "alm-wasm (lazy)": 4.3,
+              "react": 5.6,
+              "react (memo)": 4.5,
+              "svelte": 4.4
+            },
+            {
+              "op": "swap",
+              "elm": 2.4,
+              "elm (lazy)": 1.4,
+              "alm-js": 2.4,
+              "alm-js (lazy)": 1.6,
+              "alm-wasm": 2.5,
+              "alm-wasm (lazy)": 1.9,
+              "react": 15.6,
+              "react (memo)": 14.5,
+              "svelte": 1.6
+            },
+            {
+              "op": "remove",
+              "elm": 3.3,
+              "elm (lazy)": 2.5,
+              "alm-js": 3.5,
+              "alm-js (lazy)": 2.7,
+              "alm-wasm": 3.6,
+              "alm-wasm (lazy)": 2.9,
+              "react": 3.9,
+              "react (memo)": 2.6,
+              "svelte": 2.7
+            },
+            {
+              "op": "append 1k",
+              "elm": 55.3,
+              "elm (lazy)": 40.6,
+              "alm-js": 56.4,
+              "alm-js (lazy)": 40,
+              "alm-wasm": 55.9,
+              "alm-wasm (lazy)": 46.5,
+              "react": 58,
+              "react (memo)": 42,
+              "svelte": 44
+            }
+          ],
+          "decimals": 1,
+          "unit": ""
+        }
+      ],
+      "freshness": {
+        "state": "fresh",
+        "note": "2026-07-29"
+      }
     },
-    "compute": {
-      "state": "fresh",
-      "note": "measured 2026-07-29"
+    {
+      "title": "Computation \u2014 no DOM",
+      "tables": [
+        {
+          "caption": "milliseconds",
+          "columns": [
+            "elm",
+            "alm-js",
+            "alm-wasm",
+            "alm-native"
+          ],
+          "rows": [
+            {
+              "op": "fib 35",
+              "elm": 45.6,
+              "alm-js": 45.7,
+              "alm-wasm": 46.6,
+              "alm-native": 128.0
+            },
+            {
+              "op": "binary-trees d14\u00d760",
+              "elm": 8.2,
+              "alm-js": 8.5,
+              "alm-wasm": 8.7,
+              "alm-native": 28.8
+            },
+            {
+              "op": "list map 1M",
+              "elm": 97.3,
+              "alm-js": 11.9,
+              "alm-wasm": 1.9,
+              "alm-native": 16.6
+            },
+            {
+              "op": "list filter 1M",
+              "elm": 67.3,
+              "alm-js": 15.9,
+              "alm-wasm": 2.9,
+              "alm-native": 18.8
+            },
+            {
+              "op": "list fold 1M",
+              "elm": 30.3,
+              "alm-js": 13.4,
+              "alm-wasm": 4.5,
+              "alm-native": 15.7
+            },
+            {
+              "op": "Dict 100k build+get",
+              "elm": 34.9,
+              "alm-js": 31.1,
+              "alm-wasm": 26.1,
+              "alm-native": 34.7
+            },
+            {
+              "op": "mandelbrot 400\u00b2",
+              "elm": 5.9,
+              "alm-js": 5.6,
+              "alm-wasm": 5.3,
+              "alm-native": 807.4
+            },
+            {
+              "op": "sort 100k ints",
+              "elm": 24.0,
+              "alm-js": 23.3,
+              "alm-wasm": 18.0,
+              "alm-native": 9.5
+            },
+            {
+              "op": "float-list sum 1M",
+              "elm": 175.4,
+              "alm-js": 28.1,
+              "alm-wasm": 3.2,
+              "alm-native": 135.8
+            }
+          ],
+          "decimals": 1,
+          "unit": ""
+        }
+      ],
+      "freshness": {
+        "state": "fresh",
+        "note": "2026-07-29"
+      }
     },
-    "compile": {
-      "state": "fresh",
-      "note": "measured 2026-07-29"
+    {
+      "title": "Compile speed",
+      "tables": [
+        {
+          "label": "project",
+          "caption": "milliseconds \u00b7 full build of the whole module graph",
+          "columns": [
+            "elm (full)",
+            "elm (incr.)",
+            "alm-js",
+            "alm-wasm",
+            "alm-native"
+          ],
+          "rows": [
+            {
+              "op": "elm/http",
+              "elm (full)": 672.1,
+              "elm (incr.)": 100.8,
+              "alm-js": 9.9,
+              "alm-wasm": 8.4,
+              "alm-native": 82.6
+            },
+            {
+              "op": "elm/url",
+              "elm (full)": 658.0,
+              "elm (incr.)": 98.9,
+              "alm-js": 10.5,
+              "alm-wasm": 8.1,
+              "alm-native": 84.6
+            },
+            {
+              "op": "elm/parser",
+              "elm (full)": 673.1,
+              "elm (incr.)": 98.2,
+              "alm-js": 10.8,
+              "alm-wasm": 9.3,
+              "alm-native": 127.8
+            },
+            {
+              "op": "terezka/elm-charts",
+              "elm (full)": 677.9,
+              "elm (incr.)": 97.8,
+              "alm-js": 46.1,
+              "alm-wasm": 40.6,
+              "alm-native": 779.9
+            },
+            {
+              "op": "ianmackenzie/elm-geometry",
+              "elm (full)": 663.4,
+              "elm (incr.)": 103.0,
+              "alm-js": 87.3,
+              "alm-wasm": 74.9,
+              "alm-native": 1322.4
+            }
+          ],
+          "decimals": 0,
+          "unit": ""
+        },
+        {
+          "label": "build",
+          "caption": "milliseconds \u00b7 alm keeps no cache, so it is shown against each elm mode",
+          "columns": [
+            "elm, project-cold",
+            "elm, incremental",
+            "elm, all sources touched",
+            "elm, no-op",
+            "alm, full rebuild"
+          ],
+          "rows": [
+            {
+              "op": "one entry point \u00b7 src/Insight.elm",
+              "elm, project-cold": 741.8,
+              "elm, incremental": 174.2,
+              "elm, no-op": 111.1,
+              "alm, full rebuild": 120.4
+            },
+            {
+              "op": "all 19 entry points",
+              "elm, project-cold": 2897.9,
+              "elm, all sources touched": 2339.4,
+              "alm, full rebuild": 1098.2
+            }
+          ],
+          "decimals": 0,
+          "unit": ""
+        }
+      ],
+      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cache comparison: dryft \u00b7 39,790 lines \u00b7 19 entry points",
+      "freshness": {
+        "state": "fresh",
+        "note": "2026-07-29"
+      }
     }
-  },
-  "bulk": [
-    {
-      "op": "create 1k",
-      "elm (naive)": 16.4,
-      "elm (opt)": 16.7,
-      "alm-js (naive)": 16.5,
-      "alm-js (opt)": 16.6,
-      "alm-wasm (naive)": 17.8,
-      "alm-wasm (opt)": 17.3,
-      "react (naive)": 16.6,
-      "react (opt)": 16.9,
-      "svelte": 15.8
-    },
-    {
-      "op": "replace 1k",
-      "elm (naive)": 15.6,
-      "elm (opt)": 16.3,
-      "alm-js (naive)": 15.6,
-      "alm-js (opt)": 15.8,
-      "alm-wasm (naive)": 18.6,
-      "alm-wasm (opt)": 18.9,
-      "react (naive)": 19.8,
-      "react (opt)": 20.4,
-      "svelte": 16.5
-    },
-    {
-      "op": "create 10k",
-      "elm (naive)": 161.4,
-      "elm (opt)": 163.5,
-      "alm-js (naive)": 164.7,
-      "alm-js (opt)": 164,
-      "alm-wasm (naive)": 205.7,
-      "alm-wasm (opt)": 198.1,
-      "react (naive)": 260.1,
-      "react (opt)": 262.6,
-      "svelte": 171.3
-    },
-    {
-      "op": "clear 1k",
-      "elm (naive)": 1.5,
-      "elm (opt)": 1.5,
-      "alm-js (naive)": 1.6,
-      "alm-js (opt)": 1.6,
-      "alm-wasm (naive)": 1.5,
-      "alm-wasm (opt)": 1.6,
-      "react (naive)": 3.1,
-      "react (opt)": 3.2,
-      "svelte": 1.8
-    }
-  ],
-  "incr": [
-    {
-      "op": "select",
-      "elm (naive)": 1,
-      "elm (opt)": 0.2,
-      "alm-js (naive)": 1,
-      "alm-js (opt)": 0.2,
-      "alm-wasm (naive)": 0.8,
-      "alm-wasm (opt)": 0.1,
-      "react (naive)": 1.5,
-      "react (opt)": 0.4,
-      "svelte": 0.4
-    },
-    {
-      "op": "update 10th",
-      "elm (naive)": 5.2,
-      "elm (opt)": 4.2,
-      "alm-js (naive)": 5,
-      "alm-js (opt)": 4.2,
-      "alm-wasm (naive)": 4.8,
-      "alm-wasm (opt)": 4.3,
-      "react (naive)": 5.6,
-      "react (opt)": 4.5,
-      "svelte": 4.4
-    },
-    {
-      "op": "swap",
-      "elm (naive)": 2.4,
-      "elm (opt)": 1.4,
-      "alm-js (naive)": 2.4,
-      "alm-js (opt)": 1.6,
-      "alm-wasm (naive)": 2.5,
-      "alm-wasm (opt)": 1.9,
-      "react (naive)": 15.6,
-      "react (opt)": 14.5,
-      "svelte": 1.6
-    },
-    {
-      "op": "remove",
-      "elm (naive)": 3.3,
-      "elm (opt)": 2.5,
-      "alm-js (naive)": 3.5,
-      "alm-js (opt)": 2.7,
-      "alm-wasm (naive)": 3.6,
-      "alm-wasm (opt)": 2.9,
-      "react (naive)": 3.9,
-      "react (opt)": 2.6,
-      "svelte": 2.7
-    },
-    {
-      "op": "append 1k",
-      "elm (naive)": 55.3,
-      "elm (opt)": 40.6,
-      "alm-js (naive)": 56.4,
-      "alm-js (opt)": 40,
-      "alm-wasm (naive)": 55.9,
-      "alm-wasm (opt)": 46.5,
-      "react (naive)": 58,
-      "react (opt)": 42,
-      "svelte": 44
-    }
-  ],
-  "runtimeCols": [
-    "elm (naive)",
-    "elm (opt)",
-    "alm-js (naive)",
-    "alm-js (opt)",
-    "alm-wasm (naive)",
-    "alm-wasm (opt)",
-    "react (naive)",
-    "react (opt)",
-    "svelte"
-  ],
-  "compute": [
-    {
-      "op": "fib 35",
-      "elm": 45.6,
-      "alm-js": 45.7,
-      "alm-wasm": 46.6,
-      "alm-native": 128.0
-    },
-    {
-      "op": "binary-trees d14\u00d760",
-      "elm": 8.2,
-      "alm-js": 8.5,
-      "alm-wasm": 8.7,
-      "alm-native": 28.8
-    },
-    {
-      "op": "list map 1M",
-      "elm": 97.3,
-      "alm-js": 11.9,
-      "alm-wasm": 1.9,
-      "alm-native": 16.6
-    },
-    {
-      "op": "list filter 1M",
-      "elm": 67.3,
-      "alm-js": 15.9,
-      "alm-wasm": 2.9,
-      "alm-native": 18.8
-    },
-    {
-      "op": "list fold 1M",
-      "elm": 30.3,
-      "alm-js": 13.4,
-      "alm-wasm": 4.5,
-      "alm-native": 15.7
-    },
-    {
-      "op": "Dict 100k build+get",
-      "elm": 34.9,
-      "alm-js": 31.1,
-      "alm-wasm": 26.1,
-      "alm-native": 34.7
-    },
-    {
-      "op": "mandelbrot 400\u00b2",
-      "elm": 5.9,
-      "alm-js": 5.6,
-      "alm-wasm": 5.3,
-      "alm-native": 807.4
-    },
-    {
-      "op": "sort 100k ints",
-      "elm": 24.0,
-      "alm-js": 23.3,
-      "alm-wasm": 18.0,
-      "alm-native": 9.5
-    },
-    {
-      "op": "float-list sum 1M",
-      "elm": 175.4,
-      "alm-js": 28.1,
-      "alm-wasm": 3.2,
-      "alm-native": 135.8
-    }
-  ],
-  "computeCols": [
-    "elm",
-    "alm-js",
-    "alm-wasm",
-    "alm-native"
-  ],
-  "compile": [
-    {
-      "op": "elm/http",
-      "elm (full)": 672.1,
-      "elm (incr.)": 100.8,
-      "alm-js": 9.9,
-      "alm-wasm": 8.4,
-      "alm-native": 82.6
-    },
-    {
-      "op": "elm/url",
-      "elm (full)": 658.0,
-      "elm (incr.)": 98.9,
-      "alm-js": 10.5,
-      "alm-wasm": 8.1,
-      "alm-native": 84.6
-    },
-    {
-      "op": "elm/parser",
-      "elm (full)": 673.1,
-      "elm (incr.)": 98.2,
-      "alm-js": 10.8,
-      "alm-wasm": 9.3,
-      "alm-native": 127.8
-    },
-    {
-      "op": "terezka/elm-charts",
-      "elm (full)": 677.9,
-      "elm (incr.)": 97.8,
-      "alm-js": 46.1,
-      "alm-wasm": 40.6,
-      "alm-native": 779.9
-    },
-    {
-      "op": "ianmackenzie/elm-geometry",
-      "elm (full)": 663.4,
-      "elm (incr.)": 103.0,
-      "alm-js": 87.3,
-      "alm-wasm": 74.9,
-      "alm-native": 1322.4
-    }
-  ],
-  "compileCols": [
-    "elm (full)",
-    "elm (incr.)",
-    "alm-js",
-    "alm-wasm",
-    "alm-native"
-  ],
-  "caching": [
-    {
-      "op": "one entry point (src/Insight.elm)",
-      "elm, project-cold": 741.8,
-      "elm, incremental": 174.2,
-      "elm, no-op": 111.1,
-      "alm, full rebuild": 120.4
-    },
-    {
-      "op": "all 19 entry points",
-      "elm, project-cold": 2897.9,
-      "elm, all sources touched": 2339.4,
-      "alm, full rebuild": 1098.2
-    }
-  ],
-  "cachingCols": [
-    "elm, project-cold",
-    "elm, incremental",
-    "elm, all sources touched",
-    "elm, no-op",
-    "alm, full rebuild"
-  ],
-  "compileProject": {
-    "name": "dryft",
-    "entry": "src/Insight.elm",
-    "entry_lines": 8357,
-    "total_lines": 39790,
-    "entry_points": 19
-  }
+  ]
 };
 
   const GOOD = [55, 168, 119], AMBER = [215, 168, 58], BAD = [221, 97, 85];
@@ -495,63 +434,78 @@
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   }
 
-  /** One row per operation, one column group per implementation. */
-  function renderTable(id, rows, dec, cols) {
-    const t = document.getElementById(id);
-    if (!t) return;
-    if (!rows || !rows.length) {
-      t.outerHTML = '<p class="absent">No results for this section yet.</p>';
-      return;
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+
+  /** Rows down, one column per thing measured; the bar is a share of the row's best. */
+  function table(spec) {
+    if (!spec.rows || !spec.rows.length) return el("p", "absent", "No results.");
+    const t = document.createElement("table");
+    const head = t.createTHead().insertRow();
+    head.appendChild(el("th", "op", spec.label || "operation"));
+    for (const c of spec.columns) {
+      const th = el("th", "grp", c);
+      th.colSpan = 3;
+      head.appendChild(th);
     }
-    let h = '<thead><tr><th class="op">operation</th>';
-    for (const f of cols) h += `<th class="grp" colspan="3">${f}</th>`;
-    h += "</tr></thead><tbody>";
-    for (const row of rows) {
-      const present = cols.map(f => row[f]).filter(v => v != null);
-      const best = Math.min(...present);
-      h += `<tr><td class="op">${row.op}</td>`;
-      for (const f of cols) {
-        const v = row[f];
+    const body = t.createTBody();
+    for (const row of spec.rows) {
+      const tr = body.insertRow();
+      tr.appendChild(el("td", "op", row.op));
+      const values = spec.columns.map(c => row[c]).filter(v => v != null);
+      const best = values.length ? Math.min(...values) : null;
+      for (const c of spec.columns) {
+        const v = row[c];
         if (v == null) {
-          h += '<td class="c-num na">n/a</td><td class="c-bar"></td><td class="c-star"></td>';
+          tr.appendChild(el("td", "c-num na", "n/a"));
+          tr.appendChild(el("td", "c-bar"));
+          tr.appendChild(el("td", "c-star"));
           continue;
         }
-        const fill = (best / v * 100).toFixed(1);
-        h += `<td class="c-num${v === best ? " best" : ""}">${v.toFixed(dec)}</td>` +
-             `<td class="c-bar"><span class="heat"><span class="heatfill" style="width:${fill}%;` +
-             `background:${heatColor(v / best)}"></span></span></td>` +
-             `<td class="c-star">${v === best ? "★" : ""}</td>`;
+        tr.appendChild(el("td", "c-num" + (v === best ? " best" : ""),
+                          v.toFixed(spec.decimals) + (spec.unit ? " " + spec.unit : "")));
+        const bar = el("td", "c-bar");
+        const heat = el("span", "heat");
+        const fill = el("span", "heatfill");
+        fill.style.width = (best / v * 100).toFixed(1) + "%";
+        fill.style.background = heatColor(v / best);
+        heat.appendChild(fill);
+        bar.appendChild(heat);
+        tr.appendChild(bar);
+        tr.appendChild(el("td", "c-star", v === best ? "★" : ""));
       }
-      h += "</tr>";
     }
-    t.innerHTML = h + "</tbody>";
+    const scroll = el("div", "tbl-scroll");
+    scroll.appendChild(t);
+    return scroll;
   }
 
-  for (const [name, info] of Object.entries(DATA.freshness || {})) {
-    const el = document.getElementById(`stamp-${name}`);
-    if (el) {
-      el.textContent = info.note;
-      el.className = `stamp ${info.state}`;
+  const root = document.getElementById("report");
+  const header = document.createElement("header");
+  header.appendChild(el("h1", null, DATA.title));
+  header.appendChild(el("p", "eyebrow", DATA.generated));
+  const scale = el("div", "scale");
+  scale.appendChild(el("span", null, "at best"));
+  scale.appendChild(el("span", "grad"));
+  scale.appendChild(el("span", null, "3x or slower"));
+  header.appendChild(scale);
+  root.appendChild(header);
+
+  for (const s of DATA.sections) {
+    const sec = document.createElement("section");
+    const head = el("div", "sec-head");
+    head.appendChild(el("h2", null, s.title));
+    head.appendChild(el("span", "stamp " + s.freshness.state, s.freshness.note));
+    sec.appendChild(head);
+    if (s.facts) sec.appendChild(el("p", "facts", s.facts));
+    for (const tbl of s.tables) {
+      if (tbl.caption) sec.appendChild(el("p", "caption", tbl.caption));
+      sec.appendChild(table(tbl));
     }
-  }
-
-  renderTable("t-bulk", DATA.bulk, 1, DATA.runtimeCols || []);
-  renderTable("t-incr", DATA.incr, 1, DATA.runtimeCols || []);
-  renderTable("t-compute", DATA.compute, 1, DATA.computeCols || []);
-  renderTable("t-compile", DATA.compile, 0, DATA.compileCols || []);
-  renderTable("t-caching", DATA.caching, 0, DATA.cachingCols || []);
-
-  const p = DATA.compileProject;
-  const blurb = document.getElementById("compile-blurb");
-  if (p && blurb) {
-    blurb.innerHTML =
-      `The table above builds each project once. This one is a real production app — ` +
-      `<strong>${p.total_lines.toLocaleString()} lines</strong> across ` +
-      `<strong>${p.entry_points} entry points</strong>, largest entry <code>${p.entry}</code> ` +
-      `at ${p.entry_lines.toLocaleString()} lines — measured against all three of elm's ` +
-      `speeds, since alm's single number has to be read against each of them. Milliseconds.`;
-  } else if (blurb) {
-    document.getElementById("caching-sub")?.remove();
-    blurb.remove();
+    root.appendChild(sec);
   }
 </script>
