@@ -155,7 +155,7 @@ runs (3 for suites). One 8,357-line entry point and its module graph:
 | elm 0.19.1, project-cold (elm-stuff wiped) | 745 ms | 732 ms |
 | elm 0.19.1, incremental (entry file touched) | 171 ms | 169 ms |
 | elm 0.19.1, no-op (nothing changed at all) | 112 ms | 109 ms |
-| **alm, full rebuild, no cache** | **181 ms** | **179 ms** |
+| **alm, full rebuild, no cache** | **169 ms** | **168 ms** |
 
 All 19 entry points of the same codebase (~39k lines):
 
@@ -163,14 +163,14 @@ All 19 entry points of the same codebase (~39k lines):
 |---|---|
 | elm 0.19.1, project-cold | 2.82 s |
 | elm 0.19.1, all sources touched (warm elm-stuff) | 2.19 s |
-| **alm, full rebuild every time, no cache** | **1.37 s** |
+| **alm, full rebuild every time, no cache** | **1.31 s** |
 
 alm keeps no cache, so its one number has to be read against all three
-of elm's. A full alm rebuild is 4.1x faster than a full official
-rebuild, and about matches elm's *incremental* path (181 ms against
-171 ms) while redoing every module rather than the one that changed.
-Across the whole suite alm is 2.1x faster than a cold official build and
-1.6x faster than one where every source was touched. (The official
+of elm's. A full alm rebuild is 4.4x faster than a full official
+rebuild, and beats elm's *incremental* path (169 ms against 171 ms)
+while redoing every module rather than the one that changed. Across the
+whole suite alm is 2.2x faster than a cold official build and 1.7x
+faster than one where every source was touched. (The official
 compiler reuses per-package artifacts from `~/.elm` even when
 project-cold; alm recompiles package sources every run.)
 

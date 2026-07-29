@@ -121,6 +121,18 @@ impl Pool {
         self.descriptors[root].content = content;
     }
 
+    /// Append `var`'s immediate children to `out` without copying anything.
+    ///
+    /// The alternative — `content()` then `flat_children()` — clones the whole
+    /// structure and allocates a vector for every node visited, which is a lot
+    /// when walking a type.
+    pub(crate) fn push_children_of(&mut self, var: Variable, out: &mut Vec<Variable>) {
+        let root = self.find(var);
+        if let Content::Structure(flat) = &self.descriptors[root].content {
+            push_children(flat, out);
+        }
+    }
+
     /// Point `absorbed` at `keep`, leaving `keep`'s content alone.
     ///
     /// This is `merge(keep, absorbed, <keep's own content>)` without the copy.
@@ -181,14 +193,29 @@ impl Pool {
             }
         }
 
-        // Two records unify through their gathered fields; the structures
-        // themselves are never looked at, so they are not worth copying.
-        if let (Structure(FlatType::Record(..)), Structure(FlatType::Record(..))) =
-            (&self.descriptors[a_root].content, &self.descriptors[b_root].content)
+        // Two structures. Records go through their gathered rows and never
+        // look at the structures at all, so nothing is copied for them; the
+        // rest need the flats by value, because unifying the children borrows
+        // the pool mutably — but one copy each, not the two that going via
+        // `Content` and then out of the match again would cost.
         {
-            let (fields1, ext1) = self.gather_fields(a_root);
-            let (fields2, ext2) = self.gather_fields(b_root);
-            return self.unify_records(a_root, b_root, fields1, ext1, fields2, ext2);
+            let a_here = &self.descriptors[a_root].content;
+            let b_here = &self.descriptors[b_root].content;
+            match (a_here, b_here) {
+                (
+                    Structure(FlatType::Record(..)),
+                    Structure(FlatType::Record(..)),
+                ) => {
+                    let (fields1, ext1) = self.gather_fields(a_root);
+                    let (fields2, ext2) = self.gather_fields(b_root);
+                    return self.unify_records(a_root, b_root, fields1, ext1, fields2, ext2);
+                }
+                (Structure(a_flat), Structure(b_flat)) => {
+                    let (a_flat, b_flat) = (a_flat.clone(), b_flat.clone());
+                    return self.unify_structures(a_root, a_flat, b_root, b_flat);
+                }
+                _ => {}
+            }
         }
 
         let a_content = self.descriptors[a_root].content.clone();

@@ -349,15 +349,20 @@ impl Checker<'_> {
         free
     }
 
+    /// Add every variable reachable from `var` to `free`.
+    ///
+    /// Iterative and borrowing, for the same reason `Pool::occurs` is: this
+    /// runs over the whole environment on every generalization, and going
+    /// through `content()` would clone each structure — a record's field map
+    /// included — just to look at its children.
     fn collect_free(&mut self, var: Variable, free: &mut HashSet<Variable>) {
-        let root = self.pool.find(var);
-        if !free.insert(root) {
-            return;
-        }
-        if let Content::Structure(flat) = self.pool.content(root) {
-            for child in types::flat_children(&flat) {
-                self.collect_free(child, free);
+        let mut stack = vec![var];
+        while let Some(next) = stack.pop() {
+            let root = self.pool.find(next);
+            if !free.insert(root) {
+                continue;
             }
+            self.pool.push_children_of(root, &mut stack);
         }
     }
 
