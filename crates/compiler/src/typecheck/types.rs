@@ -60,6 +60,11 @@ struct Descriptor {
 
 pub struct Pool {
     descriptors: Vec<Descriptor>,
+    /// Scratch for `occurs`, reused across calls. It runs on every binding of
+    /// a variable to a structure, and allocating a worklist and a visited set
+    /// each time cost more than the walk.
+    occurs_stack: Vec<Variable>,
+    occurs_seen: std::collections::HashSet<Variable>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +80,8 @@ impl Pool {
     pub fn new() -> Pool {
         Pool {
             descriptors: Vec::new(),
+            occurs_stack: Vec::new(),
+            occurs_seen: std::collections::HashSet::new(),
         }
     }
 
@@ -114,6 +121,20 @@ impl Pool {
         self.descriptors[root].content = content;
     }
 
+    /// Point `absorbed` at `keep`, leaving `keep`'s content alone.
+    ///
+    /// This is `merge(keep, absorbed, <keep's own content>)` without the copy.
+    /// Whenever the content handed to `merge` is the surviving descriptor's
+    /// own, the assignment is a no-op — and for a record that no-op clones the
+    /// entire field map.
+    fn absorb(&mut self, keep: Variable, absorbed: Variable) {
+        let keep_root = self.find(keep);
+        let absorbed_root = self.find(absorbed);
+        if keep_root != absorbed_root {
+            self.descriptors[absorbed_root].parent = Some(keep_root);
+        }
+    }
+
     fn merge(&mut self, a: Variable, b: Variable, content: Content) {
         let a_root = self.find(a);
         let b_root = self.find(b);
@@ -131,9 +152,47 @@ impl Pool {
         if a_root == b_root {
             return Ok(());
         }
+        use Content::*;
+
+        // Settle the common shapes before copying anything. A fresh variable
+        // meeting something else is by far the most frequent unification, and
+        // in that case the surviving side keeps the content it already has —
+        // so there is nothing to copy, only a parent pointer to set. Reading
+        // the discriminants by reference keeps a record's field map out of it.
+        {
+            let a_here = &self.descriptors[a_root].content;
+            let b_here = &self.descriptors[b_root].content;
+            let error = matches!(a_here, Error) || matches!(b_here, Error);
+            let a_flex = matches!(a_here, FlexVar(_));
+            let b_flex = matches!(b_here, FlexVar(_));
+            if error {
+                self.merge(a_root, b_root, Error);
+                return Ok(());
+            }
+            if a_flex {
+                self.occurs_guard(a_root, b_root)?;
+                self.absorb(b_root, a_root);
+                return Ok(());
+            }
+            if b_flex {
+                self.occurs_guard(b_root, a_root)?;
+                self.absorb(a_root, b_root);
+                return Ok(());
+            }
+        }
+
+        // Two records unify through their gathered fields; the structures
+        // themselves are never looked at, so they are not worth copying.
+        if let (Structure(FlatType::Record(..)), Structure(FlatType::Record(..))) =
+            (&self.descriptors[a_root].content, &self.descriptors[b_root].content)
+        {
+            let (fields1, ext1) = self.gather_fields(a_root);
+            let (fields2, ext2) = self.gather_fields(b_root);
+            return self.unify_records(a_root, b_root, fields1, ext1, fields2, ext2);
+        }
+
         let a_content = self.descriptors[a_root].content.clone();
         let b_content = self.descriptors[b_root].content.clone();
-        use Content::*;
         match (&a_content, &b_content) {
             (Error, _) | (_, Error) => {
                 self.merge(a_root, b_root, Error);
@@ -257,15 +316,20 @@ impl Pool {
         let mut fields = BTreeMap::new();
         let mut current = var;
         loop {
-            match self.content(current) {
-                Content::Structure(FlatType::Record(more, ext)) => {
-                    for (name, field_var) in more {
-                        fields.entry(name).or_insert(field_var);
-                    }
-                    current = ext;
-                }
-                _ => return (fields, current),
+            // Read the row in place. Going through `content()` would clone the
+            // whole record — field map included — only to walk it and throw
+            // the copy away, and records are walked constantly.
+            let root = self.find(current);
+            let Content::Structure(FlatType::Record(more, ext)) = &self.descriptors[root].content
+            else {
+                return (fields, current);
+            };
+            // `Name` is an `Rc<str>`, so carrying the keys over is a refcount
+            // bump rather than a string copy.
+            for (name, field_var) in more {
+                fields.entry(name.clone()).or_insert(*field_var);
             }
+            current = *ext;
         }
     }
 
@@ -413,18 +477,42 @@ impl Pool {
         }
     }
 
+    /// Whether `needle` appears anywhere inside `haystack`.
+    ///
+    /// Run on every binding of a variable to a structure, so it is the
+    /// hottest thing in the checker and worth the care. Three things matter:
+    /// the walk keeps a visited set, because a type is a DAG and shared
+    /// substructure would otherwise be re-walked once per path into it; it
+    /// reads each descriptor by reference rather than through `content()`,
+    /// which clones the whole `FlatType` (a record's field map included); and
+    /// it reuses its two scratch buffers across calls instead of allocating a
+    /// child vector per node.
     fn occurs(&mut self, needle: Variable, haystack: Variable) -> bool {
         let needle_root = self.find(needle);
-        let haystack_root = self.find(haystack);
-        if needle_root == haystack_root {
-            return true;
-        }
-        match self.content(haystack_root) {
-            Content::Structure(flat) => {
-                flat_children(&flat).iter().any(|&v| self.occurs(needle, v))
+        let mut stack = std::mem::take(&mut self.occurs_stack);
+        let mut seen = std::mem::take(&mut self.occurs_seen);
+        stack.clear();
+        seen.clear();
+        stack.push(haystack);
+
+        let mut found = false;
+        while let Some(var) = stack.pop() {
+            let root = self.find(var);
+            if root == needle_root {
+                found = true;
+                break;
             }
-            _ => false,
+            if !seen.insert(root) {
+                continue;
+            }
+            if let Content::Structure(flat) = &self.descriptors[root].content {
+                push_children(flat, &mut stack);
+            }
         }
+
+        self.occurs_stack = stack;
+        self.occurs_seen = seen;
+        found
     }
 
     fn mismatch(&mut self, a: Variable, b: Variable) -> UnifyError {
@@ -556,6 +644,27 @@ fn combine_supers(a: Super, b: Super) -> Option<Super> {
         (CompAppend, Comparable) | (Comparable, CompAppend) => Some(CompAppend),
         (CompAppend, Appendable) | (Appendable, CompAppend) => Some(CompAppend),
         _ => None,
+    }
+}
+
+/// Append a structure's immediate children to `out`, allocating nothing.
+fn push_children(flat: &FlatType, out: &mut Vec<Variable>) {
+    match flat {
+        FlatType::App(_, _, args) => out.extend_from_slice(args),
+        FlatType::Fun(arg, result) => {
+            out.push(*arg);
+            out.push(*result);
+        }
+        FlatType::EmptyRecord | FlatType::Unit => {}
+        FlatType::Record(fields, ext) => {
+            out.extend(fields.values().copied());
+            out.push(*ext);
+        }
+        FlatType::Tuple(a, b, c) => {
+            out.push(*a);
+            out.push(*b);
+            out.extend(*c);
+        }
     }
 }
 

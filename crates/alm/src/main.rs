@@ -12,6 +12,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let code = run();
+    alm_compiler::project::timing::report();
+    code
+}
+
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("make") => make(&args[1..]),

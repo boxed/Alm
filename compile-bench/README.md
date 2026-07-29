@@ -42,3 +42,26 @@ server socket in it that cannot even be copied.)
 An entry point the *official* compiler cannot build on its own is dropped from
 the suite, and reported when it is. Timing a failure is not timing a compile,
 and it has to be excluded from both sides or they are not doing equal work.
+
+## Finding out where the time goes
+
+`ALM_TIMING=1` breaks any compile down by phase:
+
+```
+$ ALM_TIMING=1 alm make src/Main.elm --output=/dev/null
+── alm timing ──
+  parse              4.4 ms   2.8%
+  canonicalize       7.2 ms   4.6%
+  typecheck        131.1 ms  83.1%
+  generate          10.0 ms   6.3%
+  ...
+```
+
+For anything finer, `crates/compiler/examples/profile.rs` compiles one entry
+point in a loop so a sampling profiler has a process to attach to:
+
+```
+cargo build --release -p alm-compiler --example profile
+./target/release/examples/profile src/Main.elm 80 &
+sample $! 8 -f /tmp/prof.txt
+```

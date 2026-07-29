@@ -152,34 +152,31 @@ runs (3 for suites). One 8,357-line entry point and its module graph:
 
 | | median | best |
 |---|---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 754 ms | 742 ms |
-| elm 0.19.1, incremental (entry file touched) | 189 ms | 173 ms |
-| elm 0.19.1, no-op (nothing changed at all) | 118 ms | 114 ms |
-| **alm, full rebuild, no cache** | **223 ms** | **215 ms** |
+| elm 0.19.1, project-cold (elm-stuff wiped) | 745 ms | 732 ms |
+| elm 0.19.1, incremental (entry file touched) | 171 ms | 169 ms |
+| elm 0.19.1, no-op (nothing changed at all) | 112 ms | 109 ms |
+| **alm, full rebuild, no cache** | **181 ms** | **179 ms** |
 
 All 19 entry points of the same codebase (~39k lines):
 
 | | median |
 |---|---|
-| elm 0.19.1, project-cold | 2.91 s |
-| elm 0.19.1, all sources touched (warm elm-stuff) | 2.31 s |
-| **alm, full rebuild every time, no cache** | **1.53 s** |
+| elm 0.19.1, project-cold | 2.82 s |
+| elm 0.19.1, all sources touched (warm elm-stuff) | 2.19 s |
+| **alm, full rebuild every time, no cache** | **1.37 s** |
 
 alm keeps no cache, so its one number has to be read against all three
-of elm's. A full alm rebuild is 3.4x faster than a full official
-rebuild, and roughly matches elm's *incremental* path (223 ms against
-189 ms) while redoing every module rather than the one that changed.
-Across the whole suite alm is 1.9x faster than a cold official build and
-1.5x faster than one where every source was touched. (The official
+of elm's. A full alm rebuild is 4.1x faster than a full official
+rebuild, and about matches elm's *incremental* path (181 ms against
+171 ms) while redoing every module rather than the one that changed.
+Across the whole suite alm is 2.1x faster than a cold official build and
+1.6x faster than one where every source was touched. (The official
 compiler reuses per-package artifacts from `~/.elm` even when
 project-cold; alm recompiles package sources every run.)
 
-These numbers are worse than they once were: alm's full rebuild was
-131 ms and the suite 0.84 s several hundred commits ago, against
-essentially identical elm figures on the same machine. The compile-time
-regression is real and untriaged — the front end has gained a great deal
-since (byte-exact error reporting, the lint pass, decision trees), and
-none of it has been profiled.
+Type checking is ~80% of a build; `ALM_TIMING=1` breaks a compile down
+by phase. These numbers are still short of the 131 ms this once hit
+several hundred commits ago, so there is more to win.
 
 Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm
 `--optimize` 631 KB (all pre-minification).

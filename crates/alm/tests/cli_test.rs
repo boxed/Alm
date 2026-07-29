@@ -1054,10 +1054,20 @@ fn repl_keeps_an_annotation_with_its_definition() {
 
 /// Read from an SSE stream until `count` events have arrived or the deadline
 /// passes, returning what was received.
-fn read_events(port: u16, count: usize, deadline: std::time::Duration) -> String {
+///
+/// `subscribed` is signalled once the server's greeting has arrived, which is
+/// the point from which a broadcast will actually reach this reader. A missed
+/// event is never replayed, so a test must not change anything until then —
+/// sleeping instead is a race that only shows up under load.
+fn read_events(
+    port: u16,
+    count: usize,
+    deadline: std::time::Duration,
+    subscribed: std::sync::mpsc::Sender<()>,
+) -> String {
     use std::io::{Read, Write};
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(250))).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
     stream
         .write_all(
             b"GET /_alm/live HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n",
@@ -1066,17 +1076,37 @@ fn read_events(port: u16, count: usize, deadline: std::time::Duration) -> String
     let start = std::time::Instant::now();
     let mut text = String::new();
     let mut buf = [0u8; 4096];
+    let mut announced = false;
     while start.elapsed() < deadline {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
             Err(_) => {}
         }
+        if !announced && text.contains(": connected") {
+            announced = true;
+            let _ = subscribed.send(());
+        }
         if text.matches("event: ").count() >= count {
             break;
         }
     }
     text
+}
+
+/// Spawn a reader and block until it is actually subscribed.
+fn events_after(
+    port: u16,
+    count: usize,
+    change: impl FnOnce(),
+) -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader =
+        std::thread::spawn(move || read_events(port, count, std::time::Duration::from_secs(20), tx));
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the live endpoint never greeted the reader");
+    change();
+    reader.join().unwrap()
 }
 
 fn start(dir: &Path, args: &[&str]) -> (std::process::Child, u16) {
@@ -1134,12 +1164,9 @@ fn live_updating_tells_the_page_when_sources_change() {
 
     // An edit produces an event on the stream.
     let source = project.join("src/Main.elm");
-    let reader = std::thread::spawn(move || {
-        read_events(port, 1, std::time::Duration::from_secs(8))
+    let events = events_after(port, 1, || {
+        std::fs::write(&source, "module Main exposing (main)\n\nmain = \"two\"\n").unwrap();
     });
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    std::fs::write(&source, "module Main exposing (main)\n\nmain = \"two\"\n").unwrap();
-    let events = reader.join().unwrap();
     assert!(events.contains(": connected"), "no greeting: {events}");
     assert!(events.contains("event: changed"), "no change event: {events}");
 
@@ -1194,11 +1221,9 @@ fn a_failed_rebuild_is_reported_and_the_last_good_build_survives() {
     let (mut child, port) = start(&project, &["make", "src/Main.elm", "--live"]);
 
     let source = project.join("src/Main.elm");
-    let reader =
-        std::thread::spawn(move || read_events(port, 1, std::time::Duration::from_secs(10)));
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    std::fs::write(&source, "module Main exposing (main)\n\nmain = 1 + \"nope\"\n").unwrap();
-    let events = reader.join().unwrap();
+    let events = events_after(port, 1, || {
+        std::fs::write(&source, "module Main exposing (main)\n\nmain = 1 + \"nope\"\n").unwrap();
+    });
     assert!(events.contains("event: failed"), "no failure event: {events}");
     assert!(events.contains("TYPE MISMATCH"), "the reports are not in the event: {events}");
     // The reports must survive being put in a `data:` field.

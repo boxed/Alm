@@ -97,6 +97,10 @@ pub struct Checker<'a> {
     /// the enclosing function's scheme. Monomorphization relies on that
     /// alignment to substitute structurally.
     node_vars: Vec<(Region, Variable)>,
+    /// Whether to build `node_types` at all — only the monomorphizing
+    /// backends read it, and materializing a type per expression is the
+    /// single most expensive thing the checker does.
+    want_node_types: bool,
     node_types: HashMap<Region, can::Type>,
     /// Depth of `let` nesting during inference. Inner (local) definitions
     /// compute their schemes but must NOT freeze node types: at that moment
@@ -139,6 +143,18 @@ pub fn check(module: &can::Module) -> Result<(), Vec<Error>> {
 pub fn check_module(
     module: &can::Module,
     interfaces: &Interfaces,
+) -> Result<Checked, Vec<Error>> {
+    check_module_with(module, interfaces, true)
+}
+
+/// `want_node_types` builds the per-expression type table that
+/// monomorphization consumes. The JS backend never looks at it, and filling it
+/// in costs more than the rest of type checking put together, so a JS build
+/// asks for it to be skipped.
+pub fn check_module_with(
+    module: &can::Module,
+    interfaces: &Interfaces,
+    want_node_types: bool,
 ) -> Result<Checked, Vec<Error>> {
     let mut unions = HashMap::new();
     for union in &module.unions {
@@ -200,6 +216,7 @@ pub fn check_module(
         let_depth: 0,
         errors: Vec::new(),
         node_vars: Vec::new(),
+        want_node_types,
         node_types: HashMap::new(),
     };
 
@@ -725,24 +742,6 @@ impl Checker<'_> {
                 // corrupts inference depended on `env_free` (a HashSet)
                 // iteration order, making compilation nondeterministic.
                 // Names are assigned uniquely at generalization time instead.
-                // Instantiation (rigid == false) creates *fresh* variables:
-                // they must not carry the scheme's variable names, or two
-                // distinct instantiated variables that happen to share a
-                // source name (e.g. every `a` from `a -> Promise m a`)
-                // collide in the name-keyed `free`/`names` maps during
-                // generalization and get conflated — an error that surfaced
-                // or not depending on `env_free` (a HashSet) iteration order,
-                // making compilation nondeterministic. Names are assigned
-                // uniquely at generalization time instead.
-                // Instantiation (rigid == false) creates *fresh* variables:
-                // they must not carry the scheme's variable names, or two
-                // distinct instantiated variables that happen to share a
-                // source name (e.g. every `a` from `a -> Promise m a`)
-                // collide in the name-keyed `free`/`names` maps during
-                // generalization and get conflated — an error that surfaced
-                // or not depending on `env_free` (a HashSet) iteration order,
-                // making compilation nondeterministic. Names are assigned
-                // uniquely at generalization time instead.
                 let content = match (var_super(name), rigid) {
                     (Some(super_), false) => Content::FlexSuper(super_, None),
                     (Some(super_), true) => Content::RigidSuper(super_, name.clone()),
@@ -828,6 +827,9 @@ impl Checker<'_> {
         state: &mut GeneralizeState,
         env_free: &HashSet<Variable>,
     ) {
+        if !self.want_node_types {
+            return;
+        }
         let slice: Vec<(Region, Variable)> = self.node_vars[start..end].to_vec();
         for (region, var) in slice {
             if self.node_types.contains_key(&region) {
@@ -1642,7 +1644,9 @@ impl Checker<'_> {
         let var = self.infer_expr_inner(expr)?;
         // Record for monomorphization; zonked later with the enclosing
         // definition's naming state so variable names line up.
-        self.node_vars.push((expr.region, var));
+        if self.want_node_types {
+            self.node_vars.push((expr.region, var));
+        }
         Ok(var)
     }
 

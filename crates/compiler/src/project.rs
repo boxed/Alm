@@ -20,6 +20,74 @@ use crate::interface::Interfaces;
 use crate::reporting::{Located, Region, Report};
 use crate::{builtins, canonicalize, generate, nitpick, optimize, parse, typecheck};
 
+/// Wall-clock time per compile phase, printed to stderr when `ALM_TIMING=1`.
+///
+/// Off by default and costing one atomic load per phase when off. Compile
+/// speed is a headline property of this compiler, and it regressed once
+/// without anyone noticing; being able to ask where the time goes without
+/// rebuilding is worth the few lines.
+pub mod timing {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    macro_rules! phases {
+        ($($field:ident => $label:literal),* $(,)?) => {
+            #[derive(Default)]
+            struct Phases { $($field: AtomicU64,)* }
+            static PHASES: Phases = Phases { $($field: AtomicU64::new(0),)* };
+            /// Print the accumulated totals and reset them.
+            pub fn report() {
+                if !enabled() { return; }
+                let mut total = 0u64;
+                $(total += PHASES.$field.load(Ordering::Relaxed);)*
+                eprintln!("── alm timing ──");
+                $(
+                    let ns = PHASES.$field.swap(0, Ordering::Relaxed);
+                    eprintln!(
+                        "  {:<14} {:>7.1} ms  {:>4.1}%",
+                        $label, ns as f64 / 1e6,
+                        if total == 0 { 0.0 } else { ns as f64 * 100.0 / total as f64 }
+                    );
+                )*
+                eprintln!("  {:<14} {:>7.1} ms", "total", total as f64 / 1e6);
+            }
+            $(
+                pub fn $field<T>(f: impl FnOnce() -> T) -> T {
+                    if !enabled() { return f(); }
+                    let start = Instant::now();
+                    let out = f();
+                    PHASES.$field.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    out
+                }
+            )*
+        };
+    }
+
+    phases! {
+        read => "read",
+        parse => "parse",
+        canonicalize => "canonicalize",
+        typecheck => "typecheck",
+        nitpick => "nitpick",
+        lint => "lint",
+        simplify => "simplify",
+        interface => "interface",
+        generate => "generate",
+        dce => "tree-shake",
+    }
+
+    pub fn enabled() -> bool {
+        static ON: AtomicU64 = AtomicU64::new(u64::MAX);
+        let cached = ON.load(Ordering::Relaxed);
+        if cached != u64::MAX {
+            return cached == 1;
+        }
+        let on = std::env::var_os("ALM_TIMING").is_some();
+        ON.store(on as u64, Ordering::Relaxed);
+        on
+    }
+}
+
 pub struct BuildError {
     pub path: PathBuf,
     pub source: String,
@@ -173,8 +241,13 @@ pub struct CheckedProject {
     pub modules: Vec<can::Module>,
     pub interfaces: Interfaces,
     /// Per-module, the concrete type of every expression keyed by source
-    /// region (regions are only unique within a module). Monomorphization
-    /// consumes this; other backends ignore it.
+    /// region (regions are only unique within a module).
+    ///
+    /// Monomorphization consumes this, and so does the JS backend: it is what
+    /// lets a comparison on scalars inline to a native `<` instead of
+    /// `_Utils_cmp`. Building it is the most expensive thing the checker does,
+    /// but leaving it out makes every compiled program slower, so only callers
+    /// that generate no code at all (`generate_docs`) ask to skip it.
     pub node_types: HashMap<Name, HashMap<Region, can::Type>>,
     /// Per-module, the inferred type of every top-level definition.
     pub types: HashMap<Name, HashMap<Name, can::Type>>,
@@ -221,9 +294,9 @@ pub fn compile_project_with(
     let dce = std::env::var_os("ALM_NO_DCE").is_none();
     // Lint walks the already-checked AST — a cheap single traversal, not a
     // second front end — so `alm make` prints hints without re-type-checking.
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     Ok((
-        generate::generate_project_typed(&checked.modules, checked.node_types, dce),
+        timing::generate(|| generate::generate_project_typed(&checked.modules, checked.node_types, dce)),
         warnings,
     ))
 }
@@ -241,7 +314,7 @@ pub fn compile_project_live(
 ) -> Result<(String, Option<String>, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let checked = check_project(entry)?;
     let model_type = model_type_of(&checked);
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let javascript =
         generate::generate_project_typed(&checked.modules, checked.node_types, std::env::var_os("ALM_NO_DCE").is_none());
     Ok((javascript, model_type, warnings))
@@ -309,7 +382,9 @@ pub fn generate_docs(entry: &Path) -> Result<String, Vec<BuildError>> {
         Default::default();
     let mut sources: std::collections::BTreeMap<Name, String> = Default::default();
     for root_path in &roots {
-        let checked = check_project(root_path)?;
+        // Docs need each definition's type, never a per-expression one, and
+        // no code is generated here at all.
+        let checked = check_project_with(root_path, false)?;
         for module in checked.modules {
             if !modules.iter().any(|m| m.name == module.name) {
                 modules.push(module);
@@ -343,7 +418,7 @@ pub fn compile_project_source_maps(
             (name.clone(), (path.display().to_string(), src.clone()))
         })
         .collect();
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let (js, map) =
         generate::generate_project_typed_mapped(&checked.modules, checked.node_types, &sources);
     Ok((js, map, warnings))
@@ -357,7 +432,7 @@ pub fn compile_project_native(
     opt: generate::native::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let program = crate::ir::lower::lower_project(&checked.modules);
     generate::native::build(&program, output, opt)
         .map(|()| warnings)
@@ -381,7 +456,7 @@ pub fn compile_project_wasmgc(
     source_maps: bool,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    let warnings = crate::lint::lint(&checked.modules, &checked.sources);
+    let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
     // wasm-gc does NOT shunt any module to a native kernel: it has no
@@ -500,6 +575,17 @@ pub fn compile_project_wasmgc(
 /// Run the whole front end — load, parse, canonicalize, type check, and
 /// exhaustiveness check every module — without generating any code.
 pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
+    check_project_with(entry, true)
+}
+
+/// `want_node_types` builds the per-expression type table monomorphization
+/// consumes. Only the native and WasmGC backends read it; the JS backend does
+/// not, and building it costs more than everything else in the front end put
+/// together, so a JS build leaves it empty.
+pub fn check_project_with(
+    entry: &Path,
+    want_node_types: bool,
+) -> Result<CheckedProject, Vec<BuildError>> {
     let scopes = resolve_scopes(entry);
 
     // Load the entry module and, transitively, everything it imports. Modules
@@ -560,7 +646,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         // at the resolved, unique names. Downstream code is unchanged.
         let rewritten = rewrite_module(source_module, &unique_names);
 
-        let canonicalized = canonicalize::canonicalize_module(&rewritten, &interfaces).map_err(
+        let canonicalized = timing::canonicalize(|| canonicalize::canonicalize_module(&rewritten, &interfaces)).map_err(
             |errors| {
                 errors
                     .into_iter()
@@ -585,7 +671,10 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
             }
         };
 
-        let type_checked = typecheck::check_module(&canonical, &interfaces).map_err(|errors| {
+        let type_checked = timing::typecheck(|| {
+            typecheck::check_module_with(&canonical, &interfaces, want_node_types)
+        })
+        .map_err(|errors| {
             // All of a module's type errors belong to one report block.
             let reports = errors
                 .into_iter()
@@ -616,7 +705,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
         let types = checked.types;
         all_node_types.insert(name.clone(), checked.node_types);
 
-        let nitpicked = nitpick::check(&canonical, &interfaces).map_err(|errors| {
+        let nitpicked = timing::nitpick(|| nitpick::check(&canonical, &interfaces)).map_err(|errors| {
             errors
                 .into_iter()
                 .map(|e| {
@@ -638,7 +727,7 @@ pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
 
         // Local constant folding / simplification (after nitpick so it sees the
         // original patterns; before codegen so every backend benefits).
-        optimize::simplify_module(&mut canonical);
+        timing::simplify(|| optimize::simplify_module(&mut canonical));
 
         for name in interface.value_names.clone() {
             if let Some(tipe) = types.get(&name) {
@@ -1197,7 +1286,7 @@ fn load_module_file(
         return Ok(key);
     }
 
-    let source = std::fs::read_to_string(path).map_err(|err| {
+    let source = timing::read(|| std::fs::read_to_string(path)).map_err(|err| {
         BuildError::new(
             path.to_path_buf(),
             String::new(),
@@ -1207,7 +1296,7 @@ fn load_module_file(
         )
     })?;
 
-    let module = parse::parse_module_typed(&source, scopes.is_package).map_err(|e| match e.syntax {
+    let module = timing::parse(|| parse::parse_module_typed(&source, scopes.is_package)).map_err(|e| match e.syntax {
         Some(se) => {
             BuildError::from_reports(path.to_path_buf(), source.clone(), vec![se.to_report()])
         }
