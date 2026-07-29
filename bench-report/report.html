@@ -88,7 +88,7 @@
 
 <div class="wrap">
   <header>
-    <p class="eyebrow">generated 2026-07-29 16:57 CEST · every figure read from a harness's results.json</p>
+    <p class="eyebrow">generated 2026-07-29 17:07 CEST · every figure read from a harness's results.json</p>
     <h1>alm — runtime, computation and compile speed</h1>
     <p class="method">
       <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
@@ -134,17 +134,26 @@
     </div>
     <p class="method">
       The benchmark above is DOM-bound, which hides the compute backend. These are pure
-      workloads running the same Elm source through the official compiler and alm's
-      JavaScript and WebAssembly-GC backends. There is no native column: the workloads
-      measured it through <code>--target=native-typed</code>, which no longer exists as a
-      target — only WasmGC consumes the monomorphizer now, and plain
-      <code>--target=native</code> is the uniform boxed backend, roughly ten times slower.
-      Timing that under the same heading would compare a different compiler. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
+      workloads running the same Elm source through the official compiler and all three
+      alm backends. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
       elm — it emits the same shape of JavaScript. On collections it pulls away, because alm
       represents <code>List</code> as a growable vector rather than cons cells and fuses
       <code>map</code>/<code>filter</code>/<code>fold</code> into specialized loops. WasmGC goes
       further by storing <code>List Int</code> and <code>List Float</code> as contiguous unboxed
-      arrays, and the native backend's numeric loops auto-vectorize.
+      arrays.
+    </p>
+    <p class="method">
+      <strong>About the native column.</strong> It is <code>--target=native</code>, which
+      today is alm's <em>uniform boxed</em> backend. The unboxed, monomorphized native
+      backend — the one that used to lead most of these rows — was deleted along with
+      <code>generate/typed.rs</code> when the LLVM wasm target was retired in favour of
+      WasmGC; only WasmGC consumes the monomorphizer now. So these are not the native
+      figures published before that change, and they should not be read as a regression in
+      the same compiler: it is a different one. Boxing costs most where the work is scalar
+      and allocation-heavy — <em>mandelbrot</em> and <em>float-list sum</em> are the extreme
+      cases — while <em>sort</em> still beats every other column. Native is timed as the
+      minimum of 12 process runs minus a measured no-work startup floor, so it is
+      compute-only like the warm in-process JS and wasm figures.
     </p>
     <div class="tbl-scroll"><table id="t-compute"></table></div>
   </section>
@@ -330,63 +339,73 @@
   "compute": [
     {
       "op": "fib 35",
-      "elm": 45.7,
-      "alm-js": 46.7,
-      "alm-wasm": 45.8
+      "elm": 45.6,
+      "alm-js": 45.7,
+      "alm-wasm": 46.6,
+      "alm-native": 128.0
     },
     {
       "op": "binary-trees d14\u00d760",
-      "elm": 8.6,
+      "elm": 8.2,
       "alm-js": 8.5,
-      "alm-wasm": 8.5
+      "alm-wasm": 8.7,
+      "alm-native": 28.8
     },
     {
       "op": "list map 1M",
-      "elm": 98.0,
-      "alm-js": 11.7,
-      "alm-wasm": 1.9
+      "elm": 97.3,
+      "alm-js": 11.9,
+      "alm-wasm": 1.9,
+      "alm-native": 16.6
     },
     {
       "op": "list filter 1M",
-      "elm": 66.5,
+      "elm": 67.3,
       "alm-js": 15.9,
-      "alm-wasm": 2.5
+      "alm-wasm": 2.9,
+      "alm-native": 18.8
     },
     {
       "op": "list fold 1M",
-      "elm": 29.6,
-      "alm-js": 13.0,
-      "alm-wasm": 4.3
+      "elm": 30.3,
+      "alm-js": 13.4,
+      "alm-wasm": 4.5,
+      "alm-native": 15.7
     },
     {
       "op": "Dict 100k build+get",
-      "elm": 43.1,
+      "elm": 34.9,
       "alm-js": 31.1,
-      "alm-wasm": 25.3
+      "alm-wasm": 26.1,
+      "alm-native": 34.7
     },
     {
       "op": "mandelbrot 400\u00b2",
-      "elm": 5.8,
+      "elm": 5.9,
       "alm-js": 5.6,
-      "alm-wasm": 5.3
+      "alm-wasm": 5.3,
+      "alm-native": 807.4
     },
     {
       "op": "sort 100k ints",
       "elm": 24.0,
-      "alm-js": 23.6,
-      "alm-wasm": 18.0
+      "alm-js": 23.3,
+      "alm-wasm": 18.0,
+      "alm-native": 9.5
     },
     {
       "op": "float-list sum 1M",
-      "elm": 174.0,
-      "alm-js": 27.7,
-      "alm-wasm": 3.7
+      "elm": 175.4,
+      "alm-js": 28.1,
+      "alm-wasm": 3.2,
+      "alm-native": 135.8
     }
   ],
   "computeCols": [
     "elm",
     "alm-js",
-    "alm-wasm"
+    "alm-wasm",
+    "alm-native"
   ],
   "compile": [
     {

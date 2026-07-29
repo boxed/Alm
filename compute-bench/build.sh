@@ -11,11 +11,12 @@ for f in src/*.elm; do
     echo "building $m ..."
     "$ALM" make "$f" --target=js           --output="build/$m.js"     >/dev/null
     "$ALM" make "$f" --target=wasm-gc      --output="build/$m.wasm"   >/dev/null
-    # No native build: the unboxed/typed native backend it used to measure
-    # consumes the monomorphizer now. Plain --target=native is the uniform
-    # boxed backend — ~10x slower — so timing it under the same label would
-    # be comparing a different compiler. See README.
-    # plain --target=native is the uniform boxed+Boehm backend, ~10x slower).
+    # alm's native backend as it ships: the uniform boxed one. The unboxed,
+    # monomorphized backend earlier figures were taken with was
+    # `--target=native-typed`, deleted along with generate/typed.rs in
+    # d6eb21c, so this is a different and slower compiler than those numbers
+    # describe. It is the one users actually get.
+    "$ALM" make "$f" --target=native       --output="build/$m.native" >/dev/null
 done
 
 # Official elm, for the compute comparison. `elm make` rejects `main : Int`, so
