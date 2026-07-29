@@ -1,0 +1,271 @@
+<title>alm — benchmarks</title>
+<style>
+  :root {
+    --bg: #fbfbfc; --panel: #ffffff; --ink: #1a1e26; --ink-soft: #566072; --ink-faint: #8a93a3;
+    --line: #e7e9ef; --line-strong: #d3d7e0; --track: #eef0f4;
+    --stale-bg: #fdf3e0; --stale-ink: #8a5d00; --stale-line: #e8cf9a;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --panel: #161a21; --ink: #e8ebf1; --ink-soft: #a2abbb; --ink-faint: #6b7484;
+      --line: #232935; --line-strong: #2e3542; --track: #1e2430;
+      --stale-bg: #2e2413; --stale-ink: #e0b558; --stale-line: #5a4620;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #fbfbfc; --panel: #ffffff; --ink: #1a1e26; --ink-soft: #566072; --ink-faint: #8a93a3;
+    --line: #e7e9ef; --line-strong: #d3d7e0; --track: #eef0f4;
+    --stale-bg: #fdf3e0; --stale-ink: #8a5d00; --stale-line: #e8cf9a;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161a21; --ink: #e8ebf1; --ink-soft: #a2abbb; --ink-faint: #6b7484;
+    --line: #232935; --line-strong: #2e3542; --track: #1e2430;
+    --stale-bg: #2e2413; --stale-ink: #e0b558; --stale-line: #5a4620;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+         line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 40px 24px 80px; }
+
+  header { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 26px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-faint); margin: 0 0 10px; }
+  h1 { font-size: clamp(24px, 3.6vw, 34px); line-height: 1.1; margin: 0 0 12px;
+       letter-spacing: -.02em; text-wrap: balance; font-weight: 680; }
+  .method { color: var(--ink-soft); max-width: 74ch; margin: 0 0 12px; font-size: 15px; }
+  .method code { font-family: var(--mono); font-size: .88em; background: var(--track);
+                 padding: 1px 5px; border-radius: 4px; }
+
+  .scale { display: flex; align-items: center; gap: 10px; margin-top: 18px;
+           font-size: 12.5px; color: var(--ink-faint); font-family: var(--mono); }
+  .scale .grad { width: 180px; height: 9px; border: 1px solid var(--line-strong); flex: none;
+    background: linear-gradient(to right, rgb(55,168,119), rgb(215,168,58), rgb(221,97,85)); }
+
+  section { margin-bottom: 38px; }
+  .sec-head { display: flex; align-items: baseline; justify-content: space-between;
+              gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  h2.sec { font-size: 15px; letter-spacing: -.01em; margin: 0; font-weight: 640; }
+  .sec-note { font-size: 12.5px; color: var(--ink-faint); }
+  .sub { font-size: 12.5px; font-family: var(--mono); color: var(--ink-faint); margin: 22px 0 6px; }
+
+  .stamp { font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+           border: 1px solid var(--line-strong); color: var(--ink-faint); white-space: nowrap; }
+  .stamp.stale { background: var(--stale-bg); color: var(--stale-ink);
+                 border-color: var(--stale-line); }
+  .stamp.missing { background: var(--stale-bg); color: var(--stale-ink);
+                   border-color: var(--stale-line); }
+
+  .tbl-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  table.wide { min-width: 960px; }
+  thead th { font-family: var(--mono); font-size: 12px; font-weight: 500; padding: 7px 12px;
+             border-bottom: 1px solid var(--line-strong); color: var(--ink-faint); }
+  th.op { text-align: left; width: 20%; }
+  th.grp { text-align: center; color: var(--ink); border-left: 2px solid var(--line-strong); }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td.op { text-align: left; font-size: 14px; color: var(--ink); font-weight: 520; white-space: nowrap; }
+  td.c-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums;
+             font-size: 13px; color: var(--ink-soft); white-space: nowrap;
+             border-left: 2px solid var(--line-strong); padding-right: 5px; }
+  td.c-num.best { color: var(--ink); font-weight: 680; }
+  td.c-num.na { color: var(--ink-faint); font-weight: 400; }
+  td.c-star { width: 14px; text-align: center; color: #d9a441; font-size: 11px;
+              padding-left: 7px; padding-right: 4px; }
+  td.c-bar { width: 52px; min-width: 52px; padding-left: 6px; padding-right: 2px; }
+  .heat { display: block; width: 100%; height: 9px; background: var(--track);
+          border: 1px solid var(--line-strong); overflow: hidden; }
+  .heatfill { display: block; height: 100%; min-width: 2px; }
+
+  .absent { color: var(--ink-faint); font-style: italic; padding: 12px 0; }
+
+  footer { border-top: 1px solid var(--line); margin-top: 42px; padding-top: 20px;
+           color: var(--ink-faint); font-size: 12.5px; }
+  footer p { margin: 0 0 10px; max-width: 84ch; }
+  footer code { font-family: var(--mono); }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">generated {{GENERATED}} · every figure read from a harness's results.json</p>
+    <h1>alm — runtime, computation and compile speed</h1>
+    <p class="method">
+      <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
+      WebAssembly-GC and native. Each section below compares it against the official
+      <strong>elm 0.19.1</strong> compiler on identical Elm source, and where it makes sense
+      against React and Svelte. Lower is better everywhere; in each row the bar shows the result
+      as a share of that row's best (fullest = fastest).
+    </p>
+    <p class="method">
+      This page is generated by <code>bench-report/generate.py</code> from the JSON each harness
+      writes. Nothing here is typed in by hand, and each section carries the date it was measured
+      — so a section that has fallen behind the others says so instead of quietly looking current.
+    </p>
+    <div class="scale">
+      <span>at best</span><span class="grad"></span><span>3× or slower / larger</span>
+    </div>
+  </header>
+
+  <section id="runtime">
+    <div class="sec-head">
+      <h2 class="sec">Runtime — keyed table app</h2>
+      <span class="sec-note" id="stamp-runtime"></span>
+    </div>
+    <p class="method">
+      A keyed js-framework-benchmark app — create/append rows, update every 10th, swap, select,
+      remove, clear — built five ways. elm, alm-js and alm-wasm compile the <em>same</em>
+      <code>Main.elm</code>. Timing is paint-inclusive: from the click to a task scheduled after
+      the next frame's paint, so it counts the framework's work <em>and</em> the browser's
+      layout and paint. <strong>(opt)</strong> adds each framework's idiomatic memoization —
+      <code>Html.Lazy</code> for elm and alm, <code>React.memo</code> for React; Svelte's
+      fine-grained reactivity needs none.
+    </p>
+    <p class="sub">Bulk render</p>
+    <div class="tbl-scroll"><table class="wide" id="t-bulk"></table></div>
+    <p class="sub">Incremental updates</p>
+    <div class="tbl-scroll"><table class="wide" id="t-incr"></table></div>
+  </section>
+
+  <section id="compute">
+    <div class="sec-head">
+      <h2 class="sec">Computation — no DOM</h2>
+      <span class="sec-note" id="stamp-compute"></span>
+    </div>
+    <p class="method">
+      The benchmark above is DOM-bound, which hides the compute backend. These are pure
+      workloads running the same Elm source through the official compiler and alm's three
+      backends. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
+      elm — it emits the same shape of JavaScript. On collections it pulls away, because alm
+      represents <code>List</code> as a growable vector rather than cons cells and fuses
+      <code>map</code>/<code>filter</code>/<code>fold</code> into specialized loops. WasmGC goes
+      further by storing <code>List Int</code> and <code>List Float</code> as contiguous unboxed
+      arrays, and the native backend's numeric loops auto-vectorize.
+    </p>
+    <div class="tbl-scroll"><table id="t-compute"></table></div>
+  </section>
+
+  <section id="compile">
+    <div class="sec-head">
+      <h2 class="sec">Compile speed</h2>
+      <span class="sec-note" id="stamp-compile"></span>
+    </div>
+    <p class="method" id="compile-blurb"></p>
+    <p class="sub">One entry point and its module graph</p>
+    <div class="tbl-scroll"><table id="t-compile-single"></table></div>
+    <p class="sub">Every entry point in the project</p>
+    <div class="tbl-scroll"><table id="t-compile-suite"></table></div>
+  </section>
+
+  <footer>
+    <p><strong>Reproducing any of this.</strong>
+      <code>dom-bench/</code> drives system Chrome headless through puppeteer-core in real time
+      (no virtual clock); each figure is the median of 3 page reloads, each the median of 15
+      timed iterations. <code>compute-bench/</code> builds each workload with all four
+      compilers, checks they return the same result, then times the median of 25 calls after 10
+      warmups; the native figure subtracts a measured process-startup floor so all columns are
+      compute-only. <code>compile-bench/run.py</code> times <code>make</code> against a real
+      ~40k-line codebase, writing to a real file rather than <code>/dev/null</code> — the
+      official compiler skips code generation entirely for <code>/dev/null</code>, which would
+      flatter it by the whole back end.</p>
+    <p><strong>Why alm gets one compile-speed row and elm gets three.</strong> alm keeps no
+      incremental cache: every invocation recompiles the whole module graph, package sources
+      included. The official compiler caches aggressively, so its cold, incremental and no-op
+      times are all shown and alm's single number has to be read against all three.</p>
+  </footer>
+</div>
+
+<script>
+  const DATA = /*{{DATA}}*/;
+
+  const GOOD = [55, 168, 119], AMBER = [215, 168, 58], BAD = [221, 97, 85];
+  const mix = (a, b, u) => [0, 1, 2].map(i => Math.round(a[i] + (b[i] - a[i]) * u));
+  function heatColor(ratio) {
+    const t = Math.min(1, Math.max(0, (ratio - 1) / 2));
+    const c = t <= 0.5 ? mix(GOOD, AMBER, t / 0.5) : mix(AMBER, BAD, (t - 0.5) / 0.5);
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+
+  /** One row per operation, one column group per implementation. */
+  function renderTable(id, rows, dec, cols) {
+    const t = document.getElementById(id);
+    if (!t) return;
+    if (!rows || !rows.length) {
+      t.outerHTML = '<p class="absent">No results for this section yet.</p>';
+      return;
+    }
+    let h = '<thead><tr><th class="op">operation</th>';
+    for (const f of cols) h += `<th class="grp" colspan="3">${f}</th>`;
+    h += "</tr></thead><tbody>";
+    for (const row of rows) {
+      const present = cols.map(f => row[f]).filter(v => v != null);
+      const best = Math.min(...present);
+      h += `<tr><td class="op">${row.op}</td>`;
+      for (const f of cols) {
+        const v = row[f];
+        if (v == null) {
+          h += '<td class="c-num na">n/a</td><td class="c-bar"></td><td class="c-star"></td>';
+          continue;
+        }
+        const fill = (best / v * 100).toFixed(1);
+        h += `<td class="c-num${v === best ? " best" : ""}">${v.toFixed(dec)}</td>` +
+             `<td class="c-bar"><span class="heat"><span class="heatfill" style="width:${fill}%;` +
+             `background:${heatColor(v / best)}"></span></span></td>` +
+             `<td class="c-star">${v === best ? "★" : ""}</td>`;
+      }
+      h += "</tr>";
+    }
+    t.innerHTML = h + "</tbody>";
+  }
+
+  /** Compile speed is one measurement per row, not a grid, so it gets its own shape. */
+  function renderCompile(id, rows, dec, unit) {
+    const t = document.getElementById(id);
+    if (!t) return;
+    if (!rows || !rows.length) {
+      t.outerHTML = '<p class="absent">No results for this section yet.</p>';
+      return;
+    }
+    const best = Math.min(...rows.map(r => r.median));
+    let h = `<thead><tr><th class="op">build</th><th class="grp" colspan="3">median</th>` +
+            `<th class="grp">best</th></tr></thead><tbody>`;
+    for (const row of rows) {
+      const alm = row.op.startsWith("alm");
+      const fill = (best / row.median * 100).toFixed(1);
+      h += `<tr><td class="op">${alm ? `<strong>${row.op}</strong>` : row.op}</td>` +
+           `<td class="c-num${row.median === best ? " best" : ""}">${row.median.toFixed(dec)} ${unit}</td>` +
+           `<td class="c-bar"><span class="heat"><span class="heatfill" style="width:${fill}%;` +
+           `background:${heatColor(row.median / best)}"></span></span></td>` +
+           `<td class="c-star">${row.median === best ? "★" : ""}</td>` +
+           `<td class="c-num">${row.best.toFixed(dec)} ${unit}</td></tr>`;
+    }
+    t.innerHTML = h + "</tbody>";
+  }
+
+  for (const [name, info] of Object.entries(DATA.freshness || {})) {
+    const el = document.getElementById(`stamp-${name}`);
+    if (el) {
+      el.textContent = info.note;
+      el.className = `stamp ${info.state}`;
+    }
+  }
+
+  renderTable("t-bulk", DATA.bulk, 1, DATA.runtimeCols || []);
+  renderTable("t-incr", DATA.incr, 1, DATA.runtimeCols || []);
+  renderTable("t-compute", DATA.compute, 1, DATA.computeCols || []);
+  renderCompile("t-compile-single", DATA.compileSingle, 0, "ms");
+  renderCompile("t-compile-suite", DATA.compileSuite, 2, "s");
+
+  const p = DATA.compileProject;
+  const blurb = document.getElementById("compile-blurb");
+  if (p && blurb) {
+    blurb.innerHTML =
+      `How fast the compiler itself is, against a real production codebase: ` +
+      `<strong>${p.total_lines.toLocaleString()} lines</strong> of Elm across ` +
+      `<strong>${p.entry_points} entry points</strong>, with the largest single entry ` +
+      `(<code>${p.entry}</code>, ${p.entry_lines.toLocaleString()} lines) measured on its own ` +
+      `as well.`;
+  } else if (blurb) {
+    blurb.textContent = "How fast the compiler itself is.";
+  }
+</script>

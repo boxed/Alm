@@ -220,6 +220,53 @@ def main():
 
     print()
     report(results, biggest_lines, suite_count, lines)
+    write_results(results, project, biggest, biggest_lines, suite_count, lines)
+
+
+def write_results(results, project, entry, entry_lines, entry_count, total_lines):
+    """Record the run as JSON for the report generator.
+
+    Includes when it was taken: a report assembled from several benchmarks has
+    no other way to notice that one of its sections is older than the rest,
+    and that is exactly how the compile figures went stale once.
+    """
+    import datetime, json, platform, subprocess
+
+    def pair(key):
+        value = results.get(key)
+        return None if value is None else {
+            "median_ms": round(value[0] * 1000, 1),
+            "best_ms": round(value[1] * 1000, 1),
+        }
+
+    payload = {
+        "measured": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "machine": f"{platform.system()} {platform.machine()}",
+        "elm_version": subprocess.run(
+            ["elm", "--version"], capture_output=True, text=True
+        ).stdout.strip(),
+        "project": {
+            "entry": str(entry.relative_to(project)),
+            "entry_lines": entry_lines,
+            "total_lines": total_lines,
+            "entry_points": entry_count,
+        },
+        "runs": {"single": RUNS_SINGLE, "suite": RUNS_SUITE},
+        "single": {
+            "elm project-cold": pair("elm-cold"),
+            "elm incremental": pair("elm-incremental"),
+            "elm no-op": pair("elm-noop"),
+            "alm full rebuild": pair("alm"),
+        },
+        "suite": {
+            "elm project-cold": pair("suite-elm-cold"),
+            "elm all touched": pair("suite-elm-touched"),
+            "alm full rebuild": pair("suite-alm"),
+        },
+    }
+    out = pathlib.Path(__file__).resolve().parent / "results.json"
+    out.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"\nwrote {out.relative_to(REPO)}")
 
 
 def ms(value):

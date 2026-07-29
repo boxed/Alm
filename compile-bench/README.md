@@ -65,3 +65,10 @@ cargo build --release -p alm-compiler --example profile
 ./target/release/examples/profile src/Main.elm 80 &
 sample $! 8 -f /tmp/prof.txt
 ```
+
+## Feeding the report
+
+Every run also writes `compile-bench/results.json`, which
+`bench-report/generate.py` turns into the compile section of the published
+benchmark page. The file records when it was measured, so a stale section is
+flagged on the page instead of passing for current.
