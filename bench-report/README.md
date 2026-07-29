@@ -37,18 +37,20 @@ the untouched sections keep their own dates and admit their age.
 
 ## Refreshing
 
-Use each harness's `build.sh`, not `npm run build`. `dom-bench/build.mjs` builds
-only the React and Svelte bundles — `build.sh` is what compiles the elm and alm
-ones. Running the driver against stale bundles produces pages that never mount,
-and every operation then measures an empty frame: a suspiciously constant
-~8.3 ms per row on a 120 Hz display.
+```
+make bench          # every harness, then the report
+make report         # just rebuild the page from existing results
+make runtime        # one harness at a time
+make compute
+make compile
+```
 
-```
-cd dom-bench && ./build.sh && node drive.mjs        # runtime / memory / size
-cd compute-bench && ./build.sh && node run.mjs      # computation
-python3 compile-bench/run.py                        # compile speed
-python3 bench-report/generate.py                    # rebuild the page
-```
+`make bench` re-runs only what is out of date, so touching one benchmark's
+sources rebuilds that one and leaves the rest alone — the report then shows
+each section's own date and flags the ones behind. A harness that fails does
+not stop the others: its `results.json` keeps the last good numbers, the page
+marks that section stale, and `make` still exits non-zero so the failure is not
+quiet.
 
 Then publish `bench-report/report.html`. Re-publishing to the same URL keeps
 the artifact's history.

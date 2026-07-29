@@ -103,7 +103,11 @@ def compute_table(data):
             if entry.get(key) is not None:
                 row[label] = round(entry[key], 1)
         rows.append(row)
-    return rows, [label for _, label in columns]
+    # A compiler with no measurements gets no column, rather than an empty one
+    # implying it was run and came back blank. alm-native is currently in that
+    # position: the backend these workloads used is no longer reachable.
+    measured = {label for row in rows for label in row if label != "op"}
+    return rows, [label for _, label in columns if label in measured]
 
 
 def compile_tables(data):

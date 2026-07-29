@@ -88,7 +88,7 @@
 
 <div class="wrap">
   <header>
-    <p class="eyebrow">generated 2026-07-29 15:41 CEST · every figure read from a harness's results.json</p>
+    <p class="eyebrow">generated 2026-07-29 16:57 CEST · every figure read from a harness's results.json</p>
     <h1>alm — runtime, computation and compile speed</h1>
     <p class="method">
       <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
@@ -134,8 +134,12 @@
     </div>
     <p class="method">
       The benchmark above is DOM-bound, which hides the compute backend. These are pure
-      workloads running the same Elm source through the official compiler and alm's three
-      backends. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
+      workloads running the same Elm source through the official compiler and alm's
+      JavaScript and WebAssembly-GC backends. There is no native column: the workloads
+      measured it through <code>--target=native-typed</code>, which no longer exists as a
+      target — only WasmGC consumes the monomorphizer now, and plain
+      <code>--target=native</code> is the uniform boxed backend, roughly ten times slower.
+      Timing that under the same heading would compare a different compiler. On scalar code (recursion, float math, sorting) alm-js is neck-and-neck with
       elm — it emits the same shape of JavaScript. On collections it pulls away, because alm
       represents <code>List</code> as a growable vector rather than cons cells and fuses
       <code>map</code>/<code>filter</code>/<code>fold</code> into specialized loops. WasmGC goes
@@ -192,8 +196,8 @@
       "note": "measured 2026-07-29"
     },
     "compute": {
-      "state": "stale",
-      "note": "measured 2026-07-22 \u2014 7 days older than the newest run"
+      "state": "fresh",
+      "note": "measured 2026-07-29"
     },
     "compile": {
       "state": "fresh",
@@ -326,73 +330,63 @@
   "compute": [
     {
       "op": "fib 35",
-      "elm": 46.0,
-      "alm-js": 46.2,
-      "alm-wasm": 23.5,
-      "alm-native": 13.9
+      "elm": 45.7,
+      "alm-js": 46.7,
+      "alm-wasm": 45.8
     },
     {
       "op": "binary-trees d14\u00d760",
-      "elm": 8.3,
-      "alm-js": 8.4,
-      "alm-wasm": 8.2,
-      "alm-native": 8.3
+      "elm": 8.6,
+      "alm-js": 8.5,
+      "alm-wasm": 8.5
     },
     {
       "op": "list map 1M",
-      "elm": 98.4,
-      "alm-js": 11.9,
-      "alm-wasm": 1.9,
-      "alm-native": 0.9
+      "elm": 98.0,
+      "alm-js": 11.7,
+      "alm-wasm": 1.9
     },
     {
       "op": "list filter 1M",
-      "elm": 67.5,
-      "alm-js": 16.4,
-      "alm-wasm": 2.5,
-      "alm-native": 1.1
+      "elm": 66.5,
+      "alm-js": 15.9,
+      "alm-wasm": 2.5
     },
     {
       "op": "list fold 1M",
-      "elm": 31.3,
-      "alm-js": 13.2,
-      "alm-wasm": 4.4,
-      "alm-native": 3.3
+      "elm": 29.6,
+      "alm-js": 13.0,
+      "alm-wasm": 4.3
     },
     {
       "op": "Dict 100k build+get",
-      "elm": 34.6,
-      "alm-js": 31.2,
-      "alm-wasm": 26.4,
-      "alm-native": 33.7
+      "elm": 43.1,
+      "alm-js": 31.1,
+      "alm-wasm": 25.3
     },
     {
       "op": "mandelbrot 400\u00b2",
-      "elm": 5.9,
+      "elm": 5.8,
       "alm-js": 5.6,
-      "alm-wasm": 5.3,
-      "alm-native": 6.6
+      "alm-wasm": 5.3
     },
     {
       "op": "sort 100k ints",
-      "elm": 24.1,
+      "elm": 24.0,
       "alm-js": 23.6,
-      "alm-wasm": 18.4,
-      "alm-native": 11.3
+      "alm-wasm": 18.0
     },
     {
       "op": "float-list sum 1M",
-      "elm": 173.5,
-      "alm-js": 27.9,
-      "alm-wasm": 3.5,
-      "alm-native": 2.1
+      "elm": 174.0,
+      "alm-js": 27.7,
+      "alm-wasm": 3.7
     }
   ],
   "computeCols": [
     "elm",
     "alm-js",
-    "alm-wasm",
-    "alm-native"
+    "alm-wasm"
   ],
   "compile": [
     {
