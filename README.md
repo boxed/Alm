@@ -152,29 +152,31 @@ runs (3 for suites). One 8,357-line entry point and its module graph:
 
 | | median | best |
 |---|---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 745 ms | 732 ms |
-| elm 0.19.1, incremental (entry file touched) | 171 ms | 169 ms |
+| elm 0.19.1, project-cold (elm-stuff wiped) | 773 ms | 769 ms |
+| elm 0.19.1, incremental (entry file touched) | 177 ms | 171 ms |
 | elm 0.19.1, no-op (nothing changed at all) | 112 ms | 109 ms |
-| **alm, full rebuild, no cache** | **144 ms** | **142 ms** |
+| **alm, full rebuild, no cache** | **123 ms** | **122 ms** |
 
 All 19 entry points of the same codebase (~39k lines):
 
 | | median |
 |---|---|
-| elm 0.19.1, project-cold | 2.82 s |
-| elm 0.19.1, all sources touched (warm elm-stuff) | 2.19 s |
-| **alm, full rebuild every time, no cache** | **1.21 s** |
+| elm 0.19.1, project-cold | 2.80 s |
+| elm 0.19.1, all sources touched (warm elm-stuff) | 2.24 s |
+| **alm, full rebuild every time, no cache** | **1.12 s** |
 
 alm keeps no cache, so its one number has to be read against all three
-of elm's. A full alm rebuild is 5.2x faster than a full official
-rebuild and comfortably beats elm's *incremental* path (144 ms against
-171 ms) while redoing every module rather than the one that changed.
-Across the whole suite alm is 2.3x faster than a cold official build and
-1.8x faster than one where every source was touched. (The official
+of elm's. A full alm rebuild is 6.3x faster than a full official
+rebuild and 1.4x faster than elm's *incremental* path while redoing
+every module rather than the one that changed — it takes about as long
+as the official compiler needs to decide nothing changed at all (123 ms
+against 112 ms). Across the whole suite alm is 2.5x faster than a cold
+official build and 2.0x faster than one where every source was
+touched. (The official
 compiler reuses per-package artifacts from `~/.elm` even when
 project-cold; alm recompiles package sources every run.)
 
-Type checking is ~76% of a build; `ALM_TIMING=1` breaks a compile down
+Type checking is ~73% of a build; `ALM_TIMING=1` breaks a compile down
 by phase.
 
 Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm

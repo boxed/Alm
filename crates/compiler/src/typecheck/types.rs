@@ -72,7 +72,7 @@ pub struct Pool {
     /// a variable to a structure, and allocating a worklist and a visited set
     /// each time cost more than the walk.
     occurs_stack: Vec<Variable>,
-    occurs_seen: std::collections::HashSet<Variable>,
+    occurs_seen: crate::data::fxhash::FxHashSet<Variable>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +89,7 @@ impl Pool {
         Pool {
             descriptors: Vec::new(),
             occurs_stack: Vec::new(),
-            occurs_seen: std::collections::HashSet::new(),
+            occurs_seen: Default::default(),
         }
     }
 

@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::ast::canonical as can;
 use crate::builtins;
+use crate::data::fxhash::{FxHashMap, FxHashSet};
 use crate::data::Name;
 use crate::interface::Interfaces;
 use crate::reporting::Region;
@@ -322,7 +323,7 @@ impl Checker<'_> {
 
     /// Pool variables that appear in monomorphic bindings currently in
     /// scope; generalization must not quantify them.
-    fn env_free_vars(&mut self) -> HashSet<Variable> {
+    fn env_free_vars(&mut self) -> FxHashSet<Variable> {
         let mut mono_vars = Vec::new();
         for scope in &self.scopes {
             for binding in scope.values() {
@@ -342,7 +343,7 @@ impl Checker<'_> {
         for scope in &self.rigid_scope {
             mono_vars.extend(scope.values().copied());
         }
-        let mut free = HashSet::new();
+        let mut free = FxHashSet::default();
         for var in mono_vars {
             self.collect_free(var, &mut free);
         }
@@ -355,7 +356,7 @@ impl Checker<'_> {
     /// runs over the whole environment on every generalization, and going
     /// through `content()` would clone each structure — a record's field map
     /// included — just to look at its children.
-    fn collect_free(&mut self, var: Variable, free: &mut HashSet<Variable>) {
+    fn collect_free(&mut self, var: Variable, free: &mut FxHashSet<Variable>) {
         let mut stack = vec![var];
         while let Some(next) = stack.pop() {
             let root = self.pool.find(next);
@@ -719,7 +720,7 @@ impl Checker<'_> {
 
         // Zonk the (now mutually-unified) templates together so the shared
         // variables get the SAME generated names in every entry point's type.
-        let env_free: HashSet<Variable> = HashSet::new();
+        let env_free: FxHashSet<Variable> = FxHashSet::default();
         let mut gstate = Self::fresh_generalize_state(HashSet::new());
         pinned
             .into_iter()
@@ -832,7 +833,7 @@ impl Checker<'_> {
         start: usize,
         end: usize,
         state: &mut GeneralizeState,
-        env_free: &HashSet<Variable>,
+        env_free: &FxHashSet<Variable>,
     ) {
         if !self.want_node_types {
             return;
@@ -851,7 +852,7 @@ impl Checker<'_> {
             // enclosing scope, where the variable is resolved (or properly
             // quantified), zonks it instead.
             if !env_free.is_empty() {
-                let mut seen = HashSet::new();
+                let mut seen = FxHashSet::default();
                 if self.var_touches(var, env_free, &mut seen) {
                     continue;
                 }
@@ -865,8 +866,8 @@ impl Checker<'_> {
     fn var_touches(
         &mut self,
         var: Variable,
-        targets: &HashSet<Variable>,
-        seen: &mut HashSet<Variable>,
+        targets: &FxHashSet<Variable>,
+        seen: &mut FxHashSet<Variable>,
     ) -> bool {
         let root = self.pool.find(var);
         if targets.contains(&root) {
@@ -902,7 +903,7 @@ impl Checker<'_> {
     /// Build a fresh `GeneralizeState` for generalizing a definition: reserve
     /// enclosing annotated definitions' rigid names, then seed the already-named
     /// free variables so anonymous name generation skips them.
-    fn seed_generalize_state(&mut self, env_free: &HashSet<Variable>) -> GeneralizeState {
+    fn seed_generalize_state(&mut self, env_free: &FxHashSet<Variable>) -> GeneralizeState {
         // Reserve enclosing annotated definitions' rigid variable names so this
         // (inner) definition's freshly-generated names never collide with them.
         let mut reserved = std::collections::HashSet::new();
@@ -912,9 +913,9 @@ impl Checker<'_> {
             }
         }
         let mut state = GeneralizeState {
-            names: HashMap::new(),
+            names: FxHashMap::default(),
             free: HashMap::new(),
-            memo: HashMap::new(),
+            memo: FxHashMap::default(),
             counter: self.zonk_name_counter,
             reserved,
         };
@@ -1010,9 +1011,9 @@ impl Checker<'_> {
     /// inner `let`-bound helpers never collide with them.
     fn fresh_generalize_state(reserved: std::collections::HashSet<Name>) -> GeneralizeState {
         GeneralizeState {
-            names: HashMap::new(),
+            names: FxHashMap::default(),
             free: HashMap::new(),
-            memo: HashMap::new(),
+            memo: FxHashMap::default(),
             counter: 0,
             reserved,
         }
@@ -1057,7 +1058,7 @@ impl Checker<'_> {
     fn variable_to_type(
         &mut self,
         var: Variable,
-        env_free: &HashSet<Variable>,
+        env_free: &FxHashSet<Variable>,
         state: &mut GeneralizeState,
     ) -> can::Type {
         let root = self.pool.find(var);
@@ -2016,7 +2017,7 @@ fn var_super(name: &Name) -> Option<Super> {
 }
 
 struct GeneralizeState {
-    names: HashMap<Variable, Name>,
+    names: FxHashMap<Variable, Name>,
     free: HashMap<Name, Variable>,
     /// Zonk memo: a pool variable resolved to a `can::Type` once, reused (as an
     /// O(1) `Rc` clone) everywhere it recurs in this scheme. The pool is a DAG —
@@ -2026,7 +2027,7 @@ struct GeneralizeState {
     /// thousands of nodes that way; sharing keeps the physical size at the
     /// distinct-node count. Keyed by the union-find ROOT, valid only within this
     /// state (names are per-state).
-    memo: HashMap<Variable, can::Type>,
+    memo: FxHashMap<Variable, can::Type>,
     counter: usize,
     /// Type-variable names that belong to an enclosing annotated definition's
     /// rigid scheme. A freshly-generated (anonymous or suggested) name must
