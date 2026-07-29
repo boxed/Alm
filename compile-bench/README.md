@@ -16,16 +16,22 @@ It prints a summary and the markdown for the README's Benchmark section.
 
 ## What it measures
 
-alm has no artifact cache — every invocation recompiles the whole module graph,
-including package sources. The official compiler caches aggressively. So one
-alm number is measured against three elm ones:
+**Per compiler** — one column each, over a spread of real projects, matching how
+the runtime and computation benchmarks are laid out. Each project is a small
+application importing a package's whole public surface, so the package and
+everything under it has to be compiled; a bare library cannot be a workload
+because it has no `main` and neither compiler will emit a program without one.
 
-| | what it is |
+elm gets **two** columns because it has two speeds and they differ by ~7x:
+
+| column | what it is |
 |---|---|
-| project-cold | `elm-stuff` wiped, so elm rebuilds everything |
-| incremental | the entry file touched, elm's normal inner loop |
-| no-op | nothing changed, elm's floor |
-| alm | every run, no cache of any kind |
+| `elm (full)` | `elm-stuff` cleared each run — the like-for-like comparison |
+| `elm (incr.)` | cache warm, only what changed — what you wait for when editing |
+| `alm-js` / `alm-wasm` / `alm-native` | full build of the whole graph, every run |
+
+**Against elm's cache** — the same thing on a real production application, with
+elm's no-op time as well, and every entry point rather than one.
 
 ## Two things it is careful about
 
@@ -39,9 +45,11 @@ to what is being measured and both get mutated, so the run happens on a copy —
 often sits in a larger repository; the one behind these numbers has a live
 server socket in it that cannot even be copied.)
 
-An entry point the *official* compiler cannot build on its own is dropped from
-the suite, and reported when it is. Timing a failure is not timing a compile,
-and it has to be excluded from both sides or they are not doing equal work.
+A workload that any compiler cannot build is dropped from the table, and
+reported when it is. Timing a failure is not timing a compile, and it has to be
+excluded from every column or they are not doing equal work. (Right now
+`data-viz-lab/elm-chart-builder` goes this way: alm's native backend cannot
+build it.)
 
 ## Finding out where the time goes
 

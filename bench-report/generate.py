@@ -107,21 +107,37 @@ def compute_table(data):
 
 
 def compile_tables(data):
-    """Compile speed, as the harness measured it."""
-    def rows(section, unit):
-        out = []
-        for label, value in data[section].items():
-            if value is None:
-                continue
-            ms = value["median_ms"]
-            out.append({
-                "op": label,
-                "median": round(ms / 1000, 2) if unit == "s" else round(ms),
-                "best": round(value["best_ms"] / 1000, 2) if unit == "s"
-                        else round(value["best_ms"]),
-            })
-        return out
-    return rows("single", "ms"), rows("suite", "s")
+    """Compile speed: projects down, compilers across — like every other table."""
+    matrix = [
+        {"op": row["op"], **{c: row[c] for c in data["compilers"] if row.get(c) is not None}}
+        for row in data.get("projects", [])
+    ]
+
+    # The cache comparison is the same shape: one column per compiler, except
+    # three of the columns are the same compiler in its three modes.
+    #
+    # The two rows do not measure the same set of modes — there is no "no-op"
+    # for a whole-project build, and "all sources touched" only means anything
+    # for one — so columns are keyed by name and a mode a row did not measure
+    # is left blank. Lining them up by position instead would file each number
+    # under whichever mode happened to come next, which is worse than useless.
+    caching, caching_cols = [], []
+    detail = data.get("caching")
+    if detail:
+        rows = {}
+        rows[f"one entry point ({detail['project']['entry']})"] = detail.get("single", {})
+        suite = detail.get("suite") or {}
+        if suite:
+            count = detail["project"].get("entry_points", "")
+            rows[f"all {count} entry points".replace("  ", " ")] = suite
+        ordered = ["elm, project-cold", "elm, incremental", "elm, all sources touched",
+                   "elm, no-op", "alm, full rebuild"]
+        seen = {name for measures in rows.values() for name in measures}
+        caching_cols = [c for c in ordered if c in seen]
+        caching_cols += [c for c in sorted(seen) if c not in ordered]
+        for label, measures in rows.items():
+            caching.append({"op": label, **{k: v for k, v in measures.items() if v is not None}})
+    return matrix, data["compilers"], caching, caching_cols
 
 
 # ----------------------------------------------------------------------- page
@@ -163,9 +179,11 @@ def main():
         rows, cols = compute_table(data["compute"])
         payload["compute"], payload["computeCols"] = rows, cols
     if data["compile"]:
-        single, suite = compile_tables(data["compile"])
-        payload["compileSingle"], payload["compileSuite"] = single, suite
-        payload["compileProject"] = data["compile"]["project"]
+        matrix, cols, caching_rows, caching_cols = compile_tables(data["compile"])
+        payload["compile"], payload["compileCols"] = matrix, cols
+        payload["caching"], payload["cachingCols"] = caching_rows, caching_cols
+        if data["compile"].get("caching"):
+            payload["compileProject"] = data["compile"]["caching"]["project"]
 
     template = (REPO / "bench-report" / "template.html").read_text()
     page = template.replace("/*{{DATA}}*/", json.dumps(payload, indent=2))

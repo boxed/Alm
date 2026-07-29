@@ -88,7 +88,7 @@
 
 <div class="wrap">
   <header>
-    <p class="eyebrow">generated 2026-07-29 13:48 CEST · every figure read from a harness's results.json</p>
+    <p class="eyebrow">generated 2026-07-29 14:45 CEST · every figure read from a harness's results.json</p>
     <h1>alm — runtime, computation and compile speed</h1>
     <p class="method">
       <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
@@ -150,11 +150,20 @@
       <h2 class="sec">Compile speed</h2>
       <span class="sec-note" id="stamp-compile"></span>
     </div>
+    <p class="method">
+      How fast the compiler itself is. Each row is a project — a small application
+      importing a package's whole public surface, so the package and everything under it
+      has to be compiled — built by each compiler in turn. <strong>alm</strong> keeps no
+      incremental cache, so every alm column is a full build of the whole graph every time.
+      elm gets two columns because it has two speeds: <code>elm (full)</code> with
+      <code>elm-stuff</code> cleared, which is the like-for-like comparison, and
+      <code>elm (incr.)</code> with its cache warm, which is what you actually wait for
+      when editing. The native column pays LLVM's optimizer.
+    </p>
+    <div class="tbl-scroll"><table class="wide" id="t-compile"></table></div>
+    <p class="sub" id="caching-sub">Against elm's cache, on a production application</p>
     <p class="method" id="compile-blurb"></p>
-    <p class="sub">One entry point and its module graph</p>
-    <div class="tbl-scroll"><table id="t-compile-single"></table></div>
-    <p class="sub">Every entry point in the project</p>
-    <div class="tbl-scroll"><table id="t-compile-suite"></table></div>
+    <div class="tbl-scroll"><table class="wide" id="t-caching"></table></div>
   </section>
 
   <footer>
@@ -385,46 +394,79 @@
     "alm-wasm",
     "alm-native"
   ],
-  "compileSingle": [
+  "compile": [
     {
-      "op": "elm project-cold",
-      "median": 747,
-      "best": 686
+      "op": "elm/http",
+      "elm (full)": 672.1,
+      "elm (incr.)": 100.8,
+      "alm-js": 9.9,
+      "alm-wasm": 8.4,
+      "alm-native": 82.6
     },
     {
-      "op": "elm incremental",
-      "median": 178,
-      "best": 175
+      "op": "elm/url",
+      "elm (full)": 658.0,
+      "elm (incr.)": 98.9,
+      "alm-js": 10.5,
+      "alm-wasm": 8.1,
+      "alm-native": 84.6
     },
     {
-      "op": "elm no-op",
-      "median": 116,
-      "best": 114
+      "op": "elm/parser",
+      "elm (full)": 673.1,
+      "elm (incr.)": 98.2,
+      "alm-js": 10.8,
+      "alm-wasm": 9.3,
+      "alm-native": 127.8
     },
     {
-      "op": "alm full rebuild",
-      "median": 118,
-      "best": 116
+      "op": "terezka/elm-charts",
+      "elm (full)": 677.9,
+      "elm (incr.)": 97.8,
+      "alm-js": 46.1,
+      "alm-wasm": 40.6,
+      "alm-native": 779.9
+    },
+    {
+      "op": "ianmackenzie/elm-geometry",
+      "elm (full)": 663.4,
+      "elm (incr.)": 103.0,
+      "alm-js": 87.3,
+      "alm-wasm": 74.9,
+      "alm-native": 1322.4
     }
   ],
-  "compileSuite": [
+  "compileCols": [
+    "elm (full)",
+    "elm (incr.)",
+    "alm-js",
+    "alm-wasm",
+    "alm-native"
+  ],
+  "caching": [
     {
-      "op": "elm project-cold",
-      "median": 2.87,
-      "best": 2.86
+      "op": "one entry point (src/Insight.elm)",
+      "elm, project-cold": 741.8,
+      "elm, incremental": 174.2,
+      "elm, no-op": 111.1,
+      "alm, full rebuild": 120.4
     },
     {
-      "op": "elm all touched",
-      "median": 2.36,
-      "best": 2.35
-    },
-    {
-      "op": "alm full rebuild",
-      "median": 1.05,
-      "best": 1.05
+      "op": "all 19 entry points",
+      "elm, project-cold": 2897.9,
+      "elm, all sources touched": 2339.4,
+      "alm, full rebuild": 1098.2
     }
+  ],
+  "cachingCols": [
+    "elm, project-cold",
+    "elm, incremental",
+    "elm, all sources touched",
+    "elm, no-op",
+    "alm, full rebuild"
   ],
   "compileProject": {
+    "name": "dryft",
     "entry": "src/Insight.elm",
     "entry_lines": 8357,
     "total_lines": 39790,
@@ -472,30 +514,6 @@
     t.innerHTML = h + "</tbody>";
   }
 
-  /** Compile speed is one measurement per row, not a grid, so it gets its own shape. */
-  function renderCompile(id, rows, dec, unit) {
-    const t = document.getElementById(id);
-    if (!t) return;
-    if (!rows || !rows.length) {
-      t.outerHTML = '<p class="absent">No results for this section yet.</p>';
-      return;
-    }
-    const best = Math.min(...rows.map(r => r.median));
-    let h = `<thead><tr><th class="op">build</th><th class="grp" colspan="3">median</th>` +
-            `<th class="grp">best</th></tr></thead><tbody>`;
-    for (const row of rows) {
-      const alm = row.op.startsWith("alm");
-      const fill = (best / row.median * 100).toFixed(1);
-      h += `<tr><td class="op">${alm ? `<strong>${row.op}</strong>` : row.op}</td>` +
-           `<td class="c-num${row.median === best ? " best" : ""}">${row.median.toFixed(dec)} ${unit}</td>` +
-           `<td class="c-bar"><span class="heat"><span class="heatfill" style="width:${fill}%;` +
-           `background:${heatColor(row.median / best)}"></span></span></td>` +
-           `<td class="c-star">${row.median === best ? "★" : ""}</td>` +
-           `<td class="c-num">${row.best.toFixed(dec)} ${unit}</td></tr>`;
-    }
-    t.innerHTML = h + "</tbody>";
-  }
-
   for (const [name, info] of Object.entries(DATA.freshness || {})) {
     const el = document.getElementById(`stamp-${name}`);
     if (el) {
@@ -507,19 +525,20 @@
   renderTable("t-bulk", DATA.bulk, 1, DATA.runtimeCols || []);
   renderTable("t-incr", DATA.incr, 1, DATA.runtimeCols || []);
   renderTable("t-compute", DATA.compute, 1, DATA.computeCols || []);
-  renderCompile("t-compile-single", DATA.compileSingle, 0, "ms");
-  renderCompile("t-compile-suite", DATA.compileSuite, 2, "s");
+  renderTable("t-compile", DATA.compile, 0, DATA.compileCols || []);
+  renderTable("t-caching", DATA.caching, 0, DATA.cachingCols || []);
 
   const p = DATA.compileProject;
   const blurb = document.getElementById("compile-blurb");
   if (p && blurb) {
     blurb.innerHTML =
-      `How fast the compiler itself is, against a real production codebase: ` +
-      `<strong>${p.total_lines.toLocaleString()} lines</strong> of Elm across ` +
-      `<strong>${p.entry_points} entry points</strong>, with the largest single entry ` +
-      `(<code>${p.entry}</code>, ${p.entry_lines.toLocaleString()} lines) measured on its own ` +
-      `as well.`;
+      `The table above builds each project once. This one is a real production app — ` +
+      `<strong>${p.total_lines.toLocaleString()} lines</strong> across ` +
+      `<strong>${p.entry_points} entry points</strong>, largest entry <code>${p.entry}</code> ` +
+      `at ${p.entry_lines.toLocaleString()} lines — measured against all three of elm's ` +
+      `speeds, since alm's single number has to be read against each of them. Milliseconds.`;
   } else if (blurb) {
-    blurb.textContent = "How fast the compiler itself is.";
+    document.getElementById("caching-sub")?.remove();
+    blurb.remove();
   }
 </script>

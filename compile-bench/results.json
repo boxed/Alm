@@ -1,47 +1,84 @@
 {
-  "measured": "2026-07-29T13:47:13+02:00",
+  "measured": "2026-07-29T14:43:23+02:00",
   "machine": "Darwin arm64",
   "elm_version": "0.19.1",
-  "project": {
-    "entry": "src/Insight.elm",
-    "entry_lines": 8357,
-    "total_lines": 39790,
-    "entry_points": 19
-  },
   "runs": {
+    "matrix": 3,
     "single": 5,
     "suite": 3
   },
-  "single": {
-    "elm project-cold": {
-      "median_ms": 747.0,
-      "best_ms": 686.2
+  "compilers": [
+    "elm (full)",
+    "elm (incr.)",
+    "alm-js",
+    "alm-wasm",
+    "alm-native"
+  ],
+  "projects": [
+    {
+      "op": "elm/http",
+      "lines": 13,
+      "elm (full)": 672.1,
+      "elm (incr.)": 100.8,
+      "alm-js": 9.9,
+      "alm-wasm": 8.4,
+      "alm-native": 82.6
     },
-    "elm incremental": {
-      "median_ms": 177.8,
-      "best_ms": 174.7
+    {
+      "op": "elm/url",
+      "lines": 16,
+      "elm (full)": 658.0,
+      "elm (incr.)": 98.9,
+      "alm-js": 10.5,
+      "alm-wasm": 8.1,
+      "alm-native": 84.6
     },
-    "elm no-op": {
-      "median_ms": 115.8,
-      "best_ms": 113.5
+    {
+      "op": "elm/parser",
+      "lines": 14,
+      "elm (full)": 673.1,
+      "elm (incr.)": 98.2,
+      "alm-js": 10.8,
+      "alm-wasm": 9.3,
+      "alm-native": 127.8
     },
-    "alm full rebuild": {
-      "median_ms": 118.1,
-      "best_ms": 115.6
+    {
+      "op": "terezka/elm-charts",
+      "lines": 17,
+      "elm (full)": 677.9,
+      "elm (incr.)": 97.8,
+      "alm-js": 46.1,
+      "alm-wasm": 40.6,
+      "alm-native": 779.9
+    },
+    {
+      "op": "ianmackenzie/elm-geometry",
+      "lines": 64,
+      "elm (full)": 663.4,
+      "elm (incr.)": 103.0,
+      "alm-js": 87.3,
+      "alm-wasm": 74.9,
+      "alm-native": 1322.4
     }
-  },
-  "suite": {
-    "elm project-cold": {
-      "median_ms": 2870.1,
-      "best_ms": 2861.3
+  ],
+  "caching": {
+    "project": {
+      "name": "dryft",
+      "entry": "src/Insight.elm",
+      "entry_lines": 8357,
+      "total_lines": 39790,
+      "entry_points": 19
     },
-    "elm all touched": {
-      "median_ms": 2359.5,
-      "best_ms": 2346.1
+    "single": {
+      "elm, project-cold": 741.8,
+      "elm, incremental": 174.2,
+      "elm, no-op": 111.1,
+      "alm, full rebuild": 120.4
     },
-    "alm full rebuild": {
-      "median_ms": 1049.0,
-      "best_ms": 1048.7
+    "suite": {
+      "elm, project-cold": 2897.9,
+      "elm, all sources touched": 2339.4,
+      "alm, full rebuild": 1098.2
     }
   }
 }
