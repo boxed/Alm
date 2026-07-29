@@ -13,3 +13,4 @@ perftmp3/
 *.log
 run.err
 run.out
+__pycache__/
