@@ -774,12 +774,14 @@ impl Checker<'_> {
                 )))
             }
             can::Type::Record(fields, ext) => {
-                let fields = fields
-                    .iter()
-                    .map(|(name, t)| {
-                        (name.clone(), self.type_to_variable(t, substitutions, rigid))
-                    })
-                    .collect();
+                let fields: types::Row = types::Row::new(
+                    fields
+                        .iter()
+                        .map(|(name, t)| {
+                            (name.clone(), self.type_to_variable(t, substitutions, rigid))
+                        })
+                        .collect(),
+                );
                 let ext = match ext {
                     Some(name) => {
                         if let Some(var) = substitutions.get(name) {
@@ -1090,8 +1092,8 @@ impl Checker<'_> {
                 FlatType::Record(..) => {
                     let (fields, ext) = self.pool.gather_fields(root);
                     let fields = fields
-                        .into_iter()
-                        .map(|(name, v)| (name, self.variable_to_type(v, env_free, state)))
+                        .iter()
+                        .map(|(name, v)| (name.clone(), self.variable_to_type(*v, env_free, state)))
                         .collect();
                     let ext = match self.pool.content(ext) {
                         Content::Structure(FlatType::EmptyRecord) => None,
@@ -1536,7 +1538,7 @@ impl Checker<'_> {
                 let ext = self.pool.fresh_var();
                 Ok(self
                     .pool
-                    .fresh(Content::Structure(FlatType::Record(field_types, ext))))
+                    .fresh(Content::Structure(FlatType::Record(types::Row::new(field_types), ext))))
             }
             Ctor(home, union_name, ctor, args) => {
                 let (result_var, arg_vars) =
@@ -1887,7 +1889,7 @@ impl Checker<'_> {
                 fields.insert(field.clone(), field_var);
                 let record = self
                     .pool
-                    .fresh(Content::Structure(FlatType::Record(fields, ext)));
+                    .fresh(Content::Structure(FlatType::Record(types::Row::new(fields), ext)));
                 Ok(self
                     .pool
                     .fresh(Content::Structure(FlatType::Fun(record, field_var))))
@@ -1900,7 +1902,7 @@ impl Checker<'_> {
                 fields.insert(field.value.clone(), field_var);
                 let expected = self
                     .pool
-                    .fresh(Content::Structure(FlatType::Record(fields, ext)));
+                    .fresh(Content::Structure(FlatType::Record(types::Row::new(fields), ext)));
                 self.unify_expr(
                     expected,
                     record_var,
@@ -1930,7 +1932,7 @@ impl Checker<'_> {
                 let ext = self.pool.fresh_var();
                 let expected = self
                     .pool
-                    .fresh(Content::Structure(FlatType::Record(field_types, ext)));
+                    .fresh(Content::Structure(FlatType::Record(types::Row::new(field_types), ext)));
                 let record_label = record_name(record).unwrap_or_else(|| "_".to_string());
                 let mentioned: Vec<(String, Region)> = fields
                     .iter()
@@ -1970,7 +1972,7 @@ impl Checker<'_> {
                 let empty = self.pool.fresh(Content::Structure(FlatType::EmptyRecord));
                 Ok(self
                     .pool
-                    .fresh(Content::Structure(FlatType::Record(field_types, empty))))
+                    .fresh(Content::Structure(FlatType::Record(types::Row::new(field_types), empty))))
             }
             Unit => Ok(self.pool.fresh(Content::Structure(FlatType::Unit))),
             Shader(_) => {

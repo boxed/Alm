@@ -42,13 +42,21 @@ pub enum Content {
     Error,
 }
 
+/// A record's fields. Shared, so passing a row around is a refcount bump
+/// rather than a `BTreeMap` copy; `Rc::make_mut` clones only when a row is
+/// actually modified.
+pub type Row = std::rc::Rc<BTreeMap<Name, Variable>>;
+
 #[derive(Debug, Clone)]
 pub enum FlatType {
     /// home module, type name, arguments.
     App(Name, Name, Vec<Variable>),
     Fun(Variable, Variable),
     EmptyRecord,
-    Record(BTreeMap<Name, Variable>, Variable),
+    /// A record row and its extension. The row is shared rather than owned:
+    /// copying a `FlatType` is constant work in the checker's hot paths, and
+    /// records are what a real Elm codebase is mostly made of.
+    Record(Row, Variable),
     Unit,
     Tuple(Variable, Variable, Option<Variable>),
 }
@@ -339,24 +347,42 @@ impl Pool {
 
     /// Collect all fields reachable through nested record extensions,
     /// returning them with the final (non-record) extension variable.
-    pub(crate) fn gather_fields(&mut self, var: Variable) -> (BTreeMap<Name, Variable>, Variable) {
-        let mut fields = BTreeMap::new();
-        let mut current = var;
+    pub(crate) fn gather_fields(&mut self, var: Variable) -> (Row, Variable) {
+        let root = self.find(var);
+        let Content::Structure(FlatType::Record(row, ext)) = &self.descriptors[root].content
+        else {
+            return (Row::default(), var);
+        };
+        let (row, ext) = (row.clone(), *ext);
+
+        // Almost always the extension is not itself a record, and then the row
+        // in hand *is* the answer — sharing it costs a refcount bump where
+        // rebuilding it costs a whole `BTreeMap`.
+        let ext_root = self.find(ext);
+        if !matches!(
+            self.descriptors[ext_root].content,
+            Content::Structure(FlatType::Record(..))
+        ) {
+            return (row, ext);
+        }
+
+        // A chain of extensions: flatten it, nearest level winning.
+        let mut fields = (*row).clone();
+        let mut current = ext;
         loop {
-            // Read the row in place. Going through `content()` would clone the
-            // whole record — field map included — only to walk it and throw
-            // the copy away, and records are walked constantly.
             let root = self.find(current);
-            let Content::Structure(FlatType::Record(more, ext)) = &self.descriptors[root].content
+            let Content::Structure(FlatType::Record(more, next)) =
+                &self.descriptors[root].content
             else {
-                return (fields, current);
+                return (Row::new(fields), current);
             };
+            let next = *next;
             // `Name` is an `Rc<str>`, so carrying the keys over is a refcount
             // bump rather than a string copy.
-            for (name, field_var) in more {
+            for (name, field_var) in more.iter() {
                 fields.entry(name.clone()).or_insert(*field_var);
             }
-            current = *ext;
+            current = next;
         }
     }
 
@@ -365,14 +391,14 @@ impl Pool {
         &mut self,
         a_root: Variable,
         b_root: Variable,
-        fields1: BTreeMap<Name, Variable>,
+        fields1: Row,
         ext1: Variable,
-        fields2: BTreeMap<Name, Variable>,
+        fields2: Row,
         ext2: Variable,
     ) -> Unify {
         let mut shared = Vec::new();
         let mut unique1 = BTreeMap::new();
-        for (name, var) in &fields1 {
+        for (name, var) in fields1.iter() {
             match fields2.get(name) {
                 Some(other) => shared.push((*var, *other)),
                 None => {
@@ -388,18 +414,33 @@ impl Pool {
 
         if unique1.is_empty() && unique2.is_empty() {
             self.unify(ext1, ext2)?;
+            for (x, y) in shared {
+                self.unify(x, y)?;
+            }
+            // Both sides carry the same field names, so the flattened row is
+            // the one already in hand. Re-gathering would rebuild an identical
+            // map: `gather_fields` stops at the first non-record, so neither
+            // extension was a record, and unifying two non-records cannot make
+            // one — nothing new can have appeared in the row.
+            let final_ext = self.find(ext1);
+            self.merge(
+                a_root,
+                b_root,
+                Content::Structure(FlatType::Record(fields1, final_ext)),
+            );
+            return Ok(());
         } else if unique1.is_empty() {
             // Side 1 is missing fields that side 2 has: its extension must
             // provide them.
-            let sub_record = self.fresh(Content::Structure(FlatType::Record(unique2, ext2)));
+            let sub_record = self.fresh(Content::Structure(FlatType::Record(Row::new(unique2), ext2)));
             self.unify(ext1, sub_record)?;
         } else if unique2.is_empty() {
-            let sub_record = self.fresh(Content::Structure(FlatType::Record(unique1, ext1)));
+            let sub_record = self.fresh(Content::Structure(FlatType::Record(Row::new(unique1), ext1)));
             self.unify(ext2, sub_record)?;
         } else {
             let shared_ext = self.fresh_var();
-            let sub1 = self.fresh(Content::Structure(FlatType::Record(unique1, shared_ext)));
-            let sub2 = self.fresh(Content::Structure(FlatType::Record(unique2, shared_ext)));
+            let sub1 = self.fresh(Content::Structure(FlatType::Record(Row::new(unique1), shared_ext)));
+            let sub2 = self.fresh(Content::Structure(FlatType::Record(Row::new(unique2), shared_ext)));
             self.unify(ext1, sub2)?;
             self.unify(ext2, sub1)?;
         }
@@ -802,8 +843,8 @@ impl Pool {
                 FlatType::Record(..) => {
                     let (fields, ext) = self.gather_fields(root);
                     let mut out = BTreeMap::new();
-                    for (name, field_var) in fields {
-                        out.insert(name.to_string(), self.to_error_type_help(field_var, names, seen));
+                    for (name, field_var) in fields.iter() {
+                        out.insert(name.to_string(), self.to_error_type_help(*field_var, names, seen));
                     }
                     let ext_root = self.find(ext);
                     let extension = match self.content(ext_root) {
