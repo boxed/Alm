@@ -88,7 +88,7 @@
 
 <div class="wrap">
   <header>
-    <p class="eyebrow">generated 2026-07-29 14:45 CEST · every figure read from a harness's results.json</p>
+    <p class="eyebrow">generated 2026-07-29 15:41 CEST · every figure read from a harness's results.json</p>
     <h1>alm — runtime, computation and compile speed</h1>
     <p class="method">
       <strong>alm</strong> is an Elm compiler written in Rust, with three backends: JavaScript,
@@ -188,8 +188,8 @@
   const DATA = {
   "freshness": {
     "runtime": {
-      "state": "stale",
-      "note": "measured 2026-07-22 \u2014 7 days older than the newest run"
+      "state": "fresh",
+      "note": "measured 2026-07-29"
     },
     "compute": {
       "state": "stale",
@@ -203,39 +203,39 @@
   "bulk": [
     {
       "op": "create 1k",
-      "elm (naive)": 16.9,
-      "elm (opt)": 16.3,
-      "alm-js (naive)": 16.6,
-      "alm-js (opt)": 17.2,
-      "alm-wasm (naive)": 17.3,
-      "alm-wasm (opt)": 17.1,
-      "react (naive)": 16.4,
+      "elm (naive)": 16.4,
+      "elm (opt)": 16.7,
+      "alm-js (naive)": 16.5,
+      "alm-js (opt)": 16.6,
+      "alm-wasm (naive)": 17.8,
+      "alm-wasm (opt)": 17.3,
+      "react (naive)": 16.6,
       "react (opt)": 16.9,
-      "svelte": 15.5
+      "svelte": 15.8
     },
     {
       "op": "replace 1k",
-      "elm (naive)": 15.7,
-      "elm (opt)": 16.1,
-      "alm-js (naive)": 15.3,
-      "alm-js (opt)": 15.6,
-      "alm-wasm (naive)": 18.5,
-      "alm-wasm (opt)": 18.8,
+      "elm (naive)": 15.6,
+      "elm (opt)": 16.3,
+      "alm-js (naive)": 15.6,
+      "alm-js (opt)": 15.8,
+      "alm-wasm (naive)": 18.6,
+      "alm-wasm (opt)": 18.9,
       "react (naive)": 19.8,
-      "react (opt)": 20.2,
-      "svelte": 18.8
+      "react (opt)": 20.4,
+      "svelte": 16.5
     },
     {
       "op": "create 10k",
-      "elm (naive)": 162.2,
-      "elm (opt)": 163.2,
-      "alm-js (naive)": 164.8,
-      "alm-js (opt)": 160.8,
-      "alm-wasm (naive)": 200.8,
-      "alm-wasm (opt)": 196.3,
-      "react (naive)": 263.3,
-      "react (opt)": 257.9,
-      "svelte": 174.4
+      "elm (naive)": 161.4,
+      "elm (opt)": 163.5,
+      "alm-js (naive)": 164.7,
+      "alm-js (opt)": 164,
+      "alm-wasm (naive)": 205.7,
+      "alm-wasm (opt)": 198.1,
+      "react (naive)": 260.1,
+      "react (opt)": 262.6,
+      "svelte": 171.3
     },
     {
       "op": "clear 1k",
@@ -244,10 +244,10 @@
       "alm-js (naive)": 1.6,
       "alm-js (opt)": 1.6,
       "alm-wasm (naive)": 1.5,
-      "alm-wasm (opt)": 1.5,
-      "react (naive)": 3.7,
-      "react (opt)": 4.1,
-      "svelte": 1.7
+      "alm-wasm (opt)": 1.6,
+      "react (naive)": 3.1,
+      "react (opt)": 3.2,
+      "svelte": 1.8
     }
   ],
   "incr": [
@@ -255,36 +255,36 @@
       "op": "select",
       "elm (naive)": 1,
       "elm (opt)": 0.2,
-      "alm-js (naive)": 0.9,
-      "alm-js (opt)": 0.1,
+      "alm-js (naive)": 1,
+      "alm-js (opt)": 0.2,
       "alm-wasm (naive)": 0.8,
       "alm-wasm (opt)": 0.1,
       "react (naive)": 1.5,
       "react (opt)": 0.4,
-      "svelte": 0.3
+      "svelte": 0.4
     },
     {
       "op": "update 10th",
-      "elm (naive)": 5.1,
-      "elm (opt)": 4.3,
-      "alm-js (naive)": 4.9,
-      "alm-js (opt)": 4.3,
-      "alm-wasm (naive)": 4.9,
+      "elm (naive)": 5.2,
+      "elm (opt)": 4.2,
+      "alm-js (naive)": 5,
+      "alm-js (opt)": 4.2,
+      "alm-wasm (naive)": 4.8,
       "alm-wasm (opt)": 4.3,
-      "react (naive)": 5.4,
-      "react (opt)": 4.4,
-      "svelte": 4.3
+      "react (naive)": 5.6,
+      "react (opt)": 4.5,
+      "svelte": 4.4
     },
     {
       "op": "swap",
-      "elm (naive)": 2.5,
+      "elm (naive)": 2.4,
       "elm (opt)": 1.4,
       "alm-js (naive)": 2.4,
       "alm-js (opt)": 1.6,
       "alm-wasm (naive)": 2.5,
       "alm-wasm (opt)": 1.9,
-      "react (naive)": 15.5,
-      "react (opt)": 14.2,
+      "react (naive)": 15.6,
+      "react (opt)": 14.5,
       "svelte": 1.6
     },
     {
@@ -292,24 +292,24 @@
       "elm (naive)": 3.3,
       "elm (opt)": 2.5,
       "alm-js (naive)": 3.5,
-      "alm-js (opt)": 2.6,
-      "alm-wasm (naive)": 3.5,
+      "alm-js (opt)": 2.7,
+      "alm-wasm (naive)": 3.6,
       "alm-wasm (opt)": 2.9,
-      "react (naive)": 3.8,
+      "react (naive)": 3.9,
       "react (opt)": 2.6,
       "svelte": 2.7
     },
     {
       "op": "append 1k",
-      "elm (naive)": 55,
-      "elm (opt)": 41,
-      "alm-js (naive)": 56.2,
-      "alm-js (opt)": 40.5,
-      "alm-wasm (naive)": 59.4,
-      "alm-wasm (opt)": 44.5,
-      "react (naive)": 57.2,
-      "react (opt)": 41.8,
-      "svelte": 44.4
+      "elm (naive)": 55.3,
+      "elm (opt)": 40.6,
+      "alm-js (naive)": 56.4,
+      "alm-js (opt)": 40,
+      "alm-wasm (naive)": 55.9,
+      "alm-wasm (opt)": 46.5,
+      "react (naive)": 58,
+      "react (opt)": 42,
+      "svelte": 44
     }
   ],
   "runtimeCols": [

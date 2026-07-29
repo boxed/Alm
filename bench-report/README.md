@@ -37,9 +37,15 @@ the untouched sections keep their own dates and admit their age.
 
 ## Refreshing
 
+Use each harness's `build.sh`, not `npm run build`. `dom-bench/build.mjs` builds
+only the React and Svelte bundles — `build.sh` is what compiles the elm and alm
+ones. Running the driver against stale bundles produces pages that never mount,
+and every operation then measures an empty frame: a suspiciously constant
+~8.3 ms per row on a 120 Hz display.
+
 ```
-cd dom-bench && npm run build && npm run bench      # runtime / memory / size
-node compute-bench/run.mjs                          # computation
+cd dom-bench && ./build.sh && node drive.mjs        # runtime / memory / size
+cd compute-bench && ./build.sh && node run.mjs      # computation
 python3 compile-bench/run.py                        # compile speed
 python3 bench-report/generate.py                    # rebuild the page
 ```
