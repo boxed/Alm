@@ -14,3 +14,6 @@ perftmp3/
 run.err
 run.out
 __pycache__/
+
+# hot-reload browser test scratch project
+tests/browser/hot-reload/work/

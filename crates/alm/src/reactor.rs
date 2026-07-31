@@ -194,14 +194,18 @@ pub fn declared_module_name(path: &Path) -> Option<String> {
 }
 
 /// `Generate.Html.sandwich`, byte for byte — unless `hooks` is set, which adds
-/// the two handles the live-reload shim needs to swap the running program.
-/// With live updating off the page is exactly the one elm serves.
+/// the registry the live-reload shim swaps programs out of. With live updating
+/// off the page is exactly the one elm serves.
 pub fn sandwich(name: &str, javascript: &str, hooks: bool) -> String {
+    // Ahead of the bundle, because the bundle is what registers into it.
     let handles = if hooks {
-        "\x20 // Handle for the live-reload shim; without it, it just reloads.\n\
-         \x20 window.__alm_app__ = app;\n"
+        format!(
+            "\x20 // Where the live-reload shim finds the running program.\n\
+             \x20 {}\n",
+            crate::server::live::registry_js()
+        )
     } else {
-        ""
+        String::new()
     };
     format!(
         "<!DOCTYPE HTML>\n\
@@ -218,11 +222,11 @@ pub fn sandwich(name: &str, javascript: &str, hooks: bool) -> String {
          \n\
          <script>\n\
          try {{\n\
+         {handles}\
          {javascript}\n\
          \n\
          \x20 var node = document.getElementById(\"elm\");\n\
          \x20 var app = Elm.{name}.init({{ node: node }});\n\
-         {handles}\
          }}\n\
          catch (e)\n\
          {{\n\
@@ -348,16 +352,17 @@ mod tests {
     #[test]
     fn the_sandwich_is_elms() {
         let page = sandwich("Main", "// code", false);
-        assert!(!page.contains("__alm_app__"), "no hooks without live updating");
+        assert!(!page.contains("__alm_hot__"), "no hooks without live updating");
         assert!(page.starts_with("<!DOCTYPE HTML>\n<html>\n<head>\n  <meta charset=\"UTF-8\">\n  <title>Main</title>"));
         assert!(page.contains("<pre id=\"elm\"></pre>"));
         assert!(page
             .contains("  var app = Elm.Main.init({ node: node });"));
 
-        // With it on, the shim gets the two handles it needs and nothing else.
+        // With it on, the page installs the registry the shim swaps programs out
+        // of — ahead of the bundle, since the bundle is what registers into it.
         let live = sandwich("Main", "// code", true);
-        assert!(live.contains("window.__alm_app__ = app;"), "{live}");
-        assert!(!live.contains("__alm_node__"), "the node is detached on mount, so it is no use");
+        let registry = live.find("__alm_hot__").expect("no registry: {live}");
+        assert!(registry < live.find("// code").unwrap(), "the registry must come first: {live}");
         assert!(page.contains("header.innerText = \"Initialization Error\";"));
         assert!(page.ends_with("</body>\n</html>"));
     }

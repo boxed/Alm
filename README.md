@@ -31,6 +31,23 @@ couples to that flag — shortening record field names and numbering
 constructor tags — are not implemented; alm's runtime reads those names
 directly, so renaming them would mean rewriting it.)
 
+`--live` serves the program and rebuilds it whenever a source changes,
+swapping the new build into the open page and keeping the running model when
+the new build still agrees what a `Model` is. Adding `--output` writes the
+program out as well, for the case where the page belongs to a larger app —
+a Django template, a Vite entry — and only loads the bundle:
+
+```sh
+alm make src/Main.elm --live --output=static/app.js
+```
+
+That bundle carries the live-reload client, so the embedding page hot-swaps
+without knowing anything about alm; loading it is enough, from whatever
+origin it is served on. It is a development bundle — it talks back to the
+alm server — so build without `--live` to ship. `--no-hot-reload` keeps the
+rebuild-and-write and leaves the page alone, for an app with a reloader of
+its own.
+
 Projects are discovered through `elm.json` (`source-directories`), and
 package dependencies compile directly from the `~/.elm` cache — pure Elm
 packages need no porting. In the browser or node:

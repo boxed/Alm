@@ -105,9 +105,14 @@ fn print_help() {
          any `Debug` call survives. `--report=json` writes diagnostics to\n\
          stderr as JSON for editors. `--docs=<file>` writes a package's\n\
          docs.json.\n\
-         `--live` serves the program instead of writing it, rebuilding and\n\
+         `--live` serves the program at http://localhost:8413, rebuilding and\n\
          updating the open page whenever a source changes; the model is kept\n\
-         across the swap when the new build still agrees what a Model is."
+         across the swap when the new build still agrees what a Model is.\n\
+         Adding `--output` writes the program out as well, for embedding it in\n\
+         a larger app: that bundle carries the live-reload client, so the page\n\
+         loading it hot-swaps too, wherever it is served from. It is a\n\
+         development bundle — it talks to the alm server — so build without\n\
+         `--live` to ship."
     );
 }
 
@@ -200,26 +205,30 @@ fn make(args: &[String]) -> ExitCode {
     };
 
     if live {
-        // Serving is what `--live` does instead of writing an output file, so
-        // the flags that describe an output have nothing to act on.
-        for (flag, set) in [
-            ("--output", output.is_some()),
-            ("--docs", docs.is_some()),
-            ("--target", !matches!(backend, Backend::Js)),
-            ("--source-maps", source_maps),
-            ("--optimize", optimize),
-        ] {
-            if set {
-                eprintln!("`{flag}` does not go with `--live`: it serves the program rather \
-                           than writing one out.");
-                return ExitCode::FAILURE;
-            }
+        // `--live` serves the program *and*, given `--output`, writes it — that
+        // is the case where the page belongs to a larger app and only needs the
+        // bundle. Two flags still have nothing to act on:
+        if !matches!(backend, Backend::Js) {
+            // A native binary is not something a page loads at all, and a wasm
+            // module needs a loader this server does not have.
+            eprintln!("`--target` does not go with `--live`: only the js target can be served.");
+            return ExitCode::FAILURE;
+        }
+        if docs.is_some() {
+            // Nothing about docs.json changes as you iterate on a program, and
+            // generating it means checking the project a second time on every
+            // keystroke.
+            eprintln!("`--docs` does not go with `--live`: run `alm make --docs=…` on its own.");
+            return ExitCode::FAILURE;
         }
         return serve::run(serve::Options {
             entry: input,
             port: live_port,
             updating,
             color: use_color(),
+            output,
+            source_maps,
+            optimize,
         });
     }
 

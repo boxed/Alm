@@ -140,34 +140,65 @@ fn collect(dir: &Path, out: &mut BTreeMap<PathBuf, (u64, Option<SystemTime>)>, d
 /// The endpoint the client shim connects to.
 pub const ENDPOINT: &str = "/_alm/live";
 
+/// Install the registry that programs put themselves in as they start.
+///
+/// This has to run *before* any bundle evaluates, which is why it is a separate
+/// snippet rather than part of the shim: the shim can go anywhere, but a
+/// program that starts before the registry exists is invisible to it.
+/// Idempotent, so a page carrying two live bundles shares one registry.
+pub fn registry_js() -> &'static str {
+    "window.__alm_hot__ = window.__alm_hot__ || { apps: [] };"
+}
+
+/// How the client shim is reached and what it should swap.
+pub struct Client<'a> {
+    pub mode: Mode,
+    /// The entry module's name — for diagnostics only; which programs get
+    /// swapped comes from the registry.
+    pub module: &'a str,
+    /// Where to fetch a new build. Empty means there is nothing to fetch, so
+    /// every change reloads.
+    pub bundle: &'a str,
+    /// Absolute origin of the alm server, e.g. `http://127.0.0.1:8413`. Empty
+    /// keeps the URLs relative, which is right when alm serves the page too:
+    /// it then works over `localhost`, `127.0.0.1` or a LAN address alike.
+    /// A bundle embedded in another app's page needs the absolute form,
+    /// because that page comes from another origin.
+    pub origin: &'a str,
+    pub model_fingerprint: Option<&'a str>,
+    pub errors: Option<&'a str>,
+}
+
 /// The script injected into a page that only ever reloads — the reactor,
 /// which recompiles on request, so there is nothing to fetch.
 pub fn client_js(mode: Mode) -> String {
-    client_js_for(mode, "", "", None, None)
+    client_js_for(&Client {
+        mode,
+        module: "",
+        bundle: "",
+        origin: "",
+        model_fingerprint: None,
+        errors: None,
+    })
 }
 
-/// The script injected into a served page.
+/// The live-reload client.
 ///
-/// On a change it fetches the freshly built program and swaps it in, keeping
-/// the model when the new build still means the same thing by `Model`.
-/// Anything it cannot do cleanly ends in a reload, which is always correct.
-///
-/// `bundle` empty means there is nothing to fetch, so every change reloads.
-pub fn client_js_for(
-    mode: Mode,
-    module: &str,
-    bundle: &str,
-    model_fingerprint: Option<&str>,
-    errors: Option<&str>,
-) -> String {
+/// On a change it fetches the freshly built program and swaps every running
+/// program that came from this bundle, keeping their models when the new build
+/// still means the same thing by `Model`. Anything it cannot do cleanly ends in
+/// a reload, which is always correct.
+pub fn client_js_for(client: &Client<'_>) -> String {
+    let Client { mode, module, bundle, origin, model_fingerprint, errors } = *client;
     let hot = mode == Mode::HotSwap && !bundle.is_empty();
     format!(
         r#"(function () {{
+  {registry}
   var HOT = {hot};
   var MODULE = {module:?};
-  var BUNDLE = {bundle:?};
+  var BUNDLE = {bundle};
   var MODEL = {model_fingerprint};
-  var source = new EventSource({endpoint:?});
+  var source = new EventSource({endpoint});
   var reloading = false;
 
   function reload() {{
@@ -192,9 +223,10 @@ pub fn client_js_for(
   }});
 
   function swap() {{
-    var app = window.__alm_app__;
-    if (!app || !app.__alm_teardown) {{
-      return Promise.reject(new Error('the running program has no swap hooks'));
+    var hot = window.__alm_hot__;
+    var running = (hot && hot.apps || []).slice();
+    if (!running.length) {{
+      return Promise.reject(new Error('no running program registered'));
     }}
     return fetch(BUNDLE, {{ cache: 'no-store' }}).then(function (res) {{
       if (!res.ok) throw new Error('the new build is not available');
@@ -204,36 +236,61 @@ pub fn client_js_for(
         // separate from the one still running.
         var scope = {{}};
         new Function(js).call(scope);
-        var mod = scope.Elm && scope.Elm[MODULE];
-        if (!mod || !mod.init) throw new Error('the new build has no ' + MODULE + '.init');
+        if (!scope.Elm) throw new Error('the new build published no Elm');
 
-        // Only carry the model across if the new build still agrees about
-        // what a Model is. Restoring one into a program that reads it
-        // differently is how a hot reload corrupts your session.
+        // A page can be running several programs — a few Elm widgets embedded
+        // in a larger app — and each one this bundle exports needs replacing.
+        // The ones it does not export belong to another bundle: left alone.
+        var mine = running.filter(function (entry) {{
+          var mod = scope.Elm[entry.module];
+          return mod && typeof mod.init === 'function';
+        }});
+        if (!mine.length) throw new Error('the new build has no ' + MODULE + '.init');
+
+        // Drop them before re-initializing: `init` registers each new program
+        // as it starts, so leaving the old entries in would grow the registry
+        // by a torn-down program per save.
+        hot.apps = hot.apps.filter(function (entry) {{ return mine.indexOf(entry) === -1; }});
+
+        // Only carry a model across if the new build still agrees about what a
+        // Model is. Restoring one into a program that reads it differently is
+        // how a hot reload corrupts your session.
         var keep = MODEL !== null && fresh !== null && fresh === MODEL;
-        var model = keep ? app.__alm_model() : undefined;
+        mine.forEach(function (entry) {{
+          var app = entry.app;
+          if (!app || !app.__alm_teardown) throw new Error('a running program has no swap hooks');
+          var model = keep ? app.__alm_model() : undefined;
 
-        // Mounting replaced the original node with the program's own root, so
-        // the new program goes exactly where the old root is standing.
-        var oldRoot = app.__alm_root && app.__alm_root();
-        var ownsPage = app.__alm_kind === 'document' || app.__alm_kind === 'application';
-        app.__alm_teardown();
+          // Mounting replaced the original node with the program's own root, so
+          // the new program goes exactly where the old root is standing.
+          var oldRoot = app.__alm_root && app.__alm_root();
+          var ownsPage = app.__alm_kind === 'document' || app.__alm_kind === 'application';
+          app.__alm_teardown();
 
-        var opts = {{}};
-        if (keep) opts.__alm_model = model;
-        if (ownsPage) {{
-          // These mount themselves into <body>; just clear the old one out.
-          if (oldRoot && oldRoot.parentNode) oldRoot.parentNode.removeChild(oldRoot);
-        }} else {{
-          var slot = document.createElement('div');
-          if (oldRoot && oldRoot.parentNode) {{
-            oldRoot.parentNode.replaceChild(slot, oldRoot);
+          // Start from the options it was given, so `flags` come along. A fresh
+          // page load would pass them; a swap that dropped them would fail the
+          // program's flags decoder instead. The model is the one thing not
+          // carried over that way: these options may be a previous swap's, and
+          // reusing that model when the `Model` has since changed is exactly
+          // what the fingerprint check is there to prevent.
+          var opts = {{}};
+          for (var k in entry.opts) {{ opts[k] = entry.opts[k]; }}
+          delete opts.__alm_model;
+          if (keep) opts.__alm_model = model;
+          if (ownsPage) {{
+            // These mount themselves into <body>; just clear the old one out.
+            if (oldRoot && oldRoot.parentNode) oldRoot.parentNode.removeChild(oldRoot);
           }} else {{
-            document.body.appendChild(slot);
+            var slot = document.createElement('div');
+            if (oldRoot && oldRoot.parentNode) {{
+              oldRoot.parentNode.replaceChild(slot, oldRoot);
+            }} else {{
+              document.body.appendChild(slot);
+            }}
+            opts.node = slot;
           }}
-          opts.node = slot;
-        }}
-        window.__alm_app__ = mod.init(opts);
+          scope.Elm[entry.module].init(opts);
+        }});
         MODEL = fresh;
         if (!keep) console.info('[alm] Model changed, started fresh');
       }});
@@ -256,14 +313,17 @@ pub fn client_js_for(
     if (box) {{ box.remove(); box = null; }}
   }}
 {initial}}})();"#,
+        registry = registry_js(),
         hot = if hot { "true" } else { "false" },
         module = module,
-        bundle = bundle,
+        // Both URLs are absolute when the shim rides in a bundle another app's
+        // page loads, and relative when alm serves the page itself.
+        bundle = format!("{:?}", format!("{origin}{bundle}")),
         model_fingerprint = match model_fingerprint {
             Some(f) => format!("{f:?}"),
             None => "null".to_string(),
         },
-        endpoint = ENDPOINT,
+        endpoint = format!("{:?}", format!("{origin}{ENDPOINT}")),
         header = crate::serve::MODEL_HEADER,
         // A page served while the build is broken shows the reports at once,
         // rather than looking fine until the next save.
@@ -341,18 +401,28 @@ mod tests {
         assert!(inject("<p>hi</p>", "X").ends_with("<script>\nX\n</script>\n"));
     }
 
+    /// A shim for a page alm serves: relative URLs, no fingerprint by default.
+    fn shim(mode: Mode, bundle: &str, fingerprint: Option<&str>) -> String {
+        client_js_for(&Client {
+            mode,
+            module: "Main",
+            bundle,
+            origin: "",
+            model_fingerprint: fingerprint,
+            errors: None,
+        })
+    }
+
     /// Swapping needs both an intent to swap and somewhere to fetch the new
     /// build from. The reactor has no bundle endpoint — it recompiles on
     /// request — so its pages always reload.
     #[test]
     fn the_shim_only_swaps_when_it_can() {
-        let swapping =
-            client_js_for(Mode::HotSwap, "Main", "/_alm/bundle.js", Some("abc123"), None);
+        let swapping = shim(Mode::HotSwap, "/_alm/bundle.js", Some("abc123"));
         assert!(swapping.contains("var HOT = true"), "{swapping}");
         assert!(swapping.contains(r#"var MODEL = "abc123""#), "{swapping}");
 
-        let reloading =
-            client_js_for(Mode::Reload, "Main", "/_alm/bundle.js", Some("abc123"), None);
+        let reloading = shim(Mode::Reload, "/_alm/bundle.js", Some("abc123"));
         assert!(reloading.contains("var HOT = false"));
 
         // No bundle to fetch, so no swap however the mode is set.
@@ -360,15 +430,57 @@ mod tests {
         assert!(client_js(Mode::Reload).contains("var HOT = false"));
 
         // An unknown fingerprint must not be mistaken for a matching one.
-        let unknown = client_js_for(Mode::HotSwap, "Main", "/b.js", None, None);
+        let unknown = shim(Mode::HotSwap, "/b.js", None);
         assert!(unknown.contains("var MODEL = null"), "{unknown}");
     }
 
     /// A page served while the build is broken shows the reports at once.
     #[test]
     fn a_broken_build_is_shown_on_arrival() {
-        let shim = client_js_for(Mode::HotSwap, "Main", "/b.js", None, Some("-- OOPS --\nbad"));
-        assert!(shim.contains(r#"showErrors("-- OOPS --\nbad")"#), "{shim}");
-        assert!(!client_js_for(Mode::HotSwap, "Main", "/b.js", None, None).contains("showErrors(\""));
+        let reported = client_js_for(&Client {
+            mode: Mode::HotSwap,
+            module: "Main",
+            bundle: "/b.js",
+            origin: "",
+            model_fingerprint: None,
+            errors: Some("-- OOPS --\nbad"),
+        });
+        assert!(reported.contains(r#"showErrors("-- OOPS --\nbad")"#), "{reported}");
+        assert!(!shim(Mode::HotSwap, "/b.js", None).contains("showErrors(\""));
+    }
+
+    /// A bundle embedded in another app's page is loaded from another origin, so
+    /// its shim must reach back with absolute URLs. The shim alm injects into
+    /// its own page keeps them relative.
+    #[test]
+    fn an_embedded_shim_calls_home_by_absolute_url() {
+        let embedded = client_js_for(&Client {
+            mode: Mode::HotSwap,
+            module: "Main",
+            bundle: "/_alm/bundle.js",
+            origin: "http://127.0.0.1:8413",
+            model_fingerprint: Some("abc123"),
+            errors: None,
+        });
+        assert!(
+            embedded.contains(r#"var BUNDLE = "http://127.0.0.1:8413/_alm/bundle.js""#),
+            "{embedded}"
+        );
+        assert!(
+            embedded.contains(r#"EventSource("http://127.0.0.1:8413/_alm/live")"#),
+            "{embedded}"
+        );
+
+        let served = shim(Mode::HotSwap, "/_alm/bundle.js", Some("abc123"));
+        assert!(served.contains(r#"var BUNDLE = "/_alm/bundle.js""#), "{served}");
+        assert!(served.contains(r#"EventSource("/_alm/live")"#), "{served}");
+    }
+
+    /// The shim can only find a program through the registry, so it must install
+    /// one itself — a page that loads it late still gets later programs.
+    #[test]
+    fn the_shim_carries_the_registry() {
+        assert!(shim(Mode::HotSwap, "/b.js", None).contains("__alm_hot__"));
+        assert!(registry_js().contains("window.__alm_hot__ = window.__alm_hot__ ||"));
     }
 }

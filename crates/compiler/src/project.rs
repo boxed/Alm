@@ -301,6 +301,16 @@ pub fn compile_project_with(
     ))
 }
 
+/// What the live-reload server gets back from a build.
+pub struct LiveBuild {
+    pub javascript: String,
+    /// The Source Map v3 for `javascript`, when the caller asked for one.
+    pub source_map: Option<String>,
+    /// A fingerprint of the program's `Model` type, when there is one.
+    pub model_fingerprint: Option<String>,
+    pub warnings: Vec<crate::lint::Warning>,
+}
+
 /// Compile for the live-reload server: the JavaScript, plus a fingerprint of
 /// the program's `Model` type when there is one.
 ///
@@ -311,13 +321,37 @@ pub fn compile_project_with(
 /// `None` and should reload rather than guess.
 pub fn compile_project_live(
     entry: &Path,
-) -> Result<(String, Option<String>, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    optimize: bool,
+    source_maps: bool,
+) -> Result<LiveBuild, Vec<BuildError>> {
     let checked = check_project(entry)?;
-    let model_type = model_type_of(&checked);
+    if optimize {
+        let offenders = crate::debug_uses::modules_using_debug(&checked.modules);
+        if !offenders.is_empty() {
+            return Err(vec![BuildError::without_source(
+                crate::debug_uses::debug_remnants_report(&offenders),
+            )]);
+        }
+    }
+    let model_fingerprint = model_type_of(&checked);
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
-    let javascript =
-        generate::generate_project_typed(&checked.modules, checked.node_types, std::env::var_os("ALM_NO_DCE").is_none());
-    Ok((javascript, model_type, warnings))
+    let (javascript, source_map) = if source_maps {
+        let sources: HashMap<Name, (String, String)> = checked
+            .sources
+            .iter()
+            .map(|(name, (path, src))| (name.clone(), (path.display().to_string(), src.clone())))
+            .collect();
+        let (js, map) =
+            generate::generate_project_typed_mapped(&checked.modules, checked.node_types, &sources);
+        (js, Some(map))
+    } else {
+        let dce = std::env::var_os("ALM_NO_DCE").is_none();
+        (
+            generate::generate_project_typed(&checked.modules, checked.node_types, dce),
+            None,
+        )
+    };
+    Ok(LiveBuild { javascript, source_map, model_fingerprint, warnings })
 }
 
 /// A fingerprint of the `model` in the entry module's

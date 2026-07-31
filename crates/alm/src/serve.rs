@@ -5,6 +5,12 @@
 //! change. Rebuilding ahead of the request is what makes a failed build
 //! reportable without a reload: the page is told, and shows the errors over
 //! the running program until the next build succeeds.
+//!
+//! With `--output` it also writes the program out on every build. That is for
+//! the case where the page is not alm's to serve — the program is one piece of
+//! a larger app, embedded in its template. The written bundle carries the
+//! live-reload client with it, so that page hot-swaps without knowing anything
+//! about alm; see [`Writer::bundle`].
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -12,7 +18,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use crate::server::http::{self, Request, Response};
-use crate::server::live::{self, Live, Mode};
+use crate::server::live::{self, Client, Live, Mode};
 use crate::server::pages;
 
 /// The latest build, and how it went.
@@ -20,6 +26,8 @@ struct Build {
     /// The compiled program, kept from the last build that worked so a broken
     /// edit does not take the page down with it.
     javascript: Option<String>,
+    /// The Source Map v3 for it, under `--source-maps`.
+    source_map: Option<String>,
     /// A fingerprint of the program's `Model` type, which decides whether a
     /// running model can be carried across a swap.
     model_fingerprint: Option<String>,
@@ -32,6 +40,11 @@ pub struct Options {
     pub port: u16,
     pub updating: bool,
     pub color: bool,
+    /// Where to write the program, for embedding it in a larger app's page.
+    /// `None` serves it and nothing more.
+    pub output: Option<PathBuf>,
+    pub source_maps: bool,
+    pub optimize: bool,
 }
 
 pub fn run(options: Options) -> ExitCode {
@@ -40,13 +53,8 @@ pub fn run(options: Options) -> ExitCode {
         options.entry.file_stem().unwrap_or_default().to_string_lossy().into_owned()
     });
 
-    let build = Arc::new(Mutex::new(compile(&options.entry, &root, options.color)));
-    if let Some(errors) = &build.lock().unwrap().errors {
-        // Report the first build the way `alm make` would; the server still
-        // comes up, so fixing the error is a save away.
-        eprint!("{errors}");
-    }
-
+    // The port is bound before the first build, so a `--output` build can never
+    // write a bundle pointing at a port that turns out to be taken.
     let listener = match TcpListener::bind(("127.0.0.1", options.port)) {
         Ok(listener) => listener,
         Err(err) => {
@@ -54,19 +62,67 @@ pub fn run(options: Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    println!("Go to http://localhost:{} to see {module}.", options.port);
 
     let mode = if options.updating { Mode::HotSwap } else { Mode::Reload };
+    let writer = options.output.clone().map(|path| Writer {
+        path,
+        module: module.clone(),
+        mode,
+        origin: format!("http://127.0.0.1:{}", options.port),
+        updating: options.updating,
+        source_maps: options.source_maps,
+    });
+    let rebuild = {
+        let entry = options.entry.clone();
+        let root = root.clone();
+        let color = options.color;
+        let optimize = options.optimize;
+        let source_maps = options.source_maps;
+        move || compile(&entry, &root, color, optimize, source_maps)
+    };
+
+    let build = Arc::new(Mutex::new(rebuild()));
+    {
+        let first = build.lock().unwrap();
+        if let Some(errors) = &first.errors {
+            // Report the first build the way `alm make` would; the server still
+            // comes up, so fixing the error is a save away.
+            eprint!("{errors}");
+        }
+        if let Some(writer) = &writer {
+            writer.write(&first);
+        }
+    }
+
+    println!("Go to http://localhost:{} to see {module}.", options.port);
+    if let Some(writer) = &writer {
+        print!("Writing {} on every build.", writer.path.display());
+        if writer.updating {
+            print!(
+                " It is a development bundle: it carries the\nlive-reload client and talks to {}, \
+                 so it is not one to ship.",
+                writer.origin
+            );
+        }
+        println!();
+    }
+
     let live = options.updating.then(|| {
         let live = Live::new();
         live::heartbeat(live.clone());
+        live
+    });
+
+    // Rebuild on every change if there is anyone to rebuild for: a page to tell
+    // about it, an output file to keep current, or both. `--no-hot-reload` with
+    // `--output` is the second on its own — the file stays up to date while no
+    // page is touched, which is what you want when the app around it has a
+    // reloader of its own.
+    if options.updating || writer.is_some() {
         let watched = live.clone();
         let build = build.clone();
-        let entry = options.entry.clone();
-        let watched_root = root.clone();
-        let color = options.color;
         live::watch(&root, move || {
-            let fresh = compile(&entry, &watched_root, color);
+            let fresh = rebuild();
             let failed = fresh.errors.clone();
             {
                 let mut held = build.lock().unwrap_or_else(|e| e.into_inner());
@@ -77,17 +133,105 @@ pub fn run(options: Options) -> ExitCode {
                     Some(_) => held.errors = fresh.errors,
                     None => *held = fresh,
                 }
+                // Written under the lock, so what lands on disk is always one of
+                // the builds the server is serving, never a torn mixture.
+                if let Some(writer) = &writer {
+                    writer.write(&held);
+                }
             }
+            let Some(watched) = &watched else { return };
             match failed {
                 Some(errors) => watched.broadcast("failed", &json_string(&errors)),
                 None => watched.broadcast("changed", "null"),
             }
         });
-        live
-    });
+    }
 
     let state = State { root, module, build, live, mode, updating: options.updating };
     http::serve(listener, move |request| state.handle(request));
+}
+
+/// Writes the program out on every build, for a page alm does not serve.
+struct Writer {
+    path: PathBuf,
+    module: String,
+    mode: Mode,
+    /// Absolute origin of this server, baked into the written client so it can
+    /// be reached from a page served by something else.
+    origin: String,
+    updating: bool,
+    source_maps: bool,
+}
+
+impl Writer {
+    fn write(&self, build: &Build) {
+        // A failed build leaves the last good file in place, for the same reason
+        // the server goes on serving the last good program: a broken edit should
+        // not take the surrounding app down with it.
+        let Some(javascript) = &build.javascript else { return };
+        let bundle = self.bundle(javascript, build.model_fingerprint.as_deref());
+        if let Err(err) = std::fs::write(&self.path, bundle) {
+            eprintln!("I could not write {}: {err}", self.path.display());
+            return;
+        }
+        if let Some(map) = &build.source_map {
+            let map_path = self.map_path();
+            if let Err(err) = std::fs::write(&map_path, map) {
+                eprintln!("I could not write {}: {err}", map_path.display());
+            }
+        }
+    }
+
+    fn map_path(&self) -> PathBuf {
+        self.path.with_extension("js.map")
+    }
+
+    /// The program as written: the registry, the bundle, then the live-reload
+    /// client.
+    ///
+    /// The client goes *in the bundle* rather than in a page, because the page
+    /// belongs to another app — a Django template, a Vite entry — which should
+    /// not have to know this file came from alm. Loading it is enough. The
+    /// registry has to come first, since the bundle is what registers into it.
+    ///
+    /// What `/_alm/bundle.js` serves for a swap to fetch is deliberately *not*
+    /// this, but the bare program: a swap that pulled in another copy of the
+    /// client would open a second event stream on every save.
+    fn bundle(&self, javascript: &str, model_fingerprint: Option<&str>) -> String {
+        let mut out = String::with_capacity(javascript.len() + 4096);
+        if self.updating {
+            out.push_str("// Development bundle from `alm make --live`; not one to ship.\n");
+            out.push_str(live::registry_js());
+            out.push('\n');
+        }
+        out.push_str(javascript);
+        // The map describes the program's own lines, so the client has to come
+        // after the comment that points at it, not between the two.
+        if self.source_maps {
+            let name = self
+                .map_path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push_str(&format!("\n//# sourceMappingURL={name}\n"));
+        }
+        if self.updating {
+            out.push_str("\n// Live reload. `--no-hot-reload` leaves this out.\n");
+            out.push_str(&live::client_js_for(&Client {
+                mode: self.mode,
+                module: &self.module,
+                bundle: BUNDLE,
+                origin: &self.origin,
+                model_fingerprint,
+                // Reports go to the terminal and to the pages already open. A
+                // file written while the build is broken is the previous good
+                // one, so it has nothing to show on arrival.
+                errors: None,
+            }));
+            out.push('\n');
+        }
+        out
+    }
 }
 
 struct State {
@@ -103,7 +247,7 @@ impl State {
     fn handle(&self, request: &Request) -> Response {
         if request.path == live::ENDPOINT {
             return match &self.live {
-                Some(live) => Response::events(live.subscribe()),
+                Some(live) => allow_any_origin(Response::events(live.subscribe())),
                 None => Response::text(404, "Not Found", "Live updating is off."),
             };
         }
@@ -115,13 +259,13 @@ impl State {
             let Some(javascript) = &build.javascript else {
                 return Response::text(503, "Service Unavailable", "The build is broken.");
             };
-            let mut response = Response {
+            let mut response = allow_any_origin(Response {
                 status: 200,
                 reason: "OK",
                 content_type: "text/javascript;charset=utf-8".to_string(),
                 headers: Vec::new(),
                 body: http::Body::Bytes(javascript.clone().into_bytes()),
-            };
+            });
             if let Some(fingerprint) = &build.model_fingerprint {
                 response
                     .headers
@@ -150,13 +294,16 @@ impl State {
         if !self.updating {
             return Response::html(html);
         }
-        let shim = live::client_js_for(
-            self.mode,
-            &self.module,
-            BUNDLE,
-            build.model_fingerprint.as_deref(),
-            build.errors.as_deref(),
-        );
+        let shim = live::client_js_for(&Client {
+            mode: self.mode,
+            module: &self.module,
+            bundle: BUNDLE,
+            // alm serves this page, so relative URLs are right: they work over
+            // `localhost`, `127.0.0.1` and a LAN address alike.
+            origin: "",
+            model_fingerprint: build.model_fingerprint.as_deref(),
+            errors: build.errors.as_deref(),
+        });
         Response::html(live::inject(&html, &shim))
     }
 }
@@ -164,18 +311,39 @@ impl State {
 /// Where the bare program is served for a swap to fetch.
 const BUNDLE: &str = "/_alm/bundle.js";
 
+/// Open the two live endpoints to any origin.
+///
+/// A program embedded in a larger app is loaded by a page on another origin —
+/// Django on `:8000`, Vite on `:5173` — and both the event stream and the
+/// bundle fetch are cross-origin from there. Custom response headers are hidden
+/// from a cross-origin reader unless named explicitly, which is what would
+/// otherwise silently cost every swap its model. `*` rather than an echoed
+/// Origin because this server binds to loopback and holds nothing private:
+/// everything it serves, it serves to anyone who asks.
+fn allow_any_origin(mut response: Response) -> Response {
+    response.headers.push(("Access-Control-Allow-Origin".to_string(), "*".to_string()));
+    response
+        .headers
+        .push(("Access-Control-Expose-Headers".to_string(), MODEL_HEADER.to_string()));
+    response
+}
+
 /// Carries a fingerprint of the `Model` type the bundle was built with. A
 /// fingerprint rather than the type as written: a real `Model` renders to
 /// kilobytes, and Elm allows field names that no header value may carry.
 pub const MODEL_HEADER: &str = "X-Alm-Model-Fingerprint";
 
-fn compile(entry: &Path, root: &Path, color: bool) -> Build {
-    match alm_compiler::project::compile_project_live(entry) {
-        Ok((javascript, model_fingerprint, _warnings)) => {
-            Build { javascript: Some(javascript), model_fingerprint, errors: None }
-        }
+fn compile(entry: &Path, root: &Path, color: bool, optimize: bool, source_maps: bool) -> Build {
+    match alm_compiler::project::compile_project_live(entry, optimize, source_maps) {
+        Ok(built) => Build {
+            javascript: Some(built.javascript),
+            source_map: built.source_map,
+            model_fingerprint: built.model_fingerprint,
+            errors: None,
+        },
         Err(errors) => Build {
             javascript: None,
+            source_map: None,
             model_fingerprint: None,
             errors: Some(errors.iter().map(|e| e.render_from(Some(root), color)).collect()),
         },

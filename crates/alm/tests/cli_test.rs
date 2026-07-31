@@ -1242,19 +1242,129 @@ fn a_failed_rebuild_is_reported_and_the_last_good_build_survives() {
 }
 
 #[test]
-fn make_live_rejects_flags_that_describe_an_output() {
+fn make_live_rejects_only_what_it_cannot_serve() {
     let dir = temp_dir();
     let project = counter_project(&dir);
-    for flag in ["--output=out.js", "--optimize", "--target=native", "--source-maps"] {
-        let (ok, _, stderr) = {
-            let output = Command::new(env!("CARGO_BIN_EXE_alm"))
-                .args(["make", "src/Main.elm", "--live", flag])
-                .current_dir(&project)
-                .output()
-                .expect("run alm");
-            (output.status.success(), (), String::from_utf8_lossy(&output.stderr).into_owned())
-        };
-        assert!(!ok, "{flag} should be refused");
+    for flag in ["--target=native", "--target=wasm-gc", "--docs=docs.json"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_alm"))
+            .args(["make", "src/Main.elm", "--live", flag])
+            .current_dir(&project)
+            .output()
+            .expect("run alm");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{flag} should be refused");
         assert!(stderr.contains("does not go with `--live`"), "{flag}: {stderr}");
     }
+}
+
+/// `--live --output` is the embedded case: the program is one piece of a larger
+/// app, whose own page loads it. So the file has to be written, and it has to
+/// carry the live-reload client — that page knows nothing about alm.
+#[test]
+fn make_live_writes_the_output_with_the_client_in_it() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    std::fs::create_dir_all(project.join("static")).unwrap();
+    let (mut child, port) =
+        start(&project, &["make", "src/Main.elm", "--live", "--output=static/app.js"]);
+
+    let written = project.join("static/app.js");
+    let bundle = wait_for(&written, "_Platform_export");
+
+    // The client is in the bundle, and reaches back to this server by absolute
+    // URL — the page loading it comes from somewhere else entirely.
+    assert!(bundle.contains("EventSource"), "no live-reload client in the file");
+    assert!(
+        bundle.contains(&format!("\"http://127.0.0.1:{port}/_alm/live\"")),
+        "the client cannot reach the server"
+    );
+    assert!(
+        bundle.contains(&format!("\"http://127.0.0.1:{port}/_alm/bundle.js\"")),
+        "the client has nowhere to fetch a new build from"
+    );
+    // The registry has to be installed before the program runs, or a program
+    // that starts is invisible to the client.
+    let registry = bundle.find(REGISTRY).expect("no registry");
+    assert!(registry < bundle.find("_Platform_export").unwrap(), "the registry comes too late");
+
+    // Serving carries on as before, so the same run works either way.
+    let (status, _, body) = get(port, "/");
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(body.contains("Elm.Main.init"), "the program is not on the served page");
+
+    // An edit rewrites the file.
+    let source = project.join("src/Main.elm");
+    std::fs::write(&source, "module Main exposing (main)\n\nmain = \"rewritten\"\n").unwrap();
+    wait_for(&written, "rewritten");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Installing the registry, as opposed to the runtime merely looking for one.
+const REGISTRY: &str = "window.__alm_hot__ = window.__alm_hot__ ||";
+
+/// The output is written after the port is bound, and rebuilt a poll interval
+/// after an edit, so reading it is always a wait.
+fn wait_for(path: &Path, needle: &str) -> String {
+    for _ in 0..400 {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.contains(needle) {
+            return text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("{} never contained {needle:?}", path.display());
+}
+
+/// The bundle a swap fetches must be the bare program. If it carried the client
+/// too, every save would leave another event stream open.
+#[test]
+fn the_bundle_a_swap_fetches_has_no_client_in_it() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) =
+        start(&project, &["make", "src/Main.elm", "--live", "--output=app.js"]);
+
+    let (_, headers, bundle) = get(port, "/_alm/bundle.js");
+    assert!(bundle.contains("_Platform_export"), "that is not a bundle");
+    assert!(!bundle.contains("EventSource"), "the fetched bundle must not carry the client");
+
+    // A page on another origin has to be able to read both the bundle and the
+    // fingerprint, or every swap silently loses the model.
+    assert!(headers.contains("Access-Control-Allow-Origin: *"), "{headers}");
+    assert!(headers.contains("Access-Control-Expose-Headers: X-Alm-Model"), "{headers}");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// `--no-hot-reload` with `--output` is a plain watch-and-write: the file is kept
+/// up to date, and nothing at all is injected into it — for an app whose own
+/// reloader will notice the file changing.
+#[test]
+fn no_hot_reload_writes_a_clean_bundle_and_keeps_writing_it() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, _port) = start(
+        &project,
+        &["make", "src/Main.elm", "--live", "--output=app.js", "--no-hot-reload"],
+    );
+
+    let written = project.join("app.js");
+    let bundle = wait_for(&written, "_Platform_export");
+    assert!(!bundle.contains("EventSource"), "no client when hot reload is off");
+    // The runtime always *looks* for a registry; with nothing to swap, nothing
+    // installs one, so it stays the ordinary build it would be without --live.
+    assert!(!bundle.contains(REGISTRY), "no registry either");
+
+    // Still rebuilt on a change: what is off is telling a page about it, not
+    // keeping the file current.
+    let source = project.join("src/Main.elm");
+    std::fs::write(&source, "module Main exposing (main)\n\nmain = \"rewritten\"\n").unwrap();
+    let bundle = wait_for(&written, "rewritten");
+    assert!(!bundle.contains("EventSource"), "still no client after a rebuild");
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
