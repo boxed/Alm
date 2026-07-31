@@ -5302,13 +5302,9 @@ function _Platform_module(exports, main) {
 // under CommonJS, the global object in a browser. Two bundles loaded into one
 // scope merge, so several `alm make` outputs can share a page.
 function _Platform_export(scope, exports) {
-    // `alm make --live` installs a registry ahead of the bundle; registering
-    // there is how the reload shim finds a program whoever started it. Nothing
-    // else installs one, so an ordinary build only pays this lookup.
-    var hot = typeof window !== 'undefined' && window.__alm_hot__;
-    if (hot) {
-        for (var name in exports) { _Platform_registerHot(hot, exports[name], name); }
-    }
+    // Programs record themselves for `alm make --live` as they start; this is
+    // what lets the reload shim find one whoever called `init`.
+    for (var name in exports) { _Platform_registerHot(exports[name], name); }
     if (scope.Elm) {
         for (var name in exports) { scope.Elm[name] = exports[name]; }
     } else {
@@ -5320,13 +5316,19 @@ function _Platform_export(scope, exports) {
 // replacement in a new build — so `init` is wrapped to record it. The options go
 // with it: an embedded program is usually started with `flags`, and a swap that
 // re-initialized without them would fail the flags decoder on the first save.
-function _Platform_registerHot(hot, module, name) {
+//
+// The registry is looked up when `init` runs rather than now, so that installing
+// it does not have to precede the bundle. Nothing may be prepended to a bundle
+// that has a source map: the map addresses generated *lines*, and every line
+// added at the top puts every mapping one line out.
+function _Platform_registerHot(module, name) {
     if (!module || typeof module.init !== 'function' || module.__alm_hot) { return; }
     var init = module.init;
     module.__alm_hot = true;
     module.init = function (opts) {
         var app = init(opts);
-        hot.apps.push({ module: name, app: app, opts: opts || {} });
+        var hot = typeof window !== 'undefined' && window.__alm_hot__;
+        if (hot) { hot.apps.push({ module: name, app: app, opts: opts || {} }); }
         return app;
     };
 }

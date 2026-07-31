@@ -17,3 +17,4 @@ __pycache__/
 
 # hot-reload browser test scratch project
 tests/browser/hot-reload/work/
+tests/browser/sourcemap-breakpoints/work/

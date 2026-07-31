@@ -186,37 +186,33 @@ impl Writer {
         self.path.with_extension("js.map")
     }
 
-    /// The program as written: the registry, the bundle, then the live-reload
-    /// client.
+    /// The program as written: the bundle, then the live-reload client.
     ///
     /// The client goes *in the bundle* rather than in a page, because the page
     /// belongs to another app — a Django template, a Vite entry — which should
-    /// not have to know this file came from alm. Loading it is enough. The
-    /// registry has to come first, since the bundle is what registers into it.
+    /// not have to know this file came from alm. Loading it is enough.
+    ///
+    /// **Everything is appended; nothing is ever prepended.** A source map
+    /// addresses generated *lines*, so a single line added above the program puts
+    /// every mapping one line out, and a debugger then refuses the breakpoints it
+    /// cannot place — silently. Appending is free: the program occupies the same
+    /// lines it was compiled at. The registry the client installs is read when
+    /// `init` runs, not when the bundle evaluates, which is what lets it come
+    /// afterwards.
     ///
     /// What `/_alm/bundle.js` serves for a swap to fetch is deliberately *not*
     /// this, but the bare program: a swap that pulled in another copy of the
     /// client would open a second event stream on every save.
     fn bundle(&self, javascript: &str, model_fingerprint: Option<&str>) -> String {
         let mut out = String::with_capacity(javascript.len() + 4096);
+        out.push_str(javascript);
         if self.updating {
-            out.push_str("// Development bundle from `alm make --live`; not one to ship.\n");
+            out.push_str(
+                "\n// Live reload, from `alm make --live`; not a bundle to ship.\n\
+                 // `--no-hot-reload` leaves all of this out.\n",
+            );
             out.push_str(live::registry_js());
             out.push('\n');
-        }
-        out.push_str(javascript);
-        // The map describes the program's own lines, so the client has to come
-        // after the comment that points at it, not between the two.
-        if self.source_maps {
-            let name = self
-                .map_path()
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            out.push_str(&format!("\n//# sourceMappingURL={name}\n"));
-        }
-        if self.updating {
-            out.push_str("\n// Live reload. `--no-hot-reload` leaves this out.\n");
             out.push_str(&live::client_js_for(&Client {
                 mode: self.mode,
                 module: &self.module,
@@ -229,6 +225,16 @@ impl Writer {
                 errors: None,
             }));
             out.push('\n');
+        }
+        // Last, as the convention expects — and it has to be after the client
+        // anyway, since a comment only applies to what precedes it.
+        if self.source_maps {
+            let name = self
+                .map_path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push_str(&format!("//# sourceMappingURL={name}\n"));
         }
         out
     }

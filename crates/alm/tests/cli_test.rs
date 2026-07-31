@@ -1282,10 +1282,12 @@ fn make_live_writes_the_output_with_the_client_in_it() {
         bundle.contains(&format!("\"http://127.0.0.1:{port}/_alm/bundle.js\"")),
         "the client has nowhere to fetch a new build from"
     );
-    // The registry has to be installed before the program runs, or a program
-    // that starts is invisible to the client.
+    // The registry is installed *after* the program, which is what keeps the
+    // program on the lines it was compiled at — see
+    // `the_written_bundle_starts_exactly_where_a_plain_build_does`. It is read
+    // when `init` runs, so coming last is soon enough.
     let registry = bundle.find(REGISTRY).expect("no registry");
-    assert!(registry < bundle.find("_Platform_export").unwrap(), "the registry comes too late");
+    assert!(registry > bundle.find("_Platform_export").unwrap(), "nothing may precede the program");
 
     // Serving carries on as before, so the same run works either way.
     let (status, _, body) = get(port, "/");
@@ -1315,6 +1317,50 @@ fn wait_for(path: &Path, needle: &str) -> String {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     panic!("{} never contained {needle:?}", path.display());
+}
+
+/// Nothing may be *prepended* to the written bundle. A source map addresses
+/// generated lines, so one line added above the program puts every mapping a line
+/// out, and a debugger then silently refuses the breakpoints it cannot place.
+/// Appending is free, so the whole live-reload client goes at the end.
+#[test]
+fn the_written_bundle_starts_exactly_where_a_plain_build_does() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+
+    // What the same program compiles to with no live machinery at all.
+    let plain = Command::new(env!("CARGO_BIN_EXE_alm"))
+        .args(["make", "src/Main.elm", "--output=plain.js"])
+        .current_dir(&project)
+        .output()
+        .expect("run alm");
+    assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
+    let plain = std::fs::read_to_string(project.join("plain.js")).unwrap();
+
+    let (mut child, _port) = start(
+        &project,
+        &["make", "src/Main.elm", "--live", "--output=live.js", "--source-maps"],
+    );
+    let written = project.join("live.js");
+    let bundle = wait_for(&written, "_Platform_export");
+
+    assert!(
+        bundle.starts_with(&plain),
+        "the program must occupy the same lines it was compiled at; it starts with {:?}",
+        &bundle[..plain.len().min(200)],
+    );
+    // And the client really is in there — otherwise this passes trivially.
+    assert!(bundle.len() > plain.len(), "nothing was appended");
+    assert!(bundle.contains("EventSource"), "no live-reload client");
+    // The comment naming the map applies to what precedes it, so it goes last.
+    assert!(
+        bundle.trim_end().lines().last().unwrap().starts_with("//# sourceMappingURL="),
+        "the map comment must be the last line"
+    );
+    assert!(project.join("live.js.map").exists(), "no map was written");
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The bundle a swap fetches must be the bare program. If it carried the client
