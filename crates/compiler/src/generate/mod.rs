@@ -962,7 +962,29 @@ impl Generator {
             body_js.push(self.stmts(body, &Tail::Return));
         }
 
-        let mut inner = Mapped::raw(format!("function ({}) {{ ", params.join(", ")));
+        // Give the function expression a name, so a stack frame says what it is
+        // rather than `(anonymous)`. A multi-argument definition is emitted as
+        // `F2(function …)`, where the function is an argument and there is no
+        // assignment for the engine to infer a name from — every frame in an Elm
+        // call stack came out anonymous because of it. That matters beyond the
+        // debugger: it is what a production stack trace reports too.
+        //
+        // The plain Elm name is safe *for a top-level definition only*. A named
+        // function expression binds its own name inside itself, and a top-level
+        // body refers to itself through the mangled `$Module$name`, which this
+        // cannot capture. A `let`-bound function refers to itself by exactly this
+        // name, so naming that one would shadow the curried binding with the raw
+        // function and break its arity — those stay anonymous.
+        let name = match self_ref {
+            Some((name, SelfRef::TopLevel)) => format!("{} ", sanitize(name)),
+            _ => String::new(),
+        };
+        let mut inner = Mapped::raw(format!("function {}({}) {{ ", name, params.join(", ")));
+        // The name also goes in the source map at the `function` token, which is
+        // where a debugger looks to label the frame.
+        if let Some((elm_name, _)) = self_ref {
+            inner.mark_named(body.region, elm_name.as_str());
+        }
         inner.push(body_js);
         inner.push_str(" }");
         if arity == 1 {

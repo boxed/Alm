@@ -97,9 +97,14 @@ area shape =
             sqrt (half * (half - sideA))
 
 
+scaled : Float -> Shape -> Float
+scaled factor shape =
+    factor * area shape
+
+
 measured : Float
 measured =
-    area (Rect 2 3)
+    scaled 2 (Rect 2 3)
 `;
 
 fs.rmSync(WORK, { recursive: true, force: true });
@@ -195,9 +200,20 @@ try {
     names.includes('width') && names.includes('height'),
     names.join(', '),
   );
-  // The map names the function at its definition, which is what a call stack
-  // shows for the frame.
-  check('the frame is named', functionName.length > 0, functionName);
+  // A one-argument definition is `var $Main$area = function …`, which an engine
+  // can name from the assignment.
+  check('a one-argument frame is named', functionName.length > 0, functionName);
+
+  // Two arguments means `F2(function …)`: the function is an argument, there is
+  // no assignment to infer from, and every such frame used to come out
+  // `(anonymous)` — which is what makes a call stack unreadable, and with it the
+  // only route to a variable the engine did not capture into an inner closure.
+  const twoArg = await scopeAt(WORK, 'plain.js', 'return (factor * $Main$area(shape))');
+  check(
+    'a two-argument frame is named too',
+    twoArg.functionName.length > 0,
+    twoArg.functionName || '(anonymous)',
+  );
 } finally {
   live.kill();
 }
