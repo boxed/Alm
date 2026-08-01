@@ -930,7 +930,7 @@ impl Generator {
                     let mut bindings = Vec::new();
                     destructure(arg, &temp, &mut bindings);
                     for (name, path) in bindings {
-                        write!(prelude, "var {} = {}; ", sanitize(&name), path).unwrap();
+                        write!(prelude, "let {} = {}; ", sanitize(&name), path).unwrap();
                     }
                     params.push(temp);
                 }
@@ -1014,7 +1014,7 @@ impl Generator {
                     VarLocal(name) => (sanitize(name), Mapped::default()),
                     _ => {
                         let temp = self.fresh_temp();
-                        let mut out = Mapped::raw(format!("var {} = ", temp));
+                        let mut out = Mapped::raw(format!("let {} = ", temp));
                         out.push(self.expr(scrutinee));
                         out.push_str("; ");
                         (temp, out)
@@ -1041,7 +1041,7 @@ impl Generator {
                     pattern_tests(pattern, &temp, &mut tests, &mut bindings);
                     let mut body = Mapped::default();
                     for (name, path) in bindings {
-                        body.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+                        body.push_str(&format!("let {} = {}; ", sanitize(&name), path));
                     }
                     body.push(self.stmts(branch, tail));
                     if tests.is_empty() {
@@ -1082,7 +1082,7 @@ impl Generator {
                                 }
                             }
                             let temp = self.fresh_temp();
-                            out.push_str(&format!("var {} = ", temp));
+                            out.push_str(&format!("let {} = ", temp));
                             out.push(self.expr(arg));
                             out.push_str("; ");
                             temps.push(temp);
@@ -1190,7 +1190,7 @@ impl Generator {
             let mut bindings = Vec::new();
             pattern_tests(pattern, temp, &mut tests, &mut bindings);
             for (name, path) in bindings {
-                out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+                out.push_str(&format!("let {} = {}; ", sanitize(&name), path));
             }
             // Bodies are in tail position, so they end in `return`/`continue`;
             // no `break` is needed and cases never fall through.
@@ -1204,7 +1204,7 @@ impl Generator {
                 let mut bindings = Vec::new();
                 pattern_tests(pattern, temp, &mut tests, &mut bindings);
                 for (name, path) in bindings {
-                    out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+                    out.push_str(&format!("let {} = {}; ", sanitize(&name), path));
                 }
                 out.push(self.stmts(branch, tail));
             }
@@ -1251,7 +1251,7 @@ impl Generator {
         for &b in &shared {
             out.push_str(" } "); // close this branch's block; its body follows
             for (name, path) in &binds[&b] {
-                out.push_str(&format!("var {} = {}; ", sanitize(name), path_expr(root, path)));
+                out.push_str(&format!("let {} = {}; ", sanitize(name), path_expr(root, path)));
             }
             out.push(self.stmts(&branches[b].1, tail));
         }
@@ -1278,7 +1278,7 @@ impl Generator {
                 let mut out = Mapped::default();
                 for (name, path) in binds {
                     out.push_str(&format!(
-                        "var {} = {}; ",
+                        "let {} = {}; ",
                         sanitize(name),
                         path_expr(root, path)
                     ));
@@ -1296,7 +1296,7 @@ impl Generator {
                     (root.to_string(), Mapped::default())
                 } else {
                     let d = self.fresh_temp();
-                    (d.clone(), Mapped::raw(format!("var {} = {}; ", d, path_expr(root, path))))
+                    (d.clone(), Mapped::raw(format!("let {} = {}; ", d, path_expr(root, path))))
                 };
                 // Bool dispatches on the raw value; everything else on a tag or a
                 // primitive, which a `switch` turns into a jump table.
@@ -1347,14 +1347,14 @@ impl Generator {
         match decl {
             can::LetDecl::Def(def) => {
                 let value = self.def_value(def, SelfRef::Local);
-                out.push_str(&format!("var {} = ", sanitize(&def.name.value)));
+                out.push_str(&format!("let {} = ", sanitize(&def.name.value)));
                 out.push(value);
                 out.push_str("; ");
             }
             can::LetDecl::Recursive(defs) => {
                 for def in defs {
                     let value = self.def_value(def, SelfRef::Local);
-                    out.push_str(&format!("var {} = ", sanitize(&def.name.value)));
+                    out.push_str(&format!("let {} = ", sanitize(&def.name.value)));
                     out.push(value);
                     out.push_str("; ");
                 }
@@ -1366,7 +1366,7 @@ impl Generator {
                     can::Expr_::VarLocal(name) => sanitize(name),
                     _ => {
                         let temp = self.fresh_temp();
-                        out.push_str(&format!("var {} = ", temp));
+                        out.push_str(&format!("let {} = ", temp));
                         out.push(self.expr(value));
                         out.push_str("; ");
                         temp
@@ -1375,7 +1375,7 @@ impl Generator {
                 let mut bindings = Vec::new();
                 destructure(pattern, &temp, &mut bindings);
                 for (name, path) in bindings {
-                    out.push_str(&format!("var {} = {}; ", sanitize(&name), path));
+                    out.push_str(&format!("let {} = {}; ", sanitize(&name), path));
                 }
             }
         }

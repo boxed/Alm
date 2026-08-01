@@ -1109,28 +1109,47 @@ fn events_after(
     reader.join().unwrap()
 }
 
+/// Start a server and wait for it to answer.
+///
+/// A free port is found by binding one and letting go, which leaves a gap in
+/// which another test's server can take it — these tests run in parallel and
+/// several of them want a port. The loser exits with "I could not listen", so
+/// a child that has died means the port was stolen, not that the code is
+/// broken: pick another and try again. Waiting on `connect` alone would not
+/// notice, because by then the *winner* is listening on that port.
 fn start(dir: &Path, args: &[&str]) -> (std::process::Child, u16) {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    all.push(format!("--port={port}"));
-    let child = Command::new(env!("CARGO_BIN_EXE_alm"))
-        .args(&all)
-        .current_dir(dir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to start alm");
-    for _ in 0..200 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return (child, port);
+    for attempt in 0..5 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        all.push(format!("--port={port}"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_alm"))
+            .args(&all)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to start alm");
+        let mut lost = false;
+        for _ in 0..200 {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                lost = true;
+                break;
+            }
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return (child, port);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(lost, "server never came up on port {port}");
+        assert!(attempt < 4, "lost the race for a port five times over");
     }
-    panic!("server never came up on port {port}");
+    unreachable!()
 }
 
 /// A counter program, so a swap has state worth preserving.

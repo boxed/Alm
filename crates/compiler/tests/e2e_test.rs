@@ -395,6 +395,25 @@ fn a_tail_call_that_swaps_its_arguments_keeps_them_distinct() {
     );
 }
 
+/// A tail-recursive function becomes a `while` loop that reassigns its
+/// parameters, so a `let` in its body is entered afresh on every pass. A closure
+/// made there must capture *that* pass's value — which is what Elm means, and
+/// what block scoping gives. Function-scoped `var` would hand every closure the
+/// one binding, so they would all report the last iteration's value.
+#[test]
+fn closures_made_in_a_loop_capture_their_own_iteration() {
+    assert_eq!(
+        run("adders : Int -> List (Int -> Int) -> List (Int -> Int)\nadders n acc =\n    if n == 0 then\n        acc\n\n    else\n        let\n            step =\n                n\n        in\n        adders (n - 1) ((\\x -> x + step) :: acc)\n\nmain = String.fromInt (List.sum (List.map (\\f -> f 0) (adders 3 [])))"),
+        // 1 + 2 + 3, not 3 × the last value.
+        "6"
+    );
+    // The same through a `case` branch's pattern bindings rather than a `let`.
+    assert_eq!(
+        run("collect : List Int -> List (() -> Int) -> List (() -> Int)\ncollect xs acc =\n    case xs of\n        [] ->\n            acc\n\n        first :: rest ->\n            collect rest ((\\_ -> first) :: acc)\n\nmain = String.fromInt (List.sum (List.map (\\f -> f ()) (collect [ 1, 2, 3 ] [])))"),
+        "6"
+    );
+}
+
 #[test]
 fn dicts() {
     assert_eq!(

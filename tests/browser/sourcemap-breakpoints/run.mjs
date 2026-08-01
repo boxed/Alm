@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bindable } from './probe.mjs';
+import { scopeAt } from './scopes.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ALM = process.env.ALM || path.join(HERE, '../../../target/debug/alm');
@@ -71,6 +72,34 @@ view model =
 main : Program () Model Msg
 main =
     Browser.sandbox { init = init, update = update, view = view }
+
+
+type Shape
+    = Circle Float
+    | Rect Float Float
+    | Tri Float Float Float
+
+
+area : Shape -> Float
+area shape =
+    case shape of
+        Circle radius ->
+            pi * radius * radius
+
+        Rect width height ->
+            width * height
+
+        Tri sideA sideB sideC ->
+            let
+                half =
+                    (sideA + sideB + sideC) / 2
+            in
+            sqrt (half * (half - sideA))
+
+
+measured : Float
+measured =
+    area (Rect 2 3)
 `;
 
 fs.rmSync(WORK, { recursive: true, force: true });
@@ -151,6 +180,24 @@ try {
     console.log('\n  A whole-file loss like this is usually a line added above the'
       + '\n  program: the map addresses generated lines, so everything shifts.');
   }
+  // Pausing in the `Rect` branch must not show the other branches' locals.
+  // Everything used to be a function-scoped `var`, so all of them were listed.
+  const { names, functionName } = await scopeAt(WORK, 'plain.js', 'return (width * height)');
+  const others = ['radius', 'sideA', 'sideB', 'sideC', 'half'];
+  const leaked = others.filter((n) => names.includes(n));
+  check(
+    'the branch you stopped in is the only one in scope',
+    leaked.length === 0,
+    leaked.length ? `also visible: ${leaked.join(', ')}` : `in scope: ${names.join(', ')}`,
+  );
+  check(
+    "and that branch's own bindings are there",
+    names.includes('width') && names.includes('height'),
+    names.join(', '),
+  );
+  // The map names the function at its definition, which is what a call stack
+  // shows for the frame.
+  check('the frame is named', functionName.length > 0, functionName);
 } finally {
   live.kill();
 }
