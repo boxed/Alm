@@ -121,7 +121,9 @@ pub fn run(options: Options) -> ExitCode {
     if options.updating || writer.is_some() {
         let watched = live.clone();
         let build = build.clone();
+        let rebuilt = module.clone();
         live::watch(&root, move || {
+            let started = std::time::Instant::now();
             let fresh = rebuild();
             let failed = fresh.errors.clone();
             {
@@ -139,6 +141,16 @@ pub fn run(options: Options) -> ExitCode {
                     writer.write(&held);
                 }
             }
+            // Say so on every rebuild. A watching server is otherwise silent,
+            // and a save that was picked up then looks exactly like one that
+            // was not — which is the first thing to know when a change does
+            // not show up in the browser.
+            let took = milliseconds(started.elapsed());
+            match &failed {
+                Some(_) => eprintln!("Recompiled {rebuilt} in {took}, but it did not compile."),
+                None => println!("Recompiled {rebuilt} in {took}."),
+            }
+
             let Some(watched) = &watched else { return };
             match failed {
                 Some(errors) => watched.broadcast("failed", &json_string(&errors)),
@@ -356,6 +368,18 @@ fn compile(entry: &Path, root: &Path, color: bool, optimize: bool, source_maps: 
     }
 }
 
+/// How long a build took, as a line of a rebuild notice. A build that fails in
+/// the parser is over in well under a millisecond, and "0 ms" reads like the
+/// timing is broken, so anything that fast keeps a decimal.
+fn milliseconds(took: std::time::Duration) -> String {
+    let ms = took.as_secs_f64() * 1000.0;
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else {
+        format!("{ms:.0} ms")
+    }
+}
+
 /// A JSON string literal, for putting report text in an SSE `data:` field
 /// (which cannot contain a raw newline).
 pub fn json_string(text: &str) -> String {
@@ -386,5 +410,12 @@ mod tests {
         assert_eq!(json_string("tab\there"), "\"tab\\there\"");
         // An SSE data field must not contain a raw newline.
         assert!(!json_string("-- TYPE MISMATCH --\n\nnope").contains('\n'));
+    }
+
+    #[test]
+    fn a_build_too_fast_to_measure_in_whole_milliseconds_keeps_a_decimal() {
+        use std::time::Duration;
+        assert_eq!(milliseconds(Duration::from_micros(400)), "0.4 ms");
+        assert_eq!(milliseconds(Duration::from_millis(134)), "134 ms");
     }
 }

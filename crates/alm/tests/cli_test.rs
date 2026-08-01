@@ -1256,8 +1256,35 @@ fn a_failed_rebuild_is_reported_and_the_last_good_build_survives() {
     assert!(status.starts_with("HTTP/1.1 200"), "the good build should still serve: {status}");
     assert!(bundle.contains("_Platform_export"));
 
+    // A rebuild that did not compile is still a rebuild, and the terminal says
+    // so — otherwise a save whose errors only reached the page looks ignored.
     let _ = child.kill();
-    let _ = child.wait();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Recompiled Main in") && stderr.contains("did not compile"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Every rebuild says so on the terminal. Without it a watching server is
+/// silent, and a save that was picked up looks exactly like one that was not.
+#[test]
+fn a_rebuild_says_so_on_the_terminal() {
+    let dir = temp_dir();
+    let project = counter_project(&dir);
+    let (mut child, port) = start(&project, &["make", "src/Main.elm", "--live"]);
+
+    let source = project.join("src/Main.elm");
+    let events = events_after(port, 1, || {
+        std::fs::write(&source, "module Main exposing (main)\n\nmain = \"two\"\n").unwrap();
+    });
+    assert!(events.contains("event: changed"), "the edit was not picked up: {events}");
+
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Recompiled Main in"), "stdout: {stdout}");
 }
 
 #[test]
