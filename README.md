@@ -169,32 +169,39 @@ runs (3 for suites). One 8,357-line entry point and its module graph:
 
 | | elm 0.19.1 | alm |
 |---|---|---|
-| project-cold (build cache cleared) | 687 ms | **134 ms** |
-| incremental (one module edited) | 174 ms | **108 ms** |
-| no-op (nothing changed at all) | 103 ms | **20 ms** |
+| project-cold (build cache cleared) | 708 ms | **139 ms** |
+| incremental (one module edited) | 193 ms | **106 ms** |
+| no-op (nothing changed at all) | 118 ms | **14 ms** |
 
 All 19 entry points of the same codebase (~39k lines):
 
 | | elm 0.19.1 | alm |
 |---|---|---|
-| project-cold | 2.65 s | **0.65 s** |
-| every source edited | 2.06 s | **0.58 s** |
+| project-cold | 2.96 s | **0.67 s** |
+| every source edited | 2.40 s | **0.57 s** |
 
 Both compilers cache per module, so all three modes are comparable.
-alm is 5.1x faster cold, 1.6x faster on the edit-and-rebuild loop, and
-5x faster deciding that nothing changed at all.
+alm is 5.1x faster cold, 1.8x faster on the edit-and-rebuild loop, and
+8x faster deciding that nothing changed at all. The incremental figure
+is dominated by the size of the module you edit — this one is an
+8,357-line entry point; a one-module edit elsewhere in a project this
+size lands nearer 20 ms.
 
-On a bigger codebase the cold gap widens and the incremental one holds:
+On a bigger codebase the gaps hold:
 [exosphere](https://gitlab.com/exosphere/exosphere) is 59k lines over
-212 modules and 58 packages, and takes elm 1426 ms cold and 164 ms
-incrementally against alm's 1057 ms and 149 ms.
+212 modules and 58 packages, and takes elm 1496 ms cold and 176 ms
+incrementally against alm's 1101 ms and 105 ms.
 
-alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete) and
-reuses a module when its source *and* every interface it was checked
-against are unchanged. It is invalidated by the compiler binary
-itself, so it cannot survive a change to alm. An incremental build is
-byte-for-byte what a full build produces — a differential test holds
-that — and `ALM_NO_CACHE=1` turns it off.
+alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete). A
+module is reused when its source *and* every interface it was checked
+against are unchanged, and an untouched file is recognized by its
+timestamp and length so it is never read or parsed at all — most of
+what an incremental build would otherwise spend its time on is
+rediscovering an import graph that has not moved. The cache is
+invalidated by the compiler binary itself, so it cannot survive a
+change to alm. An incremental build is byte-for-byte what a full build
+produces — differential tests hold that — and `ALM_NO_CACHE=1` turns it
+off.
 
 Type checking is ~76% of a cold build; `ALM_TIMING=1` breaks a compile
 down by phase, and reports how many modules the cache reused.
