@@ -651,13 +651,21 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     let ctxs = build_ctxs(modules);
 
     let mut functions = Vec::new();
-    // A worklist fixpoint: `analyze_project` seeds the reachable instances, but
-    // specialization itself discovers more — every project reference resolves
-    // to a concrete `Global` and is pushed onto `sink`, catching instances
-    // (e.g. a foreign call inside a per-use-site-specialized local function)
-    // whose concrete type only exists after specialization. Distinct instances
-    // that share a mangled name (several `number` variables → `Int`, or
-    // layout-identical `Ref` specializations) are compiled once.
+    // A worklist fixpoint seeded from `main`: specializing a body resolves every
+    // project reference in it to a concrete `Global` and pushes that onto
+    // `sink`, so the closure of references *is* the reachable set. Distinct
+    // instances that share a mangled name (several `number` variables → `Int`,
+    // or layout-identical `Ref` specializations) are compiled once.
+    //
+    // `analyze_project` used to seed this with its own full traversal, and the
+    // fixpoint then discovered the rest. On a real application that pass cost
+    // 312 ms of a 970 ms monomorphization and added nothing: the set of emitted
+    // functions is identical with and without it (9,861 either way on
+    // exosphere), because anything it finds is reachable from `main` and the
+    // fixpoint walks the same references. The runaway-specialization watchdog is
+    // not lost with it — the worklist loop below carries its own. `ALM_MONO_ANALYZE=1`
+    // restores the old seeding, to bisect against if a specialization ever does
+    // go missing.
     let sink: std::cell::RefCell<Vec<Instance>> = std::cell::RefCell::new(Vec::new());
     // FxHash, not SipHash: these keys are long mangled names and this set is
     // probed once per discovered reference, which put SipHash at 14% of a real
@@ -665,12 +673,28 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     // cannot reach the output (see `data::fxhash`).
     let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut worklist: Vec<Instance> = Vec::new();
-    let analyzed = analyze_project(modules, entry);
-    let mut error = analyzed.error.clone();
-    for inst in analyzed.instances {
+    let mut error: Option<String> = None;
+    let mut seed = |inst: Instance, seen: &mut FxHashSet<String>, worklist: &mut Vec<Instance>| {
         if seen.insert(mangle(&inst.module, &inst.name, &inst.tipe).to_string()) {
             worklist.push(inst);
         }
+    };
+    if std::env::var_os("ALM_MONO_ANALYZE").is_some() {
+        let analyzed = analyze_project(modules, entry);
+        error = analyzed.error.clone();
+        for inst in analyzed.instances {
+            seed(inst, &mut seen, &mut worklist);
+        }
+    } else if let Some(main_ty) = ctxs.get(entry).and_then(|c| c.types.get(&Name::from("main"))) {
+        seed(
+            Instance {
+                module: entry.clone(),
+                name: Name::from("main"),
+                tipe: default_numbers(main_ty),
+            },
+            &mut seen,
+            &mut worklist,
+        );
     }
 
     // Effect managers: the runtime — not `main` — calls init/onEffects/
@@ -842,6 +866,15 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
         }
     }
 
+    // `ALM_MONO_DUMP=<file>` writes the sorted mangled names of every emitted
+    // specialization. Comparing two builds' dumps answers "did that change what
+    // gets compiled?" — which byte-comparing the output cannot, since it also
+    // moves with emission order.
+    if let Some(path) = std::env::var_os("ALM_MONO_DUMP") {
+        let mut names: Vec<&str> = functions.iter().map(|f| f.mangled.as_str()).collect();
+        names.sort();
+        std::fs::write(path, names.join("\n")).unwrap();
+    }
     MonoProgram { functions, error, managers }
 }
 
