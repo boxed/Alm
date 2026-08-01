@@ -821,7 +821,7 @@ impl Generator {
         // The value's start maps to the definition; flush records that plus
         // every sub-expression mapping the body carries. Bytes are identical to
         // `writeln!("var {} = {};")`.
-        value.lead_named(def.name.region, def.name.value.as_str());
+        value.lead(def.name.region);
         write!(self.out, "var {} = ", var).unwrap();
         self.flush(value);
         self.out.push_str(";\n");
@@ -864,7 +864,7 @@ impl Generator {
         for def in &values {
             let thunk = self.cyclic_global(&def.name.value);
             let mut body = self.expr(&def.body);
-            body.lead_named(def.name.region, def.name.value.as_str());
+            body.lead(def.name.region);
             write!(self.out, "function {}() {{ return ", thunk).unwrap();
             self.flush(body);
             self.out.push_str("; }\n");
@@ -980,11 +980,6 @@ impl Generator {
             _ => String::new(),
         };
         let mut inner = Mapped::raw(format!("function {}({}) {{ ", name, params.join(", ")));
-        // The name also goes in the source map at the `function` token, which is
-        // where a debugger looks to label the frame.
-        if let Some((elm_name, _)) = self_ref {
-            inner.mark_named(body.region, elm_name.as_str());
-        }
         inner.push(body_js);
         inner.push_str(" }");
         if arity == 1 {
@@ -1569,21 +1564,17 @@ impl Generator {
                 out
             }
         };
-        // Every expression records a mapping at its generated start. A reference
-        // the compiler had to rename — `$Insight$total` for `total`, `_type` for
-        // the reserved word `type` — also records what it is called in Elm, so a
-        // debugger can show and accept that name instead. Comparing against the
-        // text just emitted means only the ones that actually differ are stored.
-        let original = match &expr.value {
-            VarLocal(name) | VarTopLevel(name) => Some(name.as_str()),
-            VarForeign(_, name) => Some(name.as_str()),
-            VarCtor(_, _, ctor) => Some(ctor.name.as_str()),
-            _ => None,
-        };
-        match original {
-            Some(name) if m.text != name => m.mark_named(expr.region, name),
-            _ => m.mark(expr.region),
-        }
+        // Every expression records a mapping at its generated start.
+        //
+        // No `names` entry goes here, though the machinery for one exists. A
+        // debugger resolves an identifier's original name through the map entry
+        // *covering* its position — the nearest at or before it — so an entry
+        // naming one token also renames every later identifier that has none of
+        // its own. Naming references but not declarations put a function's
+        // parameters under the function's name and a `let` binding under
+        // whatever value preceded it. Names may go back in once every
+        // declaration carries one.
+        m.mark(expr.region);
         m
     }
 

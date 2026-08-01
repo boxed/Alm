@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bindable } from './probe.mjs';
 import { scopeAt } from './scopes.mjs';
+import { misnamed } from './names.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ALM = process.env.ALM || path.join(HERE, '../../../target/debug/alm');
@@ -97,6 +98,25 @@ area shape =
             sqrt (half * (half - sideA))
 
 
+-- Shaped like a real update function: each branch binds a name and ends in a
+-- value from another module (Nothing, Cmd.none), which is emitted renamed. A
+-- declaration with no map entry of its own inherits the name of whatever
+-- precedes it, so amount here is the one that comes out called Nothing.
+type Step
+    = Named String
+    | Counted Int
+
+
+describe : Step -> ( String, Maybe Int )
+describe step =
+    case step of
+        Named val ->
+            ( String.toUpper val, Nothing )
+
+        Counted amount ->
+            ( String.fromInt amount, Just amount )
+
+
 scaled : Float -> Shape -> Float
 scaled factor shape =
     factor * area shape
@@ -104,7 +124,7 @@ scaled factor shape =
 
 measured : Float
 measured =
-    scaled 2 (Rect 2 3)
+    scaled 2 (Rect 2 3) + toFloat (String.length (Tuple.first (describe (Counted 1))))
 `;
 
 fs.rmSync(WORK, { recursive: true, force: true });
@@ -185,6 +205,20 @@ try {
     console.log('\n  A whole-file loss like this is usually a line added above the'
       + '\n  program: the map addresses generated lines, so everything shifts.');
   }
+  // A variable must never be presented under someone else's name. Empty `names`
+  // passes trivially and is the current state; the check exists so that adding
+  // entries without covering every declaration cannot pass.
+  for (const which of ['plain.js', 'live.js']) {
+    const bad = misnamed(WORK, which);
+    check(
+      `no variable in ${which} is shown under another name`,
+      bad.length === 0,
+      bad.length
+        ? bad.slice(0, 4).map((b) => `${b.declared} shown as ${b.shownAs}`).join('; ')
+        : 'nothing misnamed',
+    );
+  }
+
   // Pausing in the `Rect` branch must not show the other branches' locals.
   // Everything used to be a function-scoped `var`, so all of them were listed.
   const { names, functionName } = await scopeAt(WORK, 'plain.js', 'return (width * height)');
