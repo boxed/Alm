@@ -167,34 +167,37 @@ Compile speed for the JavaScript target, measured by
 `compile-bench/run.py`. Apple Silicon, production codebase, median of 5
 runs (3 for suites). One 8,357-line entry point and its module graph:
 
-| | median | best |
+| | elm 0.19.1 | alm |
 |---|---|---|
-| elm 0.19.1, project-cold (elm-stuff wiped) | 773 ms | 769 ms |
-| elm 0.19.1, incremental (entry file touched) | 177 ms | 171 ms |
-| elm 0.19.1, no-op (nothing changed at all) | 112 ms | 109 ms |
-| **alm, full rebuild, no cache** | **123 ms** | **122 ms** |
+| project-cold (build cache cleared) | 687 ms | **134 ms** |
+| incremental (one module edited) | 174 ms | **108 ms** |
+| no-op (nothing changed at all) | 103 ms | **20 ms** |
 
 All 19 entry points of the same codebase (~39k lines):
 
-| | median |
-|---|---|
-| elm 0.19.1, project-cold | 2.80 s |
-| elm 0.19.1, all sources touched (warm elm-stuff) | 2.24 s |
-| **alm, full rebuild every time, no cache** | **1.12 s** |
+| | elm 0.19.1 | alm |
+|---|---|---|
+| project-cold | 2.65 s | **0.65 s** |
+| every source edited | 2.06 s | **0.58 s** |
 
-alm keeps no cache, so its one number has to be read against all three
-of elm's. A full alm rebuild is 6.3x faster than a full official
-rebuild and 1.4x faster than elm's *incremental* path while redoing
-every module rather than the one that changed — it takes about as long
-as the official compiler needs to decide nothing changed at all (123 ms
-against 112 ms). Across the whole suite alm is 2.5x faster than a cold
-official build and 2.0x faster than one where every source was
-touched. (The official
-compiler reuses per-package artifacts from `~/.elm` even when
-project-cold; alm recompiles package sources every run.)
+Both compilers cache per module, so all three modes are comparable.
+alm is 5.1x faster cold, 1.6x faster on the edit-and-rebuild loop, and
+5x faster deciding that nothing changed at all.
 
-Type checking is ~73% of a build; `ALM_TIMING=1` breaks a compile down
-by phase.
+On a bigger codebase the cold gap widens and the incremental one holds:
+[exosphere](https://gitlab.com/exosphere/exosphere) is 59k lines over
+212 modules and 58 packages, and takes elm 1426 ms cold and 164 ms
+incrementally against alm's 1057 ms and 149 ms.
+
+alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete) and
+reuses a module when its source *and* every interface it was checked
+against are unchanged. It is invalidated by the compiler binary
+itself, so it cannot survive a change to alm. An incremental build is
+byte-for-byte what a full build produces — a differential test holds
+that — and `ALM_NO_CACHE=1` turns it off.
+
+Type checking is ~76% of a cold build; `ALM_TIMING=1` breaks a compile
+down by phase, and reports how many modules the cache reused.
 
 Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm
 `--optimize` 631 KB (all pre-minification).

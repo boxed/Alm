@@ -180,7 +180,8 @@ def compile_section(data):
         if detail.get("suite"):
             rows[f"all {project.get('entry_points', '')} entry points"] = detail["suite"]
         order = ["elm, project-cold", "elm, incremental", "elm, all sources touched",
-                 "elm, no-op", "alm, full rebuild"]
+                 "elm, no-op", "alm, project-cold", "alm, incremental", "alm, no-op",
+                 "alm, full rebuild"]
         seen = {name for modes in rows.values() for name in modes}
         cols = [c for c in order if c in seen] + [c for c in sorted(seen) if c not in order]
         tables.append({

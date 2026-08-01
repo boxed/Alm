@@ -34,20 +34,26 @@ the *forked* graph in `elm.json`, which the official compiler rejects as invalid
 when resolved against the published packages. Filling the gap from the cache
 builds what the maintainers build, without touching `~/.elm`.
 
-elm gets **two** columns because it has two speeds and they differ by ~7x:
+Both compilers cache, and for both the cold and warm numbers differ by roughly
+an order of magnitude, so each gets a column of each:
 
 | column | what it is |
 |---|---|
 | `elm (full)` | `elm-stuff` cleared each run — the like-for-like comparison |
-| `elm (incr.)` | cache warm, entry module touched — what you wait for when editing |
-| `alm-js` / `alm-wasm` / `alm-native` | full build of the whole graph, every run |
+| `elm (incr.)` | cache warm, one module edited — what you wait for when editing |
+| `alm-js` | `.alm-stuff` cleared each run |
+| `alm-js (incr.)` | cache warm, one module edited |
+| `alm-wasm` / `alm-native` | full build every run; neither back end caches yet |
 
-The incremental column touches the entry module before each run on purpose:
-without an edit, elm checks mtimes and exits, and the column would be measuring
-its no-op path rather than a rebuild.
+**An incremental run edits a module rather than touching it.** The two
+compilers decide what is stale differently — elm compares mtimes, alm hashes
+contents — so a `touch` would rebuild under elm and be a no-op under alm, and
+the two columns would not be measuring the same work. Appending a comment line
+changes both. (Without *any* edit, elm's incremental column measures its no-op
+path, which is what it used to be doing.)
 
-**Against elm's cache** — the same thing on a real production application, with
-elm's no-op time as well, and every entry point rather than one.
+**Cold against warm on a real application** — the second table, with the no-op
+times as well, and every entry point rather than one.
 
 ## Two things it is careful about
 

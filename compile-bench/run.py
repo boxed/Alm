@@ -7,11 +7,15 @@ Two things are measured.
 spread of real projects — the same shape as the runtime and computation
 benchmarks, so the report reads consistently.
 
-**Against elm's cache.** alm keeps no incremental cache: every invocation
-recompiles the whole module graph, package sources included. So the table
-above compares alm's only mode against elm's cold one. The second table also
-puts alm next to elm's *incremental* and *no-op* paths, which is the honest
-comparison for day-to-day editing.
+**Cold against warm.** Both compilers cache, and for both the difference is
+most of the story, so each gets a cold column and a warm one. The second table
+does the same on a real production application, adding the no-op time and every
+entry point rather than one.
+
+The two decide staleness differently — elm compares mtimes, alm hashes contents
+— so an incremental run here *edits* a module rather than touching it. A touch
+would rebuild under elm and be a no-op under alm, and the columns would not be
+measuring the same thing.
 
     python3 compile-bench/run.py [extra/project/dir ...]
 
@@ -72,30 +76,38 @@ APPLICATIONS = [
 ]
 
 
-def wipe_cache(directory, entry):
+def wipe_elm_cache(directory, entry):
     """Clear `elm-stuff` so the official compiler rebuilds the dependency set."""
     shutil.rmtree(directory / "elm-stuff", ignore_errors=True)
 
 
-def touch_entry(directory, entry):
-    """Mark the entry module changed, so the warm cache has something to rebuild.
+def wipe_alm_cache(directory, entry):
+    """Clear `.alm-stuff`, so alm rebuilds the whole graph like elm's cold path."""
+    shutil.rmtree(directory / ".alm-stuff", ignore_errors=True)
 
-    Without this the "incremental" column is really elm's *no-op* time: the run
-    before it left a complete cache and nothing has changed since, so elm checks
-    mtimes and exits. Touching one module is the edit-and-rebuild loop the
-    column is meant to stand for.
+
+def edit_entry(directory, entry):
+    """Make a real one-module edit, which is what an incremental build is *for*.
+
+    Appending a comment rather than `touch`ing, because the two compilers decide
+    what is stale differently: elm compares mtimes, alm hashes contents. A touch
+    would give elm a rebuild and alm a no-op, and the column would be comparing
+    two different things. A trailing comment changes both.
     """
-    (directory / entry).touch()
+    with (directory / entry).open("a") as f:
+        f.write("\n-- compile-bench: one-line edit\n")
 
 
-# elm gets two columns because it has two speeds and they differ by ~7x. With
-# `elm-stuff` cleared it recompiles the dependency set, which is what alm does
-# on every run; with the cache warm it recompiles only what changed. Showing
-# just one of them would either flatter alm or flatter elm, so both are here.
+# Each compiler that has two speeds gets two columns, because the difference is
+# most of the story. A cold build recompiles the whole module graph; a warm one
+# recompiles the module that changed and whatever depended on it. Showing only
+# one of them would flatter somebody.
 COMPILERS = [
-    ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_cache),
-    ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], touch_entry),
-    ("alm-js", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
+    ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_elm_cache),
+    ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], edit_entry),
+    ("alm-js", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], wipe_alm_cache),
+    ("alm-js (incr.)", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"],
+     edit_entry),
     ("alm-wasm", lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
                                      f"--output={out}.wasm"], None),
     ("alm-native", lambda entry, out: [str(ALM), "make", entry, "--target=native",
@@ -228,6 +240,14 @@ def matrix(projects, scratch):
             if label in broken:
                 row[label] = None
                 continue
+            # One untimed run first, with the same setup. An incremental column
+            # measures a warm cache, and the column before it may have just
+            # wiped one; without this the first timed run would be a cold build
+            # in an incremental column.
+            if setup:
+                setup(directory, entry)
+            time_it(build(entry, str(target)), directory)
+
             runs = []
             for _ in range(RUNS_MATRIX):
                 if setup:
@@ -291,13 +311,30 @@ def caching(project, scratch):
         biggest.touch()
         runs.append(time_it(["elm", "make", rel, f"--output={out}"], work))
 
+    def alm_runs(setup):
+        times = []
+        for _ in range(RUNS_SINGLE):
+            setup()
+            times.append(time_it([str(ALM), "make", rel, f"--output={out}"], work))
+        return median_ms(times)
+
+    def wipe_alm():
+        shutil.rmtree(work / ".alm-stuff", ignore_errors=True)
+
+    def edit():
+        with biggest.open("a") as f:
+            f.write("\n-- compile-bench: one-line edit\n")
+
+    # alm's cold path first, so its cache exists before the incremental runs.
+    alm_cold = alm_runs(wipe_alm)
     result["single"] = {
         "elm, project-cold": cold,
         "elm, incremental": median_ms(runs),
         "elm, no-op": median_ms([time_it(["elm", "make", rel, f"--output={out}"], work)
                                  for _ in range(RUNS_SINGLE)]),
-        "alm, full rebuild": median_ms([time_it([str(ALM), "make", rel, f"--output={out}"], work)
-                                        for _ in range(RUNS_SINGLE)]),
+        "alm, project-cold": alm_cold,
+        "alm, incremental": alm_runs(edit),
+        "alm, no-op": alm_runs(lambda: None),
     }
     for label, value in result["single"].items():
         print(f"    {label:26s} {value:6.0f} ms")
@@ -320,6 +357,18 @@ def caching(project, scratch):
             total += took
         return total
 
+    def touch_all():
+        now = time.time()
+        for p in (work / "src").rglob("*.elm"):
+            os.utime(p, (now, now))
+
+    def edit_all():
+        # alm hashes contents, so a `touch` is not an edit to it. Every source
+        # really changes, which is the same work elm's touched-sources row does.
+        for p in (work / "src").rglob("*.elm"):
+            with p.open("a") as f:
+                f.write("\n-- compile-bench: one-line edit\n")
+
     runs = []
     for _ in range(RUNS_SUITE):
         shutil.rmtree(work / "elm-stuff", ignore_errors=True)
@@ -328,16 +377,25 @@ def caching(project, scratch):
 
     runs = []
     for _ in range(RUNS_SUITE):
-        now = time.time()
-        for p in (work / "src").rglob("*.elm"):
-            os.utime(p, (now, now))
+        touch_all()
         runs.append(whole("elm"))
+
+    alm_cold = []
+    for _ in range(RUNS_SUITE):
+        shutil.rmtree(work / ".alm-stuff", ignore_errors=True)
+        alm_cold.append(whole(str(ALM)))
+
+    alm_edited = []
+    for _ in range(RUNS_SUITE):
+        edit_all()
+        alm_edited.append(whole(str(ALM)))
 
     result["project"]["entry_points"] = len(buildable)
     result["suite"] = {
         "elm, project-cold": suite_cold,
         "elm, all sources touched": median_ms(runs),
-        "alm, full rebuild": median_ms([whole(str(ALM)) for _ in range(RUNS_SUITE)]),
+        "alm, project-cold": median_ms(alm_cold),
+        "alm, all sources touched": median_ms(alm_edited),
     }
     print(f"  all {len(buildable)} entry points:")
     for label, value in result["suite"].items():
