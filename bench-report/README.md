@@ -42,4 +42,10 @@ keep their own dates and admit their age.
 ## Publishing
 
 Publish `bench-report/report.html`. Re-publishing to the same URL keeps the
-artifact's history.
+artifact's history:
+
+    https://claude.ai/code/artifact/b1b7ef79-c8ba-4386-ab1a-b2560420e458
+
+Pass that URL when publishing from a session that has not published it before,
+or a *new* artifact is created and the history is left behind. The tab icon is
+⚡ — keep it, since a changed favicon reads as a different page.
