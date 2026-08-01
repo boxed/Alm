@@ -561,6 +561,28 @@ fn tree_shake(bundle: &str) -> (String, Vec<Option<u32>>) {
     (out, old_to_new)
 }
 
+/// The generated expression for `expr` when it is a name already in scope, or a
+/// field path rooted at one — `msg`, `model.shared`, `dialog.mode.tag`.
+///
+/// Reading such a path twice is free of consequence: Elm has no mutation, and its
+/// records compile to plain objects, so a field read is a property load and
+/// nothing else. That makes an alias to it pure noise. The point is the debugger —
+/// a scope listing `model.shared` under its own path beats one listing `_v476`
+/// with no clue what it holds — and every alias skipped is one less name to
+/// resolve by hand.
+///
+/// Anything else (a call, an operator, a literal) returns `None`: it may be
+/// expensive, or not a place at all, so it is computed once into a temp.
+fn reusable_path(expr: &can::Expr) -> Option<String> {
+    match &expr.value {
+        can::Expr_::VarLocal(name) => Some(sanitize(name)),
+        can::Expr_::Access(record, field) => {
+            Some(format!("{}.{}", reusable_path(record)?, field.value))
+        }
+        _ => None,
+    }
+}
+
 fn mangle_module(name: &Name) -> String {
     format!("${}", name.as_str().replace('.', "$"))
 }
@@ -1109,14 +1131,16 @@ impl Generator {
                 out
             }
             Case(scrutinee, branches) => {
-                // A `case` on a plain local reads that local directly rather than
-                // aliasing it to a temp first. Elm has no mutation, so re-reading
-                // the binding is free and cannot observe anything different — and
-                // it keeps the name you wrote in the debugger, instead of filling
-                // the scope with `_v476` for something already called `msg`.
-                let (temp, mut out) = match &scrutinee.value {
-                    VarLocal(name) => (sanitize(name), Mapped::default()),
-                    _ => {
+                // A `case` on something already reachable by name reads it where
+                // it stands rather than aliasing it to a temp first. Elm has no
+                // mutation and its records are plain objects with no accessors, so
+                // re-reading the path is free and cannot observe anything
+                // different — and it keeps the name you wrote in the debugger,
+                // instead of filling the scope with `_v476` for something already
+                // called `msg`, or `model.shared`.
+                let (temp, mut out) = match reusable_path(scrutinee) {
+                    Some(path) => (path, Mapped::default()),
+                    None => {
                         let temp = self.fresh_temp();
                         let mut out = Mapped::raw(format!("let {} = ", temp));
                         out.push(self.expr(scrutinee));
@@ -1464,11 +1488,11 @@ impl Generator {
                 }
             }
             can::LetDecl::Destruct(pattern, value) => {
-                // As with `case`: destructuring something already named reads it
-                // where it stands, rather than aliasing it to a temp first.
-                let temp = match &value.value {
-                    can::Expr_::VarLocal(name) => sanitize(name),
-                    _ => {
+                // As with `case`: destructuring something already reachable by
+                // name reads it where it stands, rather than aliasing it first.
+                let temp = match reusable_path(value) {
+                    Some(path) => path,
+                    None => {
                         let temp = self.fresh_temp();
                         out.push_str(&format!("let {} = ", temp));
                         out.push(self.expr(value));

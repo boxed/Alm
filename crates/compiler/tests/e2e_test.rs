@@ -414,6 +414,26 @@ fn closures_made_in_a_loop_capture_their_own_iteration() {
     );
 }
 
+/// A `case` on a field path reads that path where it stands instead of aliasing
+/// it, which is only sound because every read happens before anything is
+/// reassigned. A tail-recursive function is where that could break: it assigns
+/// its parameters on the way round the loop, so a path rooted at one would read
+/// differently after. The bindings are emitted ahead of the branch body and the
+/// assignment happens in tail position, so they cannot cross — this pins it.
+#[test]
+fn a_case_on_a_field_path_inside_a_loop_reads_the_current_value() {
+    // 4 + 3 + 2 + 1, accumulated through a record that the loop replaces.
+    assert_eq!(
+        run("type Step\n    = Continue Int\n    | Stop Int\n\n\nloop : { step : Step, acc : Int } -> Int\nloop state =\n    case state.step of\n        Continue n ->\n            loop\n                { step =\n                    if n <= 1 then\n                        Stop (state.acc + n)\n\n                    else\n                        Continue (n - 1)\n                , acc = state.acc + n\n                }\n\n        Stop total ->\n            total\n\n\nmain = String.fromInt (loop { step = Continue 4, acc = 0 })"),
+        "10"
+    );
+    // A nested path (`state.inner.step`) rooted at the same reassigned parameter.
+    assert_eq!(
+        run("type Step\n    = Continue Int\n    | Stop Int\n\n\nloop : { inner : { step : Step }, acc : Int } -> Int\nloop state =\n    case state.inner.step of\n        Continue n ->\n            loop\n                { inner =\n                    { step =\n                        if n <= 1 then\n                            Stop 0\n\n                        else\n                            Continue (n - 1)\n                    }\n                , acc = state.acc + n\n                }\n\n        Stop _ ->\n            state.acc\n\n\nmain = String.fromInt (loop { inner = { step = Continue 4 }, acc = 0 })"),
+        "10"
+    );
+}
+
 #[test]
 fn dicts() {
     assert_eq!(
