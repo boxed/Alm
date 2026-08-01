@@ -156,6 +156,16 @@ def compile_section(data):
                  for row in data.get("projects", [])],
         "decimals": 0, "unit": "",
     }]
+    # An n/a in this table means that compiler could not build that project —
+    # say which, rather than leave a blank cell to be read as a missing run.
+    by_compiler = {}
+    for entry in data.get("unbuilt") or []:
+        by_compiler.setdefault(entry["compiler"], []).append(entry["project"])
+    if by_compiler:
+        tables[0]["notes"] = [
+            f"n/a — {compiler} cannot build {', '.join(sorted(projects))}"
+            for compiler, projects in sorted(by_compiler.items())
+        ]
 
     detail = data.get("caching")
     facts = None

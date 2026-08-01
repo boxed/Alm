@@ -37,6 +37,9 @@ import workloads  # noqa: E402
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ALM = REPO / "target" / "release" / "alm"
 RESULTS = REPO / "compile-bench" / "results.json"
+# Cached checkouts of the application workloads. `.almtmp` is the project's own
+# scratch directory (git-ignored), so the disk they take is traceable here.
+CHECKOUTS = REPO / ".almtmp" / "checkouts"
 
 RUNS_MATRIX = 3
 RUNS_SINGLE = 5
@@ -54,9 +57,35 @@ LIBRARIES = [
     "data-viz-lab/elm-chart-builder",
 ]
 
-def wipe_cache(directory):
+# Real applications, which a wrapper around a package is not: hundreds of the
+# project's own modules on top of the dependency graph, which is where a
+# compiler's time actually goes. Pinned to a commit, so re-running measures the
+# same code, and cloned once into `CHECKOUTS`; packages still resolve from
+# `~/.elm`.
+APPLICATIONS = [
+    {
+        "name": "exosphere/exosphere",
+        "url": "https://gitlab.com/exosphere/exosphere.git",
+        "sha": "be3d71149a683b28ec32c97589e268bfc0a6ea22",
+        "entry": "src/Exosphere.elm",
+    },
+]
+
+
+def wipe_cache(directory, entry):
     """Clear `elm-stuff` so the official compiler rebuilds the dependency set."""
     shutil.rmtree(directory / "elm-stuff", ignore_errors=True)
+
+
+def touch_entry(directory, entry):
+    """Mark the entry module changed, so the warm cache has something to rebuild.
+
+    Without this the "incremental" column is really elm's *no-op* time: the run
+    before it left a complete cache and nothing has changed since, so elm checks
+    mtimes and exits. Touching one module is the edit-and-rebuild loop the
+    column is meant to stand for.
+    """
+    (directory / entry).touch()
 
 
 # elm gets two columns because it has two speeds and they differ by ~7x. With
@@ -65,7 +94,7 @@ def wipe_cache(directory):
 # just one of them would either flatter alm or flatter elm, so both are here.
 COMPILERS = [
     ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_cache),
-    ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], None),
+    ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], touch_entry),
     ("alm-js", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
     ("alm-wasm", lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
                                      f"--output={out}.wasm"], None),
@@ -102,35 +131,116 @@ def elm_count(directory):
     )
 
 
+# ------------------------------------------------------------ applications
+
+def checkout(app):
+    """The pinned commit of an application, cloned on first use.
+
+    A shallow fetch of the one commit — the history is not being measured. An
+    existing checkout is reused as-is once it is at the right commit, so a
+    re-run costs nothing.
+    """
+    directory = CHECKOUTS / app["name"].replace("/", "-")
+    head = subprocess.run(["git", "-C", str(directory), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    if head.returncode == 0 and head.stdout.strip() == app["sha"]:
+        return directory
+
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    print(f"  fetching {app['name']} @ {app['sha'][:8]}")
+    steps = [
+        ["git", "init", "-q", "."],
+        ["git", "remote", "add", "origin", app["url"]],
+        ["git", "fetch", "--depth", "1", "-q", "origin", app["sha"]],
+        ["git", "checkout", "-q", "FETCH_HEAD"],
+    ]
+    for step in steps:
+        done = subprocess.run(step, cwd=directory, capture_output=True, text=True)
+        if done.returncode != 0:
+            shutil.rmtree(directory, ignore_errors=True)
+            print(f"  {app['name']:32s} skipped — {' '.join(step)}: "
+                  f"{done.stderr.strip().splitlines()[-1] if done.stderr.strip() else 'failed'}")
+            return None
+    return directory
+
+
+def stage(app, scratch):
+    """An application copied out of its checkout, ready to build.
+
+    Only `elm.json` and the source directories: the timed runs mutate
+    `elm-stuff` and source mtimes, and a checkout is not the harness's to
+    change. The dependency set is completed from `~/.elm` — see
+    `workloads.complete`.
+    """
+    source = checkout(app)
+    if source is None:
+        return None
+
+    outline, added = workloads.complete(json.loads((source / "elm.json").read_text()))
+    if outline is None:
+        print(f"  {app['name']:32s} skipped — {added}")
+        return None
+    if added:
+        print(f"  {app['name']}: completed the dependency set with {', '.join(added)}")
+
+    directory = scratch / "apps" / app["name"].replace("/", "-")
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    (directory / "elm.json").write_text(json.dumps(outline, indent=4) + "\n")
+    for rel in outline.get("source-directories", ["src"]):
+        if (source / rel).is_dir():
+            shutil.copytree(source / rel, directory / rel,
+                            ignore=shutil.ignore_patterns("elm-stuff"))
+    return app["name"], directory, app["entry"]
+
+
 # ------------------------------------------------------------- per compiler
 
 def matrix(projects, scratch):
-    """Every compiler against every project all of them can build."""
-    out = []
+    """Every compiler against every project.
+
+    A compiler that cannot build a workload gets no figure for it, and the
+    reason is recorded rather than left to look like a blank. Dropping the whole
+    row instead — which is what this did — costs the most informative workloads:
+    a real browser application cannot be built by a back end that emits a
+    binary, and that is a fact about the back end, not a reason to stop
+    measuring the four compilers that do build it. A row nothing can build is
+    dropped, since there is then nothing to compare.
+    """
+    out, unbuilt = [], []
     for name, directory, entry in projects:
         target = scratch / "out"
-        # A workload has to build everywhere, or the columns are not measuring
-        # the same work. One that does not is dropped, and said so.
         broken = [
             label for label, build, _ in COMPILERS
             if time_it(build(entry, str(target)), directory) is None
         ]
-        if broken:
-            print(f"  {name:32s} skipped — {', '.join(broken)} cannot build it")
+        if len(broken) == len(COMPILERS):
+            print(f"  {name:32s} skipped — no compiler can build it")
             continue
+        for label in broken:
+            unbuilt.append({"project": name, "compiler": label})
+        if broken:
+            print(f"  {name:32s} not built by {', '.join(broken)}")
 
         row = {"op": name, "lines": elm_count(directory)}
         for label, build, setup in COMPILERS:
+            if label in broken:
+                row[label] = None
+                continue
             runs = []
             for _ in range(RUNS_MATRIX):
                 if setup:
-                    setup(directory)
+                    setup(directory, entry)
                 runs.append(time_it(build(entry, str(target)), directory))
             row[label] = median_ms(runs)
-        cells = "  ".join(f"{label} {row[label]:.0f}" for label, _, _ in COMPILERS)
+        cells = "  ".join(
+            f"{label} {'—' if row[label] is None else format(row[label], '.0f')}"
+            for label, _, _ in COMPILERS
+        )
         print(f"  {name:32s} {cells}")
         out.append(row)
-    return out
+    return out, unbuilt
 
 
 # -------------------------------------------------------- against elm's cache
@@ -267,9 +377,13 @@ def main():
                 print(f"  {package:32s} skipped — not resolvable from ~/.elm")
                 continue
             projects.append((package, made[0], made[1]))
+        for app in APPLICATIONS:
+            staged = stage(app, scratch)
+            if staged is not None:
+                projects.append(staged)
 
         print("== per compiler ==")
-        rows = matrix(projects, scratch)
+        rows, unbuilt = matrix(projects, scratch)
 
         local = local_project(sys.argv)
         detail = None
@@ -286,6 +400,7 @@ def main():
         "runs": {"matrix": RUNS_MATRIX, "single": RUNS_SINGLE, "suite": RUNS_SUITE},
         "compilers": [label for label, _, _ in COMPILERS],
         "projects": rows,
+        "unbuilt": unbuilt,
         "caching": detail,
     }
     RESULTS.write_text(json.dumps(payload, indent=2) + "\n")

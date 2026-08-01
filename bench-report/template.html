@@ -182,6 +182,8 @@
     for (const tbl of s.tables) {
       if (tbl.caption) sec.appendChild(el("p", "caption", tbl.caption));
       sec.appendChild(table(tbl));
+      // Why a cell reads n/a, so a blank is never left to be guessed at.
+      for (const note of tbl.notes || []) sec.appendChild(el("p", "facts", note));
     }
     root.appendChild(sec);
   }

@@ -99,6 +99,54 @@ def solve(roots):
     return chosen
 
 
+def complete(outline):
+    """An application's `elm.json` with its indirect dependencies completed.
+
+    A real application's checked-in `elm.json` is not always a closed set. A
+    project that patches a package (elm-sideload swaps in a fork whose manifest
+    drops a dependency) records the *forked* graph, so against the published
+    packages in `~/.elm` the file is missing entries and the official compiler
+    refuses it as "edited by hand ... in an invalid state". Filling the gap from
+    the cache builds the same project the maintainers do, without touching the
+    user's package cache; the direct dependencies and their versions are left
+    exactly as pinned.
+
+    Returns `(outline, added)`, or `(None, reason)` if the cache cannot close it.
+    """
+    direct = dict(outline["dependencies"]["direct"])
+    chosen = dict(direct)
+    chosen.update(outline["dependencies"]["indirect"])
+
+    added = []
+    queue = list(chosen)
+    while queue:
+        name = queue.pop()
+        manifest_path = PACKAGES / name / chosen[name] / "elm.json"
+        if not manifest_path.is_file():
+            return None, f"{name} {chosen[name]} is not in ~/.elm"
+        manifest = json.loads(manifest_path.read_text())
+        for dep, text in (manifest.get("dependencies") or {}).items():
+            if "/" not in dep or dep in chosen:
+                continue
+            constraint = parse_constraint(text) if isinstance(text, str) else None
+            options = [
+                v for v in cached_versions(dep)
+                if constraint is None or allows(constraint, v)
+            ]
+            if not options:
+                return None, f"nothing in ~/.elm satisfies {dep} {text} (needed by {name})"
+            chosen[dep] = options[-1]
+            added.append(f"{dep} {options[-1]}")
+            queue.append(dep)
+
+    outline = dict(outline)
+    outline["dependencies"] = {
+        "direct": dict(sorted(direct.items())),
+        "indirect": dict(sorted((k, v) for k, v in chosen.items() if k not in direct)),
+    }
+    return outline, added
+
+
 def exposed_modules(manifest):
     exposed = manifest.get("exposed-modules", [])
     if isinstance(exposed, dict):
