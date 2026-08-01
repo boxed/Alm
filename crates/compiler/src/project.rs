@@ -221,19 +221,37 @@ impl BuildError {
 /// that two same-named modules from different packages stay distinct.
 struct LoadedModule {
     path: PathBuf,
-    source: String,
-    module: src::Module,
     /// The name declared in `module <Name> exposing ...`.
     declared_name: Name,
     /// Resolved user imports: the name as written plus the file it resolved
     /// to, within this module's package scope. Builtin/kernel imports are not
     /// listed here.
     imports: Vec<(Name, PathBuf)>,
+    /// The source dir the file was found in, which decides where its own
+    /// imports are searched for.
+    matched_dir: PathBuf,
+    /// Absent when the graph cache said the file was untouched: a module the
+    /// build is going to reuse needs its name and its edges and nothing else,
+    /// and not reading it is most of what makes an incremental build fast.
+    /// `read` materializes it for the modules that do have to be recompiled.
+    parsed: Option<Parsed>,
+}
+
+struct Parsed {
+    source: String,
+    module: src::Module,
 }
 
 impl LoadedModule {
     fn import_paths(&self) -> impl Iterator<Item = &PathBuf> {
         self.imports.iter().map(|(_, path)| path)
+    }
+
+    /// The source text, for an error or warning that has to quote it. Empty for
+    /// a module that was never read — which is only reachable if the module
+    /// neither failed nor warned, since both of those paths read it first.
+    fn source(&self) -> &str {
+        self.parsed.as_ref().map_or("", |p| p.source.as_str())
     }
 }
 
@@ -650,8 +668,6 @@ pub fn compile_project_cached(
     dce: bool,
 ) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let scopes = resolve_scopes(entry);
-    let Loaded { modules, order, unique_names, entry_key: _ } = load_and_order(entry, &scopes)?;
-
     let dir = cache::dir_for(&project_root(entry));
     // Anything that changes what a module compiles to, but is not the module's
     // own text or its dependencies' interfaces, belongs in the fingerprint.
@@ -660,6 +676,13 @@ pub fn compile_project_cached(
         ("dce", if dce { "1" } else { "0" }),
         ("optimize", if optimize { "1" } else { "0" }),
     ]);
+
+    // The graph cache lets an untouched file skip being read, parsed and
+    // re-resolved. On a 360-module project that is most of what an incremental
+    // build would otherwise spend its time on.
+    let graph = timing::cache(|| cache::load_graph(&dir, fingerprint));
+    let Loaded { modules, order, unique_names, entry_key: _ } =
+        load_and_order_with(entry, &scopes, graph.as_ref())?;
 
     let mut interfaces = Interfaces::new();
     // Interfaces read from the cache, still encoded. They are only needed to
@@ -694,10 +717,18 @@ pub fn compile_project_cached(
             .collect();
         deps.sort();
         deps.dedup();
-        let source_hash = cache::hash_str(&source_module.source);
+        let hit = timing::cache(|| cache::load(&dir, path, fingerprint));
+        // A module the graph cache vouched for was never read, so there is no
+        // text to hash: its timestamp and length already stood in for that.
+        // Hashing every source every build was itself a measurable cost.
+        let source_unchanged = match (&source_module.parsed, &hit) {
+            (None, Some(_)) => true,
+            (Some(parsed), Some(h)) => h.source_hash == cache::hash_str(&parsed.source),
+            _ => false,
+        };
 
-        if let Some(hit) = timing::cache(|| cache::load(&dir, path, fingerprint)) {
-            if hit.source_hash == source_hash && hit.deps == deps {
+        if let Some(hit) = hit {
+            if source_unchanged && hit.deps == deps {
                 pending.push((name.clone(), hit.interface));
                 interface_hashes.insert(name.clone(), hit.interface_hash);
                 chunks.push((name.clone(), hit.javascript, hit.exports));
@@ -706,7 +737,7 @@ pub fn compile_project_cached(
                 }
                 warnings.extend(hit.warnings.into_iter().map(|report| crate::lint::Warning {
                     path: source_module.path.clone(),
-                    source: source_module.source.clone(),
+                    source: source_module.source().to_string(),
                     report,
                 }));
                 reused += 1;
@@ -727,6 +758,26 @@ pub fn compile_project_cached(
             }
         }
 
+        // This module has to be recompiled. If the graph cache vouched for its
+        // text it was never read — unchanged text is not unchanged *meaning*,
+        // and a dependency moved under it — so read it now.
+        let materialized;
+        let source_module = match source_module.parsed {
+            Some(_) => source_module,
+            None => match read_and_parse(source_module, &scopes) {
+                Ok(loaded) => {
+                    materialized = loaded;
+                    &materialized
+                }
+                Err(error) => {
+                    build_errors.push(error.in_module(&name));
+                    failed.insert(path.clone());
+                    continue;
+                }
+            },
+        };
+        let source_hash = cache::hash_str(source_module.source());
+
         let Some((canonical, interface, node_types)) =
             check_one(source_module, &name, &unique_names, &interfaces, &mut build_errors)
         else {
@@ -739,7 +790,7 @@ pub fn compile_project_cached(
                 std::slice::from_ref(&canonical),
                 &HashMap::from([(
                     name.clone(),
-                    (source_module.path.clone(), source_module.source.clone()),
+                    (source_module.path.clone(), source_module.source().to_string()),
                 )]),
             )
         });
@@ -782,10 +833,99 @@ pub fn compile_project_cached(
             crate::debug_uses::debug_remnants_report(&debug_users),
         )]);
     }
+    // Record the graph as this build saw it. Written every build, since a
+    // module that was reloaded has a new timestamp to remember.
+    timing::cache(|| {
+        cache::store_graph(
+            &dir,
+            fingerprint,
+            &cache::Graph {
+                modules: order
+                    .iter()
+                    .filter_map(|path| {
+                        let loaded = &modules[path];
+                        let (mtime_ns, size) = match &loaded.parsed {
+                            // Read this build: take its stamp from disk now.
+                            Some(_) => cache::stamp(path)?,
+                            // Not read, so the stamp the graph vouched for still
+                            // stands — it is why the file was not read.
+                            None => {
+                                let record = graph.as_ref()?.modules.get(path)?;
+                                (record.mtime_ns, record.size)
+                            }
+                        };
+                        Some((
+                            path.clone(),
+                            cache::GraphRecord {
+                                mtime_ns,
+                                size,
+                                declared_name: loaded.declared_name.clone(),
+                                matched_dir: loaded.matched_dir.clone(),
+                                imports: loaded.imports.clone(),
+                            },
+                        ))
+                    })
+                    .collect(),
+            },
+        )
+    });
+
     if timing::enabled() {
         eprintln!("── alm cache ── {reused}/{} modules reused", order.len());
     }
     Ok((timing::generate(|| generate::assemble(&chunks, dce)), warnings))
+}
+
+/// Either a real problem with the project, or a signal that the cached graph
+/// has moved on and the load should be redone without it.
+enum LoadError {
+    Build(BuildError),
+    StaleGraph,
+}
+
+impl From<BuildError> for LoadError {
+    fn from(error: BuildError) -> LoadError {
+        LoadError::Build(error)
+    }
+}
+
+/// Read and parse a module the graph cache described but did not load.
+///
+/// Its name and edges are already known and stay as they were: the graph only
+/// vouches for a file whose timestamp and length match what it recorded, so the
+/// text it holds is the text those edges came from.
+fn read_and_parse(known: &LoadedModule, scopes: &Scopes) -> Result<LoadedModule, BuildError> {
+    let source = timing::read(|| std::fs::read_to_string(&known.path)).map_err(|err| {
+        BuildError::new(
+            known.path.clone(),
+            String::new(),
+            "FILE PROBLEM",
+            Region::ZERO,
+            format!("I could not read {}: {}", known.path.display(), err),
+        )
+    })?;
+    let module = timing::parse(|| parse::parse_module_typed(&source, scopes.is_package))
+        .map_err(|e| match e.syntax {
+            Some(se) => BuildError::from_reports(
+                known.path.clone(),
+                source.clone(),
+                vec![se.to_report()],
+            ),
+            None => BuildError::new(
+                known.path.clone(),
+                source.clone(),
+                "SYNTAX PROBLEM",
+                e.region,
+                e.message,
+            ),
+        })?;
+    Ok(LoadedModule {
+        path: known.path.clone(),
+        declared_name: known.declared_name.clone(),
+        imports: known.imports.clone(),
+        matched_dir: known.matched_dir.clone(),
+        parsed: Some(Parsed { source, module }),
+    })
 }
 
 /// Canonicalize, type check and exhaustiveness check one module, returning
@@ -807,7 +947,7 @@ fn check_one(
                 build_errors.extend(errors.into_iter().map(|e| {
                     BuildError::new(
                         source_module.path.clone(),
-                        source_module.source.clone(),
+                        source_module.source().to_string(),
                         "NAMING PROBLEM",
                         e.region,
                         e.message,
@@ -838,7 +978,7 @@ fn check_one(
             build_errors.push(
                 BuildError::from_reports(
                     source_module.path.clone(),
-                    source_module.source.clone(),
+                    source_module.source().to_string(),
                     reports,
                 )
                 .in_module(name),
@@ -851,7 +991,7 @@ fn check_one(
         build_errors.extend(errors.into_iter().map(|e| {
             BuildError::new(
                 source_module.path.clone(),
-                source_module.source.clone(),
+                source_module.source().to_string(),
                 "MISSING PATTERNS",
                 e.region,
                 e.message,
@@ -910,7 +1050,7 @@ pub fn check_project_with(
         let name = unique_names[path].clone();
         all_sources.insert(
             name.clone(),
-            (source_module.path.clone(), source_module.source.clone()),
+            (source_module.path.clone(), source_module.source().to_string()),
         );
         // Rewrite the parsed module so its declared name and its imports point
         // at the resolved, unique names. Downstream code is unchanged.
@@ -923,7 +1063,7 @@ pub fn check_project_with(
                     .map(|e| {
                         BuildError::new(
                             source_module.path.clone(),
-                            source_module.source.clone(),
+                            source_module.source().to_string(),
                             "NAMING PROBLEM",
                             e.region,
                             e.message,
@@ -960,7 +1100,7 @@ pub fn check_project_with(
                 .collect::<Vec<_>>();
             vec![BuildError::from_reports(
                 source_module.path.clone(),
-                source_module.source.clone(),
+                source_module.source().to_string(),
                 reports,
             )]
         });
@@ -981,7 +1121,7 @@ pub fn check_project_with(
                 .map(|e| {
                     BuildError::new(
                         source_module.path.clone(),
-                        source_module.source.clone(),
+                        source_module.source().to_string(),
                         "MISSING PATTERNS",
                         e.region,
                         e.message,
@@ -1038,31 +1178,73 @@ struct Loaded {
 }
 
 fn load_and_order(entry: &Path, scopes: &Scopes) -> Result<Loaded, Vec<BuildError>> {
+    load_and_order_with(entry, scopes, None)
+}
+
+/// As `load_and_order`, but allowed to take a module's name and edges from the
+/// graph cache instead of reading and parsing it. If the cached graph turns out
+/// not to describe this project any more, the whole load is redone without it —
+/// simpler than patching a graph that has moved, and it happens once.
+fn load_and_order_with(
+    entry: &Path,
+    scopes: &Scopes,
+    graph: Option<&cache::Graph>,
+) -> Result<Loaded, Vec<BuildError>> {
+    match load_and_order_inner(entry, scopes, graph) {
+        Err(LoadError::StaleGraph) => load_and_order_inner(entry, scopes, None).map_err(unwrap_build),
+        other => other.map_err(unwrap_build),
+    }
+}
+
+fn unwrap_build(error: LoadError) -> Vec<BuildError> {
+    match error {
+        LoadError::Build(error) => vec![error],
+        // Only produced with a graph in hand, and that load is retried without
+        // one before this can be reached. Reported rather than dropped, because
+        // an empty error list would fail the build while printing nothing.
+        LoadError::StaleGraph => vec![BuildError::new(
+            PathBuf::new(),
+            String::new(),
+            "BUILD CACHE PROBLEM",
+            Region::ZERO,
+            "The build cache described a project layout that no longer matches, and \
+             reloading without it did not clear the condition. Delete .alm-stuff, or \
+             set ALM_NO_CACHE=1."
+                .to_string(),
+        )],
+    }
+}
+
+fn load_and_order_inner(
+    entry: &Path,
+    scopes: &Scopes,
+    graph: Option<&cache::Graph>,
+) -> Result<Loaded, LoadError> {
     // Load the entry module and, transitively, everything it imports. Modules
     // are keyed by file path so two same-named modules from different packages
     // do not clobber each other.
     let mut modules: HashMap<PathBuf, LoadedModule> = HashMap::new();
-    let entry_key = load_module_file(entry, &scopes.app_search, scopes, &mut modules)
-        .map_err(|e| vec![e])?;
+    let entry_key =
+        load_module_file(entry, &scopes.app_search, scopes, &mut modules, graph)?;
 
     // The entry module's declared name must match its file path.
     if let Some(e) = entry_name_mismatch(&modules[&entry_key], &scopes.app_search) {
-        return Err(vec![e]);
+        return Err(e.into());
     }
 
     // Topologically sort (dependencies first), detecting import cycles.
     let order = sort_modules(&modules, &entry_key).map_err(|cycle| {
         let module = &modules[&cycle];
-        vec![BuildError::new(
+        LoadError::Build(BuildError::new(
             module.path.clone(),
-            module.source.clone(),
+            module.source().to_string(),
             "IMPORT CYCLE",
             Region::ZERO,
             format!(
                 "The module `{}` is part of an import cycle. Elm does not allow cyclic imports.",
                 module.declared_name
             ),
-        )]
+        ))
     })?;
 
     // Give every loaded file a unique module name. When a name is declared by
@@ -1527,6 +1709,13 @@ fn elm_bytes_src() -> Option<PathBuf> {
     versions.pop().map(|p| p.join("src"))
 }
 
+/// The module name behind a bundled module's synthetic key, if that is what this
+/// path is: `<builtin>/Http.elm` -> `Http`.
+fn bundled_key(path: &Path) -> Option<Name> {
+    let text = path.to_str()?.strip_prefix("<builtin>/")?.strip_suffix(".elm")?;
+    Some(Name::from(text.replace(['/', '\\'], ".")))
+}
+
 /// Load a bundled effect-module source into the module graph under a synthetic
 /// key, recursing into any other bundled modules it imports (e.g. Random → Time).
 fn load_bundled_module(
@@ -1534,7 +1723,8 @@ fn load_bundled_module(
     source: &'static str,
     scopes: &Scopes,
     modules: &mut HashMap<PathBuf, LoadedModule>,
-) -> Result<PathBuf, BuildError> {
+    graph: Option<&cache::Graph>,
+) -> Result<PathBuf, LoadError> {
     let key = PathBuf::from(format!("<builtin>/{}.elm", name.as_str().replace('.', "/")));
     if modules.contains_key(&key) {
         return Ok(key);
@@ -1549,10 +1739,10 @@ fn load_bundled_module(
         key.clone(),
         LoadedModule {
             path: key.clone(),
-            source: source.to_string(),
-            module,
             declared_name,
             imports: Vec::new(),
+            matched_dir: PathBuf::new(),
+            parsed: Some(Parsed { source: source.to_string(), module }),
         },
     );
     // A bundled module's non-builtin imports resolve against the app's search
@@ -1567,7 +1757,7 @@ fn load_bundled_module(
     let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
     for import in import_names {
         if let Some(bsrc) = bundled_source(import.as_str()) {
-            let child = load_bundled_module(&import, bsrc, scopes, modules)?;
+            let child = load_bundled_module(&import, bsrc, scopes, modules, graph)?;
             resolved.push((import, child));
         } else {
             let (import_path, matched_dir) =
@@ -1580,8 +1770,8 @@ fn load_bundled_module(
                         format!("The bundled `{name}` module imports `{import}`, but I cannot find it."),
                     )
                 })?;
-            let child_search = scopes.search_for(&matched_dir);
-            let child = load_module_file(&import_path, child_search, scopes, modules)?;
+            let child_search = scopes.search_for(&matched_dir).to_vec();
+            let child = load_module_file(&import_path, &child_search, scopes, modules, graph)?;
             resolved.push((import, child));
         }
     }
@@ -1597,13 +1787,60 @@ fn load_module_file(
     search_dirs: &[PathBuf],
     scopes: &Scopes,
     modules: &mut HashMap<PathBuf, LoadedModule>,
-) -> Result<PathBuf, BuildError> {
+    graph: Option<&cache::Graph>,
+) -> Result<PathBuf, LoadError> {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if modules.contains_key(&key) {
         return Ok(key);
     }
 
-    let source = timing::read(|| std::fs::read_to_string(path)).map_err(|err| {
+    // The fast path: the graph cache described this file and its timestamp and
+    // length still match, so its name and edges stand and it is not read or
+    // parsed at all. Anything that does not line up — a recorded import missing
+    // from the graph — abandons the cache and reloads the project properly,
+    // rather than trying to patch a graph that has moved.
+    if let Some(record) = graph.and_then(|g| g.unchanged(&key)) {
+        let imports = record.imports.clone();
+        modules.insert(
+            key.clone(),
+            LoadedModule {
+                path: key.clone(),
+                declared_name: record.declared_name.clone(),
+                imports: imports.clone(),
+                matched_dir: record.matched_dir.clone(),
+                parsed: None,
+            },
+        );
+        for (import, child) in &imports {
+            let graph = graph.expect("checked above");
+            // A bundled effect module has no file on disk, so it is never in the
+            // graph — its source is compiled into alm, which the fingerprint
+            // already covers. Load it the ordinary way.
+            if let Some(source) = bundled_key(child).and_then(|n| bundled_source(n.as_str())) {
+                load_bundled_module(import, source, scopes, modules, Some(graph))?;
+                continue;
+            }
+            let child_search = match graph.modules.get(child) {
+                Some(child_record) => scopes.search_for(&child_record.matched_dir).to_vec(),
+                None => return Err(LoadError::StaleGraph),
+            };
+            load_module_file(child, &child_search, scopes, modules, Some(graph))?;
+        }
+        return Ok(key);
+    }
+
+    let read = timing::read(|| std::fs::read_to_string(path));
+    // A file the cached graph pointed at that is no longer there means the graph
+    // has moved on — the module was renamed, deleted, or now lives in another
+    // source directory — not that the project is broken. Abandon the cache and
+    // reload, which either resolves the import somewhere else or reports it
+    // missing, exactly as a full build would. Checking every recorded edge up
+    // front would cost a stat per import, which is the cost this exists to
+    // avoid; noticing on the read costs nothing until it actually happens.
+    if read.is_err() && graph.is_some() {
+        return Err(LoadError::StaleGraph);
+    }
+    let source = read.map_err(|err| {
         BuildError::new(
             path.to_path_buf(),
             String::new(),
@@ -1631,21 +1868,22 @@ fn load_module_file(
 
     // Insert a placeholder before recursing so an import cycle terminates
     // (a module already present is not reloaded).
+    let matched_dir = search_dirs.first().cloned().unwrap_or_default();
     modules.insert(
         key.clone(),
         LoadedModule {
             path: key.clone(),
-            source: source.clone(),
-            module,
             declared_name: declared_name.clone(),
             imports: Vec::new(),
+            matched_dir,
+            parsed: Some(Parsed { source: source.clone(), module }),
         },
     );
 
     let mut resolved: Vec<(Name, PathBuf)> = Vec::new();
     for import in import_names {
         if let Some(bsrc) = bundled_source(import.as_str()) {
-            let child_key = load_bundled_module(&import, bsrc, scopes, modules)?;
+            let child_key = load_bundled_module(&import, bsrc, scopes, modules, graph)?;
             resolved.push((import, child_key));
             continue;
         }
@@ -1669,13 +1907,14 @@ fn load_module_file(
                     ),
                 )
             })?;
-        let child_search = scopes.search_for(&matched_dir);
-        let child_key = load_module_file(&import_path, child_search, scopes, modules)?;
+        let child_search = scopes.search_for(&matched_dir).to_vec();
+        let child_key = load_module_file(&import_path, &child_search, scopes, modules, graph)?;
+        modules.get_mut(&key).unwrap().matched_dir = search_dirs.first().cloned().unwrap_or_default();
         let found_name = modules[&child_key].declared_name.clone();
         if found_name != import {
-            return Err(BuildError::new(
+            return Err(LoadError::Build(BuildError::new(
                 import_path.clone(),
-                modules[&child_key].source.clone(),
+                modules[&child_key].source().to_string(),
                 "MODULE NAME MISMATCH",
                 Region::ZERO,
                 format!(
@@ -1684,7 +1923,7 @@ fn load_module_file(
                     import,
                     found_name
                 ),
-            ));
+            )));
         }
         resolved.push((import, child_key));
     }
@@ -1704,7 +1943,7 @@ fn module_file_name(name: &Name) -> String {
 /// path cleanly relativizes against a source directory; otherwise the check is
 /// skipped (so an unusual path form never produces a false positive).
 fn entry_name_mismatch(m: &LoadedModule, search_dirs: &[PathBuf]) -> Option<BuildError> {
-    let name = m.module.name.as_ref()?;
+    let name = m.parsed.as_ref()?.module.name.as_ref()?;
     let expected = search_dirs.iter().find_map(|d| {
         let rel = m.path.strip_prefix(d).ok()?;
         rel.to_str()?.strip_suffix(".elm").map(|s| s.replace(['/', '\\'], "."))
@@ -1720,7 +1959,7 @@ fn entry_name_mismatch(m: &LoadedModule, search_dirs: &[PathBuf]) -> Option<Buil
     .to_report();
     Some(BuildError::from_reports(
         m.path.clone(),
-        m.source.clone(),
+        m.source().to_string(),
         vec![report],
     ))
 }
@@ -1785,7 +2024,15 @@ fn assign_unique_names(
 /// resolved, unique names, ready to hand to the (name-keyed) canonicalizer.
 /// In the common, no-duplicate case this changes nothing.
 fn rewrite_module(loaded: &LoadedModule, unique_names: &HashMap<PathBuf, Name>) -> src::Module {
-    let mut module = loaded.module.clone();
+    // Only ever called for a module being compiled, which is always one that
+    // was read: the graph cache's fast path is used exactly for the modules
+    // whose ASTs nobody needs.
+    let mut module = loaded
+        .parsed
+        .as_ref()
+        .expect("rewrite_module on a module that was never parsed")
+        .module
+        .clone();
     let my_name = unique_names[&loaded.path].clone();
 
     match &mut module.name {

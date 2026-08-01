@@ -596,3 +596,112 @@ impl<'a> Reader<'a> {
         })
     }
 }
+
+// ------------------------------------------------------- the module graph
+
+/// What a build learned about one file's *place in the project*, as opposed to
+/// what it compiled to: the name it declares and the files its imports resolve
+/// to. Cached because rediscovering it means reading and parsing every module
+/// and re-resolving every import against the search path — on a 360-module
+/// project that was 63 ms of a 150 ms incremental build, to arrive at the same
+/// graph as last time.
+pub struct GraphRecord {
+    /// Modification time in nanoseconds since the epoch, and the file's length.
+    /// Together these stand in for "unchanged". Unlike the per-module entries,
+    /// which hash contents, this is a *timestamp* check — the whole point is to
+    /// avoid reading the file. It is what elm, cargo and make all do, and it
+    /// accepts one risk in exchange: a file swapped for a same-length variant
+    /// with an older timestamp reads as untouched. `ALM_NO_CACHE=1` is the way
+    /// out if that ever happens.
+    pub mtime_ns: u64,
+    pub size: u64,
+    pub declared_name: Name,
+    /// The source directory this file was found in, which decides where *its*
+    /// imports are searched for. Only needed if the file turns out to have
+    /// changed, but recorded so that case does not need a second pass.
+    pub matched_dir: PathBuf,
+    pub imports: Vec<(Name, PathBuf)>,
+}
+
+#[derive(Default)]
+pub struct Graph {
+    pub modules: HashMap<PathBuf, GraphRecord>,
+}
+
+/// `(mtime_ns, size)` for a path, or `None` if it cannot be stat'd — which
+/// counts as changed.
+pub fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((mtime as u64, meta.len()))
+}
+
+impl Graph {
+    /// The record for `path`, if the file on disk is the one it describes.
+    pub fn unchanged(&self, path: &Path) -> Option<&GraphRecord> {
+        let record = self.modules.get(path)?;
+        let (mtime_ns, size) = stamp(path)?;
+        (record.mtime_ns == mtime_ns && record.size == size).then_some(record)
+    }
+}
+
+fn graph_path(dir: &Path) -> PathBuf {
+    dir.join("graph.almg")
+}
+
+pub fn load_graph(dir: &Path, fingerprint: u64) -> Option<Graph> {
+    let bytes = std::fs::read(graph_path(dir)).ok()?;
+    let mut r = Reader { bytes: &bytes, at: 0 };
+    if r.take(4)? != MAGIC || r.u32()? != FORMAT_VERSION || r.u64()? != fingerprint {
+        return None;
+    }
+    let records = r.vec(|r| {
+        Some((
+            PathBuf::from(r.string()?),
+            GraphRecord {
+                mtime_ns: r.u64()?,
+                size: r.u64()?,
+                declared_name: r.name()?,
+                matched_dir: PathBuf::from(r.string()?),
+                imports: r.vec(|r| Some((r.name()?, PathBuf::from(r.string()?))))?,
+            },
+        ))
+    })?;
+    (r.at == bytes.len()).then(|| Graph { modules: records.into_iter().collect() })
+}
+
+pub fn store_graph(dir: &Path, fingerprint: u64, graph: &Graph) {
+    let mut w = Writer::default();
+    w.bytes.extend_from_slice(MAGIC);
+    w.u32(FORMAT_VERSION);
+    w.u64(fingerprint);
+    // Sorted, so the file is reproducible rather than following hash order.
+    let mut paths: Vec<&PathBuf> = graph.modules.keys().collect();
+    paths.sort();
+    w.vec(&paths, |w, path| {
+        let record = &graph.modules[*path];
+        w.string(&path.display().to_string());
+        w.u64(record.mtime_ns);
+        w.u64(record.size);
+        w.name(&record.declared_name);
+        w.string(&record.matched_dir.display().to_string());
+        w.vec(&record.imports, |w, (name, path)| {
+            w.name(name);
+            w.string(&path.display().to_string());
+        });
+    });
+
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = graph_path(dir);
+    let temporary = path.with_extension("tmp");
+    if std::fs::write(&temporary, &w.bytes).is_ok() {
+        let _ = std::fs::rename(&temporary, &path);
+    }
+}

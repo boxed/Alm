@@ -241,3 +241,69 @@ fn a_corrupt_entry_is_a_miss_not_a_failure() {
         "a corrupt cache changed the output instead of being ignored"
     );
 }
+
+// The graph cache recognizes an untouched file by its timestamp and length, so
+// that an unchanged module is never read or parsed. These pin the two ways that
+// could go wrong.
+
+#[test]
+fn a_same_length_edit_is_still_noticed() {
+    let dir = common::test_dir("alm-incremental", "same-length");
+    project_with(&dir, LABEL);
+    build_incremental(&dir).expect("seed the cache");
+
+    // Same number of bytes, different bytes: only the timestamp gives it away.
+    let edited = LABEL.replace("String.toUpper text", "String.toLower text");
+    assert_eq!(edited.len(), LABEL.len(), "the fixture edit changed the length");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+
+    let js = assert_agrees(&dir, "after a same-length edit");
+    assert!(js.contains("toLower"), "a same-length edit was missed");
+}
+
+#[test]
+fn a_deleted_module_is_reported_not_silently_reused() {
+    let dir = common::test_dir("alm-incremental", "deleted");
+    project_with(&dir, LABEL);
+    build_incremental(&dir).expect("seed the cache");
+
+    // Widget still imports Label and its own text is untouched, so its cached
+    // edge points at a file that is gone. That has to be an error, not a build
+    // from the copy the cache happens to be holding.
+    std::fs::remove_file(dir.join("src").join("Label.elm")).expect("delete Label");
+    let error = assert_agrees(&dir, "after deleting an imported module");
+    assert!(
+        error.contains("Label"),
+        "the error does not mention the missing module:\n{error}"
+    );
+}
+
+#[test]
+fn moving_a_module_between_source_dirs_is_picked_up() {
+    let dir = common::test_dir("alm-incremental", "moved");
+    project_with(&dir, LABEL);
+    // A second source directory, searched after `src`.
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src", "vendor"],
+            "elm-version": "0.19.1",
+            "dependencies": { "direct": { "elm/core": "1.0.5" }, "indirect": {} },
+            "test-dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .expect("write elm.json");
+    let original = build_incremental(&dir).expect("seed the cache");
+
+    // Same module name, different file, different contents: the importer's text
+    // has not changed, so only re-resolution can find it.
+    std::fs::create_dir_all(dir.join("vendor")).expect("create vendor");
+    std::fs::remove_file(dir.join("src").join("Label.elm")).expect("remove from src");
+    std::fs::write(
+        dir.join("vendor").join("Label.elm"),
+        LABEL.replace("String.toUpper text", "String.trim text"),
+    )
+    .expect("write vendor Label");
+
+    let js = assert_agrees(&dir, "after moving a module to another source dir");
+    assert_ne!(js, original, "moving the module changed nothing in the bundle");
+    assert!(js.contains("trim"), "the moved module's new body never arrived");
+}
