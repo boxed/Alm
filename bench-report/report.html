@@ -93,7 +93,7 @@
   // that: it ended up describing numbers it was no longer showing.
   const DATA = {
   "title": "alm \u2014 runtime, computation and compile speed",
-  "generated": "generated 2026-08-01 19:59 CEST by make report",
+  "generated": "generated 2026-08-01 21:32 CEST by make report",
   "sections": [
     {
       "title": "Runtime",
@@ -342,7 +342,7 @@
       "tables": [
         {
           "label": "project",
-          "caption": "milliseconds \u00b7 full build of the whole module graph",
+          "caption": "milliseconds \u00b7 cold builds recompile the whole module graph; (incr.) rebuilds one edited module",
           "columns": [
             "elm (full)",
             "elm (incr.)",
@@ -424,7 +424,7 @@
         },
         {
           "label": "build",
-          "caption": "milliseconds \u00b7 alm keeps no cache, so it is shown against each elm mode",
+          "caption": "milliseconds \u00b7 every mode both compilers have, on one real application",
           "columns": [
             "elm, project-cold",
             "elm, incremental",
@@ -432,8 +432,8 @@
             "elm, no-op",
             "alm, project-cold",
             "alm, incremental",
-            "alm, no-op",
-            "alm, all sources touched"
+            "alm, all sources touched",
+            "alm, no-op"
           ],
           "rows": [
             {
@@ -457,7 +457,7 @@
           "unit": ""
         }
       ],
-      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cache comparison: dryft \u00b7 39,790 lines \u00b7 19 entry points",
+      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cold against warm: dryft \u00b7 39,790 lines \u00b7 19 entry points",
       "freshness": {
         "state": "fresh",
         "note": "2026-08-01"

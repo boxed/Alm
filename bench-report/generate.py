@@ -148,7 +148,7 @@ def compute_section(data):
 def compile_section(data):
     tables = [{
         "label": "project",
-        "caption": "milliseconds · full build of the whole module graph",
+        "caption": "milliseconds · cold builds recompile the whole module graph; (incr.) rebuilds one edited module",
         "columns": [c for c in data["compilers"]
                     if any(row.get(c) is not None for row in data.get("projects", []))],
         "rows": [{"op": row["op"],
@@ -176,7 +176,7 @@ def compile_section(data):
     facts = None
     if detail:
         project = detail["project"]
-        facts = (f"cache comparison: {project['name']} · {project['total_lines']:,} lines · "
+        facts = (f"cold against warm: {project['name']} · {project['total_lines']:,} lines · "
                  f"{project.get('entry_points', '?')} entry points")
         # The two rows measure different modes — there is no no-op for a
         # whole-project build — so columns are keyed by name, and a mode a row
@@ -185,13 +185,13 @@ def compile_section(data):
         if detail.get("suite"):
             rows[f"all {project.get('entry_points', '')} entry points"] = detail["suite"]
         order = ["elm, project-cold", "elm, incremental", "elm, all sources touched",
-                 "elm, no-op", "alm, project-cold", "alm, incremental", "alm, no-op",
-                 "alm, full rebuild"]
+                 "elm, no-op", "alm, project-cold", "alm, incremental",
+                 "alm, all sources touched", "alm, no-op"]
         seen = {name for modes in rows.values() for name in modes}
         cols = [c for c in order if c in seen] + [c for c in sorted(seen) if c not in order]
         tables.append({
             "label": "build",
-            "caption": "milliseconds · alm keeps no cache, so it is shown against each elm mode",
+            "caption": "milliseconds · every mode both compilers have, on one real application",
             "columns": cols,
             "rows": [{"op": label, **{k: v for k, v in modes.items() if v is not None}}
                      for label, modes in rows.items()],
