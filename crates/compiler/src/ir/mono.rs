@@ -1678,8 +1678,17 @@ impl Specializer<'_> {
         {
             let mut masked = std::collections::HashSet::new();
             scan_local_uses(&body_t, &poly_names, &mut masked, &mut queue);
-            for d in nonpoly.values() {
-                scan_decl_uses(d, &poly_names, &mut queue);
+            // In declaration order, NOT `nonpoly.values()`. This seeds the
+            // worklist below, whose order decides the order a poly local's
+            // specialized copies are emitted in — so iterating the map made the
+            // compiler's output depend on the process's hash seed. Two runs of
+            // the same binary on the same source emitted the same functions in
+            // different orders, which is a reproducible-build bug and made
+            // "did that change the output?" impossible to answer by comparison.
+            for i in 0..decls.len() {
+                if let Some(d) = nonpoly.get(&i) {
+                    scan_decl_uses(d, &poly_names, &mut queue);
+                }
             }
         }
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
