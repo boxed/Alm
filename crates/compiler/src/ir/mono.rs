@@ -20,10 +20,12 @@
 //! — that is [`crate::ir::layout`]'s job, consulted later by the backend.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 
 use crate::ast::canonical as can;
+use crate::data::fxhash::{FxHashMap, FxHashSet};
 use crate::data::Name;
 use crate::reporting::annotation::Located;
 use crate::reporting::Region;
@@ -102,7 +104,9 @@ pub fn analyze_project(modules: &[ModuleInfo], entry: &Name) -> MonoSet {
     let ctxs = build_ctxs(modules);
     let mut set = MonoSet::default();
     // Seen instances keyed by (module, name, type).
-    let mut seen: HashMap<(Name, Name, can::Type), ()> = HashMap::new();
+    // Keyed by a whole type tree, probed per reference: same reasoning as the
+    // set in `specialize_project`. Membership only.
+    let mut seen: FxHashMap<(Name, Name, can::Type), ()> = FxHashMap::default();
     let mut queue: Vec<Instance> = Vec::new();
 
     if let Some(entry_ctx) = ctxs.get(entry) {
@@ -350,7 +354,7 @@ fn type_exceeds_nodes(tipe: &can::Type, limit: usize) -> bool {
 
 fn enqueue(
     queue: &mut Vec<Instance>,
-    seen: &mut HashMap<(Name, Name, can::Type), ()>,
+    seen: &mut FxHashMap<(Name, Name, can::Type), ()>,
     set: &mut MonoSet,
     instance: Instance,
 ) {
@@ -655,7 +659,11 @@ pub fn specialize_project(modules: &[ModuleInfo], entry: &Name) -> MonoProgram {
     // that share a mangled name (several `number` variables → `Int`, or
     // layout-identical `Ref` specializations) are compiled once.
     let sink: std::cell::RefCell<Vec<Instance>> = std::cell::RefCell::new(Vec::new());
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // FxHash, not SipHash: these keys are long mangled names and this set is
+    // probed once per discovered reference, which put SipHash at 14% of a real
+    // application's build. Membership only — never iterated, so the hasher
+    // cannot reach the output (see `data::fxhash`).
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     let mut worklist: Vec<Instance> = Vec::new();
     let analyzed = analyze_project(modules, entry);
     let mut error = analyzed.error.clone();
@@ -1691,8 +1699,8 @@ impl Specializer<'_> {
                 }
             }
         }
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut spec_decls: HashMap<String, TypedLetDecl> = HashMap::new();
+        let mut seen: FxHashSet<String> = FxHashSet::default();
+        let mut spec_decls: FxHashMap<String, TypedLetDecl> = FxHashMap::default();
         let mut per_name: HashMap<Name, Vec<Name>> = HashMap::new();
         let mut qi = 0;
         while qi < queue.len() {
@@ -1781,7 +1789,7 @@ impl Specializer<'_> {
         // Route every use of a specialized local to the copy for its concrete
         // type. `emitted` guards against rewriting to a copy that (defensively)
         // does not exist.
-        let emitted: std::collections::HashSet<String> = seen;
+        let emitted: FxHashSet<String> = seen;
         {
             let mut masked = std::collections::HashSet::new();
             rewrite_local_uses(&mut body_t, &specialized, &emitted, &mut masked);
@@ -1941,7 +1949,11 @@ fn is_native_binop(op: &str) -> bool {
 /// The mangled name of a local specialization: the source name plus its
 /// concrete type, mirroring [`mangle`] for top-level functions.
 fn mangle_local(name: &Name, tipe: &can::Type) -> Name {
-    Name::from(format!("{}${}", name, mangle_type(&alpha_normalize(tipe))))
+    let mut out = String::with_capacity(48);
+    out.push_str(name.as_str());
+    out.push('$');
+    write_mangled(tipe, &mut Vec::new(), &mut out);
+    Name::from(out)
 }
 
 /// The names a pattern binds (used to detect shadowing of a specialized local).
@@ -2116,7 +2128,7 @@ fn scan_decl_uses_masked(
 fn rewrite_local_uses(
     e: &mut TypedExpr,
     specialized: &std::collections::HashSet<Name>,
-    emitted: &std::collections::HashSet<String>,
+    emitted: &FxHashSet<String>,
     masked: &mut std::collections::HashSet<Name>,
 ) {
     use TypedKind::*;
@@ -2219,7 +2231,7 @@ fn rewrite_local_uses(
 fn rewrite_decl_uses(
     decl: &mut TypedLetDecl,
     specialized: &std::collections::HashSet<Name>,
-    emitted: &std::collections::HashSet<String>,
+    emitted: &FxHashSet<String>,
 ) {
     let mut masked = std::collections::HashSet::new();
     rewrite_decl_uses_masked(decl, specialized, emitted, &mut masked);
@@ -2228,7 +2240,7 @@ fn rewrite_decl_uses(
 fn rewrite_decl_uses_masked(
     decl: &mut TypedLetDecl,
     specialized: &std::collections::HashSet<Name>,
-    emitted: &std::collections::HashSet<String>,
+    emitted: &FxHashSet<String>,
     masked: &mut std::collections::HashSet<Name>,
 ) {
     match decl {
@@ -2271,131 +2283,134 @@ fn type_depth(tipe: &can::Type) -> usize {
 }
 
 /// Mangle a `(module, name, concrete type)` triple into a unique symbol.
-/// The encoding must be INJECTIVE — a collision silently merges two
-/// specializations of different layouts (a miscompile). See `mangle_type`
-/// for the prefix-unambiguous scheme. The module qualifier keeps
-/// specializations from different modules distinct.
+/// The module qualifier keeps specializations from different modules distinct;
+/// see [`write_mangled`] for the type encoding and why it must be injective.
 pub fn mangle(module: &Name, name: &Name, tipe: &can::Type) -> Name {
-    Name::from(format!("{}${}${}", module, name, mangle_type(&alpha_normalize(tipe))))
+    let mut out = String::with_capacity(64);
+    out.push_str(module.as_str());
+    out.push('$');
+    out.push_str(name.as_str());
+    out.push('$');
+    write_mangled(tipe, &mut Vec::new(), &mut out);
+    Name::from(out)
 }
 
-/// Rename type variables to `p0, p1, …` in first-occurrence order. Two
-/// instantiations that differ only in tyvar NAMES (`Deque (Buffer a17)` vs
-/// `Deque (Buffer a18)` — inference mints fresh names per use) are the same
-/// specialization; without this the fixpoint enqueues unboundedly many
-/// name-distinct copies (elm-deque's polymorphic recursion compiled forever
-/// at shallow types), and layout-identical `Ref` copies duplicated code.
-fn alpha_normalize(tipe: &can::Type) -> can::Type {
-    fn go(t: &can::Type, map: &mut Vec<(Name, Name)>) -> can::Type {
-        use can::Type::*;
-        match t {
-            Var(n) => {
-                // Keep constraint prefixes meaningful: `number*`/`comparable*`
-                // mangle by their constraint class, not their spelling.
-                let class = CONSTRAINT_PREFIXES
-                    .iter()
-                    .find(|c| n.as_str().starts_with(*c));
-                if let Some(c) = class {
-                    return Var(Name::from(*c));
-                }
-                if let Some((_, to)) = map.iter().find(|(from, _)| from == n) {
-                    return Var(to.clone());
-                }
-                let to = Name::from(format!("p{}", map.len()));
-                map.push((n.clone(), to.clone()));
-                Var(to)
-            }
-            Lambda(a, b) => Lambda(Rc::new(go(a, map)), Rc::new(go(b, map))),
-            Type(h, n, args) => Type(h.clone(), n.clone(), Rc::new(args.iter().map(|a| go(a, map)).collect())),
-            Tuple(a, b, c) => Tuple(
-                Rc::new(go(a, map)),
-                Rc::new(go(b, map)),
-                c.as_ref().map(|x| Rc::new(go(x, map))),
-            ),
-            Record(fields, ext) => {
-                // Number type variables in the SAME field order `mangle_type`
-                // renders (sorted by name). Node types and row-variable
-                // expansion can present a record's fields in different orders;
-                // numbering vars by the raw traversal order then makes two
-                // alpha-EQUAL record types number their vars differently, so
-                // they mangle to distinct strings — and a use resolves to a
-                // specialization created under the other name (the elm-charts
-                // `stack$…vp0…vp1…` vs `…vp1…vp0…` unbound-local bug). Sorting
-                // here keeps the var numbering canonical with the render order.
-                let mut sorted: Vec<&(Name, can::Type)> = fields.iter().collect();
-                sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                Record(
-                    Rc::new(sorted.iter().map(|(n, t)| (n.clone(), go(t, map))).collect()),
-                    ext.clone(),
-                )
-            }
-            Unit => Unit,
-        }
-    }
-    let mut map = Vec::new();
-    go(tipe, &mut map)
-}
-
-fn mangle_type(tipe: &can::Type) -> String {
+/// Append `tipe`'s mangling to `out`, renaming type variables as it goes.
+///
+/// This was two passes — `alpha_normalize` building a fully renamed COPY of the
+/// type, then `mangle_type` building a `String` per node and joining them into
+/// ever-larger `String`s. Mangling runs on every reference at every
+/// instantiation, so that allocation churn was most of monomorphization's time
+/// on a real application. Fusing them is only possible in one direction:
+/// `vars`, the first-occurrence variable numbering, has to thread through the
+/// same walk that writes the output.
+///
+/// **The encoding must be INJECTIVE.** A collision silently merges two
+/// specializations of different layouts, which is a miscompile, and each rule
+/// below is here because one did:
+///
+/// - Every VARIABLE-ARITY form carries its child COUNT (`Fn` needs none —
+///   `Lambda` is fixed arity 2), making this prefix-unambiguous Polish
+///   notation. Without counts the flat `$` joining cannot tell nesting from
+///   siblings: `Rec$a_T$b_U` followed by a sibling `$c_V` is byte-identical to
+///   a `Rec` whose LAST FIELD contains `c_V` nested one level deeper. Two
+///   different types (html-table's `{colA,id,items:List {colB,id,things:…}}`
+///   against the same fields with `things` hoisted out) collided to one
+///   specialization, and callers handed it rows of the other layout.
+/// - Types are qualified by module. Two modules can each declare a `Msg` whose
+///   layouts differ — an enum `i32` in one, a tagged pointer in another — and
+///   keyed by the short name alone their specializations collided to one
+///   symbol.
+/// - A field name and its type are separate `$` tokens: `_` is legal in field
+///   and variable names, so the old `name_type` form made `{f : oo_vx}` and
+///   `{f_voo : x}` collide.
+///
+/// Renaming variables to `p0, p1, …` is what makes two instantiations differing
+/// only in variable NAMES (`Deque (Buffer a17)` against `Deque (Buffer a18)` —
+/// inference mints fresh names per use) one specialization. Without it the
+/// fixpoint enqueued unboundedly many name-distinct copies, and elm-deque's
+/// polymorphic recursion compiled forever at ever-deeper types.
+fn write_mangled(tipe: &can::Type, vars: &mut Vec<Name>, out: &mut String) {
     use can::Type::*;
     match tipe {
-        // An unconstrained `number` variable defaults to Int — exactly as elm
-        // does at the end of inference and as `layout_of` treats it. Without
-        // this, a concrete call site (`Int`) and a definition discovered with
-        // the variable still unresolved (`number`) mangle to different names
-        // for identical code, so the call finds no target.
-        Var(n) if n.as_str().starts_with("number") => "Basics$Int$0".to_string(),
-        Var(n) => format!("v{}", n),
-        // Qualify by module: two modules can each declare a `Msg`/`Model` whose
-        // layouts differ (an enum `i32` in one, a tagged pointer in another).
-        // Keyed by the short name alone, their specializations collided to one
-        // symbol — invalid IR when the layouts disagree, a silent miscompile
-        // when they happen to share a shape. `home` is unique per module (the
-        // per-package resolver renames duplicates), so `home$name` is not.
-        // Every VARIABLE-ARITY form carries its child COUNT (`Fn` needs none
-        // — Lambda is fixed arity 2), making the encoding a
-        // prefix-unambiguous Polish notation. Without counts the flat `$`
-        // joining cannot tell nesting from siblings: `Rec$a_T$b_U` followed by
-        // a sibling `$c_V` is byte-identical to a Rec whose LAST FIELD contains
-        // `c_V` nested one level deeper — two different types (html-table's
-        // `{colA,id,items:List {colB,id,things:…}}` vs the same fields with
-        // `things` hoisted to the outer record) collided to one specialization,
-        // and callers handed it rows of the other layout.
-        Type(home, name, args) if args.is_empty() => format!("{}${}$0", home, name),
-        Type(home, name, args) => format!(
-            "{}${}${}${}",
-            home,
-            name,
-            args.len(),
-            args.iter().map(mangle_type).collect::<Vec<_>>().join("$")
-        ),
-        Lambda(a, b) => format!("Fn${}${}", mangle_type(a), mangle_type(b)),
-        Tuple(a, b, c) => {
-            let mut parts = vec![mangle_type(a), mangle_type(b)];
-            if let Some(c) = c {
-                parts.push(mangle_type(c));
+        Var(n) => {
+            // A constrained variable mangles by its class, not its spelling, so
+            // `number` stays meaningful; an unconstrained `number` defaults to
+            // Int exactly as elm does at the end of inference and as `layout_of`
+            // treats it. Without that, a concrete call site (`Int`) and a
+            // definition discovered with the variable still unresolved
+            // (`number`) mangle differently for identical code, and the call
+            // finds no target.
+            match CONSTRAINT_PREFIXES.iter().find(|c| n.as_str().starts_with(**c)) {
+                Some(&"number") => out.push_str("Basics$Int$0"),
+                Some(class) => {
+                    out.push('v');
+                    out.push_str(class);
+                }
+                None => {
+                    let index = match vars.iter().position(|v| v == n) {
+                        Some(i) => i,
+                        None => {
+                            vars.push(n.clone());
+                            vars.len() - 1
+                        }
+                    };
+                    let _ = write!(out, "vp{index}");
+                }
             }
-            format!("Tup{}${}", parts.len(), parts.join("$"))
+        }
+        Type(home, name, args) if args.is_empty() => {
+            let _ = write!(out, "{home}${name}$0");
+        }
+        Type(home, name, args) => {
+            let _ = write!(out, "{home}${name}${}", args.len());
+            for arg in args.iter() {
+                out.push('$');
+                write_mangled(arg, vars, out);
+            }
+        }
+        Lambda(a, b) => {
+            out.push_str("Fn$");
+            write_mangled(a, vars, out);
+            out.push('$');
+            write_mangled(b, vars, out);
+        }
+        Tuple(a, b, c) => {
+            let _ = write!(out, "Tup{}$", if c.is_some() { 3 } else { 2 });
+            write_mangled(a, vars, out);
+            out.push('$');
+            write_mangled(b, vars, out);
+            if let Some(c) = c {
+                out.push('$');
+                write_mangled(c, vars, out);
+            }
         }
         Record(fields, _) => {
-            // Field order is not canonical in node types (row-variable
-            // expansion appends extension fields after the named ones, while
-            // fully-inferred nodes carry them sorted), but the layout sorts by
-            // name — so mangle sorted too, or one record type mangles to two
-            // names and a reference resolves to a missing sibling copy.
-            // Field name and type as separate `$` tokens: `_` is legal in
-            // field and tyvar names, so the old `name_type` form collided
-            // (`{f : oo_vx}` vs `{f_voo : x}`). Sorted by field name (unique
-            // per record) to stay canonical with the layout's order.
+            // Sorted by field name (unique per record). Field order is not
+            // canonical in node types — row-variable expansion appends
+            // extension fields after the named ones, while fully-inferred nodes
+            // carry them sorted — but the layout sorts by name, so this must
+            // too or one record type mangles to two names and a reference
+            // resolves to a missing sibling copy. Sorting also keeps the
+            // variable numbering above canonical: numbering by raw traversal
+            // order made two alpha-EQUAL records number their variables
+            // differently, so they mangled apart and a use resolved to a
+            // specialization created under the other name (the elm-charts
+            // `stack$…vp0…vp1…` against `…vp1…vp0…` unbound-local bug).
             let mut sorted: Vec<&(Name, can::Type)> = fields.iter().collect();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
-            let parts: Vec<String> = sorted
-                .iter()
-                .map(|(n, t)| format!("{}${}", n, mangle_type(t)))
-                .collect();
-            format!("Rec{}${}", parts.len(), parts.join("$"))
+            // `Rec{n}$` — the separator is written even for an empty record,
+            // which is what the `format!`/`join` pair this replaces produced.
+            let _ = write!(out, "Rec{}$", sorted.len());
+            for (i, (name, ty)) in sorted.into_iter().enumerate() {
+                if i > 0 {
+                    out.push('$');
+                }
+                let _ = write!(out, "{name}$");
+                write_mangled(ty, vars, out);
+            }
         }
-        Unit => "Unit".to_string(),
+        Unit => out.push_str("Unit"),
     }
 }
 

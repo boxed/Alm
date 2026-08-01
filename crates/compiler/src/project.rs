@@ -72,6 +72,7 @@ pub mod timing {
         lint => "lint",
         simplify => "simplify",
         interface => "interface",
+        mono => "monomorphize",
         generate => "generate",
         dce => "tree-shake",
     }
@@ -467,8 +468,8 @@ pub fn compile_project_native(
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let checked = check_project(entry)?;
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
-    let program = crate::ir::lower::lower_project(&checked.modules);
-    generate::native::build(&program, output, opt)
+    let program = timing::mono(|| crate::ir::lower::lower_project(&checked.modules));
+    timing::generate(|| generate::native::build(&program, output, opt))
         .map(|()| warnings)
         .map_err(|message| {
             vec![BuildError::new(
@@ -509,7 +510,7 @@ pub fn compile_project_wasmgc(
             node_types: checked.node_types.get(&module.name).unwrap_or(&empty_nodes),
         })
         .collect();
-    let mut program = crate::ir::mono::specialize_project(&infos, &checked.entry);
+    let mut program = timing::mono(|| crate::ir::mono::specialize_project(&infos, &checked.entry));
     if let Some(message) = &program.error {
         return Err(vec![BuildError::new(
             entry.to_path_buf(),
@@ -585,15 +586,17 @@ pub fn compile_project_wasmgc(
             })
             .collect()
     });
-    generate::wasmgc::build(
-        &program,
-        output,
-        &ports,
-        &port_types,
-        &ctor_arg_types,
-        &unions,
-        sources.as_ref(),
-    )
+    timing::generate(|| {
+        generate::wasmgc::build(
+            &program,
+            output,
+            &ports,
+            &port_types,
+            &ctor_arg_types,
+            &unions,
+            sources.as_ref(),
+        )
+    })
     .map(|()| warnings)
     .map_err(|message| {
         vec![BuildError::new(
