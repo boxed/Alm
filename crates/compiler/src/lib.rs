@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod builtins;
+pub mod cache;
 pub mod canonicalize;
 pub mod data;
 pub mod decision;

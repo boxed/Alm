@@ -116,6 +116,54 @@ fn gen_bundle(
         src_idx: None,
     };
 
+    write_preamble(&mut gen.out);
+
+    let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
+    for module in modules {
+        let node_types = node_types.remove(&module.name).unwrap_or_default();
+        let src_idx = sources
+            .and_then(|s| s.get(&module.name))
+            .map(|(path, content)| gen.sm.add_source(path, content));
+        let exports = gen.emit_module(module, node_types, src_idx);
+        all_exports.push((module.name.clone(), exports));
+    }
+
+    write_tail(&mut gen.out, &all_exports);
+    if let Some(print) = repl {
+        gen.out.push_str(&repl_print(&print));
+    }
+    gen.out.push_str("}).call(this);\n");
+
+    return if dce {
+        let (js, line_map) = tree_shake(&gen.out);
+        let map = maps_on.then(|| {
+            gen.sm.remap_generated_lines(&line_map);
+            gen.sm.to_json()
+        });
+        (js, map)
+    } else {
+        let map = maps_on.then(|| gen.sm.to_json());
+        (gen.out, map)
+    };
+}
+
+/// Everything before the first module: the runtime kernel and the tables
+/// generated from the builtin lists. Identical for every build, which is what
+/// lets a cached module chunk be concatenated onto it unchanged.
+fn write_preamble(out: &mut String) {
+    let mut gen = Generator {
+        out: String::new(),
+        module_name: None,
+        temp_counter: 0,
+        node_types: HashMap::new(),
+        cyclic_values: HashSet::new(),
+        maps_on: false,
+        sm: SourceMap::new(""),
+        cur_line: 0,
+        cur_col: 0,
+        scanned: 0,
+        src_idx: None,
+    };
     gen.out.push_str("(function () {\n'use strict';\n\n");
     gen.out.push_str(&runtime_source());
     gen.out.push_str("\n// HIGHER-ARITY CURRY HELPERS\n");
@@ -253,43 +301,11 @@ fn gen_bundle(
         .unwrap();
     }
 
-    let mut all_exports: Vec<(Name, Vec<Name>)> = Vec::new();
-    for module in modules {
-        gen.module_name = Some(module.name.clone());
-        gen.node_types = node_types.remove(&module.name).unwrap_or_default();
-        gen.src_idx = sources
-            .and_then(|s| s.get(&module.name))
-            .map(|(path, content)| gen.sm.add_source(path, content));
-        gen.out.push_str("\n// MODULE ");
-        gen.out.push_str(module.name.as_str());
-        gen.out.push_str("\n\n");
+    *out = std::mem::take(&mut gen.out);
+}
 
-        for union in &module.unions {
-            gen.union(union);
-        }
-        for port in &module.ports {
-            gen.port_decl(port);
-        }
-
-        let mut exports = Vec::new();
-        for group in &module.decls {
-            match group {
-                can::DeclGroup::Value(def) => {
-                    gen.top_level_def(def);
-                    exports.push(def.name.value.clone());
-                }
-                can::DeclGroup::Recursive(defs) => {
-                    gen.recursive_group(defs);
-                    for def in defs {
-                        exports.push(def.name.value.clone());
-                    }
-                }
-            }
-        }
-        gen.manager_decl(module);
-        all_exports.push((module.name.clone(), exports));
-    }
-
+/// The `Elm` object the bundle publishes, built from what each module exports.
+fn write_tail(out: &mut String, all_exports: &[(Name, Vec<Name>)]) {
     let mut module_objects = String::new();
     for (i, (module_name, exports)) in all_exports.iter().enumerate() {
         if i > 0 {
@@ -329,31 +345,55 @@ fn gen_bundle(
     // the global object in a browser, so — exactly as in elm's output — the
     // bundle publishes itself as `Elm` in whichever scope loaded it.
     write!(
-        gen.out,
+        out,
         "\nvar Elm = {{ {} }};\n\
          _Platform_export(this, Elm);\n",
         module_objects
     )
     .unwrap();
-    if let Some(print) = repl {
-        gen.out.push_str(&repl_print(&print));
-    }
-    gen.out.push_str("}).call(this);\n");
+}
 
-    if dce {
-        // Tree-shake, then remap the source map onto the shaken bundle: live
-        // units keep their columns and only shift lines, and dead units' bodies
-        // (with their mappings) are dropped.
-        let (js, line_map) = tree_shake(&gen.out);
-        let map = maps_on.then(|| {
-            gen.sm.remap_generated_lines(&line_map);
-            gen.sm.to_json()
-        });
-        (js, map)
-    } else {
-        let map = maps_on.then(|| gen.sm.to_json());
-        (gen.out, map)
+/// Assemble a bundle from module chunks that were generated separately — the
+/// incremental path, where most chunks come from the cache and never had an
+/// AST in this process at all. Produces exactly what `gen_bundle` would have.
+pub fn assemble(chunks: &[(Name, String, Vec<Name>)], dce: bool) -> String {
+    let mut out = String::new();
+    write_preamble(&mut out);
+    for (_, javascript, _) in chunks {
+        out.push_str(javascript);
     }
+    let exports: Vec<(Name, Vec<Name>)> =
+        chunks.iter().map(|(name, _, e)| (name.clone(), e.clone())).collect();
+    write_tail(&mut out, &exports);
+    out.push_str("}).call(this);\n");
+    if dce {
+        tree_shake(&out).0
+    } else {
+        out
+    }
+}
+
+/// One module's slice of the bundle, generated on its own so it can be cached
+/// and concatenated later.
+pub fn module_chunk(
+    module: &can::Module,
+    node_types: HashMap<Region, can::Type>,
+) -> (String, Vec<Name>) {
+    let mut gen = Generator {
+        out: String::new(),
+        module_name: None,
+        temp_counter: 0,
+        node_types: HashMap::new(),
+        cyclic_values: HashSet::new(),
+        maps_on: false,
+        sm: SourceMap::new(""),
+        cur_line: 0,
+        cur_col: 0,
+        scanned: 0,
+        src_idx: None,
+    };
+    let exports = gen.emit_module(module, node_types, None);
+    (gen.out, exports)
 }
 
 /// elm's REPL print statement: render the value, then put the type after it —
@@ -715,6 +755,53 @@ impl Generator {
             }
         }
         self.out.push_str(&m.text);
+    }
+
+    /// Emit one module and return the names it exports.
+    ///
+    /// `temp_counter` restarts here. It used to run on across the whole
+    /// bundle, which made a module's `_v3` depend on how many temps every
+    /// earlier module happened to need — so the same module generated
+    /// different text in different builds and could not be cached. Temps are
+    /// function-local, so restarting per module still never collides.
+    fn emit_module(
+        &mut self,
+        module: &can::Module,
+        node_types: HashMap<Region, can::Type>,
+        src_idx: Option<u32>,
+    ) -> Vec<Name> {
+        self.module_name = Some(module.name.clone());
+        self.node_types = node_types;
+        self.src_idx = src_idx;
+        self.temp_counter = 0;
+        self.out.push_str("\n// MODULE ");
+        self.out.push_str(module.name.as_str());
+        self.out.push_str("\n\n");
+
+        for union in &module.unions {
+            self.union(union);
+        }
+        for port in &module.ports {
+            self.port_decl(port);
+        }
+
+        let mut exports = Vec::new();
+        for group in &module.decls {
+            match group {
+                can::DeclGroup::Value(def) => {
+                    self.top_level_def(def);
+                    exports.push(def.name.value.clone());
+                }
+                can::DeclGroup::Recursive(defs) => {
+                    self.recursive_group(defs);
+                    for def in defs {
+                        exports.push(def.name.value.clone());
+                    }
+                }
+            }
+        }
+        self.manager_decl(module);
+        exports
     }
 
     // UNIONS
@@ -1569,11 +1656,12 @@ impl Generator {
         // No `names` entry goes here, though the machinery for one exists. A
         // debugger resolves an identifier's original name through the map entry
         // *covering* its position — the nearest at or before it — so an entry
-        // naming one token also renames every later identifier that has none of
-        // its own. Naming references but not declarations put a function's
-        // parameters under the function's name and a `let` binding under
-        // whatever value preceded it. Names may go back in once every
-        // declaration carries one.
+        // that names one token also renames every later identifier that has no
+        // entry of its own. Naming references but not declarations showed a
+        // function's parameters under the function's name, and a `let` binding
+        // under whatever value happened to precede it. Names may only go in once
+        // every declaration carries one; see `emit_binding_names` in the design
+        // notes for what that needs.
         m.mark(expr.region);
         m
     }

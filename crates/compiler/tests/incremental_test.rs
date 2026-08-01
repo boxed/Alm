@@ -1,0 +1,243 @@
+//! The incremental build cache has exactly one contract: whatever it does, the
+//! bundle must be what a full build would have produced. A cache that is only
+//! nearly right is worse than no cache at all, because the difference surfaces
+//! as a bug in the user's program, days later, in code they did not touch.
+//!
+//! So every test here is differential — edit something, build incrementally,
+//! build again from scratch, compare — rather than an assertion about which
+//! modules the cache decided to reuse. The one exception is
+//! `dependent_is_rechecked_when_an_interface_changes`, which pins the property
+//! the whole design rests on: a module whose own text is untouched still has to
+//! be re-checked when something it imports changes shape. Get that wrong and
+//! the build happily emits code against types that no longer exist.
+
+mod common;
+
+use std::path::Path;
+
+use alm_compiler::project;
+
+const MAIN: &str = r#"module Main exposing (main)
+
+import Platform
+import Widget
+
+
+main : Program () () ()
+main =
+    Platform.worker
+        { init = \_ -> ( (), Cmd.none )
+        , update = \_ model -> ( model, Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+described : String
+described =
+    Widget.describe Widget.sample
+"#;
+
+const WIDGET: &str = r#"module Widget exposing (Widget, describe, sample)
+
+import Label
+
+
+type alias Widget =
+    { name : String, size : Int }
+
+
+sample : Widget
+sample =
+    { name = Label.title, size = 3 }
+
+
+describe : Widget -> String
+describe w =
+    Label.render w.name ++ " (" ++ String.fromInt w.size ++ ")"
+"#;
+
+const LABEL: &str = r#"module Label exposing (render, title)
+
+
+title : String
+title =
+    "widget"
+
+
+render : String -> String
+render text =
+    String.toUpper text
+"#;
+
+/// A three-module chain — Main imports Widget imports Label — so a change to
+/// `Label` has to travel two levels to reach `Main`.
+fn project_with(dir: &Path, label: &str) {
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    std::fs::write(
+        dir.join("elm.json"),
+        r#"{ "type": "application", "source-directories": ["src"], "elm-version": "0.19.1",
+            "dependencies": { "direct": { "elm/core": "1.0.5" }, "indirect": {} },
+            "test-dependencies": { "direct": {}, "indirect": {} } }"#,
+    )
+    .expect("write elm.json");
+    std::fs::write(src.join("Main.elm"), MAIN).expect("write Main");
+    std::fs::write(src.join("Widget.elm"), WIDGET).expect("write Widget");
+    std::fs::write(src.join("Label.elm"), label).expect("write Label");
+}
+
+fn build_incremental(dir: &Path) -> Result<String, String> {
+    project::compile_project_cached(&dir.join("src").join("Main.elm"), false, true)
+        .map(|(js, _)| js)
+        .map_err(render)
+}
+
+fn build_full(dir: &Path) -> Result<String, String> {
+    project::compile_project_uncached(&dir.join("src").join("Main.elm"), false)
+        .map(|(js, _)| js)
+        .map_err(render)
+}
+
+fn render(errors: Vec<project::BuildError>) -> String {
+    errors.iter().map(|e| e.render()).collect::<Vec<_>>().join("\n")
+}
+
+/// Build incrementally and from scratch, and require the two to be identical.
+fn assert_agrees(dir: &Path, what: &str) -> String {
+    let incremental = build_incremental(dir);
+    let full = build_full(dir);
+    match (incremental, full) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(
+                a.len(),
+                b.len(),
+                "{what}: incremental bundle is {} bytes, full build is {}",
+                a.len(),
+                b.len()
+            );
+            assert!(a == b, "{what}: incremental and full bundles differ");
+            a
+        }
+        (Err(a), Err(b)) => {
+            assert_eq!(a, b, "{what}: the two paths reported different errors");
+            a
+        }
+        (Ok(_), Err(b)) => panic!("{what}: incremental succeeded but a full build failed:\n{b}"),
+        (Err(a), Ok(_)) => panic!("{what}: incremental failed but a full build succeeded:\n{a}"),
+    }
+}
+
+#[test]
+fn cold_warm_and_full_builds_agree() {
+    let dir = common::test_dir("alm-incremental", "agree");
+    project_with(&dir, LABEL);
+
+    let cold = assert_agrees(&dir, "cold");
+    // Warm: everything now comes out of the cache. Same bytes, still.
+    let warm = build_incremental(&dir).expect("warm build");
+    assert_eq!(cold, warm, "a second build with a full cache changed the bundle");
+}
+
+#[test]
+fn body_change_does_not_disturb_the_bundle() {
+    let dir = common::test_dir("alm-incremental", "body");
+    project_with(&dir, LABEL);
+    build_incremental(&dir).expect("seed the cache");
+
+    // `render`'s implementation changes; its type does not. Dependents may be
+    // reused, but the bundle must still pick up the new body.
+    let edited = LABEL.replace("String.toUpper text", "String.toLower text");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+    let js = assert_agrees(&dir, "after a body-only change");
+    assert!(js.contains("toLower"), "the edited body never reached the bundle");
+}
+
+#[test]
+fn dependent_is_rechecked_when_an_interface_changes() {
+    let dir = common::test_dir("alm-incremental", "interface");
+    project_with(&dir, LABEL);
+    build_incremental(&dir).expect("seed the cache");
+
+    // `title` becomes an Int. `Widget.sample` uses it as a String and its own
+    // text is untouched, so if the cache reuses Widget on the strength of that,
+    // the build "succeeds" and emits a program built against a type that is no
+    // longer there. It must fail instead — with the same error a full build gives.
+    let edited = LABEL.replace("title : String", "title : Int").replace("    \"widget\"", "    42");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+
+    let incremental = build_incremental(&dir);
+    let full = build_full(&dir);
+    assert!(
+        incremental.is_err(),
+        "the cache reused a dependent whose dependency changed shape — this is the \
+         stale-build bug the design exists to prevent"
+    );
+    assert_eq!(
+        incremental.unwrap_err(),
+        full.unwrap_err(),
+        "incremental and full builds disagreed about the error"
+    );
+}
+
+#[test]
+fn reverting_an_edit_restores_the_original_bundle() {
+    let dir = common::test_dir("alm-incremental", "revert");
+    project_with(&dir, LABEL);
+    let original = build_incremental(&dir).expect("seed the cache");
+
+    let edited = LABEL.replace("String.toUpper text", "String.toLower text");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+    build_incremental(&dir).expect("build the edit");
+
+    std::fs::write(dir.join("src").join("Label.elm"), LABEL).expect("revert Label");
+    assert_eq!(
+        build_incremental(&dir).expect("build the revert"),
+        original,
+        "reverting an edit did not restore the original bundle"
+    );
+}
+
+#[test]
+fn a_new_module_in_the_middle_is_picked_up() {
+    let dir = common::test_dir("alm-incremental", "new-module");
+    project_with(&dir, LABEL);
+    build_incremental(&dir).expect("seed the cache");
+
+    // Widget starts importing a module that did not exist during the last
+    // build. Nothing in the cache knows about it.
+    std::fs::write(
+        dir.join("src").join("Suffix.elm"),
+        "module Suffix exposing (mark)\n\n\nmark : String\nmark =\n    \"!\"\n",
+    )
+    .expect("write Suffix");
+    let edited = WIDGET
+        .replace("import Label", "import Label\nimport Suffix")
+        .replace("Label.render w.name ++", "Label.render w.name ++ Suffix.mark ++");
+    std::fs::write(dir.join("src").join("Widget.elm"), &edited).expect("edit Widget");
+
+    let js = assert_agrees(&dir, "after adding a module");
+    assert!(js.contains("Suffix"), "the new module never reached the bundle");
+}
+
+#[test]
+fn a_corrupt_entry_is_a_miss_not_a_failure() {
+    let dir = common::test_dir("alm-incremental", "corrupt");
+    project_with(&dir, LABEL);
+    let original = build_incremental(&dir).expect("seed the cache");
+
+    // Truncated files, foreign files, garbage: a cache is not a database, and
+    // none of this may take a build down.
+    let cache_dir = alm_compiler::cache::dir_for(&dir);
+    for entry in std::fs::read_dir(&cache_dir).expect("read cache dir") {
+        let path = entry.expect("dir entry").path();
+        let bytes = std::fs::read(&path).expect("read entry");
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).expect("truncate entry");
+    }
+    std::fs::write(cache_dir.join("junk.almc"), b"not a cache entry at all").expect("write junk");
+
+    assert_eq!(
+        build_incremental(&dir).expect("build with a corrupt cache"),
+        original,
+        "a corrupt cache changed the output instead of being ignored"
+    );
+}

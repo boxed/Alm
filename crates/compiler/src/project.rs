@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::ast::canonical as can;
 use crate::ast::source as src;
 use crate::data::Name;
+use crate::cache;
 use crate::interface::Interfaces;
 use crate::reporting::{Located, Region, Report};
 use crate::{builtins, canonicalize, generate, nitpick, optimize, parse, typecheck};
@@ -72,6 +73,7 @@ pub mod timing {
         lint => "lint",
         simplify => "simplify",
         interface => "interface",
+        cache => "cache i/o",
         mono => "monomorphize",
         generate => "generate",
         dce => "tree-shake",
@@ -281,6 +283,30 @@ pub fn compile_project_with(
     entry: &Path,
     optimize: bool,
 ) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    // Reuse what the last build compiled, module by module. `ALM_NO_CACHE=1`
+    // forces the full path — the kill-switch should a stale-cache bug ever be
+    // suspected in the field.
+    if std::env::var_os("ALM_NO_CACHE").is_none() {
+        compile_project_cached(entry, optimize, dce_wanted())
+    } else {
+        compile_project_uncached(entry, optimize)
+    }
+}
+
+/// Tree-shake by default; `ALM_NO_DCE=1` emits the whole runtime kernel as a
+/// field kill-switch should DCE ever drop something an app needs.
+fn dce_wanted() -> bool {
+    std::env::var_os("ALM_NO_DCE").is_none()
+}
+
+/// Compile to JavaScript from scratch, reading and reusing nothing. This is
+/// what the incremental path has to agree with exactly, so it is callable on
+/// its own rather than only reachable through an environment variable.
+pub fn compile_project_uncached(
+    entry: &Path,
+    optimize: bool,
+) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    let dce = dce_wanted();
     let checked = check_project(entry)?;
     if optimize {
         let offenders = crate::debug_uses::modules_using_debug(&checked.modules);
@@ -290,9 +316,6 @@ pub fn compile_project_with(
             )]);
         }
     }
-    // Tree-shake by default; `ALM_NO_DCE=1` emits the whole runtime kernel as a
-    // field kill-switch should DCE ever drop something an app needs.
-    let dce = std::env::var_os("ALM_NO_DCE").is_none();
     // Lint walks the already-checked AST — a cheap single traversal, not a
     // second front end — so `alm make` prints hints without re-type-checking.
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
@@ -609,6 +632,248 @@ pub fn compile_project_wasmgc(
     })
 }
 
+/// Compile to JavaScript, reusing what the last build already compiled.
+///
+/// The unit of reuse is a module: if its source is unchanged and every
+/// interface it was checked against is unchanged, its JavaScript comes back
+/// from `.alm-stuff` and it is not read, canonicalized, type checked or
+/// generated at all. Everything is still *parsed* every build — that is how
+/// the import graph is known, and it costs about 4% of a full build.
+///
+/// The result is byte-for-byte what a full build produces. That is the whole
+/// contract, and `incremental_matches_full_build` in the test suite is what
+/// holds it: a cache that is merely *nearly* right is worse than none, because
+/// the difference shows up as a bug in the user's program.
+pub fn compile_project_cached(
+    entry: &Path,
+    optimize: bool,
+    dce: bool,
+) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
+    let scopes = resolve_scopes(entry);
+    let Loaded { modules, order, unique_names, entry_key: _ } = load_and_order(entry, &scopes)?;
+
+    let dir = cache::dir_for(&project_root(entry));
+    // Anything that changes what a module compiles to, but is not the module's
+    // own text or its dependencies' interfaces, belongs in the fingerprint.
+    let fingerprint = cache::fingerprint(&[
+        ("target", "js"),
+        ("dce", if dce { "1" } else { "0" }),
+        ("optimize", if optimize { "1" } else { "0" }),
+    ]);
+
+    let mut interfaces = Interfaces::new();
+    // Interfaces read from the cache, still encoded. They are only needed to
+    // check *other* modules against, so a build where nothing changed never
+    // decodes one; the first module that has to be re-checked drains these.
+    let mut pending: Vec<(Name, cache::LazyInterface)> = Vec::new();
+    let mut interface_hashes: HashMap<Name, u64> = HashMap::new();
+    let mut chunks: Vec<(Name, String, Vec<Name>)> = Vec::new();
+    let mut warnings: Vec<crate::lint::Warning> = Vec::new();
+    let mut debug_users: Vec<Name> = Vec::new();
+    let mut build_errors: Vec<BuildError> = Vec::new();
+    let mut failed: HashSet<PathBuf> = HashSet::new();
+    let mut reused = 0usize;
+
+    for path in &order {
+        let source_module = &modules[path];
+        if source_module.imports.iter().any(|(_, dep)| failed.contains(dep)) {
+            failed.insert(path.clone());
+            continue;
+        }
+        let name = unique_names[path].clone();
+
+        // What this module was, or would be, compiled against. Sorted so the
+        // comparison does not depend on the order imports happen to be listed.
+        let mut deps: Vec<(Name, u64)> = source_module
+            .imports
+            .iter()
+            .filter_map(|(_, dep)| {
+                let dep_name = unique_names.get(dep)?;
+                Some((dep_name.clone(), *interface_hashes.get(dep_name)?))
+            })
+            .collect();
+        deps.sort();
+        deps.dedup();
+        let source_hash = cache::hash_str(&source_module.source);
+
+        if let Some(hit) = timing::cache(|| cache::load(&dir, path, fingerprint)) {
+            if hit.source_hash == source_hash && hit.deps == deps {
+                pending.push((name.clone(), hit.interface));
+                interface_hashes.insert(name.clone(), hit.interface_hash);
+                chunks.push((name.clone(), hit.javascript, hit.exports));
+                if hit.uses_debug {
+                    debug_users.push(name.clone());
+                }
+                warnings.extend(hit.warnings.into_iter().map(|report| crate::lint::Warning {
+                    path: source_module.path.clone(),
+                    source: source_module.source.clone(),
+                    report,
+                }));
+                reused += 1;
+                continue;
+            }
+        }
+
+        // About to check a module, so the interfaces held back until now are
+        // needed. A decode failure here means an entry that read cleanly does
+        // not parse on second look, which should be impossible — fall back to a
+        // full build rather than reason about a half-trusted cache.
+        for (pending_name, lazy) in pending.drain(..) {
+            match lazy.decode() {
+                Some(interface) => {
+                    interfaces.insert(pending_name, interface);
+                }
+                None => return compile_project_uncached(entry, optimize),
+            }
+        }
+
+        let Some((canonical, interface, node_types)) =
+            check_one(source_module, &name, &unique_names, &interfaces, &mut build_errors)
+        else {
+            failed.insert(path.clone());
+            continue;
+        };
+
+        let module_warnings = timing::lint(|| {
+            crate::lint::lint(
+                std::slice::from_ref(&canonical),
+                &HashMap::from([(
+                    name.clone(),
+                    (source_module.path.clone(), source_module.source.clone()),
+                )]),
+            )
+        });
+        let uses_debug = !crate::debug_uses::modules_using_debug(std::slice::from_ref(&canonical))
+            .is_empty();
+        let (javascript, exports) =
+            timing::generate(|| generate::module_chunk(&canonical, node_types));
+
+        let hash = cache::interface_hash(&interface);
+        timing::cache(|| cache::store(
+            &dir,
+            path,
+            fingerprint,
+            &cache::Stored {
+                source_hash,
+                deps: &deps,
+                interface_hash: hash,
+                interface: &interface,
+                javascript: &javascript,
+                exports: &exports,
+                uses_debug,
+                warnings: &module_warnings.iter().map(|w| w.report.clone()).collect::<Vec<_>>(),
+            },
+        ));
+
+        interfaces.insert(name.clone(), interface);
+        interface_hashes.insert(name.clone(), hash);
+        chunks.push((name.clone(), javascript, exports));
+        warnings.extend(module_warnings);
+        if uses_debug {
+            debug_users.push(name);
+        }
+    }
+
+    if !build_errors.is_empty() {
+        return Err(build_errors);
+    }
+    if optimize && !debug_users.is_empty() {
+        return Err(vec![BuildError::without_source(
+            crate::debug_uses::debug_remnants_report(&debug_users),
+        )]);
+    }
+    if timing::enabled() {
+        eprintln!("── alm cache ── {reused}/{} modules reused", order.len());
+    }
+    Ok((timing::generate(|| generate::assemble(&chunks, dce)), warnings))
+}
+
+/// Canonicalize, type check and exhaustiveness check one module, returning
+/// what the rest of the build needs from it. Errors are pushed onto
+/// `build_errors` and `None` returned, matching `check_project_with`: a build
+/// reports every module it could check rather than stopping at the first.
+fn check_one(
+    source_module: &LoadedModule,
+    name: &Name,
+    unique_names: &HashMap<PathBuf, Name>,
+    interfaces: &Interfaces,
+    build_errors: &mut Vec<BuildError>,
+) -> Option<(can::Module, crate::interface::Interface, HashMap<Region, can::Type>)> {
+    let rewritten = rewrite_module(source_module, unique_names);
+    let (mut canonical, mut interface) =
+        match timing::canonicalize(|| canonicalize::canonicalize_module(&rewritten, interfaces)) {
+            Ok(pair) => pair,
+            Err(errors) => {
+                build_errors.extend(errors.into_iter().map(|e| {
+                    BuildError::new(
+                        source_module.path.clone(),
+                        source_module.source.clone(),
+                        "NAMING PROBLEM",
+                        e.region,
+                        e.message,
+                    )
+                    .in_module(name)
+                }));
+                return None;
+            }
+        };
+
+    let checked = match timing::typecheck(|| {
+        typecheck::check_module_with(&canonical, interfaces, true)
+    }) {
+        Ok(checked) => checked,
+        Err(errors) => {
+            let reports = errors
+                .into_iter()
+                .map(|e| match e.report {
+                    Some(report) => report,
+                    None => crate::reporting::Report {
+                        title: "TYPE MISMATCH".to_string(),
+                        region: e.region,
+                        message: e.message,
+                        elm: None,
+                    },
+                })
+                .collect::<Vec<_>>();
+            build_errors.push(
+                BuildError::from_reports(
+                    source_module.path.clone(),
+                    source_module.source.clone(),
+                    reports,
+                )
+                .in_module(name),
+            );
+            return None;
+        }
+    };
+
+    if let Err(errors) = timing::nitpick(|| nitpick::check(&canonical, interfaces)) {
+        build_errors.extend(errors.into_iter().map(|e| {
+            BuildError::new(
+                source_module.path.clone(),
+                source_module.source.clone(),
+                "MISSING PATTERNS",
+                e.region,
+                e.message,
+            )
+            .in_module(name)
+        }));
+        return None;
+    }
+
+    timing::simplify(|| optimize::simplify_module(&mut canonical));
+
+    for value in interface.value_names.clone() {
+        if let Some(tipe) = checked.types.get(&value) {
+            interface.values.insert(value, tipe.clone());
+        }
+    }
+    for def in interface.binops.values_mut() {
+        def.tipe = checked.types.get(&def.function).cloned();
+    }
+    Some((canonical, interface, checked.node_types))
+}
+
 /// Run the whole front end — load, parse, canonicalize, type check, and
 /// exhaustiveness check every module — without generating any code.
 pub fn check_project(entry: &Path) -> Result<CheckedProject, Vec<BuildError>> {
@@ -624,39 +889,7 @@ pub fn check_project_with(
     want_node_types: bool,
 ) -> Result<CheckedProject, Vec<BuildError>> {
     let scopes = resolve_scopes(entry);
-
-    // Load the entry module and, transitively, everything it imports. Modules
-    // are keyed by file path so two same-named modules from different packages
-    // do not clobber each other.
-    let mut modules: HashMap<PathBuf, LoadedModule> = HashMap::new();
-    let entry_key = load_module_file(entry, &scopes.app_search, &scopes, &mut modules)
-        .map_err(|e| vec![e])?;
-
-    // The entry module's declared name must match its file path.
-    if let Some(e) = entry_name_mismatch(&modules[&entry_key], &scopes.app_search) {
-        return Err(vec![e]);
-    }
-
-    // Topologically sort (dependencies first), detecting import cycles.
-    let order = sort_modules(&modules, &entry_key).map_err(|cycle| {
-        let module = &modules[&cycle];
-        vec![BuildError::new(
-            module.path.clone(),
-            module.source.clone(),
-            "IMPORT CYCLE",
-            Region::ZERO,
-            format!(
-                "The module `{}` is part of an import cycle. Elm does not allow cyclic imports.",
-                module.declared_name
-            ),
-        )]
-    })?;
-
-    // Give every loaded file a unique module name. When a name is declared by
-    // just one file (the overwhelmingly common case) that file keeps it. When
-    // several files share a name they are disambiguated so every downstream
-    // map (interfaces, canonical modules, types) can stay keyed by `Name`.
-    let unique_names = assign_unique_names(&modules, &order);
+    let Loaded { modules, order, unique_names, entry_key } = load_and_order(entry, &scopes)?;
 
     // Compile each module against the interfaces of its dependencies.
     let mut interfaces = Interfaces::new();
@@ -791,6 +1024,53 @@ pub fn check_project_with(
         sources: all_sources,
         entry: unique_names[&entry_key].clone(),
     })
+}
+
+/// Every module a build touches, parsed and put in dependency order. Shared by
+/// the full and incremental paths so they can never disagree about what the
+/// project *is* — only about how much of it needs recompiling.
+struct Loaded {
+    modules: HashMap<PathBuf, LoadedModule>,
+    /// Dependencies first.
+    order: Vec<PathBuf>,
+    unique_names: HashMap<PathBuf, Name>,
+    entry_key: PathBuf,
+}
+
+fn load_and_order(entry: &Path, scopes: &Scopes) -> Result<Loaded, Vec<BuildError>> {
+    // Load the entry module and, transitively, everything it imports. Modules
+    // are keyed by file path so two same-named modules from different packages
+    // do not clobber each other.
+    let mut modules: HashMap<PathBuf, LoadedModule> = HashMap::new();
+    let entry_key = load_module_file(entry, &scopes.app_search, scopes, &mut modules)
+        .map_err(|e| vec![e])?;
+
+    // The entry module's declared name must match its file path.
+    if let Some(e) = entry_name_mismatch(&modules[&entry_key], &scopes.app_search) {
+        return Err(vec![e]);
+    }
+
+    // Topologically sort (dependencies first), detecting import cycles.
+    let order = sort_modules(&modules, &entry_key).map_err(|cycle| {
+        let module = &modules[&cycle];
+        vec![BuildError::new(
+            module.path.clone(),
+            module.source.clone(),
+            "IMPORT CYCLE",
+            Region::ZERO,
+            format!(
+                "The module `{}` is part of an import cycle. Elm does not allow cyclic imports.",
+                module.declared_name
+            ),
+        )]
+    })?;
+
+    // Give every loaded file a unique module name. When a name is declared by
+    // just one file (the overwhelmingly common case) that file keeps it. When
+    // several files share a name they are disambiguated so every downstream
+    // map (interfaces, canonical modules, types) can stay keyed by `Name`.
+    let unique_names = assign_unique_names(&modules, &order);
+    Ok(Loaded { modules, order, unique_names, entry_key })
 }
 
 /// The per-package search scopes for a project.
