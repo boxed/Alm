@@ -19,7 +19,7 @@
 //! builds a fully typed body for each. Only physical representation is deferred
 //! — that is [`crate::ir::layout`]'s job, consulted later by the backend.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 
@@ -54,6 +54,9 @@ struct ModuleCtx<'a> {
     /// True for an `effect module`: its `command`/`subscription` are synthetic
     /// top-level leaf-builders (no source def), resolved as globals.
     is_effect: bool,
+    /// The module's `port` declarations. A port has no definition to specialize,
+    /// so a use of one keeps its plain name for the back end to recognize.
+    ports: HashSet<Name>,
 }
 
 /// A use of a built-in/kernel function (`VarForeign`) at a concrete type.
@@ -209,6 +212,7 @@ fn build_ctxs<'a>(modules: &'a [ModuleInfo<'a>]) -> HashMap<Name, ModuleCtx<'a>>
                     types: m.types,
                     node_types: m.node_types,
                     is_effect: m.module.manager.is_some(),
+                    ports: m.module.ports.iter().map(|p| p.name.clone()).collect(),
                 },
             )
         })
@@ -1317,9 +1321,20 @@ impl Specializer<'_> {
                         tipe
                     );
                 }
+                // Another module's port: there is no definition to specialize,
+                // so keep the plain name — the same shape the module-local path
+                // below produces, and what every back end recognizes as a port.
+                // Mangling it would name a specialization that never exists.
+                if self
+                    .project
+                    .get(module)
+                    .map_or(false, |m| m.ports.contains(name))
+                {
+                    TypedKind::Local(name.clone())
+                }
                 // A value from another project module resolves to its
                 // specialization; a built-in stays a kernel reference.
-                if self.project.contains_key(module) {
+                else if self.project.contains_key(module) {
                     self.sink.borrow_mut().push(Instance {
                         module: module.clone(),
                         name: name.clone(),

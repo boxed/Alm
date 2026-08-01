@@ -2089,6 +2089,10 @@ struct Codegen<'a> {
     /// lifted `(eqref)->eqref` (value->`Json.Value`) function index. Registered
     /// before its body is built so recursive types resolve their own calls.
     port_encoders: HashMap<String, u32>,
+    /// Port name -> the lazily-lifted one-argument function that builds its
+    /// Cmd/Sub leaf. Only needed for a port used as a *value* rather than
+    /// applied (`setFavicon |> perform`, or passed to a HOF).
+    port_thunks: HashMap<String, u32>,
     /// Lazily-lifted `Debug.toString` helpers (allocated on first use): the
     /// ctor-arg parenthesizer and the string/char escaper.
     debug_paren_idx: Option<u32>,
@@ -2672,6 +2676,7 @@ impl<'a> Codegen<'a> {
             ports: HashMap::new(),
             port_types: HashMap::new(),
             port_encoders: HashMap::new(),
+            port_thunks: HashMap::new(),
             func_arity: HashMap::new(),
             spec_fns: HashMap::new(),
             const_int: HashMap::new(),
@@ -5290,6 +5295,41 @@ impl<'a> Codegen<'a> {
         self.lifted.push((1, Function::new([]))); // reserve slot
         self.port_encoders.insert(key, lidx); // register BEFORE body (recursion)
         let lf = self.emit_port_encode_body(ty)?;
+        let slot = (lidx - self.lifted_base) as usize;
+        self.lifted[slot] = (1, lf);
+        Ok(lidx)
+    }
+
+    /// A port used as a value: the lazily-lifted `(eqref)->eqref` that takes the
+    /// port's one argument and builds the same Cmd/Sub leaf a saturated
+    /// application does. A port has no definition, so without this there is
+    /// nothing to close over.
+    fn port_thunk(&mut self, name: &str) -> Result<u32, String> {
+        if let Some(&idx) = self.port_thunks.get(name) {
+            return Ok(idx);
+        }
+        let outgoing = self.ports[name];
+        self.fn_type(1);
+        let lidx = self.lifted_base + self.lifted.len() as u32;
+        self.lifted.push((1, Function::new([]))); // reserve slot
+        self.port_thunks.insert(name.to_string(), lidx);
+
+        // Same shape as `emit_call`'s port arm: T_CTOR tag2 [name, payload],
+        // with an outgoing payload run through the port's type-directed encoder.
+        let mut lf = Function::new([]);
+        lf.instruction(&Instruction::I32Const(2));
+        push_str_const(&mut lf, name);
+        lf.instruction(&Instruction::LocalGet(0));
+        if outgoing {
+            if let Some(pty) = self.port_types.get(name).cloned() {
+                let enc = self.port_encoder(&pty)?;
+                lf.instruction(&Instruction::Call(enc));
+            }
+        }
+        lf.instruction(&Instruction::ArrayNewFixed { array_type_index: T_ARR, array_size: 2 });
+        lf.instruction(&Instruction::StructNew(T_CTOR));
+        lf.instruction(&Instruction::End);
+
         let slot = (lidx - self.lifted_base) as usize;
         self.lifted[slot] = (1, lf);
         Ok(lidx)
@@ -21770,15 +21810,21 @@ impl<'a> Codegen<'a> {
             }
             TypedKind::Binop(op, _, _, l, r) => self.emit_binop(op.as_str(), l, r, ctx, f)?,
             TypedKind::If(branches, otherwise) => self.emit_if(branches, otherwise, ctx, f)?,
-            TypedKind::Local(name) => {
-                let idx = ctx
-                    .lookup(name.as_str())
-                    .ok_or_else(|| format!("wasmgc: unbound local `{name}`"))?;
-                f.instruction(&Instruction::LocalGet(idx));
-                // An unboxed (specialized-param) slot must be re-boxed to satisfy
-                // emit_expr's eqref contract.
-                self.box_rep(ctx.rep_of_local(idx), ctx, f);
-            }
+            TypedKind::Local(name) => match ctx.lookup(name.as_str()) {
+                Some(idx) => {
+                    f.instruction(&Instruction::LocalGet(idx));
+                    // An unboxed (specialized-param) slot must be re-boxed to
+                    // satisfy emit_expr's eqref contract.
+                    self.box_rep(ctx.rep_of_local(idx), ctx, f);
+                }
+                // A port, which has no definition, used as a value rather than
+                // applied. A local of the same name shadows it, hence the order.
+                None if self.ports.contains_key(name.as_str()) => {
+                    let idx = self.port_thunk(name.as_str())?;
+                    self.emit_make_closure(idx, 1, f);
+                }
+                None => return Err(format!("wasmgc: unbound local `{name}`")),
+            },
             TypedKind::Let(decls, body) => self.emit_let(decls, body, ctx, f)?,
             TypedKind::Global(name) => {
                 let key = name.to_string();
