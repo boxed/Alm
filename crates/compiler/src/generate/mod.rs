@@ -553,7 +553,17 @@ fn sanitize(name: &str) -> String {
 #[derive(Default)]
 struct Mapped {
     text: String,
-    maps: Vec<(usize, Region)>,
+    maps: Vec<Mark>,
+}
+
+/// One source mapping inside a [`Mapped`]: a byte offset into its text, the Elm
+/// region it came from, and what it was called there when that differs from the
+/// generated name.
+#[derive(Clone)]
+struct Mark {
+    off: usize,
+    region: Region,
+    name: Option<String>,
 }
 
 impl Mapped {
@@ -571,18 +581,32 @@ impl Mapped {
         let base = self.text.len();
         self.text.push_str(&child.text);
         self.maps
-            .extend(child.maps.into_iter().map(|(o, r)| (base + o, r)));
+            .extend(child.maps.into_iter().map(|mut m| {
+                m.off += base;
+                m
+            }));
     }
     /// Record that this whole piece starts at `region` (offset 0).
     fn mark(&mut self, region: Region) {
-        self.maps.push((0, region));
+        self.maps.push(Mark { off: 0, region, name: None });
+    }
+    /// Like [`mark`](Self::mark), and additionally records what this token is
+    /// called in the Elm source — for the tokens the compiler had to rename.
+    fn mark_named(&mut self, region: Region, name: &str) {
+        self.maps.push(Mark { off: 0, region, name: Some(name.to_string()) });
     }
     /// Like [`mark`], but takes priority at offset 0 over any inner mapping
     /// already there (stable sort + dedup keep the first-inserted). Used so a
     /// generated definition's start maps to the definition, not to its body's
     /// first sub-expression.
     fn lead(&mut self, region: Region) {
-        self.maps.insert(0, (0, region));
+        self.maps.insert(0, Mark { off: 0, region, name: None });
+    }
+    /// [`lead`](Self::lead) carrying the definition's Elm name. A debugger reads
+    /// the name at a function's start position to label the frame in a call
+    /// stack, so this is what shows `update` there rather than `$Insight$update`.
+    fn lead_named(&mut self, region: Region, name: &str) {
+        self.maps.insert(0, Mark { off: 0, region, name: Some(name.to_string()) });
     }
 }
 
@@ -671,9 +695,9 @@ impl Generator {
         };
         self.sync_cursor();
         let mut maps = m.maps;
-        maps.sort_by_key(|(off, _)| *off);
+        maps.sort_by_key(|mark| mark.off);
         let (mut line, mut col, mut pos) = (self.cur_line, self.cur_col, 0usize);
-        for (off, region) in maps {
+        for Mark { off, region, name } in maps {
             for ch in m.text[pos..off].chars() {
                 if ch == '\n' {
                     line += 1;
@@ -684,7 +708,10 @@ impl Generator {
             }
             pos = off;
             if let Some((src_line, src_col)) = region_start(&region) {
-                self.sm.add(line, col, src, src_line, src_col);
+                match &name {
+                    Some(name) => self.sm.add_named(line, col, src, src_line, src_col, name),
+                    None => self.sm.add(line, col, src, src_line, src_col),
+                }
             }
         }
         self.out.push_str(&m.text);
@@ -794,7 +821,7 @@ impl Generator {
         // The value's start maps to the definition; flush records that plus
         // every sub-expression mapping the body carries. Bytes are identical to
         // `writeln!("var {} = {};")`.
-        value.lead(def.name.region);
+        value.lead_named(def.name.region, def.name.value.as_str());
         write!(self.out, "var {} = ", var).unwrap();
         self.flush(value);
         self.out.push_str(";\n");
@@ -837,7 +864,7 @@ impl Generator {
         for def in &values {
             let thunk = self.cyclic_global(&def.name.value);
             let mut body = self.expr(&def.body);
-            body.lead(def.name.region);
+            body.lead_named(def.name.region, def.name.value.as_str());
             write!(self.out, "function {}() {{ return ", thunk).unwrap();
             self.flush(body);
             self.out.push_str("; }\n");
@@ -1520,8 +1547,21 @@ impl Generator {
                 out
             }
         };
-        // Every expression records a mapping at its generated start.
-        m.mark(expr.region);
+        // Every expression records a mapping at its generated start. A reference
+        // the compiler had to rename — `$Insight$total` for `total`, `_type` for
+        // the reserved word `type` — also records what it is called in Elm, so a
+        // debugger can show and accept that name instead. Comparing against the
+        // text just emitted means only the ones that actually differ are stored.
+        let original = match &expr.value {
+            VarLocal(name) | VarTopLevel(name) => Some(name.as_str()),
+            VarForeign(_, name) => Some(name.as_str()),
+            VarCtor(_, _, ctor) => Some(ctor.name.as_str()),
+            _ => None,
+        };
+        match original {
+            Some(name) if m.text != name => m.mark_named(expr.region, name),
+            _ => m.mark(expr.region),
+        }
         m
     }
 

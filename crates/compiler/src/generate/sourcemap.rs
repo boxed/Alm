@@ -44,6 +44,9 @@ struct Mapping {
     src: u32,
     src_line: u32,
     src_col: u32,
+    /// Index into `names`: what this token was called in the Elm source, when
+    /// the generated code had to call it something else.
+    name: Option<u32>,
 }
 
 /// Accumulates source files and generated→source mappings for one output.
@@ -54,6 +57,9 @@ pub struct SourceMap {
     sources_content: Vec<String>,
     index: HashMap<String, u32>,
     mappings: Vec<Mapping>,
+    /// The `names` array: original identifiers, interned.
+    names: Vec<String>,
+    name_index: HashMap<String, u32>,
 }
 
 impl SourceMap {
@@ -64,6 +70,8 @@ impl SourceMap {
             sources_content: Vec::new(),
             index: HashMap::new(),
             mappings: Vec::new(),
+            names: Vec::new(),
+            name_index: HashMap::new(),
         }
     }
 
@@ -89,6 +97,39 @@ impl SourceMap {
             src,
             src_line,
             src_col,
+            name: None,
+        });
+    }
+
+    /// Like [`add`](Self::add), but also records what the token at this position
+    /// is called in the Elm source.
+    ///
+    /// This is what lets a debugger undo the compiler's renaming: DevTools looks
+    /// up an identifier's position in the map and, finding a name there, shows
+    /// that instead — in the scope list, on hover, and for the function names in
+    /// a call stack. Only worth recording where the two differ; a local that kept
+    /// its Elm name needs no entry.
+    pub fn add_named(
+        &mut self,
+        gen_line: u32,
+        gen_col: u32,
+        src: u32,
+        src_line: u32,
+        src_col: u32,
+        name: &str,
+    ) {
+        let next = self.names.len() as u32;
+        let name = *self.name_index.entry(name.to_string()).or_insert_with(|| {
+            self.names.push(name.to_string());
+            next
+        });
+        self.mappings.push(Mapping {
+            gen_line,
+            gen_col,
+            src,
+            src_line,
+            src_col,
+            name: Some(name),
         });
     }
 
@@ -131,7 +172,14 @@ impl SourceMap {
             }
             json_str(s, &mut out);
         }
-        out.push_str("],\"names\":[],\"mappings\":\"");
+        out.push_str("],\"names\":[");
+        for (i, n) in self.names.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            json_str(n, &mut out);
+        }
+        out.push_str("],\"mappings\":\"");
         out.push_str(&self.encode_mappings());
         out.push_str("\"}");
         out
@@ -149,6 +197,7 @@ impl SourceMap {
         let mut prev_src: i64 = 0;
         let mut prev_src_line: i64 = 0;
         let mut prev_src_col: i64 = 0;
+        let mut prev_name: i64 = 0;
         let mut cur_line: u32 = 0;
         let mut first_in_line = true;
         let mut last_gen: Option<(u32, u32)> = None;
@@ -175,6 +224,12 @@ impl SourceMap {
             vlq_encode(m.src as i64 - prev_src, &mut out);
             vlq_encode(m.src_line as i64 - prev_src_line, &mut out);
             vlq_encode(m.src_col as i64 - prev_src_col, &mut out);
+            // The name is a fifth field, delta-encoded like the rest and simply
+            // absent on a segment that has none.
+            if let Some(name) = m.name {
+                vlq_encode(name as i64 - prev_name, &mut out);
+                prev_name = name as i64;
+            }
             prev_gen_col = m.gen_col as i64;
             prev_src = m.src as i64;
             prev_src_line = m.src_line as i64;
@@ -288,6 +343,28 @@ mod tests {
         assert_eq!(vlq_decode(lines[0].split(',').nth(1).unwrap()), vec![4, 0, 0, 4]);
         assert_eq!(lines[1], "");
         assert_eq!(vlq_decode(lines[2]), vec![2, 0, 1, -4]);
+    }
+
+    /// A name rides along as an optional fifth field, delta-encoded against the
+    /// previous name like every other field, and interned so a name used a
+    /// thousand times is stored once.
+    #[test]
+    fn names_are_a_fifth_field_and_are_interned() {
+        let mut sm = SourceMap::new("out.js");
+        sm.add_source("Main.elm", "area = 1\n");
+        sm.add_named(0, 0, 0, 0, 0, "area");
+        sm.add(0, 10, 0, 0, 4); // no name: four fields only
+        sm.add_named(0, 20, 0, 0, 6, "pi");
+        sm.add_named(0, 30, 0, 0, 8, "area"); // the same name again
+
+        let json = sm.to_json();
+        assert!(json.contains("\"names\":[\"area\",\"pi\"]"), "{json}");
+        let m = json.split("\"mappings\":\"").nth(1).unwrap().trim_end_matches("\"}");
+        let segs: Vec<Vec<i64>> = m.split(',').map(vlq_decode).collect();
+        assert_eq!(segs[0], vec![0, 0, 0, 0, 0], "first name index 0");
+        assert_eq!(segs[1], vec![10, 0, 0, 4], "no name, so no fifth field");
+        assert_eq!(segs[2], vec![10, 0, 0, 2, 1], "name index 1, delta +1");
+        assert_eq!(segs[3], vec![10, 0, 0, 2, -1], "back to index 0, delta -1");
     }
 
     #[test]
