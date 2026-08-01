@@ -161,11 +161,16 @@ def compile_section(data):
     by_compiler = {}
     for entry in data.get("unbuilt") or []:
         by_compiler.setdefault(entry["compiler"], []).append(entry["project"])
-    if by_compiler:
-        tables[0]["notes"] = [
-            f"n/a — {compiler} cannot build {', '.join(sorted(projects))}"
-            for compiler, projects in sorted(by_compiler.items())
-        ]
+    notes = [
+        f"n/a — {compiler} cannot build {', '.join(sorted(projects))}"
+        for compiler, projects in sorted(by_compiler.items())
+    ]
+    # A compiler with no incremental column has one because it has one speed,
+    # not because the run was skipped. Say which and why.
+    for compiler, why in sorted((data.get("cacheless") or {}).items()):
+        notes.append(f"no incremental column for {compiler} — {why}")
+    if notes:
+        tables[0]["notes"] = notes
 
     detail = data.get("caching")
     facts = None

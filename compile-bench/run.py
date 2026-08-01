@@ -102,6 +102,17 @@ def edit_entry(directory, entry):
 # most of the story. A cold build recompiles the whole module graph; a warm one
 # recompiles the module that changed and whatever depended on it. Showing only
 # one of them would flatter somebody.
+#
+# `alm-wasm` and `alm-native` get one column each, not because they were left
+# out but because they have one speed: monomorphization is whole-program, so
+# there is no per-module unit to reuse and those builds do not read the cache at
+# all. An "incremental" column for them would repeat the number beside it and
+# read as though caching did not help, when the truth is that it is not wired
+# up. `CACHELESS` records that so the report can say it.
+CACHELESS = {
+    "alm-wasm": "monomorphization is whole-program; no per-module cache",
+    "alm-native": "monomorphization is whole-program; no per-module cache",
+}
 COMPILERS = [
     ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_elm_cache),
     ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], edit_entry),
@@ -459,6 +470,7 @@ def main():
         "compilers": [label for label, _, _ in COMPILERS],
         "projects": rows,
         "unbuilt": unbuilt,
+        "cacheless": CACHELESS,
         "caching": detail,
     }
     RESULTS.write_text(json.dumps(payload, indent=2) + "\n")
