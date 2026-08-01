@@ -367,6 +367,34 @@ fn non_tail_recursion_still_works() {
     );
 }
 
+/// A tail call assigns the loop's parameters one at a time, so an argument that
+/// reads a parameter still to be assigned needs a temporary. An argument that
+/// reads anything else does not, and skipping the temporary there is what keeps
+/// `_v` out of the debugger's scope list — but only the *second* of those is
+/// safe, and confusing the two silently corrupts the loop.
+#[test]
+fn a_tail_call_that_swaps_its_arguments_keeps_them_distinct() {
+    // Bare parameters in swapped order: eliding here would assign `a = b` and
+    // then `b = a`, leaving both holding the old `b`.
+    assert_eq!(
+        run("swap : Int -> Int -> Int -> Int\nswap a b n =\n    if n == 0 then\n        a * 100 + b\n    else\n        swap b a (n - 1)\n\nmain = String.fromInt (swap 1 2 3)"),
+        "201"
+    );
+    // An even number of swaps must come back to where it started.
+    assert_eq!(
+        run("swap : Int -> Int -> Int -> Int\nswap a b n =\n    if n == 0 then\n        a * 100 + b\n    else\n        swap b a (n - 1)\n\nmain = String.fromInt (swap 1 2 4)"),
+        "102"
+    );
+    // Locals and parameters mixed, with the local reading a parameter that is
+    // itself reassigned: the local is computed first, so it must carry the old
+    // value forward even though its own binding needs no temporary.
+    assert_eq!(
+        // (1,2) -> (2,2) -> (2,3) -> (3,3), so 3 * 100 + 3.
+        run("go : Int -> Int -> Int -> Int\ngo a b n =\n    if n == 0 then\n        a * 100 + b\n    else\n        let\n            fromA =\n                a + 1\n        in\n        go b fromA (n - 1)\n\nmain = String.fromInt (go 1 2 3)"),
+        "303"
+    );
+}
+
 #[test]
 fn dicts() {
     assert_eq!(

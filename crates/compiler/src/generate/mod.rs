@@ -978,10 +978,21 @@ impl Generator {
                 out
             }
             Case(scrutinee, branches) => {
-                let temp = self.fresh_temp();
-                let mut out = Mapped::raw(format!("var {} = ", temp));
-                out.push(self.expr(scrutinee));
-                out.push_str("; ");
+                // A `case` on a plain local reads that local directly rather than
+                // aliasing it to a temp first. Elm has no mutation, so re-reading
+                // the binding is free and cannot observe anything different — and
+                // it keeps the name you wrote in the debugger, instead of filling
+                // the scope with `_v476` for something already called `msg`.
+                let (temp, mut out) = match &scrutinee.value {
+                    VarLocal(name) => (sanitize(name), Mapped::default()),
+                    _ => {
+                        let temp = self.fresh_temp();
+                        let mut out = Mapped::raw(format!("var {} = ", temp));
+                        out.push(self.expr(scrutinee));
+                        out.push_str("; ");
+                        (temp, out)
+                    }
+                };
                 // `ALM_NO_CASE_OPT=1` forces the plain sequential if-chain
                 // (jump tables + decision trees off) — a safety switch and the
                 // baseline for benchmarking the optimization.
@@ -1031,6 +1042,18 @@ impl Generator {
                         let mut out = Mapped::default();
                         let mut temps: Vec<String> = Vec::new();
                         for arg in call_args {
+                            // The temps are here so that assigning one parameter
+                            // cannot disturb an argument still to be read. Only
+                            // parameters are ever assigned, so an argument that is
+                            // some other local is already safe to read in place —
+                            // and one fewer `_v` in the loop's scope.
+                            if let can::Expr_::VarLocal(local) = &arg.value {
+                                let local = sanitize(local);
+                                if !params.contains(&local) {
+                                    temps.push(local);
+                                    continue;
+                                }
+                            }
                             let temp = self.fresh_temp();
                             out.push_str(&format!("var {} = ", temp));
                             out.push(self.expr(arg));
@@ -1310,10 +1333,18 @@ impl Generator {
                 }
             }
             can::LetDecl::Destruct(pattern, value) => {
-                let temp = self.fresh_temp();
-                out.push_str(&format!("var {} = ", temp));
-                out.push(self.expr(value));
-                out.push_str("; ");
+                // As with `case`: destructuring something already named reads it
+                // where it stands, rather than aliasing it to a temp first.
+                let temp = match &value.value {
+                    can::Expr_::VarLocal(name) => sanitize(name),
+                    _ => {
+                        let temp = self.fresh_temp();
+                        out.push_str(&format!("var {} = ", temp));
+                        out.push(self.expr(value));
+                        out.push_str("; ");
+                        temp
+                    }
+                };
                 let mut bindings = Vec::new();
                 destructure(pattern, &temp, &mut bindings);
                 for (name, path) in bindings {
