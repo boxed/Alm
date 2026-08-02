@@ -19,8 +19,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: The existing tag to build and upload assets for
-        required: true
+        description: The existing tag to upload assets to. Empty builds without publishing.
+        required: false
+      ref:
+        description: What to build. Defaults to the tag.
+        required: false
 
 permissions:
   contents: write
@@ -56,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.ref || inputs.tag || github.ref }}
 
       - name: Rust toolchain
         run: rustup update stable && rustup default stable
@@ -125,7 +128,10 @@ jobs:
             echo "asset=$stem.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
+      # Dispatching without a tag is how a change to the build itself gets
+      # tried on every platform before anything is published.
       - name: Upload to the release
+        if: github.event_name == 'push' || inputs.tag != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

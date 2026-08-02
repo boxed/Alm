@@ -81,16 +81,19 @@ where
     F: Fn(&[PathBuf]) + Send + 'static,
 {
     let root = root.to_path_buf();
-    std::thread::spawn(move || {
-        let mut seen = snapshot(&root);
-        loop {
-            std::thread::sleep(POLL);
-            let now = snapshot(&root);
-            if now != seen {
-                let moved = changed(&seen, &now);
-                seen = now;
-                on_change(&moved);
-            }
+    // The baseline is taken here rather than on the new thread, so every save
+    // after `watch` returns is one the watcher reports. Taken on the thread, a
+    // save that landed before the scheduler got to it would be part of the
+    // baseline instead of a change — silently missed, and the more likely the
+    // busier the machine.
+    let mut seen = snapshot(&root);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(POLL);
+        let now = snapshot(&root);
+        if now != seen {
+            let moved = changed(&seen, &now);
+            seen = now;
+            on_change(&moved);
         }
     });
 }

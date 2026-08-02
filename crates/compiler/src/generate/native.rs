@@ -244,10 +244,16 @@ pub(crate) fn finish<'ctx>(
     // runtime's own immix heap — no external allocator to link.
     let immix_gc = build_dir.join("immix_gc.o");
     std::fs::write(&immix_gc, IMMIX_GC_OBJ).map_err(|e| e.to_string())?;
-    run_linker(
-        "cc",
-        &[&object, &runtime, &regex, &bytes_jmp, &immix_gc, Path::new("-o"), output],
-    )
+    let mut args: Vec<&Path> = vec![&object, &runtime, &regex, &bytes_jmp, &immix_gc];
+    // macOS has all of these in libSystem, which `cc` always links. Elsewhere
+    // they are separate libraries and the trigonometry in Basics (sin, atan2,
+    // fma …) goes unresolved without them. Libraries come after the objects
+    // that need them: GNU ld resolves in the order given.
+    if cfg!(not(target_os = "macos")) {
+        args.extend([Path::new("-lm"), Path::new("-lpthread"), Path::new("-ldl")]);
+    }
+    args.extend([Path::new("-o"), output]);
+    run_linker("cc", &args)
 }
 
 /// Removes the transient build dir when the build ends (success or error),
