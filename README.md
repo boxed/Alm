@@ -12,8 +12,10 @@ An [Elm](https://elm-lang.org/) compiler written in Rust with:
 ## Install
 
 Binaries for macOS, Linux and Windows are on the
-[releases page](https://github.com/boxed/Alm/releases). The Windows and
-Linux-arm64 builds compile `js` and `wasm-gc`; the rest have `native` too.
+[releases page](https://github.com/boxed/Alm/releases). `--target=native` is
+macOS-only for now — the runtime's conservative GC finds its roots through
+Darwin interfaces — so the Linux and Windows binaries compile `js` and
+`wasm-gc`.
 
 Or build it:
 

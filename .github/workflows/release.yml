@@ -2,10 +2,9 @@
 #
 # Every job builds on the platform it ships for: the native backend links LLVM
 # 16 through inkwell, so cross-compiling would mean LLVM's static libraries for
-# the other platform. Where those are not readily available (Windows, and the
-# Linux arm64 runner) alm is built with `--no-default-features`, which drops
-# `--target=native` and leaves js and wasm-gc — that build needs nothing but a
-# Rust toolchain.
+# the other platform. Everywhere but macOS alm is built with
+# `--no-default-features`, which drops `--target=native` and leaves js and
+# wasm-gc — that build needs nothing but a Rust toolchain.
 #
 # Pushing a tag releases it. `workflow_dispatch` rebuilds the assets for a tag
 # that already has a release, which is how a release gets the platforms that a
@@ -46,10 +45,13 @@ jobs:
             runner: macos-13
             native: true
             baseline_cpu: x86-64-v2
+          # No native backend: it builds and links on Linux, but the runtime's
+          # conservative GC finds its roots through Darwin interfaces
+          # (getsegbyname("__DATA"), pthread_get_stackaddr_np) that have ELF
+          # equivalents nobody has written yet.
           - name: linux-x86_64
             runner: ubuntu-22.04
-            native: true
-            baseline_cpu: x86-64-v2
+            native: false
           - name: linux-arm64
             runner: ubuntu-22.04-arm
             native: false
