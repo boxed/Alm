@@ -8,9 +8,11 @@ cargo build --release -p alm
 python3 compile-bench/run.py [path/to/elm/project]
 ```
 
-The project defaults to `$ALM_BENCH_PROJECT`, then to `../dryft`. Any Elm
-application works; the figures in the top-level README come from a ~40k-line
-one with 19 buildable entry points.
+Everything it measures is public: package workloads resolve from `~/.elm`, and
+application workloads are cloned at a pinned commit. Nothing is read from
+whatever project happens to sit beside the repository — the figures used to
+come from a private codebase, which meant the published report quoted numbers
+nobody else could reproduce or check.
 
 It prints a summary and the markdown for the README's Benchmark section.
 
@@ -52,8 +54,11 @@ the two columns would not be measuring the same work. Appending a comment line
 changes both. (Without *any* edit, elm's incremental column measures its no-op
 path, which is what it used to be doing.)
 
-**Cold against warm on a real application** — the second table, with the no-op
-times as well, and every entry point rather than one.
+**Cold against warm on a real application** — the second table runs every mode
+both compilers have against one of the pinned application workloads, with the
+no-op times as well, and every entry point rather than one. An entry point only
+one compiler can build alone is dropped from it, or the two columns would be
+timing different amounts of work.
 
 ## Two things it is careful about
 

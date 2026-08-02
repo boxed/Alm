@@ -11,10 +11,10 @@ compiler, then generates code for one of three targets:
   collector.
 - **WebAssembly** — a from-scratch WasmGC backend.
 
-It compiles real production applications: all 19 entry points of a
-~40k-line production codebase (ports, Http, Json decoders, Svg, custom
-operators, elm/parser, two dozen package dependencies) compile, boot,
-and render.
+It compiles real production applications:
+[exosphere](https://gitlab.com/exosphere/exosphere) — 59k lines over 212
+modules and 58 packages, with ports, Http, Json decoders, Svg, custom
+operators and elm/parser — compiles, boots and renders.
 
 ## Usage
 
@@ -164,33 +164,28 @@ app.ports.somePort.subscribe(function (value) { ... });
 ## Benchmark
 
 Compile speed for the JavaScript target, measured by
-`compile-bench/run.py`. Apple Silicon, production codebase, median of 5
-runs (3 for suites). One 8,357-line entry point and its module graph:
+`compile-bench/run.py` on Apple Silicon, median of 5 runs. Every
+workload is public and pinned, so the figures can be reproduced:
+[exosphere](https://gitlab.com/exosphere/exosphere) at
+`be3d7114`, 59k lines over 212 modules and 58 packages.
 
 | | elm 0.19.1 | alm |
 |---|---|---|
-| project-cold (build cache cleared) | 708 ms | **139 ms** |
-| incremental (one module edited) | 193 ms | **106 ms** |
-| no-op (nothing changed at all) | 118 ms | **14 ms** |
-
-All 19 entry points of the same codebase (~39k lines):
-
-| | elm 0.19.1 | alm |
-|---|---|---|
-| project-cold | 2.96 s | **0.67 s** |
-| every source edited | 2.40 s | **0.57 s** |
+| project-cold (build cache cleared) | 1481 ms | **1120 ms** |
+| incremental (one module edited) | 168 ms | **115 ms** |
+| no-op (nothing changed at all) | 175 ms | **65 ms** |
 
 Both compilers cache per module, so all three modes are comparable.
-alm is 5.1x faster cold, 1.8x faster on the edit-and-rebuild loop, and
-8x faster deciding that nothing changed at all. The incremental figure
-is dominated by the size of the module you edit — this one is an
-8,357-line entry point; a one-module edit elsewhere in a project this
-size lands nearer 20 ms.
+The incremental figure tracks the size of what you edit and how much
+depends on it; smaller projects go much further, and a package and its
+whole dependency graph rebuilds in a fraction of what elm needs:
 
-On a bigger codebase the gaps hold:
-[exosphere](https://gitlab.com/exosphere/exosphere) is 59k lines over
-212 modules and 58 packages, and takes elm 1496 ms cold and 176 ms
-incrementally against alm's 1101 ms and 105 ms.
+| workload | elm (incr.) | alm (incr.) | |
+|---|---|---|---|
+| terezka/elm-charts | 91 ms | **14 ms** | 6.5x |
+| ianmackenzie/elm-geometry | 91 ms | **23 ms** | 4.0x |
+| data-viz-lab/elm-chart-builder | 106 ms | **20 ms** | 5.3x |
+| exosphere (59k lines) | 173 ms | **110 ms** | 1.6x |
 
 alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete). A
 module is reused when its source *and* every interface it was checked
@@ -206,8 +201,11 @@ off.
 Type checking is ~76% of a cold build; `ALM_TIMING=1` breaks a compile
 down by phase, and reports how many modules the cache reused.
 
-Bundle sizes for the same app: alm 567 KB, elm dev 667 KB, elm
-`--optimize` 631 KB (all pre-minification).
+Bundle sizes for exosphere, pre-minification: alm 3591 KB, elm dev
+3312 KB, elm `--optimize` 3093 KB — alm is 8% larger than elm's
+development build here. (On a smaller codebase alm comes out well under
+elm; tree-shaking the hand-written runtime kernel is worth a fixed
+amount, which counts for less the more application code there is.)
 
 Output compared on production code (string/number formatting, Json
 decoding pipelines, Round, Debug.toString): byte-identical between the

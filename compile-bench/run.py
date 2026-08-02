@@ -17,10 +17,13 @@ The two decide staleness differently — elm compares mtimes, alm hashes content
 would rebuild under elm and be a no-op under alm, and the columns would not be
 measuring the same thing.
 
-    python3 compile-bench/run.py [extra/project/dir ...]
+    python3 compile-bench/run.py
 
-Workloads are built from `~/.elm`; nothing is downloaded. A local application
-is picked up from $ALM_BENCH_PROJECT, or ../dryft if it is there.
+Package workloads are built from `~/.elm`; application workloads are cloned at
+a pinned commit. Everything measured is public and reproducible: the figures
+used to come from whichever project happened to sit beside the repository, and
+a published benchmark nobody else can run is an assertion rather than a
+measurement.
 """
 
 import datetime
@@ -276,15 +279,21 @@ def matrix(projects, scratch):
 
 # -------------------------------------------------------- against elm's cache
 
-def caching(project, scratch):
-    """alm's one number against all three of elm's, on one real application."""
+def caching(project, scratch, name, entry):
+    """Every mode both compilers have, on one real application.
+
+    The application is one of the pinned public checkouts, not whatever project
+    happens to be lying beside the repository. It used to be the latter, and the
+    published report ended up quoting figures from a private codebase that
+    nobody outside it could reproduce or check — which is not a benchmark, it is
+    an assertion. Everything measured here is fetchable at a known commit.
+    """
     work = scratch / "caching"
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
     # Only elm.json and the source directories: `elm-stuff` and source mtimes
-    # are inputs here and both get mutated, and a real project often sits in a
-    # bigger repository holding things that cannot even be copied.
+    # are inputs here and both get mutated.
     shutil.copy2(project / "elm.json", work / "elm.json")
     outline = json.loads((project / "elm.json").read_text())
     for rel in outline.get("source-directories", ["src"]):
@@ -300,11 +309,17 @@ def caching(project, scratch):
     if not entries:
         return None
 
-    biggest = max(entries, key=lambda p: len(p.read_text(errors="replace").splitlines()))
+    # The workload's declared entry point, not the longest file that happens to
+    # have a `main`. An application's entry is often a thin wiring module —
+    # exosphere's is 28 lines onto a 212-module graph — so picking by length
+    # measured a 794-line design-system explorer instead of the application.
+    biggest = work / entry
+    if not biggest.is_file():
+        biggest = max(entries, key=lambda p: len(p.read_text(errors="replace").splitlines()))
     rel = str(biggest.relative_to(work))
     out = scratch / "c.js"
     result = {"project": {
-        "name": project.name,
+        "name": name,
         "entry": rel,
         "entry_lines": len(biggest.read_text(errors="replace").splitlines()),
         "total_lines": elm_count(work),
@@ -348,16 +363,27 @@ def caching(project, scratch):
         "alm, no-op": alm_runs(lambda: None),
     }
     for label, value in result["single"].items():
-        print(f"    {label:26s} {value:6.0f} ms")
+        shown = "     —" if value is None else f"{value:6.0f}"
+        print(f"    {label:26s} {shown} ms")
 
     # Every entry point, which is what building the project actually costs.
+    # Both compilers, not just elm: an entry point only one of them can build
+    # would make the two columns measure different amounts of work.
     buildable = [
-        p for p in entries
+        p
+        for p in entries
         if time_it(["elm", "make", str(p.relative_to(work)), f"--output={out}"], work) is not None
+        and time_it([str(ALM), "make", str(p.relative_to(work)), f"--output={out}"], work)
+        is not None
     ]
     dropped = len(entries) - len(buildable)
     if dropped:
-        print(f"  {dropped} entry point(s) the official compiler cannot build alone: skipped")
+        print(f"  {dropped} entry point(s) one of the compilers cannot build alone: skipped")
+    # With one entry point the whole-project sweep is the single-entry table
+    # again, so there is nothing to add by showing it twice.
+    if len(buildable) < 2:
+        result["project"]["entry_points"] = len(buildable)
+        return result
 
     def whole(binary):
         total = 0.0
@@ -410,22 +436,12 @@ def caching(project, scratch):
     }
     print(f"  all {len(buildable)} entry points:")
     for label, value in result["suite"].items():
-        print(f"    {label:26s} {value / 1000:6.2f} s")
+        shown = "     —" if value is None else f"{value / 1000:6.2f}"
+        print(f"    {label:26s} {shown} s")
     return result
 
 
 # ------------------------------------------------------------------- driving
-
-def local_project(argv):
-    candidates = [pathlib.Path(a).expanduser() for a in argv[1:]]
-    if os.environ.get("ALM_BENCH_PROJECT"):
-        candidates.append(pathlib.Path(os.environ["ALM_BENCH_PROJECT"]).expanduser())
-    candidates.append(REPO.parent / "dryft")
-    for candidate in candidates:
-        if (candidate / "elm.json").is_file():
-            return candidate.resolve()
-    return None
-
 
 def main():
     if not ALM.is_file():
@@ -454,13 +470,18 @@ def main():
         print("== per compiler ==")
         rows, unbuilt = matrix(projects, scratch)
 
-        local = local_project(sys.argv)
+        # The modes table runs on the first application workload — public and
+        # pinned, so every figure on the published page can be reproduced.
         detail = None
-        if local:
-            print(f"\n== against elm's cache: {local.name} ==")
-            detail = caching(local, scratch)
-        else:
-            print("\nNo local application found; skipping the cache comparison.")
+        for app in APPLICATIONS:
+            staged = stage(app, scratch)
+            if staged is None:
+                continue
+            print(f"\n== every build mode: {app['name']} ==")
+            detail = caching(staged[1], scratch, app["name"], app["entry"])
+            break
+        if detail is None:
+            print("\nNo application workload available; skipping the modes table.")
 
     payload = {
         "measured": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -489,10 +510,12 @@ def report(rows, detail):
             print(f"| {row['op']} | {cells} |")
     if detail:
         print()
-        for label, value in detail["single"].items():
-            print(f"| {label} | {value:.0f} ms |")
-        for label, value in detail["suite"].items():
-            print(f"| {label} (all entry points) | {value / 1000:.2f} s |")
+        for label, value in detail.get("single", {}).items():
+            if value is not None:
+                print(f"| {label} | {value:.0f} ms |")
+        for label, value in detail.get("suite", {}).items():
+            if value is not None:
+                print(f"| {label} (all entry points) | {value / 1000:.2f} s |")
 
 
 if __name__ == "__main__":

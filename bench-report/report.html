@@ -93,7 +93,7 @@
   // that: it ended up describing numbers it was no longer showing.
   const DATA = {
   "title": "alm \u2014 runtime, computation and compile speed",
-  "generated": "generated 2026-08-01 22:58 CEST by make report",
+  "generated": "generated 2026-08-02 03:57 CEST by make report",
   "sections": [
     {
       "title": "Runtime",
@@ -354,64 +354,64 @@
           "rows": [
             {
               "op": "elm/http",
-              "elm (full)": 595.1,
-              "elm (incr.)": 95.9,
-              "alm-js": 11.0,
-              "alm-js (incr.)": 9.2,
-              "alm-wasm": 8.2,
-              "alm-native": 98.3
+              "elm (full)": 631.2,
+              "elm (incr.)": 94.6,
+              "alm-js": 12.1,
+              "alm-js (incr.)": 9.8,
+              "alm-wasm": 9.2,
+              "alm-native": 86.5
             },
             {
               "op": "elm/url",
-              "elm (full)": 609.8,
-              "elm (incr.)": 95.7,
-              "alm-js": 11.8,
-              "alm-js (incr.)": 9.1,
-              "alm-wasm": 8.9,
-              "alm-native": 90.1
+              "elm (full)": 637.4,
+              "elm (incr.)": 101.0,
+              "alm-js": 12.4,
+              "alm-js (incr.)": 9.7,
+              "alm-wasm": 9.7,
+              "alm-native": 98.6
             },
             {
               "op": "elm/parser",
-              "elm (full)": 601.0,
-              "elm (incr.)": 96.0,
-              "alm-js": 13.2,
-              "alm-js (incr.)": 8.9,
-              "alm-wasm": 10.0,
-              "alm-native": 137.4
+              "elm (full)": 613.0,
+              "elm (incr.)": 91.0,
+              "alm-js": 12.1,
+              "alm-js (incr.)": 8.2,
+              "alm-wasm": 9.9,
+              "alm-native": 134.7
             },
             {
               "op": "terezka/elm-charts",
-              "elm (full)": 616.9,
-              "elm (incr.)": 90.4,
-              "alm-js": 53.3,
-              "alm-js (incr.)": 13.2,
-              "alm-wasm": 39.7,
-              "alm-native": 820.2
+              "elm (full)": 632.6,
+              "elm (incr.)": 91.3,
+              "alm-js": 56.4,
+              "alm-js (incr.)": 14.3,
+              "alm-wasm": 42.0,
+              "alm-native": 830.0
             },
             {
               "op": "ianmackenzie/elm-geometry",
-              "elm (full)": 676.6,
-              "elm (incr.)": 98.1,
-              "alm-js": 99.8,
-              "alm-js (incr.)": 22.1,
-              "alm-wasm": 78.1,
-              "alm-native": 1485.0
+              "elm (full)": 652.2,
+              "elm (incr.)": 90.9,
+              "alm-js": 103.0,
+              "alm-js (incr.)": 23.2,
+              "alm-wasm": 79.9,
+              "alm-native": 1423.5
             },
             {
               "op": "data-viz-lab/elm-chart-builder",
-              "elm (full)": 657.7,
-              "elm (incr.)": 114.9,
-              "alm-js": 127.7,
-              "alm-js (incr.)": 22.0,
-              "alm-wasm": 87.5
+              "elm (full)": 657.2,
+              "elm (incr.)": 105.7,
+              "alm-js": 117.0,
+              "alm-js (incr.)": 20.1,
+              "alm-wasm": 87.1
             },
             {
               "op": "exosphere/exosphere",
-              "elm (full)": 1495.6,
-              "elm (incr.)": 175.9,
-              "alm-js": 1101.4,
-              "alm-js (incr.)": 105.3,
-              "alm-wasm": 2006.8
+              "elm (full)": 1497.4,
+              "elm (incr.)": 173.3,
+              "alm-js": 1101.1,
+              "alm-js (incr.)": 109.7,
+              "alm-wasm": 1992.2
             }
           ],
           "decimals": 0,
@@ -428,39 +428,30 @@
           "columns": [
             "elm, project-cold",
             "elm, incremental",
-            "elm, all sources touched",
             "elm, no-op",
             "alm, project-cold",
             "alm, incremental",
-            "alm, all sources touched",
             "alm, no-op"
           ],
           "rows": [
             {
-              "op": "one entry point \u00b7 src/Insight.elm",
-              "elm, project-cold": 708.5,
-              "elm, incremental": 193.4,
-              "elm, no-op": 117.5,
-              "alm, project-cold": 138.6,
-              "alm, incremental": 106.5,
-              "alm, no-op": 14.3
-            },
-            {
-              "op": "all 19 entry points",
-              "elm, project-cold": 2958.0,
-              "elm, all sources touched": 2403.8,
-              "alm, project-cold": 665.2,
-              "alm, all sources touched": 567.6
+              "op": "one entry point \u00b7 src/Exosphere.elm",
+              "elm, project-cold": 1480.7,
+              "elm, incremental": 168.1,
+              "elm, no-op": 175.4,
+              "alm, project-cold": 1119.7,
+              "alm, incremental": 114.8,
+              "alm, no-op": 65.4
             }
           ],
           "decimals": 0,
           "unit": ""
         }
       ],
-      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cold against warm: dryft \u00b7 39,790 lines \u00b7 19 entry points",
+      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cold against warm: exosphere/exosphere \u00b7 59,137 lines",
       "freshness": {
         "state": "fresh",
-        "note": "2026-08-01"
+        "note": "2026-08-02"
       }
     }
   ]

@@ -176,8 +176,11 @@ def compile_section(data):
     facts = None
     if detail:
         project = detail["project"]
-        facts = (f"cold against warm: {project['name']} · {project['total_lines']:,} lines · "
-                 f"{project.get('entry_points', '?')} entry points")
+        facts = f"cold against warm: {project['name']} · {project['total_lines']:,} lines"
+        # Only worth saying when there is more than one, since the whole-project
+        # sweep is only shown then.
+        if (project.get("entry_points") or 0) > 1:
+            facts += f" · {project['entry_points']} entry points"
         # The two rows measure different modes — there is no no-op for a
         # whole-project build — so columns are keyed by name, and a mode a row
         # did not measure is left blank rather than shifted into the next.
