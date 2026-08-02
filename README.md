@@ -54,74 +54,56 @@ rebuild-and-write but leaves the page alone, for apps with their own reloader.
 
 ## What works
 
-- **The full Elm language**: modules, imports with aliases and exposing lists
-  (including opaque types and one alias covering several modules), custom types,
-  extensible records, record-alias constructors, custom operators
-  (`infix left 5 (|=) = keeper`), value recursion through lambdas, tuples,
-  let/case/lambdas with nested patterns, whitespace-sensitive layout, ports, and
-  all literal forms including surrogate-pair escapes.
-- **Hindley-Milner type inference**, ported from `Type/*.hs`: union-find
-  unification, let-polymorphism with SCC-based generalization, rigid annotation
-  variables scoped over nested annotations, row-polymorphic records, and elm's
-  `number`/`comparable`/`appendable` constraints.
-- **Exhaustiveness checking** (`Nitpick.PatternMatches`, Maranget's algorithm):
-  missing branches are compile errors listing example patterns; redundant
-  branches are rejected.
-- **Byte-exact parse errors** (`Reporting.Error.Syntax`): unfinished
-  expressions, missing arrows, endless strings and comments, bad numbers and
-  escapes, pattern and annotation problems, declaration errors, indentation
-  problems, module-name mismatches, `effect module` misuse, port validation.
-  Pinned by 89 differential fixtures diffed against `elm make` 0.19.1 in plain
-  text, in color, and as `--report=json`. Malformed GLSL is caught too
-  (`SHADER PROBLEM`), but its message comes from a different third-party parser
-  than elm's, so that one report is not byte-exact.
-- **Byte-exact type errors** (`Reporting.Error.Type`): the type found and the
-  type wanted, laid out by a port of elm's pretty-printer, with the differing
-  parts marked and the hint chosen from *how* they differ. The wording follows
-  the context — which argument of which call, which branch, which field of a
-  record update. All of a module's errors are reported, not just the first.
-  41 of 42 differential fixtures match byte-for-byte on stdout and stderr; the
-  exception is the self-referential type, where alm blames the unification and
-  elm reports `INFINITE TYPE` against the binding.
-- **Color and `--report=json`**: terminal reports are colored exactly as elm
-  colors them, and piped output stays plain under the same "is stderr a
-  terminal" rule (`NO_COLOR`/`CLICOLOR_FORCE` are honored too, which elm does
-  not do). Held to the same fixtures as the plain text.
-- **Multi-module and package builds**: dependency-ordered compilation against
-  module interfaces; pure packages compile from their published sources;
+- **The whole language** — including opaque types, extensible records,
+  record-alias constructors, custom operators, value recursion through lambdas,
+  layout-sensitive parsing, ports, and surrogate-pair escapes.
+- **Hindley-Milner inference** ported from `Type/*.hs` — union-find unification,
+  SCC-based generalization, rigid annotation variables, row-polymorphic records,
+  `number`/`comparable`/`appendable`.
+- **Exhaustiveness checking** (Maranget's algorithm) — missing branches are
+  errors listing example patterns; redundant branches are rejected.
+- **Byte-exact parse errors** — 89 differential fixtures against `elm make`
+  0.19.1, matching in plain text, in color, and as `--report=json`. The one
+  deviation is malformed GLSL: alm reports `SHADER PROBLEM` too, but through a
+  different third-party parser, so the embedded message differs.
+- **Byte-exact type errors** — elm's pretty-printer ported, so the found and
+  wanted types are laid out the same, differing parts marked, hint chosen from
+  *how* they differ and wording from where the mismatch is. 41 of 42 fixtures
+  match; the exception is the self-referential type, where alm blames the
+  unification and elm reports `INFINITE TYPE` against the binding.
+- **elm's color rules** — same palette, and piped output stays plain under the
+  same "is stderr a terminal" test. `NO_COLOR`/`CLICOLOR_FORCE` are honored too,
+  which elm does not do.
+- **Multi-module and package builds** — dependency-ordered against module
+  interfaces; pure packages compile from their published sources;
   `Elm.Kernel.*` imports resolve to runtime shims.
-- **The Elm Architecture**: virtual DOM with keyed/lazy nodes and SVG,
-  decoder-based events, `Browser.sandbox`/`element`/`document`/`application`
-  (link interception, pushUrl, popstate, titles), `Platform.worker`, ports, a
-  CPS task scheduler, and Http/Time/Random/Browser.Dom/Events/Navigation
+- **The Elm Architecture** — virtual DOM with keyed/lazy nodes and SVG,
+  decoder-based events, all four `Browser` program types, `Platform.worker`,
+  ports, a CPS task scheduler, and the Http/Time/Random/Dom/Events/Navigation
   subscriptions.
-- **Three backends**: JavaScript in Elm kernel style (`F2`/`A2` currying, tagged
-  objects), native code via LLVM (with its own garbage collector), and WebAssembly
-  (a from-scratch WasmGC code generator). Self tail calls compile to loops that
-  run in constant stack space.
-- **Decision-tree pattern matching** (`Optimize/DecisionTree`): a `case` becomes
-  a tree that tests each sub-path of the scrutinee once and shares common
-  prefixes, with a jump table at each dense constructor node (`switch` on JS,
-  `br_table` on wasm-gc, LLVM switch on native). A branch reached from several
-  leaves is emitted once as a shared join point rather than duplicated.
-- **Standard library**: every value of every module `elm/core`, `elm/json`,
-  `elm/html`, `elm/virtual-dom`, `elm/browser`, `elm/url`, `elm/time`,
-  `elm/random`, `elm/file`, `elm/bytes`, `elm/parser`, `elm/regex`, `elm/http`
-  and `elm/svg` publish compiles at the type it is published with — as does
-  `elm-explorations/test`, `markdown`, `benchmark`, `linear-algebra`, `webgl`
-  and `elm/project-metadata-utils`. `elm-explorations/markdown` renders through
-  the same `marked` build elm vendors, so its HTML is identical.
-- **WebGL** (`elm-explorations/webgl`): GLSL `[glsl|…|]` shaders (parsed and
-  type-checked), meshes, the `linear-algebra` `Math.Vector*`/`Matrix4` kernel,
-  and the full rendering kernel — `WebGL.toHtml` mounts a canvas that
-  compiles/links shaders, uploads buffers, sets uniforms, applies
-  blend/depth/stencil settings, and draws. `WebGL.Texture.load` fetches an image
-  and uploads it to the GPU. Verified pixel-exact in a headless browser.
-- **Cross-backend parity**: a differential suite runs the same programs through
-  all three backends and checks their output agrees. `elm/bytes` works on all
-  three, byte-for-byte. Outgoing ports carry any port-legal payload on all
-  three — on wasm-gc, where the host boundary is a JSON string rather than a
-  live JS value, a type-directed encoder converts the payload before it crosses.
+- **Three backends** — JavaScript in Elm kernel style, native via LLVM (with its
+  own garbage collector), and WebAssembly (a from-scratch WasmGC code
+  generator). Self tail calls compile to constant-stack loops.
+- **Decision-tree pattern matching** — a `case` tests each sub-path of the
+  scrutinee once and shares common prefixes, jump-tabling dense constructor
+  nodes (`switch` on JS, `br_table` on wasm-gc, LLVM switch on native) and
+  emitting a branch reached from several leaves once, as a shared join point.
+- **The standard library** — every value of every module `elm/core`,
+  `elm/json`, `elm/html`, `elm/virtual-dom`, `elm/browser`, `elm/url`,
+  `elm/time`, `elm/random`, `elm/file`, `elm/bytes`, `elm/parser`, `elm/regex`,
+  `elm/http`, `elm/svg` and `elm/project-metadata-utils` publish compiles at its
+  published type, as does `elm-explorations/test`, `markdown`, `benchmark`,
+  `linear-algebra` and `webgl`. Markdown renders through the same `marked` build
+  elm vendors, so its HTML is identical.
+- **WebGL** — GLSL `[glsl|…|]` shaders are parsed and type-checked, and the
+  rendering kernel is real: `WebGL.toHtml` compiles and links shaders, uploads
+  buffers, sets uniforms and draws, and `WebGL.Texture.load` uploads images to
+  the GPU. Verified pixel-exact in a headless browser.
+- **Cross-backend parity** — a differential suite runs the same programs through
+  all three backends and checks their output agrees. That covers `elm/bytes` and
+  outgoing ports with any port-legal payload; on wasm-gc, where the host
+  boundary is a JSON string rather than a live JS value, a type-directed encoder
+  converts the payload before it crosses.
 
 ## Effect managers
 
