@@ -117,11 +117,13 @@ fn print_help() {
 }
 
 fn make(args: &[String]) -> ExitCode {
-    use alm_compiler::generate::native::OptLevel;
+    use alm_compiler::generate::OptLevel;
     #[derive(PartialEq)]
     enum Backend {
         Js,
-        /// LLVM native binary with the uniform (boxed) runtime.
+        /// LLVM native binary with the uniform (boxed) runtime. Present in the
+        /// CLI whether or not this build has the backend, so asking for it
+        /// says what is missing rather than "unknown target".
         Native,
         /// The from-scratch WebAssembly GC backend (engine-managed GC).
         WasmGc,
@@ -252,10 +254,21 @@ fn make(args: &[String]) -> ExitCode {
     }
 
     let result = match backend {
+        #[cfg(feature = "native")]
         Backend::Native => {
             let output = output.unwrap_or_else(|| input.with_extension(""));
             alm_compiler::project::compile_project_native(&input, &output, opt)
                 .map(|w| (output, w))
+        }
+        #[cfg(not(feature = "native"))]
+        Backend::Native => {
+            let _ = opt;
+            eprintln!(
+                "This alm was built without the native backend, so `--target=native`\n\
+                 has nothing to compile with. It builds js and wasm-gc. A build with\n\
+                 the native target: `cargo build --release -p alm` (needs LLVM 16)."
+            );
+            return ExitCode::FAILURE;
         }
         Backend::WasmGc => {
             let output = output.unwrap_or_else(|| input.with_extension("wasm"));

@@ -18,16 +18,36 @@ use std::process::Command;
 const RUNTIME_TOOLCHAIN: &str = "+1.72.1";
 
 fn main() {
+    // Every artifact below exists for the native backend. Without that feature
+    // nothing includes them, and the build needs neither LLVM, a C compiler,
+    // nor the pinned rustc — which is what lets alm build on a platform that
+    // has none of them.
+    if env::var_os("CARGO_FEATURE_NATIVE").is_none() {
+        return;
+    }
+
     let source = "src/generate/native_runtime.rs";
     println!("cargo:rerun-if-changed={}", source);
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // Host runtime (target-cpu=native so it inlines into host codegen).
+    // The runtime, tuned by default to the machine building it so it inlines
+    // into host codegen.
+    //
+    // `native` is right for a compiler that stays on the machine that built it
+    // and wrong for a distributed one: this runtime is linked into every
+    // program the compiler produces, so a build machine with instructions the
+    // user's CPU lacks would make those programs fault. A release build sets
+    // ALM_RUNTIME_TARGET_CPU to a baseline instead.
+    println!("cargo:rerun-if-env-changed=ALM_RUNTIME_TARGET_CPU");
+    let cpu = env::var("ALM_RUNTIME_TARGET_CPU")
+        .ok()
+        .filter(|cpu| !cpu.is_empty())
+        .unwrap_or_else(|| "native".to_string());
     build_runtime(
         source,
         &out_dir,
         "alm_runtime",
-        &["-C", "target-cpu=native"],
+        &["-C", &format!("target-cpu={cpu}")],
     );
 
     // Regex glue: a sibling crate that wraps `fancy-regex` behind a C ABI, so
@@ -91,10 +111,10 @@ fn build_regex_glue(out_dir: &PathBuf) {
 
     // The glue archive statically bundles its own `std` (and `fancy-regex`),
     // which would collide with the runtime archive's `std` at link
-    // (`_rust_eh_personality`, allocator shims, …). Merge the glue's objects
+    // (`rust_eh_personality`, allocator shims, …). Merge the glue's objects
     // into ONE relocatable object and localize every symbol except the C entry
-    // points (`ld -r -exported_symbols_list`), so its private `std` copy is
-    // self-contained and only `alm_rx_*` is visible to the final link.
+    // points, so its private `std` copy is self-contained and only `alm_rx_*`
+    // is visible to the final link.
     let glue_a = rx_target.join("release/libalm_regex.a");
     let merge_dir = out_dir.join("rxmerge");
     let _ = std::fs::remove_dir_all(&merge_dir);
@@ -107,12 +127,14 @@ fn build_regex_glue(out_dir: &PathBuf) {
         .map(|s| s.success())
         .unwrap_or(false);
     assert!(ar_ok, "extracting the regex glue archive failed");
+    // Mach-O prefixes C symbols with an underscore; ELF does not.
+    let mach_o = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    let prefix = if mach_o { "_" } else { "" };
     let exports = merge_dir.join("exports.txt");
-    std::fs::write(
-        &exports,
-        "_alm_rx_compile\n_alm_rx_contains\n_alm_rx_find\n_alm_rx_split\n_alm_rx_free\n",
-    )
-    .unwrap();
+    let names = ["compile", "contains", "find", "split", "free"]
+        .map(|n| format!("{prefix}alm_rx_{n}\n"))
+        .concat();
+    std::fs::write(&exports, names).unwrap();
     let objs: Vec<PathBuf> = std::fs::read_dir(&merge_dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -120,11 +142,25 @@ fn build_regex_glue(out_dir: &PathBuf) {
         .collect();
     let merged = out_dir.join("libalm_regex.o");
     let mut cmd = Command::new("ld");
-    cmd.arg("-r").arg("-exported_symbols_list").arg(&exports);
+    cmd.arg("-r");
+    // Apple's ld localizes as it merges; GNU ld has no equivalent, so there the
+    // merge and the localizing are two steps (objcopy, below).
+    if mach_o {
+        cmd.arg("-exported_symbols_list").arg(&exports);
+    }
     cmd.args(&objs);
     cmd.arg("-o").arg(&merged);
     let ld_ok = cmd.status().map(|s| s.success()).unwrap_or(false);
     assert!(ld_ok, "ld -r merge of the regex glue failed");
+    if !mach_o {
+        let keep = Command::new("objcopy")
+            .arg(format!("--keep-global-symbols={}", exports.display()))
+            .arg(&merged)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(keep, "objcopy localizing of the regex glue failed");
+    }
 }
 
 fn build_runtime(source: &str, out_dir: &PathBuf, crate_name: &str, extra: &[&str]) {

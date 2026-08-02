@@ -9,6 +9,24 @@ An [Elm](https://elm-lang.org/) compiler written in Rust with:
 - experimental wasm support
 - experimental native compilation
 
+## Install
+
+Binaries for macOS, Linux and Windows are on the
+[releases page](https://github.com/boxed/Alm/releases). The Windows and
+Linux-arm64 builds compile `js` and `wasm-gc`; the rest have `native` too.
+
+Or build it:
+
+```sh
+cargo build --release -p alm                        # all three targets
+cargo build --release -p alm --no-default-features  # js and wasm-gc only
+```
+
+The default build needs LLVM 16 (`brew install llvm@16`, or `llvm-16-dev`) and
+the pinned rustc that produces matching bitcode for the native runtime
+(`rustup toolchain install 1.72.1`). Without `native` it needs neither — only a
+Rust toolchain.
+
 ## Usage
 
 ```sh

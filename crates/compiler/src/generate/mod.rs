@@ -5,6 +5,7 @@
 //! types, cons cells for lists, and plain objects for records.
 
 pub mod comments;
+#[cfg(feature = "native")]
 pub mod native;
 pub mod sourcemap;
 pub mod wasmgc;
@@ -18,6 +19,23 @@ use crate::generate::sourcemap::{region_start, SourceMap};
 use crate::reporting::Region;
 
 pub const RUNTIME: &str = include_str!("runtime.js");
+
+/// How hard LLVM should optimize the native backend's output. The LLVM stage (a
+/// single-module `O2` pass over the whole monomorphized program) dominates
+/// native build time — ~98% of it on a real app — so `Debug` trades runtime
+/// speed for a much faster build, the way a native toolchain's debug profile
+/// does. `Release` is the default.
+///
+/// It lives here rather than in `native` so the CLI can parse `--dev` in a
+/// build compiled without that backend. The mapping onto LLVM's own levels is
+/// in `native`, with the rest of the LLVM-facing code.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    /// `O0`: minimal passes, fastest build. For dev iteration.
+    Debug,
+    /// `O2`: full pipeline, fastest runtime. The default.
+    Release,
+}
 
 /// The runtime source to embed. `ALM_RUNTIME_JS` overrides the compiled-in
 /// kernel — used by the mutation test harness to inject mutated runtimes

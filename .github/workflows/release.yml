@@ -1,0 +1,139 @@
+# Build the release binaries and attach them to a release.
+#
+# Every job builds on the platform it ships for: the native backend links LLVM
+# 16 through inkwell, so cross-compiling would mean LLVM's static libraries for
+# the other platform. Where those are not readily available (Windows, and the
+# Linux arm64 runner) alm is built with `--no-default-features`, which drops
+# `--target=native` and leaves js and wasm-gc — that build needs nothing but a
+# Rust toolchain.
+#
+# Pushing a tag releases it. `workflow_dispatch` rebuilds the assets for a tag
+# that already has a release, which is how a release gets the platforms that a
+# local build could not produce.
+
+name: release
+
+on:
+  push:
+    tags: ['*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to build and upload assets for
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing to build should not withhold the others; the
+      # release is assembled from whatever assets arrive.
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-14
+            native: true
+            baseline_cpu: apple-m1
+          - name: macos-x86_64
+            runner: macos-13
+            native: true
+            baseline_cpu: x86-64-v2
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+            native: true
+            baseline_cpu: x86-64-v2
+          - name: linux-arm64
+            runner: ubuntu-22.04-arm
+            native: false
+          - name: windows-x86_64
+            runner: windows-2022
+            native: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      # The native runtime is compiled to LLVM-16 bitcode for the backend to
+      # merge, so it is built with the rustc whose bundled LLVM is 16.
+      - name: Pinned runtime toolchain
+        if: matrix.native
+        run: rustup toolchain install 1.72.1 --profile minimal
+
+      - name: LLVM 16 (macOS)
+        if: matrix.native && runner.os == 'macOS'
+        run: |
+          brew install llvm@16
+          echo "LLVM_SYS_160_PREFIX=$(brew --prefix llvm@16)" >> "$GITHUB_ENV"
+
+      - name: LLVM 16 (Linux)
+        if: matrix.native && runner.os == 'Linux'
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 16
+          sudo apt-get install -y llvm-16-dev libpolly-16-dev zlib1g-dev
+          echo "LLVM_SYS_160_PREFIX=/usr/lib/llvm-16" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        # The runtime this compiler links into every program it builds must run
+        # on the user's CPU, not just the build machine's.
+        env:
+          ALM_RUNTIME_TARGET_CPU: ${{ matrix.baseline_cpu }}
+        run: |
+          if [ "${{ matrix.native }}" = "true" ]; then
+            cargo build --release -p alm
+          else
+            cargo build --release -p alm --no-default-features
+          fi
+
+      # Proof the binary runs on the platform it was built for, and that the
+      # targets it claims are the ones it has.
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin=target/release/alm
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=target/release/alm.exe; fi
+          mkdir -p smoke && cp examples/FizzBuzz.elm smoke/
+          (cd smoke && "../$bin" make FizzBuzz.elm --output=out.js)
+          (cd smoke && "../$bin" make FizzBuzz.elm --target=wasm-gc --output=out.wasm)
+          test -s smoke/out.js && test -s smoke/out.wasm
+          if [ "${{ matrix.native }}" = "true" ]; then
+            (cd smoke && "../$bin" make FizzBuzz.elm --target=native --output=out.bin)
+            smoke/out.bin
+          fi
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          stem="alm-$tag-${{ matrix.name }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$stem.zip" ./target/release/alm.exe
+            echo "asset=$stem.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar czf "$stem.tar.gz" -C target/release alm
+            echo "asset=$stem.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          # A tag push arrives before the release is written, and the jobs race
+          # each other to notice: whoever gets there first creates it.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "alm $tag" --generate-notes || true
+          fi
+          gh release upload "$tag" "${{ steps.package.outputs.asset }}" --clobber

@@ -53,17 +53,7 @@ pub const IMMIX_GC_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/immix_
 /// static library at link time.
 pub const RUNTIME_BC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/alm_runtime.bc"));
 
-/// How hard LLVM should optimize. The LLVM stage (a single-module `O2` pass over
-/// the whole monomorphized program) dominates native build time — ~98% of it on
-/// a real app — so `Debug` trades runtime speed for a much faster build, the way
-/// a native toolchain's debug profile does. `Release` is the default.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OptLevel {
-    /// `O0`: minimal passes, fastest build. For dev iteration.
-    Debug,
-    /// `O2`: full pipeline, fastest runtime. The default.
-    Release,
-}
+pub use super::OptLevel;
 
 impl OptLevel {
     fn machine_level(self) -> OptimizationLevel {

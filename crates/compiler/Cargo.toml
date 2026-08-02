@@ -4,8 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["native"]
+# The `--target=native` backend. It links LLVM 16 and builds the native runtime
+# with a pinned rustc, so a platform without those (or a build that only wants
+# js and wasm-gc) turns it off with --no-default-features.
+native = ["dep:inkwell"]
+
 [dependencies]
-inkwell = { version = "0.5", features = ["llvm16-0"] }
+inkwell = { version = "0.5", features = ["llvm16-0"], optional = true }
 wasm-encoder = "0.253.0"
 wasmparser = "0.253.0"
 glsl = "7.0.0"

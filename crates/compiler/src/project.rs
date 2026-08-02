@@ -618,10 +618,11 @@ fn built(entry: &Path, output: &Path, target: &str) {
 
 /// Compile a project to a native binary or wasm module at `output` via the
 /// LLVM backend.
+#[cfg(feature = "native")]
 pub fn compile_project_native(
     entry: &Path,
     output: &Path,
-    opt: generate::native::OptLevel,
+    opt: generate::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
     let use_cache = std::env::var_os("ALM_NO_CACHE").is_none();
     if use_cache && nothing_to_do(entry, output, "native") {

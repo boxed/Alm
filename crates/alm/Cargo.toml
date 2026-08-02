@@ -8,5 +8,11 @@ license.workspace = true
 name = "alm"
 path = "src/main.rs"
 
+[features]
+default = ["native"]
+# Forwards to the compiler's LLVM-backed `--target=native`. Off, alm builds
+# anywhere a Rust toolchain runs and compiles js and wasm-gc.
+native = ["alm-compiler/native"]
+
 [dependencies]
-alm-compiler = { path = "../compiler" }
+alm-compiler = { path = "../compiler", default-features = false }
