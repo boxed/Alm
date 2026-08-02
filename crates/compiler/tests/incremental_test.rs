@@ -23,10 +23,10 @@ import Platform
 import Widget
 
 
-main : Program () () ()
+main : Program () String ()
 main =
     Platform.worker
-        { init = \_ -> ( (), Cmd.none )
+        { init = \_ -> ( described, Cmd.none )
         , update = \_ model -> ( model, Cmd.none )
         , subscriptions = \_ -> Sub.none
         }
@@ -408,5 +408,61 @@ fn a_wasm_build_does_not_disturb_the_javascript_cache() {
         build_incremental(&dir).expect("js once more"),
         build_full(&dir).expect("js full"),
         "the js cache stopped agreeing with a full build after a wasm build"
+    );
+}
+
+// Monomorphization and code generation are whole-program, so a build with
+// nothing to do is skipped outright rather than redone. These pin the two ways
+// that could be wrong: skipping when something did change, and skipping when
+// the output being asked for is not there.
+
+#[test]
+fn a_wasm_build_with_nothing_to_do_is_skipped_but_still_correct() {
+    let dir = common::test_dir("alm-incremental", "wasm-noop");
+    project_with(&dir, LABEL);
+    let first = build_wasm(&dir, true).expect("first wasm build");
+
+    // Twice more with nothing changed: skipped, and the output stands.
+    assert_eq!(build_wasm(&dir, true).expect("second"), first);
+    assert_eq!(build_wasm(&dir, true).expect("third"), first);
+
+    // A real change is not skipped.
+    let edited = LABEL.replace("String.toUpper text", "String.toLower text");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+    let after = build_wasm(&dir, true).expect("build after the edit");
+    assert_ne!(after, first, "an edit was skipped as though nothing had changed");
+    assert_eq!(after, build_wasm(&dir, false).expect("full"), "the edit built the wrong thing");
+}
+
+#[test]
+fn a_wasm_build_is_not_skipped_when_its_output_is_gone() {
+    let dir = common::test_dir("alm-incremental", "wasm-missing-output");
+    project_with(&dir, LABEL);
+    let first = build_wasm(&dir, true).expect("first wasm build");
+
+    std::fs::remove_file(dir.join("incr.wasm")).expect("delete the output");
+    assert_eq!(
+        build_wasm(&dir, true).expect("rebuild"),
+        first,
+        "the build was skipped even though its output had been deleted"
+    );
+}
+
+#[test]
+fn a_wasm_build_is_not_skipped_for_a_different_output_path() {
+    let dir = common::test_dir("alm-incremental", "wasm-other-output");
+    project_with(&dir, LABEL);
+    let first = build_wasm(&dir, true).expect("first wasm build");
+
+    // Same sources, somewhere else: there is no file there to stand in for the
+    // work, so it has to be done.
+    let elsewhere = dir.join("other.wasm");
+    project::compile_project_wasmgc_with(&dir.join("src").join("Main.elm"), &elsewhere, false, true)
+        .map_err(render)
+        .expect("build to another path");
+    assert_eq!(
+        std::fs::read(&elsewhere).expect("read the other output"),
+        first,
+        "building to a second path produced something different"
     );
 }

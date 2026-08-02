@@ -1004,3 +1004,84 @@ pub fn store_check(dir: &Path, module_path: &Path, fingerprint: u64, entry: &Che
 
     write_atomically(dir, &entry_path(dir, module_path), &w.bytes);
 }
+
+// ------------------------------------------------------------- no-op builds
+
+/// A fingerprint of everything a build depended on, stored beside the output it
+/// produced. If it still matches and the output is still there, the build has
+/// nothing to do.
+///
+/// This is what a no-op costs, and for the back ends whose work is
+/// whole-program it is the difference between a save that touched nothing
+/// costing a second and costing nothing. Monomorphization and code generation
+/// run over the entire program every time — no per-module cache reaches them —
+/// so the only way to not pay for them is to not run them.
+pub fn build_stamp(graph: &Graph, closure: &[PathBuf], fingerprint: u64) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    fingerprint.hash(&mut h);
+    let mut paths: Vec<&PathBuf> = closure.iter().collect();
+    paths.sort();
+    for path in paths {
+        path.hash(&mut h);
+        if let Some(record) = graph.modules.get(path) {
+            record.mtime_ns.hash(&mut h);
+            record.size.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Every module reachable from `entry` according to the graph, provided every
+/// one of them is still exactly the file the graph recorded. `None` the moment
+/// anything is missing or has moved — this is a fast path, not an analysis, and
+/// the ordinary build handles every case it declines.
+pub fn unchanged_closure(graph: &Graph, entry: &Path) -> Option<Vec<PathBuf>> {
+    let entry = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+    let mut seen = Vec::new();
+    let mut queue = vec![entry];
+    while let Some(path) = queue.pop() {
+        if seen.contains(&path) {
+            continue;
+        }
+        // Bundled modules come from the compiler binary, which the fingerprint
+        // already covers, and have no file to stat.
+        let bundled = path.to_str().is_some_and(|p| p.starts_with("<builtin>/"));
+        let record = graph.modules.get(&path);
+        if !bundled {
+            let record = record?;
+            let (mtime_ns, size) = stamp(&path)?;
+            if record.mtime_ns != mtime_ns || record.size != size {
+                return None;
+            }
+        }
+        seen.push(path.clone());
+        if let Some(record) = record {
+            queue.extend(record.imports.iter().map(|(_, to)| to.clone()));
+        }
+    }
+    Some(seen)
+}
+
+fn stamps_path(dir: &Path, key: &str) -> PathBuf {
+    let mut h = std::hash::DefaultHasher::new();
+    key.hash(&mut h);
+    dir.join(format!("{:016x}.almb", h.finish()))
+}
+
+pub fn load_build_stamp(dir: &Path, key: &str) -> Option<u64> {
+    let bytes = std::fs::read(stamps_path(dir, key)).ok()?;
+    let mut r = Reader { bytes: &bytes, at: 0 };
+    if r.take(4)? != MAGIC || r.u32()? != FORMAT_VERSION {
+        return None;
+    }
+    let stamp = r.u64()?;
+    (r.at == bytes.len()).then_some(stamp)
+}
+
+pub fn store_build_stamp(dir: &Path, key: &str, stamp: u64) {
+    let mut w = Writer::default();
+    w.bytes.extend_from_slice(MAGIC);
+    w.u32(FORMAT_VERSION);
+    w.u64(stamp);
+    write_atomically(dir, &stamps_path(dir, key), &w.bytes);
+}

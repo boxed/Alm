@@ -524,6 +524,98 @@ pub fn compile_project_source_maps(
     Ok((js, map, warnings))
 }
 
+/// Record the module graph as this build saw it: each file's timestamp, length,
+/// declared name and resolved imports. Written every build, since a module that
+/// was reloaded has a new timestamp to remember.
+fn record_graph(
+    dir: &Path,
+    modules: &HashMap<PathBuf, LoadedModule>,
+    order: &[PathBuf],
+    previous: Option<&cache::Graph>,
+) {
+    cache::store_graph(
+        dir,
+        cache::fingerprint(&[]),
+        &cache::Graph {
+            modules: order
+                .iter()
+                .filter_map(|path| {
+                    let loaded = &modules[path];
+                    let (mtime_ns, size) = match &loaded.parsed {
+                        // Read this build: take its stamp from disk now.
+                        Some(_) => cache::stamp(path)?,
+                        // Not read, so the stamp the graph vouched for still
+                        // stands — it is why the file was not read.
+                        None => {
+                            let record = previous?.modules.get(path)?;
+                            (record.mtime_ns, record.size)
+                        }
+                    };
+                    Some((
+                        path.clone(),
+                        cache::GraphRecord {
+                            mtime_ns,
+                            size,
+                            declared_name: loaded.declared_name.clone(),
+                            matched_dir: loaded.matched_dir.clone(),
+                            imports: loaded.imports.clone(),
+                        },
+                    ))
+                })
+                .collect(),
+        },
+    );
+}
+
+/// Whether this exact build has already been done and its output is still
+/// there — every source unchanged since the graph was recorded, the same
+/// compiler, the same target, the same output path.
+///
+/// Worth its own check because monomorphization and code generation are
+/// whole-program: no per-module cache reaches them, so a save that changed
+/// nothing costs a wasm-gc build a second of work to arrive at the file already
+/// on disk. Costs ~360 `stat` calls on a 360-module project.
+///
+/// Deliberately conservative. Anything it cannot account for — a file it has no
+/// record of, a missing output, source maps — falls through to the ordinary
+/// build, which is only slower.
+fn nothing_to_do(entry: &Path, output: &Path, target: &str) -> bool {
+    if !output.is_file() {
+        return false;
+    }
+    let dir = cache::dir_for(&project_root(entry));
+    let Some(graph) = cache::load_graph(&dir, cache::fingerprint(&[])) else {
+        return false;
+    };
+    let Some(closure) = cache::unchanged_closure(&graph, entry) else {
+        return false;
+    };
+    let stamp = cache::build_stamp(
+        &graph,
+        &closure,
+        cache::fingerprint(&[("target", target), ("output", &output.display().to_string())]),
+    );
+    let key = format!("{target}:{}", output.display());
+    cache::load_build_stamp(&dir, &key) == Some(stamp)
+}
+
+/// Record that this build happened, so an identical one can be skipped.
+fn built(entry: &Path, output: &Path, target: &str) {
+    let dir = cache::dir_for(&project_root(entry));
+    let Some(graph) = cache::load_graph(&dir, cache::fingerprint(&[])) else {
+        return;
+    };
+    let Some(closure) = cache::unchanged_closure(&graph, entry) else {
+        return;
+    };
+    let stamp = cache::build_stamp(
+        &graph,
+        &closure,
+        cache::fingerprint(&[("target", target), ("output", &output.display().to_string())]),
+    );
+    cache::store_build_stamp(&dir, &format!("{target}:{}", output.display()), stamp);
+}
+
 /// Compile a project to a native binary or wasm module at `output` via the
 /// LLVM backend.
 pub fn compile_project_native(
@@ -531,11 +623,21 @@ pub fn compile_project_native(
     output: &Path,
     opt: generate::native::OptLevel,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
-    let checked = check_project(entry)?;
+    let use_cache = std::env::var_os("ALM_NO_CACHE").is_none();
+    if use_cache && nothing_to_do(entry, output, "native") {
+        return Ok(Vec::new());
+    }
+    // The native backend shares the front end, so it caches the same way.
+    let checked = check_project_cached(entry, true, use_cache)?;
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let program = timing::mono(|| crate::ir::lower::lower_project(&checked.modules));
     timing::generate(|| generate::native::build(&program, output, opt))
-        .map(|()| warnings)
+        .map(|()| {
+            if use_cache {
+                built(entry, output, "native");
+            }
+            warnings
+        })
         .map_err(|message| {
             vec![BuildError::new(
                 entry.to_path_buf(),
@@ -569,6 +671,9 @@ pub fn compile_project_wasmgc_with(
     source_maps: bool,
     use_cache: bool,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
+    if use_cache && !source_maps && nothing_to_do(entry, output, "wasm-gc") {
+        return Ok(Vec::new());
+    }
     let checked = check_project_cached(entry, true, use_cache)?;
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let empty_types = HashMap::new();
@@ -676,7 +781,14 @@ pub fn compile_project_wasmgc_with(
             sources.as_ref(),
         )
     })
-    .map(|()| warnings)
+    .map(|()| {
+        // Only after the output is actually written: a stamp recorded for a
+        // build that failed would skip the retry.
+        if use_cache && !source_maps {
+            built(entry, output, "wasm-gc");
+        }
+        warnings
+    })
     .map_err(|message| {
         vec![BuildError::new(
             entry.to_path_buf(),
@@ -872,42 +984,7 @@ pub fn compile_project_cached(
             crate::debug_uses::debug_remnants_report(&debug_users),
         )]);
     }
-    // Record the graph as this build saw it. Written every build, since a
-    // module that was reloaded has a new timestamp to remember.
-    timing::cache(|| {
-        cache::store_graph(
-            &dir,
-            cache::fingerprint(&[]),
-            &cache::Graph {
-                modules: order
-                    .iter()
-                    .filter_map(|path| {
-                        let loaded = &modules[path];
-                        let (mtime_ns, size) = match &loaded.parsed {
-                            // Read this build: take its stamp from disk now.
-                            Some(_) => cache::stamp(path)?,
-                            // Not read, so the stamp the graph vouched for still
-                            // stands — it is why the file was not read.
-                            None => {
-                                let record = graph.as_ref()?.modules.get(path)?;
-                                (record.mtime_ns, record.size)
-                            }
-                        };
-                        Some((
-                            path.clone(),
-                            cache::GraphRecord {
-                                mtime_ns,
-                                size,
-                                declared_name: loaded.declared_name.clone(),
-                                matched_dir: loaded.matched_dir.clone(),
-                                imports: loaded.imports.clone(),
-                            },
-                        ))
-                    })
-                    .collect(),
-            },
-        )
-    });
+    timing::cache(|| record_graph(&dir, &modules, &order, graph.as_ref()));
 
     if timing::enabled() {
         eprintln!("── alm cache ── {reused}/{} modules reused", order.len());
@@ -1283,6 +1360,14 @@ pub fn check_project_cached(
 
     if !build_errors.is_empty() {
         return Err(build_errors);
+    }
+    // The back ends that build from this need the graph to tell whether
+    // anything moved since last time. Every module here was read and parsed,
+    // so the stamps are current.
+    if use_cache {
+        timing::cache(|| {
+            record_graph(&cache::dir_for(&project_root(entry)), &modules, &order, None)
+        });
     }
 
     Ok(CheckedProject {
