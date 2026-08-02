@@ -3,7 +3,10 @@ resolver = "2"
 members = ["crates/compiler", "crates/alm", "crates/alm-regex"]
 
 [workspace.package]
-version = "0.1.0"
+# The elm version alm implements, then alm's own revision of it. Cargo takes
+# only three components, so the fourth rides along as build metadata; the
+# release calls itself 0.19.1.1.
+version = "0.19.1+1"
 edition = "2021"
 license = "BSD-3-Clause"
 

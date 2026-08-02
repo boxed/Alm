@@ -13,14 +13,14 @@ dependencies = [
 
 [[package]]
 name = "alm"
-version = "0.1.0"
+version = "0.19.1+1"
 dependencies = [
  "alm-compiler",
 ]
 
 [[package]]
 name = "alm-compiler"
-version = "0.1.0"
+version = "0.19.1+1"
 dependencies = [
  "glsl",
  "inkwell",

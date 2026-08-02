@@ -556,12 +556,14 @@ fn render(doc: Doc, color: bool) -> String {
 }
 
 fn welcome(color: bool) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    // The crate version carries alm's revision as build metadata, since cargo
+    // takes only three components — spell it as the fourth one it stands for.
+    let version = env!("CARGO_PKG_VERSION").replace('+', ".");
     let title = format!("alm {version}");
     let dashes = "-".repeat(74usize.saturating_sub(title.chars().count()));
     let doc = Doc::vcat(vec![
         // The spaces around the title sit outside the colored runs, as elm's
-        // do — `<grey>----</grey> <cyan>alm 0.1.0</cyan> <grey>---…</grey>`.
+        // do — `<grey>----</grey> <cyan>alm 0.19.1.1</cyan> <grey>---…</grey>`.
         Doc::concat(vec![
             Doc::color(Color::BlackVivid, Doc::text("----")),
             Doc::text(" "),
