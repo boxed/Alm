@@ -1,6 +1,6 @@
 # alm
 
-An [Elm](https://elm-lang.org/) compiler] written in Rust with:
+An [Elm](https://elm-lang.org/) compiler written in Rust with:
 
 
 - improved compilation speed
