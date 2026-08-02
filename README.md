@@ -1,20 +1,14 @@
 # alm
 
-A port of the [Elm compiler](https://github.com/elm/compiler) from Haskell to Rust.
+An [Elm compiler](https://github.com/elm/compiler) written in Rust with:
 
-alm runs Elm 0.19 applications through the same front-end as the original
-compiler, then generates code for one of three targets:
 
-- **JavaScript** (the default) — Elm kernel style, byte-identical to
-  `elm make` for pure code.
-- **Native** — a standalone binary via LLVM, with its own garbage
-  collector.
-- **WebAssembly** — a from-scratch WasmGC backend.
-
-It compiles real production applications:
-[exosphere](https://gitlab.com/exosphere/exosphere) — 59k lines over 212
-modules and 58 packages, with ports, Http, Json decoders, Svg, custom
-operators and elm/parser — compiles, boots and renders.
+- improved compilation speed
+- faster runtime execution
+- source maps
+- live hot module reload
+- experimental wasm support
+- experimental native compilation
 
 ## Usage
 
