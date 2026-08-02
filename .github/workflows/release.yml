@@ -83,6 +83,16 @@ jobs:
           prefix=$(brew --prefix llvm@16)
           test -x "$prefix/bin/llvm-config" || { echo "llvm@16 did not install"; exit 1; }
           echo "LLVM_SYS_160_PREFIX=$prefix" >> "$GITHUB_ENV"
+          # LLVM's link line names zstd and libunwind, which resolve to the
+          # Homebrew dylibs — paths that do not exist on a Mac without
+          # Homebrew, so the binary would die in dyld on the machine it was
+          # shipped to. force_load takes those two statically, and
+          # dead_strip_dylibs drops every load command nothing needed.
+          zstd=$(brew --prefix zstd)
+          flags="-C link-arg=-Wl,-force_load,$zstd/lib/libzstd.a"
+          flags="$flags -C link-arg=-Wl,-force_load,$prefix/lib/libunwind.a"
+          flags="$flags -C link-arg=-Wl,-dead_strip_dylibs"
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
 
       - name: LLVM 16 (Linux)
         if: matrix.native && runner.os == 'Linux'
@@ -104,6 +114,20 @@ jobs:
             cargo build --release -p alm
           else
             cargo build --release -p alm --no-default-features
+          fi
+
+      # A binary that loads something from /opt/homebrew or /usr/local runs
+      # here and dies in dyld on a Mac without Homebrew. Only what ships with
+      # the OS may be dynamic.
+      - name: Only system libraries
+        if: runner.os == 'macOS'
+        run: |
+          otool -L target/release/alm | tail -n +2 > deps.txt
+          cat deps.txt
+          if grep -vqE '^[[:space:]]+(/usr/lib|/System)/' deps.txt; then
+            echo "::error::the binary depends on libraries that are not part of macOS"
+            grep -vE '^[[:space:]]+(/usr/lib|/System)/' deps.txt
+            exit 1
           fi
 
       # Proof the binary runs on the platform it was built for, and that the
