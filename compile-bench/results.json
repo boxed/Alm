@@ -1,5 +1,5 @@
 {
-  "measured": "2026-08-02T03:57:28+02:00",
+  "measured": "2026-08-02T04:04:30+02:00",
   "machine": "Darwin arm64",
   "elm_version": "0.19.1",
   "runs": {
@@ -10,8 +10,10 @@
   "compilers": [
     "elm (full)",
     "elm (incr.)",
+    "elm (no-op)",
     "alm-js",
     "alm-js (incr.)",
+    "alm-js (no-op)",
     "alm-wasm",
     "alm-native"
   ],
@@ -19,71 +21,85 @@
     {
       "op": "elm/http",
       "lines": 13,
-      "elm (full)": 631.2,
-      "elm (incr.)": 94.6,
-      "alm-js": 12.1,
-      "alm-js (incr.)": 9.8,
-      "alm-wasm": 9.2,
-      "alm-native": 86.5
+      "elm (full)": 678.1,
+      "elm (incr.)": 96.2,
+      "elm (no-op)": 97.4,
+      "alm-js": 9.7,
+      "alm-js (incr.)": 7.9,
+      "alm-js (no-op)": 7.5,
+      "alm-wasm": 8.3,
+      "alm-native": 93.4
     },
     {
       "op": "elm/url",
       "lines": 16,
-      "elm (full)": 637.4,
-      "elm (incr.)": 101.0,
-      "alm-js": 12.4,
-      "alm-js (incr.)": 9.7,
-      "alm-wasm": 9.7,
-      "alm-native": 98.6
+      "elm (full)": 691.7,
+      "elm (incr.)": 99.4,
+      "elm (no-op)": 98.8,
+      "alm-js": 9.7,
+      "alm-js (incr.)": 7.8,
+      "alm-js (no-op)": 8.0,
+      "alm-wasm": 8.8,
+      "alm-native": 103.2
     },
     {
       "op": "elm/parser",
       "lines": 14,
-      "elm (full)": 613.0,
-      "elm (incr.)": 91.0,
-      "alm-js": 12.1,
-      "alm-js (incr.)": 8.2,
-      "alm-wasm": 9.9,
-      "alm-native": 134.7
+      "elm (full)": 652.4,
+      "elm (incr.)": 107.2,
+      "elm (no-op)": 99.3,
+      "alm-js": 11.7,
+      "alm-js (incr.)": 9.1,
+      "alm-js (no-op)": 9.0,
+      "alm-wasm": 10.9,
+      "alm-native": 130.6
     },
     {
       "op": "terezka/elm-charts",
       "lines": 17,
-      "elm (full)": 632.6,
-      "elm (incr.)": 91.3,
-      "alm-js": 56.4,
-      "alm-js (incr.)": 14.3,
-      "alm-wasm": 42.0,
-      "alm-native": 830.0
+      "elm (full)": 657.2,
+      "elm (incr.)": 98.3,
+      "elm (no-op)": 103.2,
+      "alm-js": 53.1,
+      "alm-js (incr.)": 12.8,
+      "alm-js (no-op)": 11.2,
+      "alm-wasm": 41.2,
+      "alm-native": 824.5
     },
     {
       "op": "ianmackenzie/elm-geometry",
       "lines": 64,
-      "elm (full)": 652.2,
-      "elm (incr.)": 90.9,
-      "alm-js": 103.0,
-      "alm-js (incr.)": 23.2,
+      "elm (full)": 681.1,
+      "elm (incr.)": 113.2,
+      "elm (no-op)": 110.5,
+      "alm-js": 102.1,
+      "alm-js (incr.)": 21.5,
+      "alm-js (no-op)": 18.9,
       "alm-wasm": 79.9,
-      "alm-native": 1423.5
+      "alm-native": 1417.4
     },
     {
       "op": "data-viz-lab/elm-chart-builder",
       "lines": 17,
-      "elm (full)": 657.2,
-      "elm (incr.)": 105.7,
-      "alm-js": 117.0,
-      "alm-js (incr.)": 20.1,
-      "alm-wasm": 87.1,
+      "elm (full)": 694.4,
+      "elm (incr.)": 112.2,
+      "elm (no-op)": 109.4,
+      "alm-js": 113.5,
+      "alm-js (incr.)": 20.6,
+      "alm-js (no-op)": 18.3,
+      "alm-wasm": 87.4,
       "alm-native": null
     },
     {
       "op": "exosphere/exosphere",
       "lines": 59137,
-      "elm (full)": 1497.4,
-      "elm (incr.)": 173.3,
-      "alm-js": 1101.1,
-      "alm-js (incr.)": 109.7,
-      "alm-wasm": 1992.2,
+      "elm (full)": 1508.8,
+      "elm (incr.)": 175.5,
+      "elm (no-op)": 160.7,
+      "alm-js": 1085.8,
+      "alm-js (incr.)": 106.1,
+      "alm-js (no-op)": 56.4,
+      "alm-wasm": 1965.7,
       "alm-native": null
     }
   ],
@@ -100,22 +116,5 @@
   "cacheless": {
     "alm-wasm": "monomorphization is whole-program; no per-module cache",
     "alm-native": "monomorphization is whole-program; no per-module cache"
-  },
-  "caching": {
-    "project": {
-      "name": "exosphere/exosphere",
-      "entry": "src/Exosphere.elm",
-      "entry_lines": 28,
-      "total_lines": 59137,
-      "entry_points": 1
-    },
-    "single": {
-      "elm, project-cold": 1480.7,
-      "elm, incremental": 168.1,
-      "elm, no-op": 175.4,
-      "alm, project-cold": 1119.7,
-      "alm, incremental": 114.8,
-      "alm, no-op": 65.4
-    }
   }
 }

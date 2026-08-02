@@ -43,8 +43,8 @@ an order of magnitude, so each gets a column of each:
 |---|---|
 | `elm (full)` | `elm-stuff` cleared each run — the like-for-like comparison |
 | `elm (incr.)` | cache warm, one module edited — what you wait for when editing |
-| `alm-js` | `.alm-stuff` cleared each run |
-| `alm-js (incr.)` | cache warm, one module edited |
+| `elm (no-op)` | cache warm, nothing changed — what a save that touched nothing costs |
+| `alm-js` / `alm-js (incr.)` / `alm-js (no-op)` | the same three, with `.alm-stuff` |
 | `alm-wasm` / `alm-native` | full build every run; neither back end caches yet |
 
 **An incremental run edits a module rather than touching it.** The two
@@ -54,11 +54,10 @@ the two columns would not be measuring the same work. Appending a comment line
 changes both. (Without *any* edit, elm's incremental column measures its no-op
 path, which is what it used to be doing.)
 
-**Cold against warm on a real application** — the second table runs every mode
-both compilers have against one of the pinned application workloads, with the
-no-op times as well, and every entry point rather than one. An entry point only
-one compiler can build alone is dropped from it, or the two columns would be
-timing different amounts of work.
+There is one table, not two. A second one used to repeat every mode against a
+single application — which, once that application became one of the workloads
+above, was the same row measured twice. The only figures it added were the
+no-op times, so those are columns now.
 
 ## Two things it is careful about
 

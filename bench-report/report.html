@@ -93,7 +93,7 @@
   // that: it ended up describing numbers it was no longer showing.
   const DATA = {
   "title": "alm \u2014 runtime, computation and compile speed",
-  "generated": "generated 2026-08-02 03:57 CEST by make report",
+  "generated": "generated 2026-08-02 04:04 CEST by make report",
   "sections": [
     {
       "title": "Runtime",
@@ -342,76 +342,92 @@
       "tables": [
         {
           "label": "project",
-          "caption": "milliseconds \u00b7 cold builds recompile the whole module graph; (incr.) rebuilds one edited module",
+          "caption": "milliseconds \u00b7 cold rebuilds the whole module graph, (incr.) one edited module, (no-op) nothing changed",
           "columns": [
             "elm (full)",
             "elm (incr.)",
+            "elm (no-op)",
             "alm-js",
             "alm-js (incr.)",
+            "alm-js (no-op)",
             "alm-wasm",
             "alm-native"
           ],
           "rows": [
             {
               "op": "elm/http",
-              "elm (full)": 631.2,
-              "elm (incr.)": 94.6,
-              "alm-js": 12.1,
-              "alm-js (incr.)": 9.8,
-              "alm-wasm": 9.2,
-              "alm-native": 86.5
+              "elm (full)": 678.1,
+              "elm (incr.)": 96.2,
+              "elm (no-op)": 97.4,
+              "alm-js": 9.7,
+              "alm-js (incr.)": 7.9,
+              "alm-js (no-op)": 7.5,
+              "alm-wasm": 8.3,
+              "alm-native": 93.4
             },
             {
               "op": "elm/url",
-              "elm (full)": 637.4,
-              "elm (incr.)": 101.0,
-              "alm-js": 12.4,
-              "alm-js (incr.)": 9.7,
-              "alm-wasm": 9.7,
-              "alm-native": 98.6
+              "elm (full)": 691.7,
+              "elm (incr.)": 99.4,
+              "elm (no-op)": 98.8,
+              "alm-js": 9.7,
+              "alm-js (incr.)": 7.8,
+              "alm-js (no-op)": 8.0,
+              "alm-wasm": 8.8,
+              "alm-native": 103.2
             },
             {
               "op": "elm/parser",
-              "elm (full)": 613.0,
-              "elm (incr.)": 91.0,
-              "alm-js": 12.1,
-              "alm-js (incr.)": 8.2,
-              "alm-wasm": 9.9,
-              "alm-native": 134.7
+              "elm (full)": 652.4,
+              "elm (incr.)": 107.2,
+              "elm (no-op)": 99.3,
+              "alm-js": 11.7,
+              "alm-js (incr.)": 9.1,
+              "alm-js (no-op)": 9.0,
+              "alm-wasm": 10.9,
+              "alm-native": 130.6
             },
             {
               "op": "terezka/elm-charts",
-              "elm (full)": 632.6,
-              "elm (incr.)": 91.3,
-              "alm-js": 56.4,
-              "alm-js (incr.)": 14.3,
-              "alm-wasm": 42.0,
-              "alm-native": 830.0
+              "elm (full)": 657.2,
+              "elm (incr.)": 98.3,
+              "elm (no-op)": 103.2,
+              "alm-js": 53.1,
+              "alm-js (incr.)": 12.8,
+              "alm-js (no-op)": 11.2,
+              "alm-wasm": 41.2,
+              "alm-native": 824.5
             },
             {
               "op": "ianmackenzie/elm-geometry",
-              "elm (full)": 652.2,
-              "elm (incr.)": 90.9,
-              "alm-js": 103.0,
-              "alm-js (incr.)": 23.2,
+              "elm (full)": 681.1,
+              "elm (incr.)": 113.2,
+              "elm (no-op)": 110.5,
+              "alm-js": 102.1,
+              "alm-js (incr.)": 21.5,
+              "alm-js (no-op)": 18.9,
               "alm-wasm": 79.9,
-              "alm-native": 1423.5
+              "alm-native": 1417.4
             },
             {
               "op": "data-viz-lab/elm-chart-builder",
-              "elm (full)": 657.2,
-              "elm (incr.)": 105.7,
-              "alm-js": 117.0,
-              "alm-js (incr.)": 20.1,
-              "alm-wasm": 87.1
+              "elm (full)": 694.4,
+              "elm (incr.)": 112.2,
+              "elm (no-op)": 109.4,
+              "alm-js": 113.5,
+              "alm-js (incr.)": 20.6,
+              "alm-js (no-op)": 18.3,
+              "alm-wasm": 87.4
             },
             {
               "op": "exosphere/exosphere",
-              "elm (full)": 1497.4,
-              "elm (incr.)": 173.3,
-              "alm-js": 1101.1,
-              "alm-js (incr.)": 109.7,
-              "alm-wasm": 1992.2
+              "elm (full)": 1508.8,
+              "elm (incr.)": 175.5,
+              "elm (no-op)": 160.7,
+              "alm-js": 1085.8,
+              "alm-js (incr.)": 106.1,
+              "alm-js (no-op)": 56.4,
+              "alm-wasm": 1965.7
             }
           ],
           "decimals": 0,
@@ -421,34 +437,9 @@
             "no incremental column for alm-native \u2014 monomorphization is whole-program; no per-module cache",
             "no incremental column for alm-wasm \u2014 monomorphization is whole-program; no per-module cache"
           ]
-        },
-        {
-          "label": "build",
-          "caption": "milliseconds \u00b7 every mode both compilers have, on one real application",
-          "columns": [
-            "elm, project-cold",
-            "elm, incremental",
-            "elm, no-op",
-            "alm, project-cold",
-            "alm, incremental",
-            "alm, no-op"
-          ],
-          "rows": [
-            {
-              "op": "one entry point \u00b7 src/Exosphere.elm",
-              "elm, project-cold": 1480.7,
-              "elm, incremental": 168.1,
-              "elm, no-op": 175.4,
-              "alm, project-cold": 1119.7,
-              "alm, incremental": 114.8,
-              "alm, no-op": 65.4
-            }
-          ],
-          "decimals": 0,
-          "unit": ""
         }
       ],
-      "facts": "Darwin arm64 \u00b7 elm 0.19.1 \u00b7 cold against warm: exosphere/exosphere \u00b7 59,137 lines",
+      "facts": "Darwin arm64 \u00b7 elm 0.19.1",
       "freshness": {
         "state": "fresh",
         "note": "2026-08-02"

@@ -148,7 +148,8 @@ def compute_section(data):
 def compile_section(data):
     tables = [{
         "label": "project",
-        "caption": "milliseconds · cold builds recompile the whole module graph; (incr.) rebuilds one edited module",
+        "caption": "milliseconds · cold rebuilds the whole module graph, "
+                   "(incr.) one edited module, (no-op) nothing changed",
         "columns": [c for c in data["compilers"]
                     if any(row.get(c) is not None for row in data.get("projects", []))],
         "rows": [{"op": row["op"],
@@ -172,39 +173,9 @@ def compile_section(data):
     if notes:
         tables[0]["notes"] = notes
 
-    detail = data.get("caching")
-    facts = None
-    if detail:
-        project = detail["project"]
-        facts = f"cold against warm: {project['name']} · {project['total_lines']:,} lines"
-        # Only worth saying when there is more than one, since the whole-project
-        # sweep is only shown then.
-        if (project.get("entry_points") or 0) > 1:
-            facts += f" · {project['entry_points']} entry points"
-        # The two rows measure different modes — there is no no-op for a
-        # whole-project build — so columns are keyed by name, and a mode a row
-        # did not measure is left blank rather than shifted into the next.
-        rows = {f"one entry point · {project['entry']}": detail.get("single", {})}
-        if detail.get("suite"):
-            rows[f"all {project.get('entry_points', '')} entry points"] = detail["suite"]
-        order = ["elm, project-cold", "elm, incremental", "elm, all sources touched",
-                 "elm, no-op", "alm, project-cold", "alm, incremental",
-                 "alm, all sources touched", "alm, no-op"]
-        seen = {name for modes in rows.values() for name in modes}
-        cols = [c for c in order if c in seen] + [c for c in sorted(seen) if c not in order]
-        tables.append({
-            "label": "build",
-            "caption": "milliseconds · every mode both compilers have, on one real application",
-            "columns": cols,
-            "rows": [{"op": label, **{k: v for k, v in modes.items() if v is not None}}
-                     for label, modes in rows.items()],
-            "decimals": 0, "unit": "",
-        })
-
     parts = [data.get("machine")]
     if data.get("elm_version"):
         parts.append(f"elm {data['elm_version']}")
-    parts.append(facts)
     return {"title": "Compile speed", "tables": tables,
             "facts": " · ".join(p for p in parts if p)}
 

@@ -116,12 +116,17 @@ CACHELESS = {
     "alm-wasm": "monomorphization is whole-program; no per-module cache",
     "alm-native": "monomorphization is whole-program; no per-module cache",
 }
+# A no-op column needs no setup at all: the untimed warm-up run in `matrix`
+# leaves a complete cache, and then nothing changes. It is what an editor or a
+# watch loop pays on every save that touched nothing relevant.
 COMPILERS = [
     ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_elm_cache),
     ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], edit_entry),
+    ("elm (no-op)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], None),
     ("alm-js", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], wipe_alm_cache),
     ("alm-js (incr.)", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"],
      edit_entry),
+    ("alm-js (no-op)", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
     ("alm-wasm", lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
                                      f"--output={out}.wasm"], None),
     ("alm-native", lambda entry, out: [str(ALM), "make", entry, "--target=native",
@@ -277,170 +282,6 @@ def matrix(projects, scratch):
     return out, unbuilt
 
 
-# -------------------------------------------------------- against elm's cache
-
-def caching(project, scratch, name, entry):
-    """Every mode both compilers have, on one real application.
-
-    The application is one of the pinned public checkouts, not whatever project
-    happens to be lying beside the repository. It used to be the latter, and the
-    published report ended up quoting figures from a private codebase that
-    nobody outside it could reproduce or check — which is not a benchmark, it is
-    an assertion. Everything measured here is fetchable at a known commit.
-    """
-    work = scratch / "caching"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    # Only elm.json and the source directories: `elm-stuff` and source mtimes
-    # are inputs here and both get mutated.
-    shutil.copy2(project / "elm.json", work / "elm.json")
-    outline = json.loads((project / "elm.json").read_text())
-    for rel in outline.get("source-directories", ["src"]):
-        if (project / rel).is_dir():
-            shutil.copytree(project / rel, work / rel,
-                            ignore=shutil.ignore_patterns("elm-stuff"))
-
-    entries = []
-    for path in sorted((work / "src").rglob("*.elm")):
-        text = path.read_text(encoding="utf8", errors="replace")
-        if any(l.startswith("main =") or l.startswith("main :") for l in text.splitlines()):
-            entries.append(path)
-    if not entries:
-        return None
-
-    # The workload's declared entry point, not the longest file that happens to
-    # have a `main`. An application's entry is often a thin wiring module —
-    # exosphere's is 28 lines onto a 212-module graph — so picking by length
-    # measured a 794-line design-system explorer instead of the application.
-    biggest = work / entry
-    if not biggest.is_file():
-        biggest = max(entries, key=lambda p: len(p.read_text(errors="replace").splitlines()))
-    rel = str(biggest.relative_to(work))
-    out = scratch / "c.js"
-    result = {"project": {
-        "name": name,
-        "entry": rel,
-        "entry_lines": len(biggest.read_text(errors="replace").splitlines()),
-        "total_lines": elm_count(work),
-    }}
-
-    print(f"  one entry point: {rel}")
-    runs = []
-    for _ in range(RUNS_SINGLE):
-        shutil.rmtree(work / "elm-stuff", ignore_errors=True)
-        runs.append(time_it(["elm", "make", rel, f"--output={out}"], work))
-    cold = median_ms(runs)
-
-    runs = []
-    for _ in range(RUNS_SINGLE):
-        biggest.touch()
-        runs.append(time_it(["elm", "make", rel, f"--output={out}"], work))
-
-    def alm_runs(setup):
-        times = []
-        for _ in range(RUNS_SINGLE):
-            setup()
-            times.append(time_it([str(ALM), "make", rel, f"--output={out}"], work))
-        return median_ms(times)
-
-    def wipe_alm():
-        shutil.rmtree(work / ".alm-stuff", ignore_errors=True)
-
-    def edit():
-        with biggest.open("a") as f:
-            f.write("\n-- compile-bench: one-line edit\n")
-
-    # alm's cold path first, so its cache exists before the incremental runs.
-    alm_cold = alm_runs(wipe_alm)
-    result["single"] = {
-        "elm, project-cold": cold,
-        "elm, incremental": median_ms(runs),
-        "elm, no-op": median_ms([time_it(["elm", "make", rel, f"--output={out}"], work)
-                                 for _ in range(RUNS_SINGLE)]),
-        "alm, project-cold": alm_cold,
-        "alm, incremental": alm_runs(edit),
-        "alm, no-op": alm_runs(lambda: None),
-    }
-    for label, value in result["single"].items():
-        shown = "     —" if value is None else f"{value:6.0f}"
-        print(f"    {label:26s} {shown} ms")
-
-    # Every entry point, which is what building the project actually costs.
-    # Both compilers, not just elm: an entry point only one of them can build
-    # would make the two columns measure different amounts of work.
-    buildable = [
-        p
-        for p in entries
-        if time_it(["elm", "make", str(p.relative_to(work)), f"--output={out}"], work) is not None
-        and time_it([str(ALM), "make", str(p.relative_to(work)), f"--output={out}"], work)
-        is not None
-    ]
-    dropped = len(entries) - len(buildable)
-    if dropped:
-        print(f"  {dropped} entry point(s) one of the compilers cannot build alone: skipped")
-    # With one entry point the whole-project sweep is the single-entry table
-    # again, so there is nothing to add by showing it twice.
-    if len(buildable) < 2:
-        result["project"]["entry_points"] = len(buildable)
-        return result
-
-    def whole(binary):
-        total = 0.0
-        for p in buildable:
-            took = time_it([binary, "make", str(p.relative_to(work)), f"--output={out}"], work)
-            if took is None:
-                return None
-            total += took
-        return total
-
-    def touch_all():
-        now = time.time()
-        for p in (work / "src").rglob("*.elm"):
-            os.utime(p, (now, now))
-
-    def edit_all():
-        # alm hashes contents, so a `touch` is not an edit to it. Every source
-        # really changes, which is the same work elm's touched-sources row does.
-        for p in (work / "src").rglob("*.elm"):
-            with p.open("a") as f:
-                f.write("\n-- compile-bench: one-line edit\n")
-
-    runs = []
-    for _ in range(RUNS_SUITE):
-        shutil.rmtree(work / "elm-stuff", ignore_errors=True)
-        runs.append(whole("elm"))
-    suite_cold = median_ms(runs)
-
-    runs = []
-    for _ in range(RUNS_SUITE):
-        touch_all()
-        runs.append(whole("elm"))
-
-    alm_cold = []
-    for _ in range(RUNS_SUITE):
-        shutil.rmtree(work / ".alm-stuff", ignore_errors=True)
-        alm_cold.append(whole(str(ALM)))
-
-    alm_edited = []
-    for _ in range(RUNS_SUITE):
-        edit_all()
-        alm_edited.append(whole(str(ALM)))
-
-    result["project"]["entry_points"] = len(buildable)
-    result["suite"] = {
-        "elm, project-cold": suite_cold,
-        "elm, all sources touched": median_ms(runs),
-        "alm, project-cold": median_ms(alm_cold),
-        "alm, all sources touched": median_ms(alm_edited),
-    }
-    print(f"  all {len(buildable)} entry points:")
-    for label, value in result["suite"].items():
-        shown = "     —" if value is None else f"{value / 1000:6.2f}"
-        print(f"    {label:26s} {shown} s")
-    return result
-
-
 # ------------------------------------------------------------------- driving
 
 def main():
@@ -470,18 +311,7 @@ def main():
         print("== per compiler ==")
         rows, unbuilt = matrix(projects, scratch)
 
-        # The modes table runs on the first application workload — public and
-        # pinned, so every figure on the published page can be reproduced.
-        detail = None
-        for app in APPLICATIONS:
-            staged = stage(app, scratch)
-            if staged is None:
-                continue
-            print(f"\n== every build mode: {app['name']} ==")
-            detail = caching(staged[1], scratch, app["name"], app["entry"])
-            break
-        if detail is None:
-            print("\nNo application workload available; skipping the modes table.")
+
 
     payload = {
         "measured": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -492,14 +322,13 @@ def main():
         "projects": rows,
         "unbuilt": unbuilt,
         "cacheless": CACHELESS,
-        "caching": detail,
     }
     RESULTS.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"\nwrote {RESULTS.relative_to(REPO)}")
-    report(rows, detail)
+    report(rows)
 
 
-def report(rows, detail):
+def report(rows):
     if rows:
         print("\n| project | " + " | ".join(l for l, _, _ in COMPILERS) + " |")
         print("|---" * (len(COMPILERS) + 1) + "|")
@@ -508,14 +337,6 @@ def report(rows, detail):
                 "—" if row[l] is None else f"{row[l]:.0f} ms" for l, _, _ in COMPILERS
             )
             print(f"| {row['op']} | {cells} |")
-    if detail:
-        print()
-        for label, value in detail.get("single", {}).items():
-            if value is not None:
-                print(f"| {label} | {value:.0f} ms |")
-        for label, value in detail.get("suite", {}).items():
-            if value is not None:
-                print(f"| {label} (all entry points) | {value / 1000:.2f} s |")
 
 
 if __name__ == "__main__":

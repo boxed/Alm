@@ -171,9 +171,9 @@ workload is public and pinned, so the figures can be reproduced:
 
 | | elm 0.19.1 | alm |
 |---|---|---|
-| project-cold (build cache cleared) | 1481 ms | **1120 ms** |
-| incremental (one module edited) | 168 ms | **115 ms** |
-| no-op (nothing changed at all) | 175 ms | **65 ms** |
+| project-cold (build cache cleared) | 1509 ms | **1086 ms** |
+| incremental (one module edited) | 176 ms | **106 ms** |
+| no-op (nothing changed at all) | 161 ms | **56 ms** |
 
 Both compilers cache per module, so all three modes are comparable.
 The incremental figure tracks the size of what you edit and how much
@@ -182,10 +182,14 @@ whole dependency graph rebuilds in a fraction of what elm needs:
 
 | workload | elm (incr.) | alm (incr.) | |
 |---|---|---|---|
-| terezka/elm-charts | 91 ms | **14 ms** | 6.5x |
-| ianmackenzie/elm-geometry | 91 ms | **23 ms** | 4.0x |
-| data-viz-lab/elm-chart-builder | 106 ms | **20 ms** | 5.3x |
-| exosphere (59k lines) | 173 ms | **110 ms** | 1.6x |
+| terezka/elm-charts | 98 ms | **13 ms** | 7.5x |
+| ianmackenzie/elm-geometry | 113 ms | **22 ms** | 5.1x |
+| data-viz-lab/elm-chart-builder | 112 ms | **21 ms** | 5.3x |
+| exosphere (59k lines) | 176 ms | **106 ms** | 1.7x |
+
+elm's no-op costs about what its incremental build does — 161 ms against
+176 ms on exosphere — so with the official compiler you pay nearly the
+full price for a save that changed nothing.
 
 alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete). A
 module is reused when its source *and* every interface it was checked
