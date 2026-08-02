@@ -75,8 +75,14 @@ jobs:
       - name: LLVM 16 (macOS)
         if: matrix.native && runner.os == 'macOS'
         run: |
-          brew install llvm@16
-          echo "LLVM_SYS_160_PREFIX=$(brew --prefix llvm@16)" >> "$GITHUB_ENV"
+          # brew exits non-zero when a dependency it pulled in cannot be linked
+          # over what the runner image already has (python@3.12), which says
+          # nothing about LLVM. Whether LLVM arrived is its own question, so
+          # ask that directly rather than trusting the exit code.
+          brew install llvm@16 || true
+          prefix=$(brew --prefix llvm@16)
+          test -x "$prefix/bin/llvm-config" || { echo "llvm@16 did not install"; exit 1; }
+          echo "LLVM_SYS_160_PREFIX=$prefix" >> "$GITHUB_ENV"
 
       - name: LLVM 16 (Linux)
         if: matrix.native && runner.os == 'Linux'
