@@ -38,11 +38,11 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
-            runner: macos-14
+            runner: macos-15
             native: true
             baseline_cpu: apple-m1
           - name: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             native: true
             baseline_cpu: x86-64-v2
           # No native backend: it builds and links on Linux, but the runtime's
