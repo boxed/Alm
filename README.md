@@ -171,9 +171,9 @@ workload is public and pinned, so the figures can be reproduced:
 
 | exosphere | elm 0.19.1 | alm-js | alm-wasm |
 |---|---|---|---|
-| full (build cache cleared) | 1484 ms | **1064 ms** | 2282 ms |
-| incremental (one module edited) | 170 ms | **103 ms** | 1146 ms |
-| no-op (nothing changed at all) | 166 ms | **55 ms** | 1135 ms |
+| full (build cache cleared) | 1507 ms | **1060 ms** | 2281 ms |
+| incremental (one module edited) | 165 ms | **106 ms** | 1157 ms |
+| no-op (nothing changed at all) | 168 ms | 55 ms | **15 ms** |
 
 Compare within a mode, never across: a no-op and a full build are not the
 same measurement.
@@ -209,6 +209,10 @@ build, and rebuild the AST from source each time. That is why their
 incremental builds improve but stay well above alm-js: the work left is
 monomorphization and code generation, and neither is per module.
 (Native gains least of all — LLVM dominates its build.)
+
+A build whose sources all still match, for the same compiler, target and
+output, is skipped outright rather than redone — which is what makes a
+no-op cheapest exactly where the work is least divisible.
 
 The cache is invalidated by the compiler binary itself, so it cannot
 survive a change to alm. An incremental build is byte-for-byte what a
