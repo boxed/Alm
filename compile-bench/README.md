@@ -36,16 +36,23 @@ the *forked* graph in `elm.json`, which the official compiler rejects as invalid
 when resolved against the published packages. Filling the gap from the cache
 builds what the maintainers build, without touching `~/.elm`.
 
-Both compilers cache, and for both the cold and warm numbers differ by roughly
-an order of magnitude, so each gets a column of each:
+**Measurements are grouped by mode, and each mode gets its own table.** A
+number is only meaningful against another number of the same kind:
 
-| column | what it is |
+| mode | what it is |
 |---|---|
-| `elm (full)` | `elm-stuff` cleared each run — the like-for-like comparison |
-| `elm (incr.)` | cache warm, one module edited — what you wait for when editing |
-| `elm (no-op)` | cache warm, nothing changed — what a save that touched nothing costs |
-| `alm-js` / `alm-js (incr.)` / `alm-js (no-op)` | the same three, with `.alm-stuff` |
-| `alm-wasm` / `alm-native` | full build every run; neither back end caches yet |
+| `full` | build cache cleared each run — every module recompiled |
+| `incremental` | cache warm, one module edited — what you wait for while working |
+| `no-op` | cache warm, nothing changed — what a save that touched nothing costs |
+
+`alm-wasm` and `alm-native` appear under `full` only; neither back end caches,
+and the report says so rather than leaving a gap.
+
+Mixing the modes into one table was actively misleading, and not because of the
+labels. The report scales each bar — and awards the row's star — against the
+best figure in that row, so with a no-op sitting in the same row a full build
+was being drawn against it and every full build looked terrible. The numbers
+were right; the comparison the layout invited was not.
 
 **An incremental run edits a module rather than touching it.** The two
 compilers decide what is stale differently — elm compares mtimes, alm hashes
@@ -54,10 +61,10 @@ the two columns would not be measuring the same work. Appending a comment line
 changes both. (Without *any* edit, elm's incremental column measures its no-op
 path, which is what it used to be doing.)
 
-There is one table, not two. A second one used to repeat every mode against a
-single application — which, once that application became one of the workloads
-above, was the same row measured twice. The only figures it added were the
-no-op times, so those are columns now.
+There used to be a second table repeating every mode against a single
+application — which, once that application became one of the workloads above,
+was the same row measured twice. The only figures it added were the no-op
+times, and those are a mode of their own now.
 
 ## Two things it is careful about
 

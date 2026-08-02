@@ -146,32 +146,81 @@ def compute_section(data):
 
 
 def compile_section(data):
-    tables = [{
-        "label": "project",
-        "caption": "milliseconds · cold rebuilds the whole module graph, "
-                   "(incr.) one edited module, (no-op) nothing changed",
-        "columns": [c for c in data["compilers"]
-                    if any(row.get(c) is not None for row in data.get("projects", []))],
-        "rows": [{"op": row["op"],
-                  **{c: row[c] for c in data["compilers"] if row.get(c) is not None}}
-                 for row in data.get("projects", [])],
-        "decimals": 0, "unit": "",
-    }]
-    # An n/a in this table means that compiler could not build that project —
-    # say which, rather than leave a blank cell to be read as a missing run.
-    by_compiler = {}
-    for entry in data.get("unbuilt") or []:
-        by_compiler.setdefault(entry["compiler"], []).append(entry["project"])
-    notes = [
-        f"n/a — {compiler} cannot build {', '.join(sorted(projects))}"
-        for compiler, projects in sorted(by_compiler.items())
+    """One table per build mode.
+
+    A number is only meaningful against another number of the same kind. With
+    every mode in one table the bar and the star were scaled to the row's best
+    across all of them, so a no-op time set the scale a full build was drawn
+    against — and a column that simply had no incremental mode read as a gap
+    rather than as a fact about that back end. Each mode gets its own table, and
+    each says which compilers can do it and why the others cannot.
+    """
+    modes = [
+        (
+            "full",
+            "every module recompiled from scratch, build cache cleared",
+        ),
+        (
+            "incremental",
+            "one module edited, cache warm — what you wait for while working",
+        ),
+        (
+            "no-op",
+            "nothing changed at all — what a save that touched nothing costs",
+        ),
     ]
-    # A compiler with no incremental column has one because it has one speed,
-    # not because the run was skipped. Say which and why.
-    for compiler, why in sorted((data.get("cacheless") or {}).items()):
-        notes.append(f"no incremental column for {compiler} — {why}")
-    if notes:
-        tables[0]["notes"] = notes
+    # (compiler, mode) -> the key its measurements are recorded under.
+    columns = data.get("compilers") or []
+    projects = data.get("projects") or []
+    cacheless = data.get("cacheless") or {}
+
+    unbuilt = {}
+    for entry in data.get("unbuilt") or []:
+        unbuilt.setdefault(entry["compiler"], []).append(entry["project"])
+
+    tables = []
+    for mode, caption in modes:
+        present = [c for c in columns if c["mode"] == mode]
+        names = [
+            c["name"] for c in present
+            if any(row.get(c["column"]) is not None for row in projects)
+        ]
+        if not names:
+            continue
+        by_name = {c["name"]: c["column"] for c in present}
+        rows = [
+            {
+                "op": row["op"],
+                **{
+                    name: row[by_name[name]]
+                    for name in names
+                    if row.get(by_name[name]) is not None
+                },
+            }
+            for row in projects
+        ]
+        notes = [
+            f"n/a — {compiler} cannot build {', '.join(sorted(where))}"
+            for compiler, where in sorted(unbuilt.items())
+            if compiler in names
+        ]
+        # Say who is missing from this mode, so an absent column is read as a
+        # fact about the back end rather than as a measurement nobody took.
+        missing = sorted(
+            compiler for compiler, why in cacheless.items()
+            if compiler not in names and any(c["name"] == compiler for c in columns)
+        )
+        for compiler in missing:
+            notes.append(f"no {mode} build for {compiler} — {cacheless[compiler]}")
+        tables.append({
+            "label": "project",
+            "caption": f"{mode} · milliseconds · {caption}",
+            "columns": names,
+            "rows": rows,
+            "decimals": 0,
+            "unit": "",
+            **({"notes": notes} if notes else {}),
+        })
 
     parts = [data.get("machine")]
     if data.get("elm_version"):

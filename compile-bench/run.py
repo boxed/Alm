@@ -101,37 +101,48 @@ def edit_entry(directory, entry):
         f.write("\n-- compile-bench: one-line edit\n")
 
 
-# Each compiler that has two speeds gets two columns, because the difference is
-# most of the story. A cold build recompiles the whole module graph; a warm one
-# recompiles the module that changed and whatever depended on it. Showing only
-# one of them would flatter somebody.
+# Measurements are grouped by MODE, and the report gives each mode its own
+# table, because a figure is only meaningful against another figure of the same
+# kind. Mixed together, a no-op time sets the scale a full build is drawn
+# against and every full build looks terrible — the numbers were fine, the
+# comparison was not.
 #
-# `alm-wasm` and `alm-native` get one column each, not because they were left
-# out but because they have one speed: monomorphization is whole-program, so
-# there is no per-module unit to reuse and those builds do not read the cache at
-# all. An "incremental" column for them would repeat the number beside it and
-# read as though caching did not help, when the truth is that it is not wired
-# up. `CACHELESS` records that so the report can say it.
+# `alm-wasm` and `alm-native` appear under `full` only, not because they were
+# left out but because they have one speed: monomorphization is whole-program,
+# so there is no per-module unit to reuse and those builds do not read the cache
+# at all. `CACHELESS` records why, so the report can say it rather than leave a
+# gap to be read as a missing run.
 CACHELESS = {
     "alm-wasm": "monomorphization is whole-program; no per-module cache",
     "alm-native": "monomorphization is whole-program; no per-module cache",
 }
-# A no-op column needs no setup at all: the untimed warm-up run in `matrix`
-# leaves a complete cache, and then nothing changes. It is what an editor or a
-# watch loop pays on every save that touched nothing relevant.
+
+FULL = "full"
+INCREMENTAL = "incremental"
+NOOP = "no-op"
+
+# `no-op` needs no setup at all: the untimed warm-up run in `matrix` leaves a
+# complete cache, and then nothing changes. It is what an editor or a watch loop
+# pays on a save that touched nothing relevant.
 COMPILERS = [
-    ("elm (full)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_elm_cache),
-    ("elm (incr.)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], edit_entry),
-    ("elm (no-op)", lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], None),
-    ("alm-js", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], wipe_alm_cache),
-    ("alm-js (incr.)", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"],
+    ("elm", FULL, lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], wipe_elm_cache),
+    ("elm", INCREMENTAL, lambda entry, out: ["elm", "make", entry, f"--output={out}.js"],
      edit_entry),
-    ("alm-js (no-op)", lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
-    ("alm-wasm", lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
-                                     f"--output={out}.wasm"], None),
-    ("alm-native", lambda entry, out: [str(ALM), "make", entry, "--target=native",
-                                       f"--output={out}.bin"], None),
+    ("elm", NOOP, lambda entry, out: ["elm", "make", entry, f"--output={out}.js"], None),
+    ("alm-js", FULL, lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"],
+     wipe_alm_cache),
+    ("alm-js", INCREMENTAL, lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"],
+     edit_entry),
+    ("alm-js", NOOP, lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
+    ("alm-wasm", FULL, lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
+                                           f"--output={out}.wasm"], wipe_alm_cache),
+    ("alm-native", FULL, lambda entry, out: [str(ALM), "make", entry, "--target=native",
+                                             f"--output={out}.bin"], wipe_alm_cache),
 ]
+
+def column(name, mode):
+    """The key a measurement is recorded under."""
+    return f"{name}|{mode}"
 
 
 def time_it(command, cwd):
@@ -242,21 +253,26 @@ def matrix(projects, scratch):
     out, unbuilt = [], []
     for name, directory, entry in projects:
         target = scratch / "out"
+        # Whether a compiler can build this at all is a property of the
+        # compiler, not of the mode, so it is probed once per compiler.
+        compilers = sorted({c for c, _, _, _ in COMPILERS}, key=lambda c: c)
+        probe = {c: b for c, m, b, _ in COMPILERS if m == FULL for _ in [0]}
         broken = [
-            label for label, build, _ in COMPILERS
-            if time_it(build(entry, str(target)), directory) is None
+            c for c in compilers
+            if time_it(probe[c](entry, str(target)), directory) is None
         ]
-        if len(broken) == len(COMPILERS):
+        if len(broken) == len(compilers):
             print(f"  {name:32s} skipped — no compiler can build it")
             continue
-        for label in broken:
-            unbuilt.append({"project": name, "compiler": label})
+        for compiler in broken:
+            unbuilt.append({"project": name, "compiler": compiler})
         if broken:
             print(f"  {name:32s} not built by {', '.join(broken)}")
 
         row = {"op": name, "lines": elm_count(directory)}
-        for label, build, setup in COMPILERS:
-            if label in broken:
+        for compiler, mode, build, setup in COMPILERS:
+            label = column(compiler, mode)
+            if compiler in broken:
                 row[label] = None
                 continue
             # One untimed run first, with the same setup. An incremental column
@@ -274,8 +290,8 @@ def matrix(projects, scratch):
                 runs.append(time_it(build(entry, str(target)), directory))
             row[label] = median_ms(runs)
         cells = "  ".join(
-            f"{label} {'—' if row[label] is None else format(row[label], '.0f')}"
-            for label, _, _ in COMPILERS
+            f"{c}/{m} {'—' if row[column(c, m)] is None else format(row[column(c, m)], '.0f')}"
+            for c, m, _, _ in COMPILERS
         )
         print(f"  {name:32s} {cells}")
         out.append(row)
@@ -318,7 +334,10 @@ def main():
         "machine": f"{platform.system()} {platform.machine()}",
         "elm_version": elm_version,
         "runs": {"matrix": RUNS_MATRIX, "single": RUNS_SINGLE, "suite": RUNS_SUITE},
-        "compilers": [label for label, _, _ in COMPILERS],
+        # (compiler, mode) pairs, so the report can group by mode instead of
+        # parsing labels back apart.
+        "compilers": [{"name": c, "mode": m, "column": column(c, m)}
+                      for c, m, _, _ in COMPILERS],
         "projects": rows,
         "unbuilt": unbuilt,
         "cacheless": CACHELESS,
@@ -329,12 +348,27 @@ def main():
 
 
 def report(rows):
-    if rows:
-        print("\n| project | " + " | ".join(l for l, _, _ in COMPILERS) + " |")
-        print("|---" * (len(COMPILERS) + 1) + "|")
+    """The markdown summary, one table per mode.
+
+    Never one table across modes: a full build and a no-op are not comparable,
+    and putting them side by side invites exactly that comparison.
+    """
+    for mode in (FULL, INCREMENTAL, NOOP):
+        compilers = [c for c, m, _, _ in COMPILERS if m == mode]
+        present = [
+            c for c in compilers
+            if any(row.get(column(c, mode)) is not None for row in rows)
+        ]
+        if not present:
+            continue
+        print(f"\n**{mode}**\n")
+        print("| project | " + " | ".join(present) + " |")
+        print("|---" * (len(present) + 1) + "|")
         for row in rows:
             cells = " | ".join(
-                "—" if row[l] is None else f"{row[l]:.0f} ms" for l, _, _ in COMPILERS
+                "—" if row.get(column(c, mode)) is None
+                else f"{row[column(c, mode)]:.0f} ms"
+                for c in present
             )
             print(f"| {row['op']} | {cells} |")
 

@@ -169,26 +169,29 @@ workload is public and pinned, so the figures can be reproduced:
 [exosphere](https://gitlab.com/exosphere/exosphere) at
 `be3d7114`, 59k lines over 212 modules and 58 packages.
 
-| | elm 0.19.1 | alm |
+| exosphere | elm 0.19.1 | alm |
 |---|---|---|
-| project-cold (build cache cleared) | 1509 ms | **1086 ms** |
-| incremental (one module edited) | 176 ms | **106 ms** |
-| no-op (nothing changed at all) | 161 ms | **56 ms** |
+| full (build cache cleared) | 1507 ms | **1054 ms** |
+| incremental (one module edited) | 171 ms | **116 ms** |
+| no-op (nothing changed at all) | 170 ms | **61 ms** |
+
+Compare within a mode, never across: a no-op and a full build are not the
+same measurement.
 
 Both compilers cache per module, so all three modes are comparable.
 The incremental figure tracks the size of what you edit and how much
 depends on it; smaller projects go much further, and a package and its
 whole dependency graph rebuilds in a fraction of what elm needs:
 
-| workload | elm (incr.) | alm (incr.) | |
+| incremental | elm 0.19.1 | alm | |
 |---|---|---|---|
 | terezka/elm-charts | 98 ms | **13 ms** | 7.5x |
-| ianmackenzie/elm-geometry | 113 ms | **22 ms** | 5.1x |
-| data-viz-lab/elm-chart-builder | 112 ms | **21 ms** | 5.3x |
-| exosphere (59k lines) | 176 ms | **106 ms** | 1.7x |
+| ianmackenzie/elm-geometry | 108 ms | **20 ms** | 5.4x |
+| data-viz-lab/elm-chart-builder | 129 ms | **21 ms** | 6.1x |
+| exosphere (59k lines) | 171 ms | **116 ms** | 1.5x |
 
-elm's no-op costs about what its incremental build does — 161 ms against
-176 ms on exosphere — so with the official compiler you pay nearly the
+elm's no-op costs about what its incremental build does — 170 ms against
+171 ms on exosphere — so with the official compiler you pay nearly the
 full price for a save that changed nothing.
 
 alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete). A
