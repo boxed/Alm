@@ -121,8 +121,15 @@ pub fn run(options: Options) -> ExitCode {
     if options.updating || writer.is_some() {
         let watched = live.clone();
         let build = build.clone();
-        let rebuilt = module.clone();
-        live::watch(&root, move || {
+        let watching = root.clone();
+        live::watch(&root, move |moved| {
+            // Announced before the build rather than after it, so a save is
+            // acknowledged the moment it is noticed: a watching server is
+            // otherwise silent, and a change that was picked up looks exactly
+            // like one that was not until the build is over.
+            print!("Recompiling {}... ", naming(moved, &watching));
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+
             let started = std::time::Instant::now();
             let fresh = rebuild();
             let failed = fresh.errors.clone();
@@ -141,14 +148,13 @@ pub fn run(options: Options) -> ExitCode {
                     writer.write(&held);
                 }
             }
-            // Say so on every rebuild. A watching server is otherwise silent,
-            // and a save that was picked up then looks exactly like one that
-            // was not — which is the first thing to know when a change does
-            // not show up in the browser.
+            // Finishes the line the change opened. Both endings go to stdout,
+            // so the line stays whole; the reports themselves are the page's
+            // to show.
             let took = milliseconds(started.elapsed());
             match &failed {
-                Some(_) => eprintln!("Recompiled {rebuilt} in {took}, but it did not compile."),
-                None => println!("Recompiled {rebuilt} in {took}."),
+                Some(_) => println!("it does not compile ({took})."),
+                None => println!("done ({took})."),
             }
 
             let Some(watched) = &watched else { return };
@@ -368,6 +374,26 @@ fn compile(entry: &Path, root: &Path, color: bool, optimize: bool, source_maps: 
     }
 }
 
+/// What to call the change that started a rebuild: the file that moved, said
+/// the way you would have typed it — relative to the project, since that is
+/// where the server was started.
+///
+/// A save is one file, which is the case worth reading well. Several at once is
+/// a branch switch or a formatter run, and the count is all there is to say
+/// about it.
+fn naming(moved: &[PathBuf], root: &Path) -> String {
+    match moved {
+        [] => "the sources".to_string(),
+        [one] => one.strip_prefix(root).unwrap_or(one).display().to_string(),
+        [first, rest @ ..] => format!(
+            "{} and {} other file{}",
+            first.strip_prefix(root).unwrap_or(first).display(),
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 /// How long a build took, as a line of a rebuild notice. A build that fails in
 /// the parser is over in well under a millisecond, and "0 ms" reads like the
 /// timing is broken, so anything that fast keeps a decimal.
@@ -410,6 +436,26 @@ mod tests {
         assert_eq!(json_string("tab\there"), "\"tab\\there\"");
         // An SSE data field must not contain a raw newline.
         assert!(!json_string("-- TYPE MISMATCH --\n\nnope").contains('\n'));
+    }
+
+    #[test]
+    fn a_change_is_named_by_the_file_that_moved() {
+        let root = Path::new("/home/me/app");
+        let one = [PathBuf::from("/home/me/app/src/Main.elm")];
+        assert_eq!(naming(&one, root), "src/Main.elm");
+
+        let several = [
+            PathBuf::from("/home/me/app/src/Main.elm"),
+            PathBuf::from("/home/me/app/src/View.elm"),
+        ];
+        assert_eq!(naming(&several, root), "src/Main.elm and 1 other file");
+        let three = vec![several[0].clone(), several[1].clone(), several[0].clone()];
+        assert_eq!(naming(&three, root), "src/Main.elm and 2 other files");
+
+        // A file outside the project keeps the path as it stands, rather than
+        // being reported as something it is not.
+        let elsewhere = [PathBuf::from("/packages/elm/core/src/List.elm")];
+        assert_eq!(naming(&elsewhere, root), "/packages/elm/core/src/List.elm");
     }
 
     #[test]

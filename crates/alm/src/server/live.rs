@@ -73,11 +73,12 @@ impl Live {
 /// Poll `root` for changes to Elm sources and call `on_change` when they
 /// settle. Returns immediately; the watching happens on its own thread.
 ///
-/// `on_change` runs on that thread, so a rebuild there does not block the
-/// server from answering requests.
+/// `on_change` is given the files that moved, so a caller can say which save it
+/// is acting on. It runs on the watching thread, so a rebuild there does not
+/// block the server from answering requests.
 pub fn watch<F>(root: &Path, on_change: F)
 where
-    F: Fn() + Send + 'static,
+    F: Fn(&[PathBuf]) + Send + 'static,
 {
     let root = root.to_path_buf();
     std::thread::spawn(move || {
@@ -86,11 +87,24 @@ where
             std::thread::sleep(POLL);
             let now = snapshot(&root);
             if now != seen {
+                let moved = changed(&seen, &now);
                 seen = now;
-                on_change();
+                on_change(&moved);
             }
         }
     });
+}
+
+/// The files two snapshots disagree about: edited, added or removed alike.
+fn changed(before: &Snapshot, after: &Snapshot) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = before
+        .iter()
+        .filter(|(path, stat)| after.get(*path) != Some(stat))
+        .map(|(path, _)| path.clone())
+        .collect();
+    out.extend(after.keys().filter(|path| !before.contains_key(*path)).cloned());
+    out.sort();
+    out
 }
 
 /// Send a heartbeat to every page periodically, so a browser that closed is
@@ -103,15 +117,17 @@ pub fn heartbeat(live: Arc<Live>) {
     });
 }
 
-/// Every Elm source under `root`, with its size and modification time.
+/// Every Elm source under a directory, with its size and modification time.
 /// Comparing two of these catches edits, additions and deletions alike.
-fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, Option<SystemTime>)> {
+type Snapshot = BTreeMap<PathBuf, (u64, Option<SystemTime>)>;
+
+fn snapshot(root: &Path) -> Snapshot {
     let mut out = BTreeMap::new();
     collect(root, &mut out, 0);
     out
 }
 
-fn collect(dir: &Path, out: &mut BTreeMap<PathBuf, (u64, Option<SystemTime>)>, depth: u32) {
+fn collect(dir: &Path, out: &mut Snapshot, depth: u32) {
     // Deep enough for any real source tree, and a stop for a symlink loop.
     if depth > 32 {
         return;
@@ -390,6 +406,38 @@ mod tests {
         assert_eq!(snapshot(&dir), seen);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The watcher hands on what moved, so the caller can say which save it is
+    /// building — an edit, a new file and a deleted one all count.
+    #[test]
+    fn a_change_names_the_files_that_moved() {
+        let stat = (1, None);
+        let before: Snapshot = [
+            (PathBuf::from("src/Main.elm"), stat),
+            (PathBuf::from("src/Gone.elm"), stat),
+            (PathBuf::from("src/Same.elm"), stat),
+        ]
+        .into_iter()
+        .collect();
+        let after: Snapshot = [
+            (PathBuf::from("src/Main.elm"), (2, None)),
+            (PathBuf::from("src/New.elm"), stat),
+            (PathBuf::from("src/Same.elm"), stat),
+        ]
+        .into_iter()
+        .collect();
+
+        let moved = changed(&before, &after);
+        assert_eq!(
+            moved,
+            vec![
+                PathBuf::from("src/Gone.elm"),
+                PathBuf::from("src/Main.elm"),
+                PathBuf::from("src/New.elm"),
+            ]
+        );
+        assert!(changed(&before, &before).is_empty());
     }
 
     #[test]

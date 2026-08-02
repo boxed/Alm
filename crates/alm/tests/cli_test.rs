@@ -1260,14 +1260,15 @@ fn a_failed_rebuild_is_reported_and_the_last_good_build_survives() {
     // so — otherwise a save whose errors only reached the page looks ignored.
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stderr.contains("Recompiled Main in") && stderr.contains("did not compile"),
-        "stderr: {stderr}"
+        stdout.contains("Recompiling src/Main.elm... it does not compile ("),
+        "stdout: {stdout}"
     );
 }
 
-/// Every rebuild says so on the terminal. Without it a watching server is
+/// Every rebuild says so on the terminal, naming the file that was saved and
+/// finishing the line when the build is over. Without it a watching server is
 /// silent, and a save that was picked up looks exactly like one that was not.
 #[test]
 fn a_rebuild_says_so_on_the_terminal() {
@@ -1284,7 +1285,7 @@ fn a_rebuild_says_so_on_the_terminal() {
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Recompiled Main in"), "stdout: {stdout}");
+    assert!(stdout.contains("Recompiling src/Main.elm... done ("), "stdout: {stdout}");
 }
 
 #[test]

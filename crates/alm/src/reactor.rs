@@ -75,7 +75,9 @@ pub fn run(args: &[String], color: bool) -> ExitCode {
         let live = Live::new();
         live::heartbeat(live.clone());
         let watched = live.clone();
-        live::watch(&root, move || watched.broadcast("changed", "null"));
+        // Which file moved does not matter here: the reactor compiles when a
+        // page asks for it, so all a change does is tell the page to ask again.
+        live::watch(&root, move |_| watched.broadcast("changed", "null"));
         live
     });
     http::serve(listener, move |request| handle(&root, request, live.as_ref(), mode, color));
