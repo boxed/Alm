@@ -169,11 +169,11 @@ workload is public and pinned, so the figures can be reproduced:
 [exosphere](https://gitlab.com/exosphere/exosphere) at
 `be3d7114`, 59k lines over 212 modules and 58 packages.
 
-| exosphere | elm 0.19.1 | alm |
-|---|---|---|
-| full (build cache cleared) | 1507 ms | **1054 ms** |
-| incremental (one module edited) | 171 ms | **116 ms** |
-| no-op (nothing changed at all) | 170 ms | **61 ms** |
+| exosphere | elm 0.19.1 | alm-js | alm-wasm |
+|---|---|---|---|
+| full (build cache cleared) | 1484 ms | **1064 ms** | 2282 ms |
+| incremental (one module edited) | 170 ms | **103 ms** | 1146 ms |
+| no-op (nothing changed at all) | 166 ms | **55 ms** | 1135 ms |
 
 Compare within a mode, never across: a no-op and a full build are not the
 same measurement.
@@ -183,15 +183,15 @@ The incremental figure tracks the size of what you edit and how much
 depends on it; smaller projects go much further, and a package and its
 whole dependency graph rebuilds in a fraction of what elm needs:
 
-| incremental | elm 0.19.1 | alm | |
+| incremental | elm 0.19.1 | alm-js | |
 |---|---|---|---|
-| terezka/elm-charts | 98 ms | **13 ms** | 7.5x |
-| ianmackenzie/elm-geometry | 108 ms | **20 ms** | 5.4x |
-| data-viz-lab/elm-chart-builder | 129 ms | **21 ms** | 6.1x |
-| exosphere (59k lines) | 171 ms | **116 ms** | 1.5x |
+| terezka/elm-charts | 90 ms | **13 ms** | 6.9x |
+| ianmackenzie/elm-geometry | 102 ms | **20 ms** | 5.1x |
+| data-viz-lab/elm-chart-builder | 103 ms | **19 ms** | 5.4x |
+| exosphere (59k lines) | 170 ms | **103 ms** | 1.7x |
 
-elm's no-op costs about what its incremental build does — 170 ms against
-171 ms on exosphere — so with the official compiler you pay nearly the
+elm's no-op costs about what its incremental build does — 166 ms against
+170 ms on exosphere — so with the official compiler you pay nearly the
 full price for a save that changed nothing.
 
 alm's cache lives in `.alm-stuff` (self-ignoring, safe to delete). A
@@ -199,11 +199,21 @@ module is reused when its source *and* every interface it was checked
 against are unchanged, and an untouched file is recognized by its
 timestamp and length so it is never read or parsed at all — most of
 what an incremental build would otherwise spend its time on is
-rediscovering an import graph that has not moved. The cache is
-invalidated by the compiler binary itself, so it cannot survive a
-change to alm. An incremental build is byte-for-byte what a full build
-produces — differential tests hold that — and `ALM_NO_CACHE=1` turns it
-off.
+rediscovering an import graph that has not moved.
+
+The JavaScript target reuses a module whole: its interface, its
+generated code, its exports. wasm-gc and native cannot, because
+monomorphization is whole-program and reads every module's AST — so
+they cache the type checker's output instead, which is ~76% of a cold
+build, and rebuild the AST from source each time. That is why their
+incremental builds improve but stay well above alm-js: the work left is
+monomorphization and code generation, and neither is per module.
+(Native gains least of all — LLVM dominates its build.)
+
+The cache is invalidated by the compiler binary itself, so it cannot
+survive a change to alm. An incremental build is byte-for-byte what a
+full build produces — differential tests hold that for both JavaScript
+and wasm — and `ALM_NO_CACHE=1` turns it off.
 
 Type checking is ~76% of a cold build; `ALM_TIMING=1` breaks a compile
 down by phase, and reports how many modules the cache reused.

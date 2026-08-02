@@ -107,15 +107,9 @@ def edit_entry(directory, entry):
 # against and every full build looks terrible — the numbers were fine, the
 # comparison was not.
 #
-# `alm-wasm` and `alm-native` appear under `full` only, not because they were
-# left out but because they have one speed: monomorphization is whole-program,
-# so there is no per-module unit to reuse and those builds do not read the cache
-# at all. `CACHELESS` records why, so the report can say it rather than leave a
-# gap to be read as a missing run.
-CACHELESS = {
-    "alm-wasm": "monomorphization is whole-program; no per-module cache",
-    "alm-native": "monomorphization is whole-program; no per-module cache",
-}
+# Every compiler now has all three modes. `CACHELESS` stays because the report
+# uses it to explain an absent column, and a back end may lose a mode again.
+CACHELESS = {}
 
 FULL = "full"
 INCREMENTAL = "incremental"
@@ -136,8 +130,16 @@ COMPILERS = [
     ("alm-js", NOOP, lambda entry, out: [str(ALM), "make", entry, f"--output={out}.js"], None),
     ("alm-wasm", FULL, lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
                                            f"--output={out}.wasm"], wipe_alm_cache),
+    ("alm-wasm", INCREMENTAL, lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
+                                                  f"--output={out}.wasm"], edit_entry),
+    ("alm-wasm", NOOP, lambda entry, out: [str(ALM), "make", entry, "--target=wasm-gc",
+                                           f"--output={out}.wasm"], None),
     ("alm-native", FULL, lambda entry, out: [str(ALM), "make", entry, "--target=native",
                                              f"--output={out}.bin"], wipe_alm_cache),
+    ("alm-native", INCREMENTAL, lambda entry, out: [str(ALM), "make", entry, "--target=native",
+                                                    f"--output={out}.bin"], edit_entry),
+    ("alm-native", NOOP, lambda entry, out: [str(ALM), "make", entry, "--target=native",
+                                             f"--output={out}.bin"], None),
 ]
 
 def column(name, mode):

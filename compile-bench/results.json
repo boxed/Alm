@@ -1,5 +1,5 @@
 {
-  "measured": "2026-08-02T04:12:53+02:00",
+  "measured": "2026-08-02T04:35:03+02:00",
   "machine": "Darwin arm64",
   "elm_version": "0.19.1",
   "runs": {
@@ -44,95 +44,143 @@
       "column": "alm-wasm|full"
     },
     {
+      "name": "alm-wasm",
+      "mode": "incremental",
+      "column": "alm-wasm|incremental"
+    },
+    {
+      "name": "alm-wasm",
+      "mode": "no-op",
+      "column": "alm-wasm|no-op"
+    },
+    {
       "name": "alm-native",
       "mode": "full",
       "column": "alm-native|full"
+    },
+    {
+      "name": "alm-native",
+      "mode": "incremental",
+      "column": "alm-native|incremental"
+    },
+    {
+      "name": "alm-native",
+      "mode": "no-op",
+      "column": "alm-native|no-op"
     }
   ],
   "projects": [
     {
       "op": "elm/http",
       "lines": 13,
-      "elm|full": 722.4,
-      "elm|incremental": 99.9,
-      "elm|no-op": 97.2,
-      "alm-js|full": 10.0,
-      "alm-js|incremental": 8.2,
-      "alm-js|no-op": 7.3,
-      "alm-wasm|full": 8.4,
-      "alm-native|full": 102.2
+      "elm|full": 687.6,
+      "elm|incremental": 89.7,
+      "elm|no-op": 90.0,
+      "alm-js|full": 9.4,
+      "alm-js|incremental": 7.8,
+      "alm-js|no-op": 7.5,
+      "alm-wasm|full": 10.3,
+      "alm-wasm|incremental": 7.9,
+      "alm-wasm|no-op": 7.4,
+      "alm-native|full": 85.0,
+      "alm-native|incremental": 88.0,
+      "alm-native|no-op": 88.0
     },
     {
       "op": "elm/url",
       "lines": 16,
-      "elm|full": 683.7,
-      "elm|incremental": 114.5,
-      "elm|no-op": 95.9,
-      "alm-js|full": 9.9,
-      "alm-js|incremental": 8.6,
-      "alm-js|no-op": 7.9,
-      "alm-wasm|full": 8.2,
-      "alm-native|full": 85.8
+      "elm|full": 671.5,
+      "elm|incremental": 87.9,
+      "elm|no-op": 88.8,
+      "alm-js|full": 9.6,
+      "alm-js|incremental": 8.1,
+      "alm-js|no-op": 7.6,
+      "alm-wasm|full": 9.5,
+      "alm-wasm|incremental": 7.2,
+      "alm-wasm|no-op": 7.0,
+      "alm-native|full": 89.9,
+      "alm-native|incremental": 87.0,
+      "alm-native|no-op": 89.1
     },
     {
       "op": "elm/parser",
       "lines": 14,
-      "elm|full": 680.6,
-      "elm|incremental": 95.8,
-      "elm|no-op": 97.1,
-      "alm-js|full": 11.8,
-      "alm-js|incremental": 8.2,
-      "alm-js|no-op": 8.2,
-      "alm-wasm|full": 8.7,
-      "alm-native|full": 152.1
+      "elm|full": 717.4,
+      "elm|incremental": 88.2,
+      "elm|no-op": 88.7,
+      "alm-js|full": 11.0,
+      "alm-js|incremental": 7.8,
+      "alm-js|no-op": 7.2,
+      "alm-wasm|full": 10.9,
+      "alm-wasm|incremental": 8.1,
+      "alm-wasm|no-op": 8.7,
+      "alm-native|full": 132.6,
+      "alm-native|incremental": 132.7,
+      "alm-native|no-op": 136.0
     },
     {
       "op": "terezka/elm-charts",
       "lines": 17,
-      "elm|full": 664.3,
-      "elm|incremental": 98.0,
-      "elm|no-op": 97.6,
-      "alm-js|full": 50.3,
-      "alm-js|incremental": 13.4,
-      "alm-js|no-op": 11.4,
-      "alm-wasm|full": 39.6,
-      "alm-native|full": 800.5
+      "elm|full": 693.6,
+      "elm|incremental": 90.0,
+      "elm|no-op": 89.9,
+      "alm-js|full": 51.9,
+      "alm-js|incremental": 13.0,
+      "alm-js|no-op": 11.6,
+      "alm-wasm|full": 55.1,
+      "alm-wasm|incremental": 25.8,
+      "alm-wasm|no-op": 25.2,
+      "alm-native|full": 829.0,
+      "alm-native|incremental": 817.1,
+      "alm-native|no-op": 800.6
     },
     {
       "op": "ianmackenzie/elm-geometry",
       "lines": 64,
-      "elm|full": 679.6,
-      "elm|incremental": 107.9,
-      "elm|no-op": 109.7,
-      "alm-js|full": 96.4,
-      "alm-js|incremental": 20.3,
-      "alm-js|no-op": 18.1,
-      "alm-wasm|full": 76.3,
-      "alm-native|full": 1374.6
+      "elm|full": 675.2,
+      "elm|incremental": 101.6,
+      "elm|no-op": 100.3,
+      "alm-js|full": 101.7,
+      "alm-js|incremental": 20.4,
+      "alm-js|no-op": 18.0,
+      "alm-wasm|full": 103.7,
+      "alm-wasm|incremental": 54.6,
+      "alm-wasm|no-op": 53.1,
+      "alm-native|full": 1421.9,
+      "alm-native|incremental": 1372.7,
+      "alm-native|no-op": 1379.1
     },
     {
       "op": "data-viz-lab/elm-chart-builder",
       "lines": 17,
-      "elm|full": 717.3,
-      "elm|incremental": 129.3,
-      "elm|no-op": 127.9,
-      "alm-js|full": 112.7,
-      "alm-js|incremental": 20.9,
-      "alm-js|no-op": 17.7,
-      "alm-wasm|full": 83.4,
-      "alm-native|full": null
+      "elm|full": 710.2,
+      "elm|incremental": 103.4,
+      "elm|no-op": 103.1,
+      "alm-js|full": 109.9,
+      "alm-js|incremental": 19.4,
+      "alm-js|no-op": 18.5,
+      "alm-wasm|full": 114.2,
+      "alm-wasm|incremental": 53.8,
+      "alm-wasm|no-op": 53.1,
+      "alm-native|full": null,
+      "alm-native|incremental": null,
+      "alm-native|no-op": null
     },
     {
       "op": "exosphere/exosphere",
       "lines": 59137,
-      "elm|full": 1506.9,
-      "elm|incremental": 170.9,
-      "elm|no-op": 169.8,
-      "alm-js|full": 1054.4,
-      "alm-js|incremental": 115.6,
-      "alm-js|no-op": 61.4,
-      "alm-wasm|full": 1948.2,
-      "alm-native|full": null
+      "elm|full": 1483.8,
+      "elm|incremental": 170.1,
+      "elm|no-op": 166.4,
+      "alm-js|full": 1063.8,
+      "alm-js|incremental": 103.2,
+      "alm-js|no-op": 55.4,
+      "alm-wasm|full": 2281.5,
+      "alm-wasm|incremental": 1146.4,
+      "alm-wasm|no-op": 1134.8,
+      "alm-native|full": null,
+      "alm-native|incremental": null,
+      "alm-native|no-op": null
     }
   ],
   "unbuilt": [
@@ -145,8 +193,5 @@
       "compiler": "alm-native"
     }
   ],
-  "cacheless": {
-    "alm-wasm": "monomorphization is whole-program; no per-module cache",
-    "alm-native": "monomorphization is whole-program; no per-module cache"
-  }
+  "cacheless": {}
 }

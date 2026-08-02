@@ -4,6 +4,7 @@
 //! curried functions, `{ $: 'Ctor', a: ..., b: ... }` objects for custom
 //! types, cons cells for lists, and plain objects for records.
 
+pub mod comments;
 pub mod native;
 pub mod sourcemap;
 pub mod wasmgc;

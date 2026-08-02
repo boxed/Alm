@@ -226,13 +226,22 @@ fn a_corrupt_entry_is_a_miss_not_a_failure() {
     let original = build_incremental(&dir).expect("seed the cache");
 
     // Truncated files, foreign files, garbage: a cache is not a database, and
-    // none of this may take a build down.
+    // none of this may take a build down. Everything under `.alm-stuff` —
+    // module entries, the module graph, the type-checker output — is fair game.
     let cache_dir = alm_compiler::cache::dir_for(&dir);
-    for entry in std::fs::read_dir(&cache_dir).expect("read cache dir") {
-        let path = entry.expect("dir entry").path();
-        let bytes = std::fs::read(&path).expect("read entry");
-        std::fs::write(&path, &bytes[..bytes.len() / 2]).expect("truncate entry");
+    build_wasm(&dir, true).expect("seed the wasm cache too");
+    fn truncate_everything(at: &Path) {
+        for entry in std::fs::read_dir(at).expect("read cache dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                truncate_everything(&path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("read entry");
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).expect("truncate entry");
+        }
     }
+    truncate_everything(&cache_dir);
     std::fs::write(cache_dir.join("junk.almc"), b"not a cache entry at all").expect("write junk");
 
     assert_eq!(
@@ -240,6 +249,7 @@ fn a_corrupt_entry_is_a_miss_not_a_failure() {
         original,
         "a corrupt cache changed the output instead of being ignored"
     );
+    assert_wasm_agrees(&dir, "wasm with a corrupt cache");
 }
 
 // The graph cache recognizes an untouched file by its timestamp and length, so
@@ -306,4 +316,97 @@ fn moving_a_module_between_source_dirs_is_picked_up() {
     let js = assert_agrees(&dir, "after moving a module to another source dir");
     assert_ne!(js, original, "moving the module changed nothing in the bundle");
     assert!(js.contains("trim"), "the moved module's new body never arrived");
+}
+
+// wasm-gc and native cannot reuse a module wholesale — monomorphization is
+// whole-program — so they cache the type checker's output instead and rebuild
+// the AST from source every time. The contract is the same: byte-for-byte what
+// a full build produces.
+
+fn build_wasm(dir: &Path, use_cache: bool) -> Result<Vec<u8>, String> {
+    let out = dir.join(if use_cache { "incr.wasm" } else { "full.wasm" });
+    project::compile_project_wasmgc_with(
+        &dir.join("src").join("Main.elm"),
+        &out,
+        false,
+        use_cache,
+    )
+    .map_err(render)?;
+    std::fs::read(&out).map_err(|e| e.to_string())
+}
+
+fn assert_wasm_agrees(dir: &Path, what: &str) -> Vec<u8> {
+    let incremental = build_wasm(dir, true);
+    let full = build_wasm(dir, false);
+    match (incremental, full) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(a.len(), b.len(), "{what}: wasm is {} bytes against {}", a.len(), b.len());
+            assert!(a == b, "{what}: incremental and full wasm differ");
+            a
+        }
+        (Err(a), Err(b)) => {
+            assert_eq!(a, b, "{what}: the two paths reported different errors");
+            Vec::new()
+        }
+        (Ok(_), Err(b)) => panic!("{what}: incremental succeeded but a full build failed:\n{b}"),
+        (Err(a), Ok(_)) => panic!("{what}: incremental failed but a full build succeeded:\n{a}"),
+    }
+}
+
+#[test]
+fn wasm_cold_warm_and_full_builds_agree() {
+    let dir = common::test_dir("alm-incremental", "wasm-agree");
+    project_with(&dir, LABEL);
+
+    let cold = assert_wasm_agrees(&dir, "wasm cold");
+    let warm = build_wasm(&dir, true).expect("warm wasm build");
+    assert_eq!(cold, warm, "a second wasm build with a full cache changed the output");
+}
+
+#[test]
+fn wasm_picks_up_a_body_change() {
+    let dir = common::test_dir("alm-incremental", "wasm-body");
+    project_with(&dir, LABEL);
+    build_wasm(&dir, true).expect("seed the cache");
+
+    let edited = LABEL.replace("String.toUpper text", "String.toLower text");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+    let before = build_wasm(&dir, false).expect("reference build");
+    let after = assert_wasm_agrees(&dir, "wasm after a body change");
+    assert_eq!(after, before, "the edited body never reached the wasm output");
+}
+
+#[test]
+fn wasm_dependent_is_rechecked_when_an_interface_changes() {
+    let dir = common::test_dir("alm-incremental", "wasm-interface");
+    project_with(&dir, LABEL);
+    build_wasm(&dir, true).expect("seed the cache");
+
+    // The same trap as the JavaScript path: `Widget`'s own text is untouched
+    // but the type it depends on changed, and reusing its cached types would
+    // hand monomorphization a program that no longer type checks.
+    let edited = LABEL.replace("title : String", "title : Int").replace("    \"widget\"", "    42");
+    std::fs::write(dir.join("src").join("Label.elm"), &edited).expect("edit Label");
+
+    assert!(
+        build_wasm(&dir, true).is_err(),
+        "the cache reused type-checker output for a module whose dependency changed shape"
+    );
+}
+
+#[test]
+fn a_wasm_build_does_not_disturb_the_javascript_cache() {
+    let dir = common::test_dir("alm-incremental", "both-targets");
+    project_with(&dir, LABEL);
+
+    // The two caches are keyed by module path, so without separate homes each
+    // target would evict the other's entries and neither would ever hit.
+    let js = build_incremental(&dir).expect("seed the js cache");
+    build_wasm(&dir, true).expect("seed the wasm cache");
+    assert_eq!(build_incremental(&dir).expect("js again"), js, "the wasm build changed the js output");
+    assert_eq!(
+        build_incremental(&dir).expect("js once more"),
+        build_full(&dir).expect("js full"),
+        "the js cache stopped agreeing with a full build after a wasm build"
+    );
 }

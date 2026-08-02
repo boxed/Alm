@@ -297,6 +297,11 @@ pub fn compile_project(entry: &Path) -> Result<(String, Vec<crate::lint::Warning
 /// broken bundle, and alm already tree-shakes to well under elm's output size.
 /// The `Debug` rule is enforced regardless, so a project that builds with
 /// `--optimize` under elm builds here too.
+///
+/// What `optimize` does change about the output is comments: the hand-written
+/// kernel is commented as source should be, and none of that belongs in a
+/// production bundle, so an optimized build is stripped of it (see
+/// [`generate::comments`]).
 pub fn compile_project_with(
     entry: &Path,
     optimize: bool,
@@ -325,7 +330,7 @@ pub fn compile_project_uncached(
     optimize: bool,
 ) -> Result<(String, Vec<crate::lint::Warning>), Vec<BuildError>> {
     let dce = dce_wanted();
-    let checked = check_project(entry)?;
+    let checked = check_project_cached(entry, true, false)?;
     if optimize {
         let offenders = crate::debug_uses::modules_using_debug(&checked.modules);
         if !offenders.is_empty() {
@@ -338,9 +343,26 @@ pub fn compile_project_uncached(
     // second front end — so `alm make` prints hints without re-type-checking.
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     Ok((
-        timing::generate(|| generate::generate_project_typed(&checked.modules, checked.node_types, dce)),
+        timing::generate(|| {
+            let js = generate::generate_project_typed(&checked.modules, checked.node_types, dce);
+            for_release(js, optimize)
+        }),
         warnings,
     ))
+}
+
+/// The last thing that happens to an optimized bundle: out go the comments.
+///
+/// This runs on the assembled, already tree-shaken bundle rather than on the
+/// kernel source, so it sees generated code too, and so the cached and full
+/// build paths — which share nothing but the bundle they end up with — are
+/// stripped by the same code at the same point.
+fn for_release(javascript: String, optimize: bool) -> String {
+    if optimize {
+        generate::comments::strip(&javascript)
+    } else {
+        javascript
+    }
 }
 
 /// What the live-reload server gets back from a build.
@@ -377,6 +399,10 @@ pub fn compile_project_live(
     }
     let model_fingerprint = model_type_of(&checked);
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
+    // A mapped build keeps its comments: the map is built against the bundle as
+    // generated, and stripping would move every line out from under it. Asking
+    // for source maps is asking to read the output, so that is the right way
+    // round.
     let (javascript, source_map) = if source_maps {
         let sources: HashMap<Name, (String, String)> = checked
             .sources
@@ -388,10 +414,8 @@ pub fn compile_project_live(
         (js, Some(map))
     } else {
         let dce = std::env::var_os("ALM_NO_DCE").is_none();
-        (
-            generate::generate_project_typed(&checked.modules, checked.node_types, dce),
-            None,
-        )
+        let js = generate::generate_project_typed(&checked.modules, checked.node_types, dce);
+        (for_release(js, optimize), None)
     };
     Ok(LiveBuild { javascript, source_map, model_fingerprint, warnings })
 }
@@ -531,7 +555,21 @@ pub fn compile_project_wasmgc(
     output: &Path,
     source_maps: bool,
 ) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
-    let checked = check_project(entry)?;
+    compile_project_wasmgc_with(entry, output, source_maps,
+                                std::env::var_os("ALM_NO_CACHE").is_none())
+}
+
+/// As `compile_project_wasmgc`, with the front-end cache switchable — so the
+/// differential tests can compare an incremental build against a real full one
+/// without an environment variable, which tests sharing a process cannot do
+/// safely.
+pub fn compile_project_wasmgc_with(
+    entry: &Path,
+    output: &Path,
+    source_maps: bool,
+    use_cache: bool,
+) -> Result<Vec<crate::lint::Warning>, Vec<BuildError>> {
+    let checked = check_project_cached(entry, true, use_cache)?;
     let warnings = timing::lint(|| crate::lint::lint(&checked.modules, &checked.sources));
     let empty_types = HashMap::new();
     let empty_nodes = HashMap::new();
@@ -680,7 +718,8 @@ pub fn compile_project_cached(
     // The graph cache lets an untouched file skip being read, parsed and
     // re-resolved. On a 360-module project that is most of what an incremental
     // build would otherwise spend its time on.
-    let graph = timing::cache(|| cache::load_graph(&dir, fingerprint));
+    let entries = cache::entries_dir(&dir, "js");
+    let graph = timing::cache(|| cache::load_graph(&dir, cache::fingerprint(&[])));
     let Loaded { modules, order, unique_names, entry_key: _ } =
         load_and_order_with(entry, &scopes, graph.as_ref())?;
 
@@ -717,7 +756,7 @@ pub fn compile_project_cached(
             .collect();
         deps.sort();
         deps.dedup();
-        let hit = timing::cache(|| cache::load(&dir, path, fingerprint));
+        let hit = timing::cache(|| cache::load(&entries, path, fingerprint));
         // A module the graph cache vouched for was never read, so there is no
         // text to hash: its timestamp and length already stood in for that.
         // Hashing every source every build was itself a measurable cost.
@@ -801,7 +840,7 @@ pub fn compile_project_cached(
 
         let hash = cache::interface_hash(&interface);
         timing::cache(|| cache::store(
-            &dir,
+            &entries,
             path,
             fingerprint,
             &cache::Stored {
@@ -838,7 +877,7 @@ pub fn compile_project_cached(
     timing::cache(|| {
         cache::store_graph(
             &dir,
-            fingerprint,
+            cache::fingerprint(&[]),
             &cache::Graph {
                 modules: order
                     .iter()
@@ -873,7 +912,10 @@ pub fn compile_project_cached(
     if timing::enabled() {
         eprintln!("── alm cache ── {reused}/{} modules reused", order.len());
     }
-    Ok((timing::generate(|| generate::assemble(&chunks, dce)), warnings))
+    Ok((
+        timing::generate(|| for_release(generate::assemble(&chunks, dce), optimize)),
+        warnings,
+    ))
 }
 
 /// Either a real problem with the project, or a signal that the cached graph
@@ -1028,7 +1070,36 @@ pub fn check_project_with(
     entry: &Path,
     want_node_types: bool,
 ) -> Result<CheckedProject, Vec<BuildError>> {
+    check_project_cached(entry, want_node_types, std::env::var_os("ALM_NO_CACHE").is_none())
+}
+
+/// The front end, optionally reusing type-checker output for modules that have
+/// not changed.
+///
+/// This is what makes the wasm-gc and native builds incremental. They cannot
+/// reuse a module wholesale the way a JavaScript build does — monomorphization
+/// is whole-program and reads every module's canonical AST — but type checking
+/// is ~76% of a cold build and it is per module, so it is the half worth
+/// keeping. The AST is rebuilt from source every time: parsing and
+/// canonicalizing the whole project is ~74 ms against type checking's ~711 ms,
+/// and not serializing it avoids the entire canonical AST as a format to
+/// maintain.
+///
+/// `use_cache` is off for the reference path the differential tests compare
+/// against, so "full build" means one.
+pub fn check_project_cached(
+    entry: &Path,
+    want_node_types: bool,
+    use_cache: bool,
+) -> Result<CheckedProject, Vec<BuildError>> {
     let scopes = resolve_scopes(entry);
+    // Only the code-generating paths ask for node types, and they are most of
+    // what is being cached, so a build that does not want them (`--docs`) takes
+    // the plain path.
+    let use_cache = use_cache && want_node_types;
+    let cache_dir = cache::entries_dir(&cache::dir_for(&project_root(entry)), "check");
+    let fingerprint = cache::fingerprint(&[("target", "check")]);
+    let mut interface_hashes: HashMap<Name, u64> = HashMap::new();
     let Loaded { modules, order, unique_names, entry_key } = load_and_order(entry, &scopes)?;
 
     // Compile each module against the interfaces of its dependencies.
@@ -1080,6 +1151,46 @@ pub fn check_project_with(
                 continue;
             }
         };
+
+        // What this module was, or would be, checked against. Sorted, so the
+        // comparison does not depend on the order imports are listed in.
+        let mut deps: Vec<(Name, u64)> = source_module
+            .imports
+            .iter()
+            .filter_map(|(_, dep)| {
+                let dep_name = unique_names.get(dep)?;
+                Some((dep_name.clone(), *interface_hashes.get(dep_name)?))
+            })
+            .collect();
+        deps.sort();
+        deps.dedup();
+        let source_hash = cache::hash_str(source_module.source());
+
+        let cached = use_cache
+            .then(|| timing::cache(|| cache::load_check(&cache_dir, path, fingerprint)))
+            .flatten()
+            .filter(|hit| hit.source_hash == source_hash && hit.deps == deps);
+
+        // A hit means this module and everything it was checked against are
+        // unchanged, so type checking would reach the same answer — and so
+        // would the exhaustiveness check, which is why that is skipped too.
+        if let Some(hit) = cached {
+            timing::simplify(|| optimize::simplify_module(&mut canonical));
+            for value in interface.value_names.clone() {
+                if let Some(tipe) = hit.types.get(&value) {
+                    interface.values.insert(value, tipe.clone());
+                }
+            }
+            for def in interface.binops.values_mut() {
+                def.tipe = hit.types.get(&def.function).cloned();
+            }
+            interface_hashes.insert(name.clone(), hit.interface_hash);
+            interfaces.insert(name.clone(), interface);
+            all_node_types.insert(name.clone(), hit.node_types);
+            all_types.insert(name.clone(), hit.types);
+            canonical_modules.push(canonical);
+            continue;
+        }
 
         let type_checked = timing::typecheck(|| {
             typecheck::check_module_with(&canonical, &interfaces, want_node_types)
@@ -1146,6 +1257,24 @@ pub fn check_project_with(
         }
         for def in interface.binops.values_mut() {
             def.tipe = types.get(&def.function).cloned();
+        }
+        if use_cache {
+            let hash = cache::interface_hash(&interface);
+            interface_hashes.insert(name.clone(), hash);
+            timing::cache(|| {
+                cache::store_check(
+                    &cache_dir,
+                    path,
+                    fingerprint,
+                    &cache::CheckStored {
+                        source_hash,
+                        deps: &deps,
+                        interface_hash: hash,
+                        types: &types,
+                        node_types: &all_node_types[&name],
+                    },
+                )
+            });
         }
         interfaces.insert(name.clone(), interface);
         all_types.insert(name.clone(), types);

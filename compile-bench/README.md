@@ -45,8 +45,9 @@ number is only meaningful against another number of the same kind:
 | `incremental` | cache warm, one module edited — what you wait for while working |
 | `no-op` | cache warm, nothing changed — what a save that touched nothing costs |
 
-`alm-wasm` and `alm-native` appear under `full` only; neither back end caches,
-and the report says so rather than leaving a gap.
+Every compiler has all three. wasm-gc and native cache less than the JavaScript
+target does — monomorphization is whole-program, so they reuse only the type
+checker's output — which the incremental column shows rather than hides.
 
 Mixing the modes into one table was actively misleading, and not because of the
 labels. The report scales each bar — and awards the row's star — against the

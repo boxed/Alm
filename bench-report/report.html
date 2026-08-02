@@ -93,7 +93,7 @@
   // that: it ended up describing numbers it was no longer showing.
   const DATA = {
   "title": "alm \u2014 runtime, computation and compile speed",
-  "generated": "generated 2026-08-02 04:13 CEST by make report",
+  "generated": "generated 2026-08-02 04:35 CEST by make report",
   "sections": [
     {
       "title": "Runtime",
@@ -352,50 +352,50 @@
           "rows": [
             {
               "op": "elm/http",
-              "elm": 722.4,
-              "alm-js": 10.0,
-              "alm-wasm": 8.4,
-              "alm-native": 102.2
+              "elm": 687.6,
+              "alm-js": 9.4,
+              "alm-wasm": 10.3,
+              "alm-native": 85.0
             },
             {
               "op": "elm/url",
-              "elm": 683.7,
-              "alm-js": 9.9,
-              "alm-wasm": 8.2,
-              "alm-native": 85.8
+              "elm": 671.5,
+              "alm-js": 9.6,
+              "alm-wasm": 9.5,
+              "alm-native": 89.9
             },
             {
               "op": "elm/parser",
-              "elm": 680.6,
-              "alm-js": 11.8,
-              "alm-wasm": 8.7,
-              "alm-native": 152.1
+              "elm": 717.4,
+              "alm-js": 11.0,
+              "alm-wasm": 10.9,
+              "alm-native": 132.6
             },
             {
               "op": "terezka/elm-charts",
-              "elm": 664.3,
-              "alm-js": 50.3,
-              "alm-wasm": 39.6,
-              "alm-native": 800.5
+              "elm": 693.6,
+              "alm-js": 51.9,
+              "alm-wasm": 55.1,
+              "alm-native": 829.0
             },
             {
               "op": "ianmackenzie/elm-geometry",
-              "elm": 679.6,
-              "alm-js": 96.4,
-              "alm-wasm": 76.3,
-              "alm-native": 1374.6
+              "elm": 675.2,
+              "alm-js": 101.7,
+              "alm-wasm": 103.7,
+              "alm-native": 1421.9
             },
             {
               "op": "data-viz-lab/elm-chart-builder",
-              "elm": 717.3,
-              "alm-js": 112.7,
-              "alm-wasm": 83.4
+              "elm": 710.2,
+              "alm-js": 109.9,
+              "alm-wasm": 114.2
             },
             {
               "op": "exosphere/exosphere",
-              "elm": 1506.9,
-              "alm-js": 1054.4,
-              "alm-wasm": 1948.2
+              "elm": 1483.8,
+              "alm-js": 1063.8,
+              "alm-wasm": 2281.5
             }
           ],
           "decimals": 0,
@@ -409,50 +409,63 @@
           "caption": "incremental \u00b7 milliseconds \u00b7 one module edited, cache warm \u2014 what you wait for while working",
           "columns": [
             "elm",
-            "alm-js"
+            "alm-js",
+            "alm-wasm",
+            "alm-native"
           ],
           "rows": [
             {
               "op": "elm/http",
-              "elm": 99.9,
-              "alm-js": 8.2
+              "elm": 89.7,
+              "alm-js": 7.8,
+              "alm-wasm": 7.9,
+              "alm-native": 88.0
             },
             {
               "op": "elm/url",
-              "elm": 114.5,
-              "alm-js": 8.6
+              "elm": 87.9,
+              "alm-js": 8.1,
+              "alm-wasm": 7.2,
+              "alm-native": 87.0
             },
             {
               "op": "elm/parser",
-              "elm": 95.8,
-              "alm-js": 8.2
+              "elm": 88.2,
+              "alm-js": 7.8,
+              "alm-wasm": 8.1,
+              "alm-native": 132.7
             },
             {
               "op": "terezka/elm-charts",
-              "elm": 98.0,
-              "alm-js": 13.4
+              "elm": 90.0,
+              "alm-js": 13.0,
+              "alm-wasm": 25.8,
+              "alm-native": 817.1
             },
             {
               "op": "ianmackenzie/elm-geometry",
-              "elm": 107.9,
-              "alm-js": 20.3
+              "elm": 101.6,
+              "alm-js": 20.4,
+              "alm-wasm": 54.6,
+              "alm-native": 1372.7
             },
             {
               "op": "data-viz-lab/elm-chart-builder",
-              "elm": 129.3,
-              "alm-js": 20.9
+              "elm": 103.4,
+              "alm-js": 19.4,
+              "alm-wasm": 53.8
             },
             {
               "op": "exosphere/exosphere",
-              "elm": 170.9,
-              "alm-js": 115.6
+              "elm": 170.1,
+              "alm-js": 103.2,
+              "alm-wasm": 1146.4
             }
           ],
           "decimals": 0,
           "unit": "",
           "notes": [
-            "no incremental build for alm-native \u2014 monomorphization is whole-program; no per-module cache",
-            "no incremental build for alm-wasm \u2014 monomorphization is whole-program; no per-module cache"
+            "n/a \u2014 alm-native cannot build data-viz-lab/elm-chart-builder, exosphere/exosphere"
           ]
         },
         {
@@ -460,50 +473,63 @@
           "caption": "no-op \u00b7 milliseconds \u00b7 nothing changed at all \u2014 what a save that touched nothing costs",
           "columns": [
             "elm",
-            "alm-js"
+            "alm-js",
+            "alm-wasm",
+            "alm-native"
           ],
           "rows": [
             {
               "op": "elm/http",
-              "elm": 97.2,
-              "alm-js": 7.3
+              "elm": 90.0,
+              "alm-js": 7.5,
+              "alm-wasm": 7.4,
+              "alm-native": 88.0
             },
             {
               "op": "elm/url",
-              "elm": 95.9,
-              "alm-js": 7.9
+              "elm": 88.8,
+              "alm-js": 7.6,
+              "alm-wasm": 7.0,
+              "alm-native": 89.1
             },
             {
               "op": "elm/parser",
-              "elm": 97.1,
-              "alm-js": 8.2
+              "elm": 88.7,
+              "alm-js": 7.2,
+              "alm-wasm": 8.7,
+              "alm-native": 136.0
             },
             {
               "op": "terezka/elm-charts",
-              "elm": 97.6,
-              "alm-js": 11.4
+              "elm": 89.9,
+              "alm-js": 11.6,
+              "alm-wasm": 25.2,
+              "alm-native": 800.6
             },
             {
               "op": "ianmackenzie/elm-geometry",
-              "elm": 109.7,
-              "alm-js": 18.1
+              "elm": 100.3,
+              "alm-js": 18.0,
+              "alm-wasm": 53.1,
+              "alm-native": 1379.1
             },
             {
               "op": "data-viz-lab/elm-chart-builder",
-              "elm": 127.9,
-              "alm-js": 17.7
+              "elm": 103.1,
+              "alm-js": 18.5,
+              "alm-wasm": 53.1
             },
             {
               "op": "exosphere/exosphere",
-              "elm": 169.8,
-              "alm-js": 61.4
+              "elm": 166.4,
+              "alm-js": 55.4,
+              "alm-wasm": 1134.8
             }
           ],
           "decimals": 0,
           "unit": "",
           "notes": [
-            "no no-op build for alm-native \u2014 monomorphization is whole-program; no per-module cache",
-            "no no-op build for alm-wasm \u2014 monomorphization is whole-program; no per-module cache"
+            "n/a \u2014 alm-native cannot build data-viz-lab/elm-chart-builder, exosphere/exosphere"
           ]
         }
       ],

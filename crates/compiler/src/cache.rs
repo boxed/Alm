@@ -38,6 +38,15 @@ pub fn dir_for(project_root: &Path) -> PathBuf {
     project_root.join(".alm-stuff").join(format!("v{FORMAT_VERSION}"))
 }
 
+/// Module entries live under the kind of thing they hold — `js` for a compiled
+/// module chunk, `check` for type-checker output. They are keyed by module path,
+/// so without this a wasm build and a JavaScript build would take turns
+/// overwriting each other's entries and neither would ever hit. The module
+/// graph sits above both, since the project's shape is the same either way.
+pub fn entries_dir(dir: &Path, kind: &str) -> PathBuf {
+    dir.join(kind)
+}
+
 /// A fingerprint every entry is stamped with: change it and the whole cache
 /// misses.
 ///
@@ -196,7 +205,14 @@ pub fn store(dir: &Path, module_path: &Path, fingerprint: u64, entry: &Stored) {
     // Write-then-rename so a build killed mid-write cannot leave a torn entry
     // behind (a torn entry would be rejected on read, but only after the
     // partial file had displaced a good one).
-    let path = entry_path(dir, module_path);
+    write_atomically(dir, &entry_path(dir, module_path), &w.bytes);
+}
+
+/// Failing to write is not a build failure: the next build just misses.
+/// Write-then-rename, so a build killed mid-write cannot leave a torn entry
+/// behind — a torn entry would be rejected on read, but only after the partial
+/// file had displaced a good one.
+fn write_atomically(dir: &Path, path: &Path, bytes: &[u8]) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
@@ -204,15 +220,20 @@ pub fn store(dir: &Path, module_path: &Path, fingerprint: u64, entry: &Stored) {
     // project ends up with build output committed. Cargo does the same for
     // `target/`. At the top of `.alm-stuff` rather than inside the versioned
     // directory, so a later format version is covered without being asked.
-    if let Some(parent) = dir.parent() {
-        let ignore = parent.join(".gitignore");
-        if !ignore.exists() {
-            let _ = std::fs::write(&ignore, "# Created by alm. Build cache; safe to delete.\n*\n");
+    let mut root = dir;
+    while root.file_name().is_some_and(|n| n != ".alm-stuff") {
+        match root.parent() {
+            Some(parent) => root = parent,
+            None => break,
         }
     }
+    let ignore = root.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(&ignore, "# Created by alm. Build cache; safe to delete.\n*\n");
+    }
     let temporary = path.with_extension("tmp");
-    if std::fs::write(&temporary, &w.bytes).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
+    if std::fs::write(&temporary, bytes).is_ok() {
+        let _ = std::fs::rename(&temporary, path);
     }
 }
 
@@ -704,4 +725,282 @@ pub fn store_graph(dir: &Path, fingerprint: u64, graph: &Graph) {
     if std::fs::write(&temporary, &w.bytes).is_ok() {
         let _ = std::fs::rename(&temporary, &path);
     }
+}
+
+// ------------------------------------------------- type checking (wasm/native)
+
+/// What type checking one module produced. Cached for the back ends that need
+/// more from the front end than its interface: monomorphization reads every
+/// module's canonical AST *and* the type of every expression in it, so those
+/// builds cannot reuse a module wholesale the way a JavaScript build can.
+///
+/// They can, though, skip the expensive half. Parsing and canonicalizing the
+/// whole project costs ~74 ms where type checking costs ~711 ms, so the AST is
+/// simply rebuilt from source every time and never serialized — which is what
+/// keeps this small, since the canonical AST is 23 expression forms and 12
+/// pattern forms of surface area to get exactly right.
+pub struct CheckEntry {
+    pub source_hash: u64,
+    pub deps: Vec<(Name, u64)>,
+    pub interface_hash: u64,
+    /// Every top-level definition's type.
+    pub types: HashMap<Name, can::Type>,
+    /// Every expression's type, keyed by source region.
+    pub node_types: HashMap<Region, can::Type>,
+}
+
+pub struct CheckStored<'a> {
+    pub source_hash: u64,
+    pub deps: &'a [(Name, u64)],
+    pub interface_hash: u64,
+    pub types: &'a HashMap<Name, can::Type>,
+    pub node_types: &'a HashMap<Region, can::Type>,
+}
+
+/// Types are written once each and referred to by index afterwards.
+///
+/// This is what makes the whole thing viable. Written out node by node, the
+/// per-expression type table of a 59k-line application is 11 million type nodes
+/// — the same types over and over, since every `List.map` call site mentions
+/// the same `List`, and inference shares them through `Rc` in memory. Hash-consed
+/// it is **21 thousand** distinct types, a 520:1 collapse, and decoding rebuilds
+/// the sharing instead of inflating 132 MB of duplicates.
+#[derive(Default)]
+struct TypeTable {
+    nodes: Vec<TypeNode>,
+    index: HashMap<TypeNode, u32>,
+    /// Interning results keyed by `Rc` identity. Inference shares subtrees
+    /// aggressively, so without this the walk re-descends the same type
+    /// millions of times to reach the same answer — 11 million visits on a
+    /// 59k-line project, which cost more than the type checking being cached.
+    /// With it the walk sees each shared subtree once.
+    by_pointer: HashMap<usize, u32>,
+    /// The same, for argument and field lists behind `Rc<Vec<…>>`.
+    lists: HashMap<usize, Vec<u32>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum TypeNode {
+    Var(Name),
+    Lambda(u32, u32),
+    Type(Name, Name, Vec<u32>),
+    Record(Vec<(Name, u32)>, Option<Name>),
+    Unit,
+    Tuple(u32, u32, Option<u32>),
+}
+
+impl TypeTable {
+    /// The index for `tipe`, adding it (and anything under it) if new. Children
+    /// are interned first, so a node only ever refers to smaller indices and a
+    /// reader can build the table front to back in one pass.
+    fn intern(&mut self, tipe: &can::Type) -> u32 {
+        use can::Type::*;
+        let node = match tipe {
+            Var(n) => TypeNode::Var(n.clone()),
+            Lambda(a, b) => TypeNode::Lambda(self.shared(a), self.shared(b)),
+            Type(home, name, args) => {
+                let args = self.shared_list(args, |table, t| table.intern(t));
+                TypeNode::Type(home.clone(), name.clone(), args)
+            }
+            Record(fields, ext) => {
+                let indices = self.shared_list(fields, |table, (_, t)| table.intern(t));
+                let names = fields.iter().map(|(n, _)| n.clone());
+                TypeNode::Record(names.zip(indices).collect(), ext.clone())
+            }
+            Unit => TypeNode::Unit,
+            Tuple(a, b, c) => TypeNode::Tuple(
+                self.shared(a),
+                self.shared(b),
+                c.as_ref().map(|c| self.shared(c)),
+            ),
+        };
+        if let Some(&at) = self.index.get(&node) {
+            return at;
+        }
+        let at = self.nodes.len() as u32;
+        self.nodes.push(node.clone());
+        self.index.insert(node, at);
+        at
+    }
+
+    /// `intern`, answered from the pointer memo when this exact `Rc` has been
+    /// seen before.
+    fn shared(&mut self, tipe: &Rc<can::Type>) -> u32 {
+        let key = Rc::as_ptr(tipe) as usize;
+        if let Some(&at) = self.by_pointer.get(&key) {
+            return at;
+        }
+        let at = self.intern(tipe);
+        self.by_pointer.insert(key, at);
+        at
+    }
+
+    /// The same for a shared list, whose elements are interned in order.
+    fn shared_list<T>(
+        &mut self,
+        list: &Rc<Vec<T>>,
+        mut each: impl FnMut(&mut Self, &T) -> u32,
+    ) -> Vec<u32> {
+        let key = Rc::as_ptr(list) as usize;
+        if let Some(indices) = self.lists.get(&key) {
+            return indices.clone();
+        }
+        let indices: Vec<u32> = list.iter().map(|item| each(self, item)).collect();
+        self.lists.insert(key, indices.clone());
+        indices
+    }
+}
+
+pub fn load_check(dir: &Path, module_path: &Path, fingerprint: u64) -> Option<CheckEntry> {
+    let bytes = std::fs::read(entry_path(dir, module_path)).ok()?;
+    let mut r = Reader { bytes: &bytes, at: 0 };
+    if r.take(4)? != MAGIC || r.u32()? != FORMAT_VERSION || r.u64()? != fingerprint {
+        return None;
+    }
+    let source_hash = r.u64()?;
+    let deps = r.vec(|r| Some((r.name()?, r.u64()?)))?;
+    let interface_hash = r.u64()?;
+
+    // The table, front to back: every node's children are already built.
+    let mut built: Vec<can::Type> = Vec::new();
+    let count = r.u32()? as usize;
+    if count > r.bytes.len() - r.at {
+        return None;
+    }
+    for _ in 0..count {
+        let at = |i: u32, built: &Vec<can::Type>| built.get(i as usize).cloned();
+        let node = match r.u8()? {
+            0 => can::Type::Var(r.name()?),
+            1 => can::Type::Lambda(
+                Rc::new(at(r.u32()?, &built)?),
+                Rc::new(at(r.u32()?, &built)?),
+            ),
+            2 => can::Type::Type(
+                r.name()?,
+                r.name()?,
+                Rc::new(r.vec(|r| r.u32())?.into_iter().map(|i| at(i, &built)).collect::<Option<Vec<_>>>()?),
+            ),
+            3 => can::Type::Record(
+                Rc::new(
+                    r.vec(|r| Some((r.name()?, r.u32()?)))?
+                        .into_iter()
+                        .map(|(n, i)| Some((n, at(i, &built)?)))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                r.option(|r| r.name())?,
+            ),
+            4 => can::Type::Unit,
+            5 => can::Type::Tuple(
+                Rc::new(at(r.u32()?, &built)?),
+                Rc::new(at(r.u32()?, &built)?),
+                match r.option(|r| r.u32())? {
+                    Some(i) => Some(Rc::new(at(i, &built)?)),
+                    None => None,
+                },
+            ),
+            _ => return None,
+        };
+        built.push(node);
+    }
+
+    let types = r
+        .vec(|r| Some((r.name()?, r.u32()?)))?
+        .into_iter()
+        .map(|(n, i)| Some((n, built.get(i as usize)?.clone())))
+        .collect::<Option<HashMap<_, _>>>()?;
+    let node_types = r
+        .vec(|r| Some((r.region()?, r.u32()?)))?
+        .into_iter()
+        .map(|(region, i)| Some((region, built.get(i as usize)?.clone())))
+        .collect::<Option<HashMap<_, _>>>()?;
+
+    (r.at == bytes.len()).then_some(CheckEntry {
+        source_hash,
+        deps,
+        interface_hash,
+        types,
+        node_types,
+    })
+}
+
+pub fn store_check(dir: &Path, module_path: &Path, fingerprint: u64, entry: &CheckStored) {
+    let mut table = TypeTable::default();
+    // Sorted, so the bytes do not follow hash order and an unchanged module
+    // keeps producing the same file.
+    let mut types: Vec<(&Name, u32)> =
+        entry.types.iter().map(|(n, t)| (n, table.intern(t))).collect();
+    types.sort_by(|a, b| a.0.cmp(b.0));
+    let mut node_types: Vec<(&Region, u32)> =
+        entry.node_types.iter().map(|(r, t)| (r, table.intern(t))).collect();
+    node_types.sort_by_key(|(r, _)| (r.start.row, r.start.col, r.end.row, r.end.col));
+
+    let mut w = Writer::default();
+    w.bytes.extend_from_slice(MAGIC);
+    w.u32(FORMAT_VERSION);
+    w.u64(fingerprint);
+    w.u64(entry.source_hash);
+    w.vec(entry.deps, |w, (name, hash)| {
+        w.name(name);
+        w.u64(*hash);
+    });
+    w.u64(entry.interface_hash);
+
+    w.u32(table.nodes.len() as u32);
+    for node in &table.nodes {
+        match node {
+            TypeNode::Var(n) => {
+                w.u8(0);
+                w.name(n);
+            }
+            TypeNode::Lambda(a, b) => {
+                w.u8(1);
+                w.u32(*a);
+                w.u32(*b);
+            }
+            TypeNode::Type(home, name, args) => {
+                w.u8(2);
+                w.name(home);
+                w.name(name);
+                w.vec(args, |w, a| w.u32(*a));
+            }
+            TypeNode::Record(fields, ext) => {
+                w.u8(3);
+                w.vec(fields, |w, (n, i)| {
+                    w.name(n);
+                    w.u32(*i);
+                });
+                match ext {
+                    Some(n) => {
+                        w.u8(1);
+                        w.name(n);
+                    }
+                    None => w.u8(0),
+                }
+            }
+            TypeNode::Unit => w.u8(4),
+            TypeNode::Tuple(a, b, c) => {
+                w.u8(5);
+                w.u32(*a);
+                w.u32(*b);
+                match c {
+                    Some(c) => {
+                        w.u8(1);
+                        w.u32(*c);
+                    }
+                    None => w.u8(0),
+                }
+            }
+        }
+    }
+
+    w.vec(&types, |w, (name, at)| {
+        w.name(name);
+        w.u32(*at);
+    });
+    w.vec(&node_types, |w, (region, at)| {
+        w.region(region);
+        w.u32(*at);
+    });
+
+    write_atomically(dir, &entry_path(dir, module_path), &w.bytes);
 }
